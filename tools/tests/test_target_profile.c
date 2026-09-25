@@ -220,11 +220,83 @@ static void test_sha256(void) {
           "sha256(\"\") = %s", hex);
 }
 
+/*
+ * [G] Gate-G chain-level module policy. Every page-cache stage consults this,
+ * so the decision must be exercised off-device: a regression here re-opens the
+ * ZZIC path silently.
+ */
+static void test_module_policy(void) {
+    printf("[G] Gate G: chain-level module policy\n");
+    struct TargetProfile p;
+
+    /* Unrelated devices keep upstream behaviour: Gate G never applies. */
+    dfr_module_policy v = dfr_module_policy_eval(DFR_TARGET_UPSTREAM_GENERIC, &DFR_PROFILE_ZZIC);
+    CHECK(v == DFR_MODULE_POLICY_NOT_APPLICABLE && dfr_module_policy_permits(v),
+          "upstream generic device -> NOT_APPLICABLE, permitted (%s)",
+          dfr_module_policy_name(v));
+
+    /* A MISMATCH never reaches Gate G, but must not read as permitted either. */
+    v = dfr_module_policy_eval(DFR_TARGET_MISMATCH, &DFR_PROFILE_ZZIC);
+    CHECK(v == DFR_MODULE_POLICY_NOT_APPLICABLE,
+          "MISMATCH -> NOT_APPLICABLE (refused earlier, by Gate A) (%s)",
+          dfr_module_policy_name(v));
+
+    /* The shipped profile: no validated module, so ZZIC is refused. */
+    v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC);
+    CHECK(v == DFR_MODULE_POLICY_REFUSE_UNVERIFIED && !dfr_module_policy_permits(v),
+          "shipped profile on ZZIC -> REFUSE_UNVERIFIED (%s)",
+          dfr_module_policy_name(v));
+
+    /* A bare flag is not evidence: no digest, no filename -> still refused. */
+    p = DFR_PROFILE_ZZIC;
+    p.ko_zzic_verified = 1;
+    v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
+    CHECK(v == DFR_MODULE_POLICY_REFUSE_NO_DIGEST && !dfr_module_policy_permits(v),
+          "ko_zzic_verified=1 with no ko_sha256 -> REFUSE_NO_DIGEST (%s)",
+          dfr_module_policy_name(v));
+
+    /* An empty-string digest is "not pinned", not "pinned to nothing". */
+    p = DFR_PROFILE_ZZIC;
+    p.ko_zzic_verified = 1;
+    p.ko_sha256 = "";
+    p.ko_filename = "dirtyfrag-zzic.ko";
+    v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
+    CHECK(v == DFR_MODULE_POLICY_REFUSE_NO_DIGEST,
+          "empty ko_sha256 -> REFUSE_NO_DIGEST (%s)", dfr_module_policy_name(v));
+
+    /* All three fields go together: a digest without a filename is refused. */
+    p = DFR_PROFILE_ZZIC;
+    p.ko_zzic_verified = 1;
+    p.ko_sha256 = "00112233445566778899aabbccddeeff"
+                  "00112233445566778899aabbccddeeff";
+    p.ko_filename = NULL;
+    v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
+    CHECK(v == DFR_MODULE_POLICY_REFUSE_NO_FILENAME && !dfr_module_policy_permits(v),
+          "digest without ko_filename -> REFUSE_NO_FILENAME (%s)",
+          dfr_module_policy_name(v));
+
+    /* All three present -> the policy allows the chain; the BYTE binding is
+     * still checked separately by patch_ko(), which is the only holder of the
+     * selected payload. */
+    p.ko_filename = "dirtyfrag-zzic.ko";
+    v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
+    CHECK(v == DFR_MODULE_POLICY_ALLOW && dfr_module_policy_permits(v),
+          "all three ko_* fields set -> ALLOW (byte binding still owed) (%s)",
+          dfr_module_policy_name(v));
+
+    /* A ZZIC classification with nothing to consult is a refusal, not a pass. */
+    v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, NULL);
+    CHECK(!dfr_module_policy_permits(v),
+          "ZZIC with a NULL profile -> refused (%s)", dfr_module_policy_name(v));
+}
+
 int main(void) {
     printf("DFReroot target-profile test suite\n\n");
     test_target_detection();
     printf("\n");
     test_regression_generic();
+    printf("\n");
+    test_module_policy();
     printf("\n");
     test_sha256();
     printf("\n%d/%d checks passed, %d failed\n", g_total - g_fail, g_total, g_fail);

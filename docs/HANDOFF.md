@@ -37,6 +37,13 @@ Added for this target: a fail-closed profile (`app/src/main/jni/target_profile.{
    device classify `MISMATCH` and refuses the entire chain. Two host tests guard
    this; `tools/profile_binding_audit.py` guards it again in CI.
 
+1b. **A gate is only as strong as its weakest entry point.** `patch_ko()`,
+   `patch_libc()` and `patch_cxx()` are each independently reachable (JNI natives
+   plus `StageReceiver` transactions 1–3), so both the identity gate
+   (`gate_target`) and the Gate-G module policy (`gate_module_policy`) run in all
+   three. Enforcing either in only one stage is the same as not enforcing it.
+   `tools/profile_binding_audit.py` fails CI if a stage drops the policy call.
+
 2. **Artefact hashes are scoped to the stage that writes them.** The chain
    rewrites the vendor file, `libc` and `libc++` in the page cache, so a stage
    that re-hashes an artefact an earlier stage already patched compares against
@@ -82,7 +89,7 @@ The ZZIC path **refuses by design**, at:
 ```
 
 That is correct behaviour, not a bug. Everything static is done and verified:
-the project builds, both APKs are produced and signed with one key, 28/28 host
+the project builds, both APKs are produced and signed with one key, 36/36 host
 gate tests pass, and the offline audits pass. What remains is evidence only.
 
 ## Pending work, in order
@@ -124,8 +131,15 @@ the three `ko_*` profile fields. The module imports only `sprint_symbol`,
 existence evidence, not export evidence.
 
 Until a positively validated module is cryptographically bound to the ZZIC
-profile, Gate G remains fail-closed. There is no runtime marker or operator
-override that converts `UNVERIFIED` into permission to proceed.
+profile, Gate G remains fail-closed at **every** page-cache stage
+(`patch_ko`, `patch_libc`, `patch_cxx`), not just the module write. There is no
+runtime marker or operator override that converts `UNVERIFIED` into permission to
+proceed, and CI rejects the reintroduction of one under any name.
+
+Read the consequence plainly: the chain cannot be exercised end to end on this
+firmware today, deliberately or otherwise. Restoring an at-own-risk opt-in is a
+policy decision for the repository owner; it is not something to reinstate quietly
+because a run is inconvenient.
 
 ### 3. `scheduleReceiver` overload shape — the one runtime unknown
 
@@ -189,7 +203,7 @@ signed with a throwaway key.
 ## Verification commands
 
 ```sh
-sh tools/tests/run_tests.sh              # 28/28 expected
+sh tools/tests/run_tests.sh              # 36/36 expected
 python3 tools/profile_binding_audit.py   # §39 invariant + C/JSON drift
 python3 tools/ko_audit.py <ko>           # Gate G; exits 1 on INCOMPATIBLE
 python3 tools/apk_audit.py df_reroot.apk  # Gate E

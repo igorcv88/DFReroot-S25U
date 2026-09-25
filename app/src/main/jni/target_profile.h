@@ -143,6 +143,48 @@ typedef enum {
     DFR_TARGET_MISMATCH         = 2  /* looks like the ZZIC target but deviates */
 } dfr_target_class;
 
+/* -------- Gate G: chain-level module policy (pure, host-testable) -------- */
+
+/*
+ * Verdict of the Gate-G policy for one page-cache corruption stage.
+ *
+ * DFR_MODULE_POLICY_ALLOW means only that the profile's three ko_* fields are
+ * present together. It is NOT the byte binding: SHA-256(selected module bytes)
+ * == ko_sha256 is deliberately not evaluated here, because only the stage that
+ * actually selects the payload holds those bytes. That check stays in patch_ko(),
+ * where it can be proven rather than assumed.
+ */
+typedef enum {
+    DFR_MODULE_POLICY_NOT_APPLICABLE     = 0, /* not the exact ZZIC target */
+    DFR_MODULE_POLICY_ALLOW              = 1, /* all three ko_* fields present */
+    DFR_MODULE_POLICY_REFUSE_UNVERIFIED  = 2, /* ko_zzic_verified = 0 */
+    DFR_MODULE_POLICY_REFUSE_NO_DIGEST   = 3, /* flag set, ko_sha256 unpinned */
+    DFR_MODULE_POLICY_REFUSE_NO_FILENAME = 4  /* flag set, ko_filename unset */
+} dfr_module_policy;
+
+/*
+ * Fail-closed Gate-G policy for the exact ZZIC target.
+ *
+ * EVERY page-cache corruption stage consults this, not only the stage that
+ * writes the module. On ZZIC the earlier writes (crash_dump64, the vendor file,
+ * libc, libc++) exist for one purpose: to make the kernel load the module. If
+ * the load can never be permitted, corrupting those files is risk with no
+ * reachable outcome, so the whole chain refuses at its first stage instead of
+ * refusing only at the last one.
+ *
+ * A bare boolean is not evidence: ko_zzic_verified=1 grants nothing unless
+ * ko_sha256 and ko_filename are pinned alongside it (the header invariant above,
+ * dossier section 39). `p` may be NULL only when `cls` is not the ZZIC target.
+ */
+dfr_module_policy dfr_module_policy_eval(dfr_target_class cls,
+                                         const struct TargetProfile *p);
+
+/* Stable log token for a verdict, e.g. "REFUSE_UNVERIFIED". Never NULL. */
+const char *dfr_module_policy_name(dfr_module_policy v);
+
+/* 1 if the verdict permits the stage to proceed, 0 if it must refuse. */
+int dfr_module_policy_permits(dfr_module_policy v);
+
 /* Observed device identity, filled from Android props + uname (or test vectors). */
 struct ObservedTarget {
     const char *manufacturer;

@@ -144,6 +144,36 @@ def summarize_named(logical_path, r):
     return lines
 
 
+def verdict(results):
+    """Gate F pass/fail, plus the reasons.
+
+    Fails only on a positive defect: an artefact that is present but is not the
+    pinned one, is not a valid AArch64 ELF64, or is missing a symbol the chain
+    requires. An artefact that is simply absent (no --root/--map, or a partial
+    pull) is absent evidence, which this project treats as UNVERIFIED rather than
+    as a defect - the same rule ko_audit.py applies to UNVERIFIED and N/A. An
+    UNPINNED hash is likewise not a defect: crashdump_sha256 is legitimately
+    unpinned until it is captured from the device.
+    """
+    reasons = []
+    for logical, r in results.items():
+        st = r.get("status")
+        if st == "MISSING_FILE":
+            continue
+        if st != "OK":
+            reasons.append("%s: %s" % (logical, st))
+            continue
+        if not r.get("machine_ok"):
+            reasons.append("%s: wrong architecture (%s)" % (logical, r.get("machine")))
+        identity = r.get("identity", "")
+        if identity.startswith("MISMATCH"):
+            reasons.append("%s: identity %s" % (logical, identity))
+        for name, d in r.get("symbol_checks", {}).items():
+            if not d.get("found"):
+                reasons.append("%s: required symbol %s MISSING" % (logical, name))
+    return reasons
+
+
 def human(results):
     L = ["=== Gate F: userspace ELF audit ==="]
     for logical, r in results.items():
@@ -201,11 +231,25 @@ def main():
                 real = None
             results[logical] = audit_file(logical, real)
 
+    reasons = verdict(results)
+    audited = [k for k, v in results.items() if v.get("status") != "MISSING_FILE"]
+    status = "FAIL" if reasons else ("PASS" if audited else "UNVERIFIED")
     if a.json:
-        print(json.dumps(results, indent=2))
+        print(json.dumps({"artefacts": results, "status": status,
+                          "failures": reasons}, indent=2))
     else:
         print(human(results))
-    return 0
+        print("")
+        print("GATE_F=%s (%d of %d artefacts present)"
+              % (status, len(audited), len(results)))
+        for why in reasons:
+            print("  [x] %s" % why)
+        if status == "UNVERIFIED":
+            print("  no artefact was available to audit; pass --root or --map")
+    # Gate F used to return 0 unconditionally, so a MISMATCHed or wrong-arch
+    # artefact only changed printed text. A real defect now exits 1; absent
+    # evidence (UNVERIFIED) stays successful on purpose.
+    return 1 if reasons else 0
 
 
 if __name__ == "__main__":

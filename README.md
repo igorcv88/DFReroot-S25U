@@ -6,7 +6,28 @@ persist a system-UID app, then use Dirty Frag from it for all subsequent roots.
 
 ## Supported devices
 
-Tested only on Galaxy S26 OneUI 8.5 (samsung/m1qjpnx/m1q:16/BP4A.251205.006/S942QOPU1AZDE_SJP1AZDE:user/release-keys), but might work on other versions.
+Verified end to end only on Galaxy S26 OneUI 8.5
+(`samsung/m1qjpnx/m1q:16/BP4A.251205.006/S942QOPU1AZDE_SJP1AZDE:user/release-keys`).
+Other firmware may work; nothing here asserts that it does.
+
+This fork adds a **fail-closed compatibility profile** for one further target:
+
+```
+Galaxy S25 Ultra, SM-S938B / pa3q, Android 17 / One UI 9 Beta 3, S938BXXUCZZIC
+kernel 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k
+```
+
+That profile is **not** a support claim — it is the opposite. On a device
+asserting the S25 Ultra model or codename, the chain refuses unless every pinned
+identity field matches exactly, and today it refuses regardless: the pristine
+`crash_dump64` hash has never been captured from hardware, and the bundled kernel
+module is Gate-G `UNVERIFIED` against this kernel. Running the app on that
+firmware collects `[DFR][*]` diagnostics and writes nothing.
+
+`docs/S25U_ZZIC_COMPATIBILITY.md` is the authoritative gate matrix;
+`docs/HANDOFF.md` lists the remaining evidence and the exact command that closes
+each item. Every device that is not that exact firmware takes the unchanged
+upstream path.
 
 ## Background
 

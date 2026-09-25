@@ -35,6 +35,63 @@ JNI_DIR = os.path.join(ROOT, "app", "src", "main", "jni")
 PROFILE_JSON = os.path.join(HERE, "zzic_profile.json")
 EXP_C = os.path.join(ROOT, "app", "src", "main", "jni", "exp.c")
 
+# Runtime sources of both apps: everything that ships inside an APK. Build
+# scripts and the offline tools are excluded on purpose - they never run on the
+# device. The removed override token is rejected anywhere in here.
+RUNTIME_ROOTS = [
+    os.path.join(ROOT, "app", "src", "main"),
+    os.path.join(ROOT, "installer", "src", "main"),
+]
+# The stricter "no world-writable staging path" rule applies to DFReroot only:
+# that is the app that evaluates Gate G and performs the page-cache writes.
+# DFInstaller never reaches Gate G, and its CLI usage comments legitimately show
+# /data/local/tmp paths for a manually sideloaded APK.
+CHAIN_ROOTS = [os.path.join(ROOT, "app", "src", "main")]
+RUNTIME_EXTS = (".c", ".h", ".kt", ".java", ".S")
+
+# The token PR #5 removed. Kept here as a named constant so its reintroduction is
+# caught by name as well as by the broader mechanism check below.
+LEGACY_BYPASS_TOKEN = "dfr_allow_unverified_ko"
+
+# Any world-writable staging path referenced from runtime code.
+TMP_PATH_RE = re.compile(r"/data/local/tmp[\w./-]*")
+
+# Every page-cache corruption stage in exp.c, each independently reachable.
+PATCH_STAGES = ["patch_ko", "patch_libc", "patch_cxx"]
+
+
+def rel(path):
+    """Repo-relative path, so a violation message names a file a reader can open."""
+    return os.path.relpath(path, ROOT)
+
+
+def sources_under(roots):
+    out = []
+    for root in roots:
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in sorted(filenames):
+                if name.endswith(RUNTIME_EXTS):
+                    out.append(os.path.join(dirpath, name))
+    return sorted(out)
+
+
+def stage_calls_policy(src, stage):
+    """True if `stage`'s body in exp.c calls gate_module_policy().
+
+    The body is taken from the function's opening line to the start of the next
+    top-level definition, which is enough structure for this file's flat layout
+    and avoids matching a call that merely sits somewhere else in the file.
+    """
+    m = re.search(r"^[A-Za-z_][\w \t*]*\b%s\s*\([^;]*\)\s*\{" % re.escape(stage),
+                  src, flags=re.M)
+    if not m:
+        return False
+    body = src[m.end():]
+    nxt = re.search(r"^\}", body, flags=re.M)
+    if nxt:
+        body = body[:nxt.start()]
+    return "gate_module_policy(" in body
+
 # Fields compared between the C profile and the JSON profile.
 SHARED_STRINGS = [
     "id", "manufacturer", "model", "device", "display", "fingerprint",
@@ -149,15 +206,59 @@ def audit():
              "'samsung' on this firmware and the compare is case-sensitive"
              % (c.get("manufacturer"),))
 
-    # Exact ZZIC support must never gain an operator marker that bypasses an
-    # UNVERIFIED module decision. Missing Gate-G evidence is a hard refusal.
-    with open(EXP_C) as f:
-        exp_src = f.read()
-    bypass_token = "dfr_allow_unverified_ko"
-    if bypass_token in exp_src:
-        fail("unsafe Gate-G override token is present in exp.c: %s" % bypass_token)
-    r["checks"]["unverified_module_override"] = (
-        "absent" if bypass_token not in exp_src else "present"
+    # --- no runtime override of an UNVERIFIED Gate-G decision --------------
+    #
+    # Exact ZZIC support must never regain a marker that converts missing Gate-G
+    # evidence into permission to proceed. Grepping only exp.c for one historical
+    # token would be trivially defeated by a rename, or by putting the same
+    # access() in any other runtime source, so reject the MECHANISM as well as the
+    # spelling: no source that ships in DFReroot may reference a world-writable
+    # /data/local/tmp path at all, since a marker read from one is the only shape
+    # such an override can take. DFReroot has no legitimate use for that
+    # directory, so any hit is either an override or needs the same scrutiny.
+    runtime = sources_under(RUNTIME_ROOTS)
+    chain = set(sources_under(CHAIN_ROOTS))
+    hits = []
+    for path in runtime:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                src = f.read()
+        except OSError as ex:
+            fail("cannot read runtime source %s: %s" % (rel(path), ex))
+            continue
+        rp = rel(path)
+        if LEGACY_BYPASS_TOKEN in src:
+            hits.append("%s references the removed Gate-G override token %r"
+                        % (rp, LEGACY_BYPASS_TOKEN))
+        if path in chain:
+            for m in TMP_PATH_RE.finditer(src):
+                hits.append("%s references a world-writable staging path: %s"
+                            % (rp, m.group(0)))
+    for h in hits:
+        fail("possible Gate-G execution override: %s" % h)
+    r["checks"]["runtime_sources_scanned"] = "%d (%d in the chain app)" % (
+        len(runtime), len(chain))
+    r["checks"]["unverified_module_override"] = "absent" if not hits else "present"
+
+    # --- every page-cache stage must consult the module policy -------------
+    #
+    # The refusal is only as strong as its weakest entry point: patch_ko(),
+    # patch_libc() and patch_cxx() are each reachable on their own (JNI natives,
+    # StageReceiver transactions 1-3), so a policy enforced in one of them is not
+    # enforced at all. Require the call in each.
+    try:
+        with open(EXP_C, encoding="utf-8") as f:
+            exp_src = f.read()
+    except OSError as ex:
+        fail("cannot read %s: %s" % (rel(EXP_C), ex))
+        exp_src = ""
+    unguarded = [s for s in PATCH_STAGES if not stage_calls_policy(exp_src, s)]
+    for s in unguarded:
+        fail("%s() does not call gate_module_policy(); a page-cache stage that "
+             "skips Gate G re-opens the ZZIC path" % s)
+    r["checks"]["module_policy_call_sites"] = (
+        "all (%s)" % ", ".join(PATCH_STAGES) if not unguarded
+        else "MISSING in %s" % ", ".join(unguarded)
     )
 
     r["status"] = "PASS" if not r["violations"] else "FAIL"
@@ -174,6 +275,10 @@ def human(r):
         L.append("ko_sha256 (bundled) : %s" % ck["ko_sha256_actual"])
     L.append("ZZIC_MODULE_BINDING : %s" % ck.get("ZZIC_MODULE_BINDING", "n/a"))
     L.append("profile drift       : %s" % ck.get("profile_drift"))
+    L.append("runtime sources     : %s scanned for an execution override"
+             % ck.get("runtime_sources_scanned"))
+    L.append("Gate-G override     : %s" % ck.get("unverified_module_override"))
+    L.append("policy call sites   : %s" % ck.get("module_policy_call_sites"))
     L.append("")
     for v in r["violations"]:
         L.append("  [x] %s" % v)

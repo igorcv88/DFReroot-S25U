@@ -30,6 +30,13 @@ jobs:
       - name: Python tool syntax
         run: python3 -m compileall -q tools
 
+      # No ZZIC filesystem here, so this can only report UNVERIFIED. Running it
+      # anyway keeps the Gate F tool itself exercised: it returned 0
+      # unconditionally until it was given a real verdict, and a tool that cannot
+      # fail is not a gate.
+      - name: Gate F - userspace ELF audit tool (no artefacts: expect UNVERIFIED)
+        run: python3 tools/elf_audit.py
+
       - name: Shell script syntax
         run: |
           # `sh -n "$s" && echo ...` would swallow a failure: on the left of &&
