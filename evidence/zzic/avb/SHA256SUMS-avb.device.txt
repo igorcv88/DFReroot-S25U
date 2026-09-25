@@ -1,0 +1,4 @@
+afb4a6df96917d84cdb4b888ab4848d761651d66e52cc078d18919b51bfcd946  /sdcard/Download/DFReroot-ZZIC-evidence/vbmeta.img
+e643faa047e4952349345ceaa4c9b4b9a874ea4f9140e72f7a6b22221171667b  /sdcard/Download/DFReroot-ZZIC-evidence/dtbo-vbmeta.img
+5ce045389f0f352b65269932491f26a4592e3a116d6158606c2f3f7ce27b15bf  /sdcard/Download/DFReroot-ZZIC-evidence/optics-vbmeta.img
+8e964dee142560c81f251447a407eb04cbe66e515b279a65cd367ea98e97230b  /sdcard/Download/DFReroot-ZZIC-evidence/prism-vbmeta.img

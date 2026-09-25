@@ -156,8 +156,37 @@ kernel's `Module.symvers`, is the **only** result that justifies setting them.
 Matching the GKI base version and the page size is **not sufficient** when the
 kernel has `CONFIG_MODVERSIONS=y`, and must never be treated as if it were.
 
+Nor is agreement among the `__versions` entries that happen to exist. Under
+`CONFIG_MODVERSIONS` the kernel refuses a load when the table exists but names no
+version for a symbol it is resolving, and `CONFIG_MODULE_FORCE_LOAD` is not set
+on this kernel — so a table covering three of four imports is unloadable while an
+entries-only diff reads `COMPATIBLE`. `ko_audit.py` therefore requires
+`imports_requiring_modversion - __versions entries == {}`, reports a hole as a
+hole (never as a CRC mismatch), reports an import absent from `Module.symvers`
+separately again, and exempts a weak undefined symbol only when the supplied `Module.symvers`
+does not export it. That exemption is narrower than `STB_WEAK`: `resolve_symbol()`
+runs `check_version()` whenever it *finds* the symbol and returns
+`ERR_PTR(-EINVAL)` on failure, and an error pointer is not NULL, so
+`simplify_symbols()`' `!ksym && STB_WEAK` escape hatch never applies to an
+exported symbol. An exported weak import with no entry fails the load exactly
+like a strong one. With no `Module.symvers` the question is undecidable, so it is
+reported `UNDECIDED` and refused under `--require-modversion-coverage` - never
+assumed exempt. The acceptance run for a newly built module must pass
+`--require-modversion-coverage`.
+
 `Module.symvers` is a kernel *build* artefact. It does not exist on a running
 Android filesystem, so "search the device for it" is not a valid plan.
+
+**And it names no kernel.** A `Module.symvers` contains no release string, so
+nothing in the file says which kernel produced it. That is a live trap, not a
+theoretical one: build a module against a GKI DDK tree with `kernel.release`
+forced to the target's string and `KBUILD_MODPOST_WARN=1` downgrading modpost's
+complaints, and you get a populated `__versions` table full of **DDK** CRCs.
+Audit that against the same DDK symvers and it reads `COMPATIBLE` — a true
+statement about the wrong kernel. `ko_audit.py` therefore records the symvers'
+path, digest and symbol count alongside every verdict, so the verdict names the
+evidence it rests on. Only the **exact target kernel's** `Module.symvers` may
+promote Gate G; a DDK tree is a toolchain, not an authority.
 
 ### 3.6 No execution override, under any name
 
@@ -256,12 +285,14 @@ Run these before proposing any change. They are fast and they are the gate.
 
 ```sh
 git diff --check
-sh    tools/tests/run_tests.sh            # target profile + gates, and a host
-                                          # syntax pass over exp.c
+sh    tools/tests/run_tests.sh            # target profile + gates, a host syntax
+                                          # pass over exp.c, and the Gate-G
+                                          # modversion rules
 sh    tools/tests/run_installer_tests.sh  # SafeWrite against an in-memory fs
 sh    tools/tests/test_resolve_release_tag.sh
 python3 tools/profile_binding_audit.py    # profile invariants + drift + no override
 python3 tools/elf_audit.py                # Gate F
+python3 tools/verify_zzic_avb.py          # /vendor AVB provenance, offline
 python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko   # Gate G
 python3 tools/release_notes.py            # the notes still generate
 python3 -m compileall -q tools

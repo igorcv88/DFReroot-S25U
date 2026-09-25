@@ -46,5 +46,26 @@
     "/system/lib64/libc++.so": [
       "_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_"
     ]
+  },
+  "vendor_avb": {
+    "_note": "OFFLINE ONLY. Verified by tools/verify_zzic_avb.py against the vbmeta blobs under evidence/zzic/avb/. Deliberately NOT mirrored into target_profile.c: reading the live dm-verity table needs a DM ioctl that has never been measured from u:r:network_stack:s0, so a runtime gate on these would be unsatisfiable by construction - the same trap that broke 2.0.2. A pinned field the runtime never compares is dead weight.",
+    "_canonical": "Block counts are canonical; byte offsets are DERIVED (blocks x block_size) and compared against the signed descriptor. Pinning both forms of one quantity is drift.",
+    "partition_name": "vendor",
+    "vbmeta_chain": [
+      "dtbo",
+      "optics",
+      "prism"
+    ],
+    "dm_verity_version": 1,
+    "hash_algorithm": "sha256",
+    "data_block_size": 4096,
+    "hash_block_size": 4096,
+    "data_blocks": 860461,
+    "tree_blocks": 6777,
+    "fec_num_roots": 2,
+    "fec_offset_blocks": 867238,
+    "fec_blocks": 6856,
+    "salt": "336ad2aade4ed5c7091151b1c84693a25f3d1011015f8861cfd636a6184cada6",
+    "root_digest": "794944fad5211fbab0016286b05a42417f44b24dcba3fd4891ba637c29b42a3f"
   }
 }

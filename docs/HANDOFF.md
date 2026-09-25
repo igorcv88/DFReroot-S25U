@@ -145,8 +145,28 @@ symbols.
 
 ```sh
 python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko \
+    --require-modversion-coverage \
     --symvers Module.symvers --kallsyms kallsyms.txt
 ```
+
+`--require-modversion-coverage` is mandatory on the acceptance run for a newly
+built module. A `__versions` table that covers only *some* imports cannot load
+(`check_version()` refuses with `no symbol version for %s`, and
+`CONFIG_MODULE_FORCE_LOAD` is not set), so the audit requires
+`imports_requiring_modversion - __versions entries == {}` and names every hole.
+A weak undefined symbol is exempt only when the `Module.symvers` does not export
+it — `check_version()` still runs on an exported weak symbol, so one with no
+entry fails the load like a strong one; with no symvers it is `UNDECIDED` and
+refused under the strict flag. An import absent from `Module.symvers` altogether
+is reported separately, as the harder `Unknown symbol` failure.
+
+The audit also records the symvers' digest, because a `Module.symvers` names no
+kernel. A module built against a GKI DDK with `kernel.release` forced to the
+target string and `KBUILD_MODPOST_WARN=1` gets a full `__versions` table of DDK
+CRCs, and audited against that same DDK symvers it reads `COMPATIBLE` about the
+wrong kernel. RMGLabs-Payloads builds its `insmod`-loadable DEFEX helper exactly
+that way — which is evidence the approach produces a *loadable* module on this
+kernel family, and is **not** a substitute for the target's own symbol table.
 
 `MODULE_VS_ZZIC_KERNEL = COMPATIBLE` is the only result that justifies setting
 the three `ko_*` profile fields. The module imports only `sprint_symbol`,
@@ -230,9 +250,11 @@ expensive:
 Expected counts, so a drop is noticeable:
 
 ```sh
-sh tools/tests/run_tests.sh              # 72/72, then the exp.c syntax pass
+sh tools/tests/run_tests.sh              # 72/72, the exp.c syntax pass,
+                                         # then 38/38 (ko_audit modversion rules)
 sh tools/tests/run_installer_tests.sh    # 49/49 (SafeWrite)
 sh tools/tests/test_resolve_release_tag.sh   # 8/8
+python3 tools/verify_zzic_avb.py          # AVB provenance, reproducible
 ```
 
 The one command that is specific to this handoff rather than to the repo:

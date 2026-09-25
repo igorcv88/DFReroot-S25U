@@ -22,6 +22,7 @@ offline tools would mean two different definitions of "the target".
 Exit code 0 = invariants hold, 1 = violated.
 """
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -30,6 +31,11 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+
+# ko_audit's COMPATIBLE verdict is the only thing that authorises setting
+# ko_zzic_verified=1, so this tool also guards the rule that verdict rests on.
+sys.path.insert(0, HERE)
+import ko_audit  # noqa: E402
 PROFILE_C = os.path.join(ROOT, "app", "src", "main", "jni", "target_profile.c")
 JNI_DIR = os.path.join(ROOT, "app", "src", "main", "jni")
 PROFILE_JSON = os.path.join(HERE, "zzic_profile.json")
@@ -242,6 +248,62 @@ def audit():
             fail("ko_zzic_verified=0 but ko_filename is set (%s)" % ko_name)
         r["checks"]["ZZIC_MODULE_BINDING"] = "UNVERIFIED (fail-closed, as expected)"
 
+    # --- the modversion coverage rule behind a COMPATIBLE verdict -----------
+    # Only MODULE_VS_ZZIC_KERNEL=COMPATIBLE justifies moving the three ko_*
+    # fields (AGENTS.md 3.5), so the rule that verdict rests on is guarded here
+    # by exercising ko_audit on the bundled modules rather than by grepping its
+    # source: a refactor that drops the coverage requirement still trips this.
+    #
+    # The hole being closed: comparing only the entries __versions HAPPENS to
+    # contain is fail-open. The kernel refuses a load when the table exists but
+    # names no version for a symbol it is resolving, so a table covering three
+    # of four imports is unloadable - while an entries-only diff finds every
+    # present entry in agreement and reads COMPATIBLE.
+    cov_reports = {}
+    for ko_file in sorted(glob.glob(os.path.join(JNI_DIR, "dirtyfrag-android*.ko"))):
+        base = os.path.basename(ko_file)
+        try:
+            rep = ko_audit.audit(ko_file)
+            strict = ko_audit.audit(ko_file, require_coverage=True)
+        except Exception as ex:  # a tool that cannot run is not a pass
+            fail("ko_audit could not audit %s: %s" % (base, ex))
+            continue
+        cov = rep.get("MODVERSION_COVERAGE")
+        missing = rep.get("modversion_missing_entries")
+        if cov is None or missing is None:
+            fail("ko_audit no longer reports modversion coverage for %s; the "
+                 "COMPATIBLE verdict would rest on an entries-only diff" % base)
+            continue
+        # Only a module built for the ZZIC kernel family is a ZZIC candidate;
+        # the upstream modules for other families stay N/A by design, and
+        # demanding INCOMPATIBLE from them would read as "evaluated and rejected
+        # for its own kernel", which is not what was measured.
+        candidate = bool(rep.get("vermagic_base_ok"))
+        cov_reports[base] = "%s  [%s]" % (
+            cov, "ZZIC candidate" if candidate else "other kernel family")
+        if missing:
+            # A named hole must be fatal somewhere, or naming it buys nothing.
+            if str(cov).startswith("COMPLETE"):
+                fail("%s: coverage reads COMPLETE while %d import(s) have no "
+                     "__versions entry (%s)" % (base, len(missing),
+                                                ", ".join(missing)))
+            if candidate and strict.get("MODULE_VS_ZZIC_KERNEL") != "INCOMPATIBLE":
+                fail("%s: %d import(s) have no __versions entry but "
+                     "--require-modversion-coverage still yields %r; an "
+                     "unloadable module must not pass"
+                     % (base, len(missing), strict.get("MODULE_VS_ZZIC_KERNEL")))
+        # An imported symbol reported as "not imported" is a false label on
+        # exactly the hole that matters (AGENTS.md 3.7: signals never collapsed).
+        for sym, props in (rep.get("symbols_of_interest") or {}).items():
+            if props.get("SYMBOL_IMPORTED_BY_MODULE") and \
+                    "not imported" in str(props.get("MODVERSION_MATCH")):
+                fail("%s: %s is imported but MODVERSION_MATCH reads %r"
+                     % (base, sym, props.get("MODVERSION_MATCH")))
+    if not cov_reports:
+        fail("no dirtyfrag-android*.ko is bundled; the Gate-G coverage rule "
+             "has nothing to guard")
+    r["checks"]["modversion_coverage"] = cov_reports
+
     # --- C profile vs JSON profile agreement -------------------------------
     drift = []
     for k in SHARED_STRINGS:
@@ -444,6 +506,8 @@ def human(r):
     if "ko_sha256_actual" in ck:
         L.append("ko_sha256 (bundled) : %s" % ck["ko_sha256_actual"])
     L.append("ZZIC_MODULE_BINDING : %s" % ck.get("ZZIC_MODULE_BINDING", "n/a"))
+    for base, cov in sorted((ck.get("modversion_coverage") or {}).items()):
+        L.append("  modversions %-28s %s" % (base, cov))
     L.append("profile drift       : %s" % ck.get("profile_drift"))
     L.append("runtime sources     : %s scanned for an execution override"
              % ck.get("runtime_sources_scanned"))

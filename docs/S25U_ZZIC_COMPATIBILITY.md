@@ -242,12 +242,52 @@ SELinux label. A domain denied `open(2)` may also be denied `getattr`, so these
 are compared **when available** (available-and-divergent is a hard `FAIL_CHAIN`)
 and recorded as `SKIP` when not. They are never counted as agreement.
 
-**Limitation, stated plainly.** The pinned vendor digest's provenance anchor is
-"read under an enforcing, green, locked AVB state with vbmeta digest `23a0e0b0…`",
-not "extracted from the signed ZZIC `vendor.img` offline". Extracting it from the
-OTA payload and re-verifying the AVB chain of the image itself is strictly
-stronger and remains worth doing; it would not change the runtime gate, only the
-strength of the value the gate compares against.
+### The anchor is now reproducible, not merely observed
+
+Until the AVB evidence landed, the pinned `vbmeta_digest` was a number somebody
+had seen on a device once. That is the kind of evidence this repository does not
+accept anywhere else, and it was recorded here as a limitation.
+
+It no longer is. `evidence/zzic/avb/` holds the four vbmeta images from the
+official ZZIC OTA, and `tools/verify_zzic_avb.py` re-derives the digest from
+them:
+
+```text
+chain order       : dtbo -> optics -> prism
+digest reproduced : 23a0e0b0a5b421d5a75b62de40edb37489a4e6d441d54e58ee6f930c1a9a3f62
+digest pinned     : 23a0e0b0a5b421d5a75b62de40edb37489a4e6d441d54e58ee6f930c1a9a3f62
+VBMETA_DIGEST_REPRODUCIBLE = PASS
+```
+
+`ro.boot.vbmeta.digest` is SHA-256 over the top-level vbmeta blob followed by
+each chained vbmeta in descriptor order, so `vbmeta.img` alone reproduces
+nothing — the three children are load-bearing, and a missing one is a refusal
+rather than a shorter walk. The digest commits the auxiliary block, which
+carries the signed hashtree descriptor for `vendor`; that descriptor's root
+digest, salt and geometry are verified against the profile in the same run. The
+tool parses AVB itself (`tools/avb.py`), so CI and any reviewer with `python3`
+can redo the derivation with no AOSP checkout and no `avbtool`.
+
+What remains observational, and is stated as such:
+
+- The ELF bytes were read from the verified `/vendor` mount rather than
+  extracted from a 3.5 GB `vendor.img`. Under `veritymode=enforcing` with a root
+  digest matching a signed descriptor, those are equivalent — reconstructing the
+  image would be redundant forensics, not a missing link.
+- The **live** dm-verity table is corroboration, not a requirement. The DM ioctl
+  succeeds from `u:r:ksu:s0` and fails from `u:r:untrusted_app_27:s0`, and has
+  never been measured from `u:r:network_stack:s0`. Requiring it at runtime would
+  rebuild the 2.0.2 trap — a gate the chain's own domain cannot satisfy. Drop a
+  raw `dmsetup table vendor-verity` capture into `evidence/zzic/avb/` and the
+  offline verifier compares it automatically; while it is absent the tool reports
+  `LIVE_DM_VERITY_TABLE = SKIP (artefact absent)`, never implicit agreement.
+
+The descriptor's geometry is pinned in `tools/zzic_profile.json` under
+`vendor_avb` and **not** in `target_profile.c`: block counts are canonical, byte
+offsets are derived and compared, and `data_blocks + tree_blocks ==
+fec_offset_blocks` is asserted. These are offline-only values, because a pinned
+field the runtime never compares is dead weight advertising a check nobody
+performs.
 
 ## Installer write path — two field defects fixed
 
@@ -456,11 +496,17 @@ sha256      : 6658df7da8b2e90a9d15dd551cbdc7a2405d707fdd13ee8892a1d7c635d884c0  
 machine     : AArch64 (OK)          module: dirtyfrag   license: GPL   depends: <none>
 vermagic    : 6.6.127-4k-g46a034eca005-dirty SMP preempt mod_unload modversions aarch64
 signed      : False
-imports (4) : __stack_chk_fail, _printk, memset, sprint_symbol
+imports (4) : __stack_chk_fail, _printk, memset, sprint_symbol   (4 need a version entry, 0 weak)
 __versions  : 0 entries   (section present, size 0 — no per-symbol CRC table)
+MODVERSION_COVERAGE = EMPTY (__versions holds no entries; 4 import(s) need one)
 relocations : .rela.text 8, .rela.init.text 25, .rela.init.data 1, .rela.gnu.linkonce.this_module 1
 GENERIC_ANDROID15_6_6_MODULE = UNVERIFIED
 ```
+
+With `--require-modversion-coverage` the same module is `INCOMPATIBLE`: the empty
+table alone makes it unloadable on a `CONFIG_MODVERSIONS=y` kernel, independently
+of any CRC. The plain invocation stays `UNVERIFIED` (exit 0) on purpose, so the
+release audit is not blocked by evidence that is merely absent.
 
 Key findings, reported as **four independent properties** (never collapsed):
 - The module imports **only** `sprint_symbol`, `_printk`, `memset`,
@@ -478,6 +524,12 @@ Key findings, reported as **four independent properties** (never collapsed):
   module ships an **empty `__versions` table**, so no CRC can be checked offline.
   Verdict is therefore `UNVERIFIED` — resolve with the ZZIC `Module.symvers`:
   `tools/ko_audit.py … --symvers Module.symvers --kallsyms kallsyms.txt`.
+- `MODVERSION_COVERAGE=EMPTY` is reported as its own value, distinct from
+  `INCOMPLETE` and from the CRC diff. "The table has no entry for this import"
+  and "the entry disagrees with the kernel" are different facts; so are
+  `SYMBOL_HAS_MODVERSION_ENTRY` and `MODVERSION_MATCH`. An imported symbol with
+  no entry reports `MISSING (imported, no __versions entry)` — it used to report
+  `N/A (not imported)`, a false label on exactly the hole that matters.
 
 ## Native packaging (Gate E) — built and verified in this environment
 
@@ -735,13 +787,13 @@ SM-S938B / `S938BXXUCZZIC`, not inferred.
 | A — Target identity | **physical PASS** | all twelve fields matched on hardware; `TARGET_PROFILE=S25U_ZZIC`, `PASS exact identity`. 72/72 host checks incl. every required negative |
 | B — Kernel identity | **physical PASS** | `ZZIC_KERNEL_IDENTITY/VERSION/ARCH/PAGE_SIZE` all `PASS` on hardware |
 | B — `crash_dump64` identity | **PASS (pinned)** | `9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f`, captured from the device; readable from this domain, so it remains a direct runtime SHA-256 check |
-| B — vendor ELF provenance | **PASS_AVB** | direct read is `EACCES` in `system_server` and `network_stack`; identity rests on the AVB chain the digest was captured under (vbmeta digest, green, locked, verity enforcing, `/vendor` erofs ro). See "Vendor ELF" above |
+| B — vendor ELF provenance | **PASS_AVB, now reproducible** | direct read is `EACCES` in `system_server` and `network_stack`; identity rests on the AVB chain the digest was captured under (vbmeta digest, green, locked, verity enforcing, `/vendor` erofs ro). The pinned `vbmeta_digest` is no longer merely observed: `tools/verify_zzic_avb.py` re-derives `23a0e0b0…` from the four vbmeta blobs in `evidence/zzic/avb/` and checks the signed `vendor` hashtree descriptor (root `794944fa…`, salt `336ad2aa…`, 860461+6777=867238 blocks). Runtime gate unchanged. See "Vendor ELF" above |
 | B — `libc` / `libc++` identity | **BLOCKED** | pinned and checked at runtime, but the run refused at Gate G before `patch_libc`/`patch_cxx` were reached |
 | C — Java/system-server compat | **physical PASS** | `scheduleReceiver/12` observed on Android 17; `getProcessRecordLocked` absent, `mProcessNames` fallback resolved the ProcessRecord; `mOnewayThread` was the correct field |
 | D — NetworkStack identity | **physical PASS** | `scheduleReceiver sent` → `networkstack CONTROLLER binder received`, which only happens after `System.loadLibrary("exp")` inside `u:r:network_stack:s0`. Remote evidence is now reported back to the UI, not logcat-only |
 | E — Native packaging | **PASS** | real `./build.sh`; `libexp.so` AArch64, all JNI symbols, hashes recorded (apk_audit) |
 | F — Userspace ELF audit | **BLOCKED** | tool implemented + host-verified; awaits pulled ZZIC ELFs |
-| G — Module ABI compatibility | **UNVERIFIED** (runtime-enforced) | the device confirms `CONFIG_MODVERSIONS=y`; the bundled `dirtyfrag-android15-6.6.ko` has an **empty `__versions`** table, so no symbol-CRC agreement exists. Every page-cache stage refuses; there is no override, and `ko_zzic_verified=1` is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
+| G — Module ABI compatibility | **UNVERIFIED** (runtime-enforced) | the device confirms `CONFIG_MODVERSIONS=y`; the bundled `dirtyfrag-android15-6.6.ko` has an **empty `__versions`** table (`MODVERSION_COVERAGE=EMPTY`), so no symbol-CRC agreement exists — and a *partial* table would not do either: the audit requires an entry for every non-weak import before it will report `COMPATIBLE`. Every page-cache stage refuses; there is no override, and `ko_zzic_verified=1` is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
 | H — Installer format compatibility | **physical PASS** | `ABX → TEXT → ABX` accepted by PMS; injection survived the soft reboot; the two write-path defects the run exposed are fixed and regression-tested |
 | I — Full hardware compatibility | **BLOCKED by Gate G** | the chain cannot be exercised end to end while the module is `UNVERIFIED`. `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is independent, not proof |
 
@@ -845,6 +897,57 @@ Then:
 python3 tools/ko_audit.py <new-module.ko> \
     --symvers <exact-Module.symvers> --kallsyms <captured-kallsyms.txt>
 ```
+
+#### Modversion coverage is part of that verdict
+
+Comparing only the entries `__versions` *happens to contain* is fail-open. The
+kernel's `check_version()` walks the table for the symbol it is resolving and
+refuses the load when the table exists but names no version for it (`no symbol
+version for %s`); `CONFIG_MODULE_FORCE_LOAD` is not set on this kernel, so there
+is no escape hatch. A table covering three of four imports is therefore
+**unloadable** — yet an entries-only diff finds every present entry in agreement
+and would read `COMPATIBLE`.
+
+So `ko_audit.py` requires, and reports separately:
+
+```text
+MODVERSION_COVERAGE          imports_requiring_modversion - __versions entries == {}
+modversion_missing_entries   the imports with no entry, named
+modversion_unresolvable_imports  imports absent from Module.symvers entirely
+SYMBOL_HAS_MODVERSION_ENTRY  per symbol, distinct from MODVERSION_MATCH
+```
+
+Rules that follow from that:
+
+- A hole in the table is `INCOMPATIBLE` when a `Module.symvers` is supplied, and
+  is reported as a **hole**, never as a CRC mismatch — different failure,
+  different fix.
+- An import absent from `Module.symvers` is a separate, harder failure: the load
+  dies on `Unknown symbol` before any version check runs.
+- A weak (`STB_WEAK`) undefined symbol is exempt **only when the kernel does not
+  export it**. `resolve_symbol()` runs `check_version()` whenever it finds the
+  symbol and returns `ERR_PTR(-EINVAL)` on failure; an error pointer is not NULL,
+  so `simplify_symbols()`' `!ksym && STB_WEAK` escape hatch does not apply. An
+  *exported* weak import with no entry fails the load like a strong one. The
+  hatch only covers a weak symbol the kernel exports nowhere, which stays
+  unresolved at zero. With no `Module.symvers` this is undecidable: reported
+  `UNDECIDED`, refused under `--require-modversion-coverage`, never assumed
+  exempt.
+- Coverage is decidable from the `.ko` alone, so it is always reported. Without a
+  `Module.symvers` the verdict still stays `UNVERIFIED` — absent evidence is not
+  a defect in the module — unless `--require-modversion-coverage` is passed, which
+  the new-module acceptance path **must** pass:
+
+```sh
+python3 tools/ko_audit.py <new-module.ko> --require-modversion-coverage \
+    --symvers <exact-Module.symvers> --kallsyms <captured-kallsyms.txt>
+```
+
+`tools/tests/test_ko_audit.py` carries one negative case per element, including
+the one this rule exists for: a partial table whose every present entry agrees.
+`tools/profile_binding_audit.py` exercises `ko_audit` on the bundled modules and
+fails if a named hole ever stops being fatal, so the rule cannot be refactored
+away silently.
 
 `MODULE_VS_ZZIC_KERNEL = COMPATIBLE` is the only result that justifies setting
 the three profile fields, and they move together or not at all:
