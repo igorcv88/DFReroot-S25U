@@ -42,8 +42,29 @@ target kernel accepted all 588 entries of its `__versions` table at load time.
 
 The DDK image is the **toolchain and headers only**. Its own `Module.symvers`
 holds GKI CRCs, which are *not* the Samsung kernel's — feeding those to `modpost`
-is precisely the trap `ko_audit.py` now detects and refuses. The derived table
-replaces it.
+is precisely the trap `ko_audit.py` now detects and refuses. So the four CRCs in
+that table get replaced with the derived ones.
+
+**Do not copy the derived table over `Module.symvers`.** It exists for
+`ko_audit.py`, which reads only the CRC and the symbol name, and it is not
+modpost input:
+
+- it carries a `#` header, and `scripts/mod/modpost` reads its symbol dump as
+  tab-delimited records with no comment handling — the first header line has no
+  tab, so `read_dump()` takes its `goto fail` and calls
+  `fatal("parse error in symbol dump file")`;
+- its rows have four fields, while `Module.symvers` gained a namespace column in
+  Linux 5.8, so a 6.6 tree expects five
+  (`CRC  symbol  namespace  module  export-type`).
+
+`tools/patch_symvers_crcs.py` edits the kernel's **own** table instead: each row
+keeps its exact shape and only the CRC field of the four named symbols changes.
+That is format-agnostic — four columns or five, it does not care — and it refuses
+rather than writes when a required symbol is absent from the base table, because
+modpost would otherwise leave the module with no `__versions` entry for it and the
+load would fail on the device instead of in the build. It also demands the derived
+table's provenance, exactly as the audit does, so it cannot become a side door
+into hand-edited CRCs.
 
 ```sh
 # On the Linux host, in a clone of this repo.
@@ -62,9 +83,13 @@ docker run --rm -v "$PWD":/src -w /src \
     printf "#define UTS_RELEASE \"%s\"\n" "$R" > "$KDIR/include/generated/utsrelease.h"
 
     # THE point of the whole exercise: modpost must resolve the imports against
-    # the TARGET CRCs, not the DDK ones.
-    cp "$KDIR/Module.symvers" "$KDIR/Module.symvers.ddk.bak" || true
-    cp evidence/zzic/gate-g/ZZIC-derived-minimal.symvers "$KDIR/Module.symvers"
+    # the TARGET CRCs, not the DDK ones. The derived table is not modpost input
+    # (comments, and four columns instead of five), so patch the tree own table.
+    cp "$KDIR/Module.symvers" "$KDIR/Module.symvers.ddk.bak"
+    python3 tools/patch_symvers_crcs.py \
+      --base "$KDIR/Module.symvers.ddk.bak" \
+      --derived evidence/zzic/gate-g/ZZIC-derived-minimal.symvers \
+      --out "$KDIR/Module.symvers"
 
     # No KBUILD_MODPOST_WARN. An unresolved symbol must FAIL the build here,
     # because that warning is exactly how a module ends up with an incomplete

@@ -338,6 +338,94 @@ def main():
                   for w in committed["witnesses"]),
               "every committed witness is from that exact kernel")
 
+    # === the modpost-ready table (Codex review of 7a9f03d) ==================
+    # The derived table is NOT modpost input: modpost reads tab-delimited records
+    # and skips no comments, and Module.symvers gained a namespace column in 5.8.
+    # patch_symvers_crcs.py edits the kernel's OWN table instead, so the row shape
+    # is whatever that tree uses.
+    import patch_symvers_crcs as psv
+
+    def base_table(name, rows):
+        path = os.path.join(td, name)
+        with open(path, "w") as f:
+            f.write("".join("\t".join(r) + "\n" for r in rows))
+        return path
+
+    five = base_table("five.symvers", [
+        ("0x11111111", "__stack_chk_fail", "", "vmlinux", "EXPORT_SYMBOL"),
+        ("0x22222222", "_printk", "", "vmlinux", "EXPORT_SYMBOL"),
+        ("0x33333333", "memset", "", "vmlinux", "EXPORT_SYMBOL"),
+        ("0x44444444", "sprint_symbol", "", "vmlinux", "EXPORT_SYMBOL_GPL"),
+        ("0x55555555", "kmalloc", "", "vmlinux", "EXPORT_SYMBOL"),
+    ])
+    lines, found = psv.patch(five, {n: c for n, c in TRUE_CRCS})
+    check(sorted(found) == sorted(REQUIRED),
+          "every required symbol is rewritten in a 5-field table")
+    check(all(len(l.split("\t")) == 5 for l in lines if l.strip()),
+          "the 5-field row shape is preserved")
+    check(lines[0].split("\t")[0] == "0xf0fdf6cb",
+          "the CRC field carries the derived value (got %s)"
+          % lines[0].split("\t")[0])
+    check(lines[4].split("\t")[0] == "0x55555555",
+          "an unrelated symbol is left untouched")
+
+    four = base_table("four.symvers", [
+        ("0x1", "__stack_chk_fail", "vmlinux", "EXPORT_SYMBOL"),
+        ("0x2", "_printk", "vmlinux", "EXPORT_SYMBOL"),
+        ("0x3", "memset", "vmlinux", "EXPORT_SYMBOL"),
+        ("0x4", "sprint_symbol", "vmlinux", "EXPORT_SYMBOL_GPL"),
+    ])
+    lines, found = psv.patch(four, {n: c for n, c in TRUE_CRCS})
+    check(all(len(l.split("\t")) == 4 for l in lines if l.strip()),
+          "a 4-field table keeps four fields")
+    check(sorted(found) == sorted(REQUIRED),
+          "and every symbol is still rewritten")
+
+    # A symbol the tree does not export is a refusal: modpost would otherwise
+    # leave the module with no entry for it and the load would fail on-device.
+    partial = base_table("partial.symvers", [
+        ("0x1", "__stack_chk_fail", "", "vmlinux", "EXPORT_SYMBOL"),
+        ("0x2", "_printk", "", "vmlinux", "EXPORT_SYMBOL"),
+    ])
+    try:
+        psv.patch(partial, {n: c for n, c in TRUE_CRCS})
+        check(False, "a base table missing a required symbol is refused")
+    except SystemExit as ex:
+        check("does not export" in str(ex) and "memset" in str(ex),
+              "a base table missing a required symbol is refused, and names it")
+
+    dup = base_table("dup.symvers", [
+        ("0x1", "memset", "", "vmlinux", "EXPORT_SYMBOL"),
+        ("0x2", "memset", "", "vmlinux", "EXPORT_SYMBOL"),
+    ])
+    try:
+        psv.patch(dup, {"memset": 0xdcb764ad})
+        check(False, "a duplicated symbol is refused")
+    except SystemExit as ex:
+        check("more than once" in str(ex), "a duplicated symbol is refused")
+
+    junk = os.path.join(td, "junk.symvers")
+    with open(junk, "w") as f:
+        f.write("# a comment, which modpost would also reject\n")
+    try:
+        psv.patch(junk, {n: c for n, c in TRUE_CRCS})
+        check(False, "a non-record line is refused")
+    except SystemExit as ex:
+        check("not a tab-delimited symbol record" in str(ex),
+              "a non-record line is refused rather than passed to modpost")
+
+    # This tool is a second door into the CRCs, so it must demand the same
+    # provenance the audit does - otherwise the gate is intact and bypassed.
+    try:
+        psv.load_derived(lonely, None)
+        check(False, "the patcher refuses a derived table with no provenance")
+    except SystemExit as ex:
+        check("no provenance record" in str(ex),
+              "the patcher refuses a derived table with no provenance")
+    crcs, kind, _ = psv.load_derived(out, prov)
+    check(kind == "DERIVED" and crcs == {n: c for n, c in TRUE_CRCS},
+          "with its provenance it loads exactly the derived CRCs")
+
     # --- exit status -------------------------------------------------------
     rc = subprocess.call([sys.executable,
                           os.path.join(TOOLS, "derive_zzic_symvers.py"), w1],
