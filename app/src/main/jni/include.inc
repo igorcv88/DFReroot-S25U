@@ -172,6 +172,8 @@
   .equ ANDROID_LOG_INFO,     4
 
   .equ EAGAIN,              11
+  .equ E2BIG,                7
+  .equ ENODEV,              19
   .equ SEEK_DATA,            3
   .equ MAP_SHARED,         0x1
   .equ MAP_PRIVATE,        0x2

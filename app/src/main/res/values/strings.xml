@@ -6,6 +6,7 @@
     <string name="run_dialog_title">DirtyFrag Log</string>
     <string name="run_dialog_close">Close</string>
     <string name="run_running">⏳ Running…</string>
+    <string name="run_waiting_post_root">⏳ Waiting for verified post-root completion…</string>
     <string name="run_success">✅ Succeeded</string>
     <string name="run_failed">❌ Failed</string>
     <string name="chip_ready">READY</string>

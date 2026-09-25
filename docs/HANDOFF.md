@@ -18,6 +18,56 @@ aarch64 / 4096-byte pages
 
 The signed validation release is `v2.0.4-zzic` (versionCode 7).
 
+## Implementation checkpoint — fail-closed closeout
+
+The source implementation is now split across coordinated branches/PRs, but no
+new signed DFReroot release has been produced and Gate I is not promoted.
+
+`RMGLabs-Payloads` PR #2 (`feat/dfr-post-root-closeout`) now implements the
+DFR-only daemon contract:
+
+- `get_info()` is live rather than `INFO_CACHE`-backed for this profile, so the
+  post-restore proof issues a new KernelSU ioctl instead of replaying the first
+  result;
+- both proofs require KernelSU version 32601, UAPI 2 and late-load mode, using
+  `get_info()`, `ensure_uapi_version_matched()` and `is_late_load()`;
+- `/system/bin/setenforce 1` runs only after the first proof, and
+  `/sys/fs/selinux/enforce` must read back exactly `1`;
+- the second live control proof precedes an atomic
+  `/data/system/dfreroot-post-root` publish (`system:system`, `0640`);
+- failures converge on a best-effort enforcing restore;
+- the normal `rmg` profile retains its cached UAPI and existing staging
+  behavior;
+- the exact-port workflow still applies the narrow LSPosed/DEFEX patch and now
+  checks the compiled DFR ksud for every closeout signal.
+
+The DFReroot branch `feat/dfr-post-root-fail-closed` now implements:
+
+- `finit_module()` raw-result handling: only intentional `-E2BIG` proceeds;
+  `-ENODEV` is a named helper self-check failure and every other value refuses;
+- `dfm1` after expected `-E2BIG`, as checked `HELPER_SUCCESS`; `dfm2` remains
+  private namespace, `dfm3` bind handoff, and `dfm4` exec failure;
+- best-effort `/system/bin/setenforce 1` from stage2 if a post-helper failure
+  occurs before ksud takes over;
+- native bootstrap PASS only for `dfm1 + dfm2 + dfm3` with no `dfm4`; isolated
+  `dfm3` is explicitly incomplete;
+- a strict same-boot completion parser and independent live
+  `/sys/fs/selinux/enforce == 1` check before the UI can show success;
+- negative tests for stale/malformed records, wrong SELinux, wrong KSU/UAPI or
+  runtime mode, isolated `dfm3`, and unexpected helper return ordering.
+
+The current blocking sequence is now narrower:
+
+1. generate the exact DFR ksud from the Payloads PR branch;
+2. verify its embedded exact ZZIC module and LSPosed/DEFEX signature, then record
+   the new size and SHA-256;
+3. replace and repin `app/src/main/assets/ksud` in DFReroot;
+4. pass every offline gate and the full Android build;
+5. only then spend one signed release for physical Gate-I acceptance.
+
+Until steps 1–4 finish, `tools/profile_binding_audit.py` intentionally refuses
+the old bundled ksud because it lacks the new DFR post-root strings.
+
 The second physical run changed the project state materially: the exact ZZIC
 DirtyFrag helper, the complete userspace patch chain, the stage2 handoff, the
 DFR-specific ksud and KernelSU all executed on hardware in one boot. Root was

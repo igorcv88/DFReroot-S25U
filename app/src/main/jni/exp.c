@@ -1470,27 +1470,34 @@ Java_org_lsposed_lspromise_DirtyFrag_runAll(JNIEnv *env, jobject thiz) {
         createOrphanProcess();
         usleep(500000);
         int mark = has_mutex();
+        int mark1 = has_mark(1);
         int mark2 = has_mark(2);
         int mark3 = has_mark(3);
         int mark4 = has_mark(4);
-        REPORTLN("mark: %d %d %d %d (1=present 0=absent -1=undeterminable)",
-                 mark, mark2, mark3, mark4);
-        if (mark < 0 || mark2 < 0 || mark3 < 0 || mark4 < 0) {
+        REPORTLN("[DFR][MARKER] df=%d helper=%d ns=%d bind=%d exec_fail=%d"
+                 " (1=present 0=absent -1=undeterminable)",
+                 mark, mark1, mark2, mark3, mark4);
+        if (mark < 0 || mark1 < 0 || mark2 < 0 || mark3 < 0 || mark4 < 0) {
             /* Undeterminable is neither success nor failure: say so and keep
              * retrying rather than reporting a verdict the markers do not support. */
-            REPORTLN("[DFR][MARKER] UNKNOWN df=%d dfm2=%d dfm3=%d dfm4=%d could not be"
+            REPORTLN("[DFR][MARKER] UNKNOWN df=%d helper=%d ns=%d bind=%d exec_fail=%d could not be"
                      " read (not ENOENT); not treating it as either outcome",
-                     mark, mark2, mark3, mark4);
+                     mark, mark1, mark2, mark3, mark4);
         }
         if (mark4 == 1) {
-            REPORTLN("Failed (failure marker set). See logcat for details.\n");
+            REPORTLN("[DFR][BOOTSTRAP] FAIL ksud execve failure marker is present\n");
             return 1;
         }
-        if (mark3 == 1) {
-            REPORTLN("Done. Check KSU Manager.\n");
+        if (mark1 == 1 && mark2 == 1 && mark3 == 1) {
+            REPORTLN("[DFR][BOOTSTRAP] PASS helper=-E2BIG namespace=private bind=complete;"
+                     " waiting for same-boot POST_ROOT_COMPLETE\n");
             return 0;
         }
+        if (mark3 == 1) {
+            REPORTLN("[DFR][BOOTSTRAP] INCOMPLETE bind exists without the full"
+                     " helper/ns evidence; dfm3 is never final success");
+        }
     }
-    REPORTLN("no success signal; verify via manager app + logcat");
+    REPORTLN("[DFR][BOOTSTRAP] FAIL no complete helper/ns/bind handoff signal");
     return 2;
 }

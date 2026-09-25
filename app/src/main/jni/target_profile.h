@@ -168,6 +168,12 @@ struct TargetProfile {
     const char *ksud_sha256;
     long        ksud_size;
 
+    /* DFR-only final-state contract consumed by the system-UID app. */
+    const char *post_root_record;
+    int         kernelsu_version;
+    int         kernelsu_uapi_version;
+    int         post_root_selinux;
+
     /* NetworkStack expectations */
     const char *network_stack_process;
     int         network_stack_uid;

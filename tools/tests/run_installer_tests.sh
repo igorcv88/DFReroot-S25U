@@ -16,3 +16,10 @@ javac -nowarn -d "$OUT" \
     installer/src/main/java/com/polygraphene/df/installer/SafeWrite.java \
     tools/tests/SafeWriteTest.java
 java -cp "$OUT" SafeWriteTest
+
+# Same-boot DFR post-root parser: stale/malformed status, wrong SELinux and
+# invalid KernelSU/UAPI fields must all remain negative without Android.
+javac -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/PostRootStatus.java \
+    tools/tests/PostRootStatusTest.java
+java -cp "$OUT" PostRootStatusTest
