@@ -22,7 +22,7 @@ exists instead of a built module.
 ## 0. What is already done
 
 ```text
-evidence/zzic/gate-g/ZZIC-derived-minimal.symvers       the four CRCs
+evidence/zzic/gate-g/ZZIC-derived-minimal.symvers       the five CRCs
 evidence/zzic/gate-g/ZZIC-modversion-provenance.json    each bound to witness bytes
 evidence/zzic/gate-g/lsmod-target.txt                   the witness is kernel-loaded
 ```
@@ -42,7 +42,7 @@ target kernel accepted all 588 entries of its `__versions` table at load time.
 
 The DDK image is the **toolchain and headers only**. Its own `Module.symvers`
 holds GKI CRCs, which are *not* the Samsung kernel's — feeding those to `modpost`
-is precisely the trap `ko_audit.py` now detects and refuses. So the four CRCs in
+is precisely the trap `ko_audit.py` now detects and refuses. So the five CRCs in
 that table get replaced with the derived ones.
 
 **Do not copy the derived table over `Module.symvers`.** It exists for
@@ -58,7 +58,7 @@ modpost input:
   (`CRC  symbol  namespace  module  export-type`).
 
 `tools/patch_symvers_crcs.py` edits the kernel's **own** table instead: each row
-keeps its exact shape and only the CRC field of the four named symbols changes.
+keeps its exact shape and only the CRC field of the five named symbols changes.
 That is format-agnostic — four columns or five, it does not care — and it refuses
 rather than writes when a required symbol is absent from the base table, because
 modpost would otherwise leave the module with no `__versions` entry for it and the
@@ -67,6 +67,9 @@ table's provenance, exactly as the audit does, so it cannot become a side door
 into hand-edited CRCs.
 
 ```sh
+# The workflow .github/workflows/build-zzic-dirtyfrag.yml does all of this and
+# audits the result; prefer dispatching it over running these by hand. The
+# commands below are the same steps, for a host without a runner.
 # On the Linux host, in a clone of this repo.
 R=6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k
 docker pull ghcr.io/ylarod/ddk-min:android15-6.6-20260828
@@ -91,9 +94,25 @@ docker run --rm -v "$PWD":/src -w /src \
       --derived evidence/zzic/gate-g/ZZIC-derived-minimal.symvers \
       --out "$KDIR/Module.symvers"
 
+    # This DDK ships a PATCHED modpost: check_exports() has its
+    # `s->module = exp->module;` commented out AND its only call site is
+    # commented out too. No import is ever matched to an export, add_versions()
+    # skips every symbol, and the table comes out EMPTY - silently, because the
+    # function that would have warned is the one removed. Restore both lines and
+    # rebuild modpost from the restored source, or nothing below means anything.
+    MP=/opt/ddk/src/android15-6.6/scripts/mod/modpost.c
+    sed -i -e "s|^//\([[:space:]]*\)\(s->module = exp->module;\)|\1\2|" \
+           -e "s|^//\([[:space:]]*\)\(check_exports(mod);\)|\1\2|" "$MP"
+    grep -nE "^[[:space:]]+(s->module = exp->module|check_exports\(mod\));" "$MP"
+    ( cd "$KDIR" \
+      && eval "$(sed -n "s|^savedcmd_scripts/mod/modpost\.o := ||p" \
+                   scripts/mod/.modpost.o.cmd)" \
+      && eval "$(sed -n "s|^savedcmd_scripts/mod/modpost := ||p" \
+                   scripts/mod/.modpost.cmd)" )
+
     # No KBUILD_MODPOST_WARN. An unresolved symbol must FAIL the build here,
-    # because that warning is exactly how a module ends up with an incomplete
-    # __versions table that cannot load.
+    # because that warning is another way to end up with an incomplete
+    # __versions table - one that loads while verifying nothing.
     make -C dirtyfrag-lkm KDIR="$KDIR" clean
     make -C dirtyfrag-lkm KDIR="$KDIR"
     test -s dirtyfrag-lkm/dirtyfrag.ko
@@ -141,7 +160,7 @@ MODULE_VS_ZZIC_KERNEL       = COMPATIBLE
 ```
 
 Anything else leaves Gate G closed. The audit finds the provenance record beside
-the table on its own and **refuses** without one, so the four CRCs can never
+the table on its own and **refuses** without one, so the five CRCs can never
 degrade into typed-in numbers.
 
 Optional, and worth it: `--kallsyms <capture>` to record existence evidence for

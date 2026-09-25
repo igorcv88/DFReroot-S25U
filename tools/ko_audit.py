@@ -23,21 +23,52 @@ table read as agreement.
 
 MODVERSION COVERAGE - why this is a gate of its own
 ---------------------------------------------------
-Comparing only the entries __versions HAPPENS to contain is fail-open. The
-kernel's check_version() walks the table looking for the symbol it is resolving
-and, when the table exists but holds no entry for that symbol, refuses the load
-("no symbol version for %s"). CONFIG_MODULE_FORCE_LOAD is not set on the ZZIC
-kernel, so there is no escape hatch. A module whose table covers three of four
-imports is therefore NOT loadable - yet an audit that only diffs the entries
-present would find every one of them in agreement and report COMPATIBLE.
+Comparing only the entries __versions HAPPENS to contain is fail-open, but not
+for the reason this file used to give. Read the kernel that will run this
+module - kernel/module/version.c on android15-6.6 - rather than assuming:
 
-So the audit computes, and requires:
+    if (versindex == 0)                     /* no __versions section at all */
+            return try_to_force_load(mod, symname) == 0;
+    for (i = 0; i < num_versions; i++) {
+            if (strcmp(versions[i].name, symname) != 0)
+                    continue;
+            if (versions[i].crc == crcval)
+                    return 1;               /* agrees   -> load proceeds */
+            goto bad_version;               /* disagrees -> load REFUSED */
+    }
+    /* Broken toolchain. Warn once, then let it go.. */
+    pr_warn_once("%s: no symbol version for %s\n", info->name, symname);
+    return 1;                               /* NO ENTRY -> load proceeds  */
+
+So there are three outcomes, and they are not what "missing entry = unloadable"
+claimed:
+
+  * no __versions section at all    -> refused (try_to_force_load fails;
+                                       CONFIG_MODULE_FORCE_LOAD is not set)
+  * entry present and disagreeing   -> refused ("disagrees about version of")
+  * entry ABSENT for a symbol being resolved -> the check is SKIPPED, with one
+                                       warn_once, and the load proceeds
+
+The third case is why coverage is still required, and it is the worse of the
+two failure shapes for this repository. A hole does not stop the module; it
+stops the *checking*. The module loads with nothing verified about that symbol,
+which is precisely the silent-ABI-mismatch-then-oops that this gate exists to
+keep off the device. Under a fail-closed reading, an unchecked symbol is
+unverified evidence, and unverified evidence is a refusal.
+
+Hence the audit computes, and requires:
 
     imports_requiring_modversion - __versions entries == empty set
 
-Weak undefined symbols are excluded ONLY when the kernel does not export them.
-The exemption is narrower than STB_WEAK alone, and getting that wrong is
-fail-open. In simplify_symbols():
+and refuses the hole because nothing proved it right, not because the kernel
+would have caught it. The kernel would not have.
+
+The same correction applies to the weak-symbol rule, whose conclusion survives
+it unchanged. A weak undefined symbol the kernel DOES export gets resolved, so
+a missing entry for it leaves a real, exported symbol version-unchecked ->
+unverified -> refused. A weak symbol the kernel does not export at all stays
+unresolved at zero and has no version to check, so it is genuinely exempt. In
+simplify_symbols():
 
     ksym = resolve_symbol_wait(...);
     if (ksym && !IS_ERR(ksym)) { ...resolved...; break; }
@@ -45,18 +76,35 @@ fail-open. In simplify_symbols():
         break;                       /* <- the weak escape hatch */
     ret = PTR_ERR(ksym) ?: -ENOENT;  /* <- load fails */
 
-resolve_symbol() runs check_version() whenever it FINDS the symbol, and returns
-ERR_PTR(-EINVAL) when the version check fails. An error pointer is not NULL, so
-`!ksym` is false and the weak escape hatch does not apply: an exported weak
-import with no __versions entry fails the load exactly like a strong one. The
-hatch only covers a weak symbol the kernel does not export at all, which stays
-unresolved at zero.
+The hatch is reached only when the lookup found nothing, so it never covers an
+exported symbol - which is why the exemption is narrower than STB_WEAK alone,
+and why getting it wrong is fail-open.
 
 So the audit needs the symbol table to decide, and says so when it does not have
 one: a weak import is exempt when Module.symvers does not export it, required
 when it does, and UNDECIDED when no Module.symvers was supplied. Undecided is
 never silently treated as exempt - under --require-modversion-coverage it is a
 refusal, because that is the fail-closed reading of "we cannot tell".
+
+SYMBOLS THE KERNEL CHECKS WHETHER OR NOT THE MODULE IMPORTS THEM
+----------------------------------------------------------------
+module_layout is not an undefined symbol of the .ko - the module never calls it,
+and it appears only as a NAME inside __versions - so an import-driven coverage
+check cannot see it. The kernel checks it anyway, and first:
+
+    int check_modstruct_version(...)
+    {
+            struct find_symbol_arg fsa = { .name = "module_layout", ... };
+            ...
+            return check_version(info, "module_layout", mod, fsa.crc);
+    }
+
+Its CRC summarises struct module, struct modversion_info, struct kernel_param,
+struct kernel_symbol and struct tracepoint - the layouts the loader itself walks.
+A module carrying another kernel's module_layout CRC is refused outright (the
+disagreeing case above), and one carrying no entry for it loads with that whole
+group unchecked. Either way it is the single most load-relevant CRC in the table
+and it is not an import, so this audit adds it to the required set explicitly.
 
 An import absent from Module.symvers altogether is a separate, harder failure
 (the symbol is not exported, so the load dies on "Unknown symbol" before any
@@ -96,6 +144,17 @@ STT_NOTYPE, STT_OBJECT, STT_FUNC = 0, 1, 2
 NON_IMPORT_UNDEFS = frozenset({
     "_GLOBAL_OFFSET_TABLE_", "__this_module", "_DYNAMIC",
 })
+
+# The mirror image of NON_IMPORT_UNDEFS: symbols the loader version-checks even
+# though the module never references them, so they are absent from the undefined
+# symbol table and an import-driven coverage rule cannot see them.
+#
+# check_modstruct_version() looks "module_layout" up in vmlinux and runs
+# check_version() on it before any other symbol is resolved. Its CRC covers the
+# layouts the loader itself walks, so it is the most load-relevant entry in the
+# table - and the one nobody would think to derive, because nothing in the
+# module's source names it. See the module_layout section of the file header.
+KERNEL_CHECKED_WITHOUT_IMPORT = frozenset({"module_layout"})
 
 
 def classify_imports(syms):
@@ -417,7 +476,16 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False,
         weak_required = set()
         weak_exempt = set()
         weak_undecided = set(weak_imports)
-    requiring = strong_imports | weak_required
+    # Symbols the loader checks without the module importing them are required
+    # too, but only once the module is actually built with modversions: with no
+    # __versions section at all the kernel takes the try_to_force_load() path
+    # instead, and naming a missing module_layout entry there would report a
+    # second, derived symptom of the one real fault.
+    kernel_checked = (KERNEL_CHECKED_WITHOUT_IMPORT
+                      if ("modversions" in vermagic or version_map)
+                      else frozenset())
+    requiring = strong_imports | weak_required | kernel_checked
+    r["imports_kernel_checked"] = sorted(kernel_checked)
     # Kept separate on purpose: "is an import" and "needs a version entry" are
     # different facts, and the second is what the coverage rule is about.
     r["imports_requiring_modversion"] = sorted(requiring)
@@ -489,7 +557,13 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False,
         # An import the kernel does not export at all dies on "Unknown symbol"
         # before any version check. Reported separately from a CRC mismatch
         # because it is a different failure with a different fix.
-        unresolvable = sorted(requiring - exported)
+        # Imports only. A symbol in KERNEL_CHECKED_WITHOUT_IMPORT is not linked
+        # against an export, so "Unknown symbol" is not its failure mode; when
+        # the supplied table cannot speak for it the honest verdict is missing
+        # evidence, which the `stale` branch below reaches as UNVERIFIED.
+        # Reporting it here would print a false reason and, worse, promote
+        # "we could not check this" to a hard rejection of the module.
+        unresolvable = sorted((requiring - kernel_checked) - exported)
         mismatches = sorted(n for n, c in version_map.items()
                             if n in symvers_crc and symvers_crc[n] != c)
         # Entries naming a symbol this Module.symvers does not know: the table

@@ -1,7 +1,7 @@
 {
   "CONSENSUS": "COMPLETE",
   "conflicts": [],
-  "generated_utc": "2026-09-25T15:36:23Z",
+  "generated_utc": "2026-09-25T17:05:21Z",
   "marker": "DFR-DERIVED-SYMVERS v1",
   "missing_required": [],
   "rejected": [],
@@ -9,12 +9,14 @@
     "sprint_symbol",
     "_printk",
     "memset",
-    "__stack_chk_fail"
+    "__stack_chk_fail",
+    "module_layout"
   ],
   "singletons": [
     "__stack_chk_fail",
     "_printk",
     "memset",
+    "module_layout",
     "sprint_symbol"
   ],
   "symbols": {
@@ -4136,7 +4138,7 @@
     }
   },
   "symvers_path": "evidence/zzic/gate-g/ZZIC-derived-minimal.symvers",
-  "symvers_sha256": "c1321fbfb633ff7ff04e309b7f1cacc84d6a664efc5f66b9f27a6537d011cc51",
+  "symvers_sha256": "340b840d63f3dd6fabe589aff9b52d365ee1c568e8303b47a052c3da7ac0a5dd",
   "target_kernel_release": "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k",
   "tool": "tools/derive_zzic_symvers.py",
   "violations": [],

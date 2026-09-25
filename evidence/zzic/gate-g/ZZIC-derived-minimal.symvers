@@ -11,4 +11,5 @@
 0xf0fdf6cb	__stack_chk_fail	vmlinux	EXPORT_SYMBOL_GPL
 0x92997ed8	_printk	vmlinux	EXPORT_SYMBOL_GPL
 0xdcb764ad	memset	vmlinux	EXPORT_SYMBOL_GPL
+0x81972209	module_layout	vmlinux	EXPORT_SYMBOL_GPL
 0x661601de	sprint_symbol	vmlinux	EXPORT_SYMBOL_GPL

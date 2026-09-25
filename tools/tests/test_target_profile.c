@@ -241,15 +241,30 @@ static void test_module_policy(void) {
           "MISMATCH -> NOT_APPLICABLE (refused earlier, by Gate A) (%s)",
           dfr_module_policy_name(v));
 
-    /* The shipped profile: no validated module, so ZZIC is refused. */
+    /* The shipped profile now pins a validated module, so the policy allows the
+     * stage to proceed - to the digest binding in patch_ko(), which is what
+     * actually compares the bytes. This assertion tracks the shipped profile on
+     * purpose: if the three ko_* fields are ever cleared, or set inconsistently,
+     * it changes here rather than silently on a device. */
     v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC);
+    CHECK(v == DFR_MODULE_POLICY_ALLOW && dfr_module_policy_permits(v),
+          "shipped profile on ZZIC -> ALLOW, all three ko_* fields set (%s)",
+          dfr_module_policy_name(v));
+
+    /* Clearing the flag refuses again, whatever else stays pinned. The policy
+     * never infers permission from a digest that happens to be there. */
+    p = DFR_PROFILE_ZZIC;
+    p.ko_zzic_verified = 0;
+    v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
     CHECK(v == DFR_MODULE_POLICY_REFUSE_UNVERIFIED && !dfr_module_policy_permits(v),
-          "shipped profile on ZZIC -> REFUSE_UNVERIFIED (%s)",
+          "ko_zzic_verified=0 with a digest pinned -> REFUSE_UNVERIFIED (%s)",
           dfr_module_policy_name(v));
 
     /* A bare flag is not evidence: no digest, no filename -> still refused. */
     p = DFR_PROFILE_ZZIC;
     p.ko_zzic_verified = 1;
+    p.ko_sha256 = NULL;
+    p.ko_filename = NULL;
     v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
     CHECK(v == DFR_MODULE_POLICY_REFUSE_NO_DIGEST && !dfr_module_policy_permits(v),
           "ko_zzic_verified=1 with no ko_sha256 -> REFUSE_NO_DIGEST (%s)",
@@ -497,11 +512,23 @@ static void test_profile_invariants(void) {
     CHECK(is_lower_hex64(p->vbmeta_digest),
           "vbmeta_digest is pinned as 64 lowercase hex chars");
 
-    /* Gate G stays UNVERIFIED until a module is positively validated, and the
-     * three fields move together or not at all. */
-    CHECK(p->ko_zzic_verified == 0 && p->ko_filename == NULL && p->ko_sha256 == NULL,
-          "Gate G still UNVERIFIED: ko_zzic_verified=%d, no filename, no digest",
-          p->ko_zzic_verified);
+    /* Gate G boundary G1: a module built against this exact kernel is now
+     * pinned. The three fields move together or not at all, which is the whole
+     * invariant - so assert the conjunction rather than the flag, in either
+     * direction. A future revert to UNVERIFIED must clear all three, and this
+     * fails if it clears only some. */
+    CHECK((p->ko_zzic_verified == 1 && p->ko_filename != NULL &&
+           p->ko_sha256 != NULL) ||
+          (p->ko_zzic_verified == 0 && p->ko_filename == NULL &&
+           p->ko_sha256 == NULL),
+          "the three ko_* fields move together: verified=%d filename=%s digest=%s",
+          p->ko_zzic_verified,
+          p->ko_filename ? p->ko_filename : "<none>",
+          p->ko_sha256 ? "pinned" : "<none>");
+    CHECK(p->ko_zzic_verified == 1 &&
+          dfr_streq(p->ko_filename, "dirtyfrag-android15-6.6-S938BXXUCZZIC.ko") &&
+          is_lower_hex64(p->ko_sha256),
+          "the pinned module is the exact-kernel one, digest as 64 lowercase hex");
 }
 
 /* ---- [M] /proc/self/mountinfo parsing ---- */

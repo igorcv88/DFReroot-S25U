@@ -46,11 +46,17 @@ jobs:
 
           path = Path("evidence/zzic/gate-g/ZZIC-derived-minimal.symvers")
 
+          # module_layout is here for the same reason it is in the derived
+          # table: the loader version-checks it first, the module imports it
+          # from nobody, and the DDK ships a different CRC for it. Leaving it
+          # out of this consistency gate would let the committed evidence go
+          # back to four symbols without anything noticing.
           required = {
               "__stack_chk_fail": 0xf0fdf6cb,
               "_printk":          0x92997ed8,
               "memset":           0xdcb764ad,
               "sprint_symbol":    0x661601de,
+              "module_layout":    0x81972209,
           }
 
           got = {}
@@ -167,92 +173,23 @@ jobs:
                 "$KDIR/Module.symvers" || true
 
               #
-              # The committed derived symvers is authoritative only for:
+              # Patch the DDK table with the derived ZZIC CRCs using the tool this
+              # repo already has, not a second copy of the same logic inline here.
               #
-              #     CRC + symbol
+              # tools/patch_symvers_crcs.py is unit-tested (row shape preserved
+              # for 4- and 5-field tables, refusals for a missing symbol, a
+              # duplicate, a non-record line) and - the reason it matters - it
+              # DEMANDS the provenance record for the derived table, exactly as
+              # ko_audit.py does. An inline reimplementation is a second door
+              # into those CRCs with no gate on it.
               #
-              # Preserve the DDKs existing owner/export-type/namespace fields
-              # and replace only the CRC for the four imports.
-              #
-              python3 - "$KDIR/Module.symvers" "$EXACT" <<'"'"'PY'"'"'
-          import sys
-          from pathlib import Path
+              cp "$KDIR/Module.symvers" "$KDIR/Module.symvers.ddk.bak"
 
-          ddk_path = Path(sys.argv[1])
-          exact_path = Path(sys.argv[2])
-
-          required = {
-              "__stack_chk_fail",
-              "_printk",
-              "memset",
-              "sprint_symbol",
-          }
-
-          exact_crc = {}
-
-          for line in exact_path.read_text().splitlines():
-              fields = line.split()
-
-              if len(fields) < 2:
-                  continue
-
-              try:
-                  crc = int(fields[0], 16)
-              except ValueError:
-                  continue
-
-              symbol = fields[1]
-
-              if symbol in required:
-                  exact_crc[symbol] = crc & 0xffffffff
-
-          if set(exact_crc) != required:
-              raise SystemExit(
-                  "Derived ZZIC symvers does not contain exactly the "
-                  f"required symbols. got={sorted(exact_crc)} "
-                  f"expected={sorted(required)}"
-              )
-
-          original_lines = ddk_path.read_text().splitlines()
-
-          found = set()
-          output = []
-
-          for line in original_lines:
-              fields = line.split("\t")
-
-              if len(fields) >= 2 and fields[1] in required:
-                  symbol = fields[1]
-
-                  if symbol in found:
-                      raise SystemExit(
-                          f"Duplicate DDK Module.symvers entry for {symbol}"
-                      )
-
-                  fields[0] = f"0x{exact_crc[symbol]:08x}"
-                  line = "\t".join(fields)
-                  found.add(symbol)
-
-              output.append(line)
-
-          missing = required - found
-
-          if missing:
-              raise SystemExit(
-                  "Required symbol(s) absent from DDK Module.symvers: "
-                  + ", ".join(sorted(missing))
-              )
-
-          ddk_path.write_text("\n".join(output) + "\n")
-
-          print("Patched exact ZZIC CRCs into DDK Module.symvers:")
-
-          for symbol in sorted(required):
-              print(f"  {symbol:20s} 0x{exact_crc[symbol]:08x}")
-
-          print()
-          print("All non-CRC Module.symvers fields preserved.")
-          PY
+              python3 /work/tools/patch_symvers_crcs.py \
+                --base "$KDIR/Module.symvers.ddk.bak" \
+                --derived "$EXACT" \
+                --provenance /work/evidence/zzic/gate-g/ZZIC-modversion-provenance.json \
+                --out "$KDIR/Module.symvers"
 
               echo
               echo "=== EFFECTIVE KDIR ENTRIES ==="
@@ -283,6 +220,7 @@ jobs:
               "_printk":          0x92997ed8,
               "memset":           0xdcb764ad,
               "sprint_symbol":    0x661601de,
+              "module_layout":    0x81972209,
           }
 
           got = {}
@@ -337,6 +275,111 @@ jobs:
                 /opt/ddk/src/android15-6.6/scripts/mod 2>/dev/null \
                 | head -100 || true
 
+              echo
+              echo "=== MODPOST INTEGRITY ==="
+
+              #
+              # The reason the earlier runs produced an EMPTY __versions with no
+              # warning at all: this DDK image ships a PATCHED modpost. Two lines
+              # are commented out in scripts/mod/modpost.c -
+              #
+              #     //  s->module = exp->module;   in check_exports()
+              #     //  check_exports(mod);        its only call site
+              #
+              # so no import is ever matched to an export. add_versions() then
+              # skips every symbol on its `if (!s->module) continue;` and writes
+              # an empty table, and the function that would have complained is
+              # the one that was removed - hence a silent, successful build.
+              #
+              # For a DDK whose modules must load on many kernels that is a
+              # feature. Here it is the whole gate: an empty table still LOADS
+              # (check_version takes the warn-once path) while proving nothing
+              # about the kernel it was built for. Restore both lines and rebuild
+              # modpost from the restored source.
+              #
+              MODPOST_SRC=/opt/ddk/src/android15-6.6/scripts/mod/modpost.c
+
+              cp "$MODPOST_SRC" "$MODPOST_SRC.ddk.bak"
+
+              sed -i \
+                -e "s|^//\([[:space:]]*\)\(s->module = exp->module;\)|\1\2|" \
+                -e "s|^//\([[:space:]]*\)\(check_exports(mod);\)|\1\2|" \
+                "$MODPOST_SRC"
+
+              echo "restored lines:"
+              grep -n \
+                -E "^[[:space:]]+(s->module = exp->module|check_exports\(mod\));" \
+                "$MODPOST_SRC"
+
+              #
+              # Fail closed on the commented forms still being there, so a future
+              # image that comments them differently is a refusal rather than
+              # another silent empty table.
+              #
+              if grep -q \
+                   -E "^//[[:space:]]*(s->module = exp->module|check_exports\(mod\));" \
+                   "$MODPOST_SRC"; then
+                echo "::error::modpost.c still carries a commented-out export"
+                echo "::error::resolution line - the restore pattern no longer"
+                echo "::error::matches this image. Refusing to build."
+                exit 1
+              fi
+
+              test "$(grep -c \
+                -E "^[[:space:]]+s->module = exp->module;" "$MODPOST_SRC")" = 1
+              test "$(grep -c \
+                -E "^[[:space:]]+check_exports\(mod\);" "$MODPOST_SRC")" = 1
+
+              #
+              # Any OTHER line commented out at column 0 in this file is the same
+              # class of edit and this build has no way to know what it disabled.
+              # Name it and refuse.
+              #
+              if grep -n "^//" "$MODPOST_SRC"; then
+                echo "::error::modpost.c has further column-0 commented-out"
+                echo "::error::lines, printed above. This DDK image disables"
+                echo "::error::something else in modpost; audit it before"
+                echo "::error::trusting a __versions table it produces."
+                exit 1
+              fi
+
+              #
+              # Rebuild with the recorded commands of the image itself rather than a
+              # second copy of the flags, which would drift the moment the image
+              # changes how it builds its host tools.
+              #
+              cd "$KDIR"
+
+              test -s scripts/mod/.modpost.o.cmd
+              test -s scripts/mod/.modpost.cmd
+
+              cp scripts/mod/modpost scripts/mod/modpost.ddk.bak
+
+              eval "$(sed -n \
+                "s|^savedcmd_scripts/mod/modpost\.o := ||p" \
+                scripts/mod/.modpost.o.cmd)"
+
+              eval "$(sed -n \
+                "s|^savedcmd_scripts/mod/modpost := ||p" \
+                scripts/mod/.modpost.cmd)"
+
+              #
+              # The source changed, so the binary must too. Identical here means
+              # the rebuild silently did not happen and the next step would be
+              # auditing a table the old modpost wrote.
+              #
+              if cmp -s scripts/mod/modpost scripts/mod/modpost.ddk.bak; then
+                echo "::error::rebuilt modpost is byte-identical to the one the"
+                echo "::error::image shipped, although its source changed. The"
+                echo "::error::rebuild did not take effect."
+                exit 1
+              fi
+
+              echo "modpost rebuilt from restored source:"
+              sha256sum \
+                scripts/mod/modpost \
+                scripts/mod/modpost.ddk.bak
+
               #
               # Clean only the external DirtyFrag module tree.
               #
@@ -344,30 +387,45 @@ jobs:
 
               make -C "$KDIR" \
                 M="$PWD" \
-                src="$PWD" \
                 ARCH=arm64 \
                 LLVM=1 \
-                LLVM_IAS=1 \
                 clean || true
 
               echo
               echo "=== BUILD ==="
 
               #
-              # Explicitly request BASIC modversions.
+              # Exactly what dirtyfrag-lkm/Makefile does, plus V=1.
               #
-              # The exact ZZIC stock witness stores CRC/name pairs in
-              # __versions, and ko_audit currently verifies that representation.
+              # What was here before also passed src="$PWD", LLVM_IAS=1 and
+              # CONFIG_{BASIC,EXTENDED}_MODVERSIONS, and produced a module whose
+              # __versions section existed with size 0 - no entries, and no
+              # modpost warning either.
+              #
+              #   src is an INTERNAL kbuild variable. A make command-line
+              #   assignment overrides it everywhere, including in
+              #   scripts/Makefile.modpost, which is what computes the symbol
+              #   dump modpost reads. Overriding it is the leading suspect for
+              #   modpost resolving nothing while staying silent.
+              #
+              #   CONFIG_BASIC_MODVERSIONS / CONFIG_EXTENDED_MODVERSIONS do not
+              #   exist in 6.6: the MODPOST MODE SUPPORT probe above found no
+              #   reference to either in the scripts of this tree. They were
+              #   noise.
+              #
+              #   LLVM_IAS=1 is the default on 6.6 and dirtyfrag-lkm/Makefile does
+              #   not pass it.
+              #
+              # V=1 makes the actual modpost invocation visible, so if
+              # __versions is still empty the command line that produced it is
+              # in the log rather than guessed at.
               #
               make -C "$KDIR" \
                 M="$PWD" \
-                src="$PWD" \
                 ARCH=arm64 \
                 LLVM=1 \
-                LLVM_IAS=1 \
                 CONFIG_MODVERSIONS=y \
-                CONFIG_BASIC_MODVERSIONS=y \
-                CONFIG_EXTENDED_MODVERSIONS= \
+                V=1 \
                 modules \
                 -j"$(nproc)"
 
@@ -389,6 +447,63 @@ jobs:
                 | grep -E \
                   "__versions|__version_ext_names|__version_ext_crcs" \
                 || true
+
+              echo
+              echo "=== MODPOST SYMBOL RESOLUTION ==="
+
+              #
+              # Diagnose at the cause. The previous run produced a __versions
+              # section of size 0, which means modpost emitted the section and no
+              # entries: for each import it either did not find the symbol in the
+              # dump (s->module NULL) or found it without a CRC. Failing here,
+              # naming which, beats failing in ko_audit three steps later with
+              # only the consequence visible.
+              #
+              echo "module-local symvers written by this build:"
+              cat Module.symvers || echo "  (none)"
+
+              echo
+              echo "kernel symvers modpost should have read:"
+              wc -l < "$KDIR/Module.symvers"
+
+              echo
+              echo "generated __versions array in dirtyfrag.mod.c:"
+              sed -n "/__versions/,/};/p" dirtyfrag.mod.c || true
+
+              #
+              # Read the section size with the ELF parser this repo already has,
+              # not awk over readelf, which prints a single-digit section index
+              # as "[ 8]",
+              # which splits into two fields and shifts every column, and the size
+              # is column 6 rather than 7. Getting that wrong would report a
+              # populated table as empty, or worse, the reverse.
+              #
+              VERS_SIZE=$(
+                PYTHONPATH=/work/tools python3 -c "import elf64; s = elf64.ELF64('"'"'dirtyfrag.ko'"'"').section('"'"'__versions'"'"'); print(-1 if s is None else s.size)"
+              )
+
+              echo
+              echo "__versions size = $VERS_SIZE bytes (-1 = section absent)"
+
+              if [ "$VERS_SIZE" -le 0 ]; then
+                echo "::error::modpost produced an EMPTY __versions table."
+                echo "::error::Read kernel/module/version.c before concluding"
+                echo "::error::this is unloadable: it is not. versindex is"
+                echo "::error::non-zero, the table is merely empty, so every"
+                echo "::error::check_version() call takes the warn-once path and"
+                echo "::error::the module LOADS with nothing verified about any"
+                echo "::error::symbol. That is worse than a refusal, and it is"
+                echo "::error::why this build refuses instead."
+                echo "::error::The MODPOST INTEGRITY step above restores the two"
+                echo "::error::lines this DDK comments out of check_exports and"
+                echo "::error::rebuilds modpost; if the table is still empty,"
+                echo "::error::read the V=1 modpost command line and the"
+                echo "::error::generated dirtyfrag.mod.c array printed just"
+                echo "::error::above. Do not reach for compiler flags."
+                exit 1
+              fi
+
+              echo "__versions is populated."
 
               echo
               echo "=== PRE-STRIP MODINFO ==="
