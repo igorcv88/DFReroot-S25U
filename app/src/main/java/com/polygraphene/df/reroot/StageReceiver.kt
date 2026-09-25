@@ -36,8 +36,9 @@ class StageReceiver : BroadcastReceiver() {
     private fun stage2(context: Context) {
         try {
             System.loadLibrary("exp")
+            Log.i(TAG, "[DFR][PROCESS] LIBEXP_LOADED=PASS")
         } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "loadLibrary(exp) failed (arm64-only lib?): $e")
+            Log.e(TAG, "[DFR][PROCESS] LIBEXP_LOADED=FAIL: $e")
             return
         }
         val controller = object : Binder() {
