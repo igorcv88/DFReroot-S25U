@@ -905,6 +905,22 @@ int patch_ko(struct Reporter *reporter) {
         REPORTLN("[DFR][TARGET] aborting: target gate refused");
         return 1;
     }
+    /*
+     * Gate G is a prerequisite to *any* page-cache corruption on the exact
+     * ZZIC target.  Refuse before patch #1 as well as before the vendor module
+     * stage: otherwise an unverified module can still leave crash_dump64's
+     * page cache modified even though the run is about to be rejected.
+     *
+     * There is deliberately no runtime override for an UNVERIFIED module.
+     * Compatibility must be promoted by bundling a module that has been
+     * positively validated for this exact target.
+     */
+    if (cls == DFR_TARGET_S25U_ZZIC && !DFR_PROFILE_ZZIC.ko_zzic_verified) {
+        REPORTLN("[DFR][MODULE] ENTER");
+        REPORTLN("[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED (no ZZIC-validated .ko bundled)");
+        REPORTLN("[DFR][MODULE] FAIL fail-closed before any page-cache patch.");
+        return 1;
+    }
     //char buf[] = {1,2,3,4};
     LOGD("patch1");
     size_t len = splice_helper_end - splice_helper_start;
@@ -935,29 +951,6 @@ int patch_ko(struct Reporter *reporter) {
         return 1;
     }
     REPORTLN("* ko android%d-%d.%d (%d bytes)", ko->android_release, ko->kver_major, ko->kver_minor, (int)(ko->end - ko->start));
-
-    /*
-     * Fail-closed module policy: on the exact ZZIC target the only bundled
-     * module is the GENERIC android15-6.6 image, which Gate G reports as
-     * UNVERIFIED (empty __versions; no ZZIC Module.symvers to prove symbol-CRC
-     * agreement). Loading an ABI-mismatched module can crash/corrupt the
-     * kernel, so refuse unless either a ZZIC-validated module is bundled
-     * (profile.ko_zzic_verified) or the device operator has explicitly accepted
-     * the risk by creating the override marker.
-     */
-    if (cls == DFR_TARGET_S25U_ZZIC && !DFR_PROFILE_ZZIC.ko_zzic_verified) {
-        REPORTLN("[DFR][MODULE] ENTER");
-        REPORTLN("[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED (no ZZIC-validated .ko bundled)");
-        if (access("/data/local/tmp/dfr_allow_unverified_ko", F_OK) == 0) {
-            REPORTLN("[DFR][MODULE] WARN proceeding: operator override marker present"
-                     " (/data/local/tmp/dfr_allow_unverified_ko); kernel-crash risk accepted");
-        } else {
-            REPORTLN("[DFR][MODULE] FAIL fail-closed: refusing to load an unverified module on ZZIC.");
-            REPORTLN("[DFR][MODULE]   bundle a Gate-G COMPATIBLE module, or (owner, at own risk)"
-                     " `touch /data/local/tmp/dfr_allow_unverified_ko` to override.");
-            return 1;
-        }
-    }
 
     len = ko->end - ko->start;
 
