@@ -1,7 +1,12 @@
-# Closing Gate G — building the ZZIC `dirtyfrag.ko`
+# Gate G1 — exact ZZIC `dirtyfrag.ko` build record
 
-Everything Gate G needs except the module itself is committed. This is the recipe
-for the one missing artefact, and what happens after it exists.
+Gate G1 is **closed offline**. This file is now the reproducible build record for
+the exact helper rather than a plan for a missing artefact. The bundled module is
+`app/src/main/jni/dirtyfrag-android15-6.6-S938BXXUCZZIC.ko`, SHA-256
+`b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017`,
+6592 bytes, with `MODVERSION_COVERAGE = COMPLETE (5/5)` and
+`MODULE_VS_ZZIC_KERNEL = COMPATIBLE`. G2/G4 and the downstream chain still
+require hardware evidence.
 
 **Where each step runs matters.** Read the machine column before copying anything.
 
@@ -28,6 +33,7 @@ evidence/zzic/gate-g/lsmod-target.txt                   the witness is kernel-lo
 ```
 
 ```text
+module_layout     0x81972209
 __stack_chk_fail  0xf0fdf6cb
 _printk           0x92997ed8
 memset            0xdcb764ad
@@ -149,10 +155,11 @@ The only acceptable output:
 ```text
 machine                     = AArch64 (EM_AARCH64)  (OK)
 vermagic                    = 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k …
-MODVERSION_COVERAGE         = COMPLETE (4/4)
+MODVERSION_COVERAGE         = COMPLETE (5/5)
 symvers kind                = DERIVED
 provenance                  = … (consensus COMPLETE)
-  __stack_chk_fail / _printk / memset / sprint_symbol    MODVERSION_MATCH = True
+  module_layout / __stack_chk_fail / _printk / memset / sprint_symbol
+                               MODVERSION_MATCH = True
 missing entries             = []
 unresolvable imports        = []
 CRC mismatches              = []
@@ -167,58 +174,36 @@ Optional, and worth it: `--kallsyms <capture>` to record existence evidence for
 `kallsyms_lookup_name` and `selinux_state`, which the helper resolves at run time
 rather than importing. Zeroed addresses are fine; only the names are read.
 
-## 3. Bundle and pin — one thing here needs a code change
+## 3. Bundle and pin — CLOSED
 
-This was not obvious and is worth stating before anyone edits the profile.
+The required code change is implemented and guarded by
+`tools/profile_binding_audit.py`.
 
-`select_ko_image()` chooses by **kernel family** and the module is embedded with
-`.incbin "dirtyfrag-android15-6.6.ko"` — a fixed filename resolved by the
-assembler. `patch_ko()` then hashes **the bytes it selected** against
-`ko_sha256`. So:
-
-- `ko_filename` in the profile is a **label that is reported, never used to
-  select**. The digest is what binds.
-- Therefore simply dropping the ZZIC module in as
-  `app/src/main/jni/dirtyfrag-android15-6.6.ko` *works* for ZZIC — and
-  **regresses every other android15/6.6 device**, which would take the upstream
-  generic path and be handed a module whose `vermagic` is the exact ZZIC release.
-  Its load would fail cleanly, but upstream support would be broken.
-
-So the module gets its **own** entry, and selection prefers it only on the exact
-ZZIC target:
-
-1. add `dirtyfrag-android15-6.6-zzic.ko` as a second `.incbin` payload;
-2. in `patch_ko()`, when `cls == DFR_TARGET_S25U_ZZIC`, select that payload
-   instead of the family one — the existing digest check then binds it;
-3. leave the generic `dirtyfrag-android15-6.6.ko` untouched for every other
-   device.
-
-That change is small, but it is on the page-cache path and cannot be exercised
-without the module, so it lands **in the same commit as the `.ko`** and is
-verified together, not speculatively beforehand.
-
-Then, and only then, the three fields move **together** (AGENTS.md §3.5) in both
-`app/src/main/jni/target_profile.c` and `tools/zzic_profile.json`:
+The generic `dirtyfrag-android15-6.6.ko` remains in the family table unchanged.
+The ZZIC module has its own `.incbin` and is reachable only from the explicit
+`DFR_TARGET_S25U_ZZIC` branch in `patch_ko()`; it is never eligible through
+`dfr_select_ko_image()`. The profile pins all three fields together:
 
 ```c
 .ko_zzic_verified = 1,
-.ko_filename      = "dirtyfrag-android15-6.6-zzic.ko",
-.ko_sha256        = "<sha256 of exactly the bundled bytes>",
+.ko_filename      = "dirtyfrag-android15-6.6-S938BXXUCZZIC.ko",
+.ko_sha256        = "b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017",
 ```
 
-`tools/profile_binding_audit.py` refuses a flag without a digest, a digest that
-does not match the bundled file, and a digest left pinned while the flag is 0.
+At runtime `patch_ko()` hashes the exact selected bytes before the first
+page-cache write. The binding audit also verifies that the ZZIC image never
+leaks into generic family selection.
 
-## 4. Release
+## 4. Release — CLOSED
 
-One dispatch of `release.yml` with a tag (e.g. `v2.0.4-zzic`), `prerelease` left
-`false`. It runs the whole offline gate set before spending a signed build, then
-publishes both APKs, `SHA256SUMS.txt` and `build-provenance.txt`.
+`v2.0.4-zzic` was published as the stable release from commit
+`9f3c3efc983cc0ad527cb9d508cbe47d795f55cc`. The signed release workflow ran
+the strict exact-module audit against the provenance-bound ZZIC table before
+building. Release assets include both APKs, `SHA256SUMS.txt` and
+`build-provenance.txt`.
 
-A locally built APK is **not** a substitute: the signing keys live in the
-repository secrets, and DFInstaller injects DFReroot's certificate into
-`packages.xml`. A different key makes an existing injection useless and forces a
-re-injection.
+A locally built APK is **not** a substitute: the signing keys live in repository
+secrets, and DFInstaller injects DFReroot's certificate into `packages.xml`.
 
 ## 5. The physical run
 
@@ -226,7 +211,7 @@ Gate G is one of four boundaries and closing it closes only the first.
 
 | Sub-gate | What closes it |
 |---|---|
-| **G1** loader / import ABI | the module loads |
+| **G1** loader / import ABI | **closed offline**: exact vermagic + target-derived COMPLETE (5/5) modversions + byte pin; the first hardware run still supplies the physical loader observation |
 | **G2** symbol discovery | the runtime `sprint_symbol` scan finds its targets |
 | **G3** `selinux_state` layout | the ZZIC BTF already supports it: 128 bytes, 9 fields, `enforcing` at bit offset 0 |
 | **G4** write safety | **nothing above establishes this** |
@@ -283,8 +268,9 @@ reimplement any of it, and must not depend on the standalone
 `defex_lsposed_compat.ko`, which was a diagnostic instrument and would also
 require a world-writable path this repository forbids (§3.6).
 
-Two items remain open on that side and are tracked in `docs/HANDOFF.md`, not
-here: pinning the ZZIC `ksud` bytes (the `dfreroot` staging profile exists in
-RMGLabs-Payloads but the binary has not been built with it yet), and restoring
-SELinux to `Enforcing` after readiness is published — which must be verified, not
-assumed.
+The DFReroot-profile ZZIC `ksud` is now built, bundled and pinned:
+SHA-256 `b82c194db398ace90fa777bed4d8419c70041eb99d7bbe2915caa900100de75f`,
+staged at `/data/system/dfreroot-ksud`, with pre- and post-write identity checks.
+The remaining post-root item is restoration of SELinux to `Enforcing` after a
+proven KernelSU readiness boundary; that path is still unimplemented/unverified
+and must not be assumed.
