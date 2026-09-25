@@ -193,7 +193,149 @@ def load_kallsyms(path):
     return names
 
 
-def audit(path, symvers=None, kallsyms=None, require_coverage=False):
+DERIVED_MARKER = "DFR-DERIVED-SYMVERS v1"
+
+
+def pinned_kernel_release():
+    """The one release this repository targets, from the offline profile.
+
+    Taken from the profile rather than from the module under audit: a candidate
+    and a provenance record from ANOTHER firmware agree with each other perfectly,
+    and both pass the generic base/page checks, so deriving the expectation from
+    the candidate lets a matched non-ZZIC pair read COMPATIBLE.
+    """
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "zzic_profile.json")) as f:
+            return json.load(f).get("kernel_release") or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def check_derived_provenance(symvers, provenance, module_vermagic):
+    """Return (kind, provenance_summary, violations).
+
+    An authoritative Module.symvers comes out of the kernel build and this tool
+    cannot verify that claim - it records the digest and trusts the operator, as
+    it always has. A DERIVED table is different: it is only evidence if every CRC
+    is traceable to the bytes it was read from, so when the generator's marker is
+    present the provenance record becomes mandatory and is checked.
+    """
+    violations = []
+    try:
+        with open(symvers, "r", errors="replace") as f:
+            head = f.read(4096)
+    except OSError as ex:
+        return "UNREADABLE", None, ["cannot read %s: %s" % (symvers, ex)]
+    if DERIVED_MARKER not in head:
+        return "AUTHORITATIVE (claimed; not verifiable from the file)", None, []
+
+    path = provenance
+    if path is None:
+        # Default beside the symvers, the layout the generator produces.
+        guess = os.path.join(os.path.dirname(os.path.abspath(symvers)),
+                             "ZZIC-modversion-provenance.json")
+        if os.path.exists(guess):
+            path = guess
+    if not path or not os.path.exists(path):
+        return ("DERIVED", None,
+                ["%s carries the derived marker but no provenance record was "
+                 "supplied or found; a derived CRC without its witness is a "
+                 "typed-in number" % symvers])
+    try:
+        with open(path) as f:
+            prov = json.load(f)
+    except (OSError, ValueError) as ex:
+        return "DERIVED", None, ["cannot read provenance %s: %s" % (path, ex)]
+
+    summary = {
+        "path": path,
+        "target_kernel_release": prov.get("target_kernel_release"),
+        "witnesses": [{"device_path": w.get("device_path"),
+                       "sha256": w.get("sha256"),
+                       "vermagic": w.get("vermagic")}
+                      for w in (prov.get("witnesses") or [])],
+        "consensus": prov.get("CONSENSUS"),
+    }
+    if prov.get("CONSENSUS") != "COMPLETE":
+        violations.append("provenance CONSENSUS is %r, not COMPLETE"
+                          % prov.get("CONSENSUS"))
+    if prov.get("conflicts"):
+        violations.append("provenance records %d CRC conflict(s) between "
+                          "witnesses" % len(prov["conflicts"]))
+    if not summary["witnesses"]:
+        violations.append("provenance lists no witnesses")
+    # Both the witnesses AND the candidate are measured against the PINNED
+    # release, not against each other: a ZZI4 module audited with a ZZI4-derived
+    # table agrees with itself, and that is not ZZIC.
+    want = pinned_kernel_release()
+    if not want:
+        violations.append("the profile pins no kernel_release; a derived table "
+                          "cannot be tied to a target")
+    candidate = module_vermagic.split()[0] if module_vermagic else ""
+    if want and candidate != want:
+        violations.append("the module under audit carries release %r, not the "
+                          "pinned %r; a derived table promotes this target only"
+                          % (candidate or "<none>", want))
+    if prov.get("target_kernel_release") and want \
+            and prov["target_kernel_release"] != want:
+        violations.append("provenance targets release %r, not the pinned %r"
+                          % (prov["target_kernel_release"], want))
+    for w in summary["witnesses"]:
+        got = (w.get("vermagic") or "").split()
+        got = got[0] if got else ""
+        if want and got != want:
+            violations.append("witness %s carries release %r, not the pinned %r"
+                              % ((w.get("sha256") or "?")[:16], got or "<none>", want))
+        if not w.get("sha256"):
+            violations.append("a witness has no sha256; the CRC is not bound to "
+                              "bytes")
+        if not w.get("device_path") or w["device_path"].startswith("<"):
+            violations.append("witness %s has no on-device path recorded; the "
+                              "provenance must name path + digest + vermagic"
+                              % ((w.get("sha256") or "?")[:16]))
+
+    # The table and the record must agree on the NUMBERS, not merely both exist.
+    # Without this, editing a CRC in the table (or leaving a stale sidecar beside
+    # a regenerated one) lets a typed-in value promote Gate G - the exact hole
+    # this whole route is meant to close.
+    recorded_digest = prov.get("symvers_sha256")
+    try:
+        with open(symvers, "rb") as f:
+            actual_digest = hashlib.sha256(f.read()).hexdigest()
+    except OSError as ex:
+        actual_digest = None
+        violations.append("cannot digest %s: %s" % (symvers, ex))
+    summary["symvers_sha256_recorded"] = recorded_digest
+    summary["symvers_sha256_actual"] = actual_digest
+    if not recorded_digest:
+        violations.append("the provenance records no symvers_sha256, so it "
+                          "cannot be tied to this table")
+    elif actual_digest and recorded_digest != actual_digest:
+        violations.append("the provenance was written for a different table "
+                          "(records %s, this file is %s)"
+                          % (recorded_digest, actual_digest))
+
+    symbols = prov.get("symbols") or {}
+    table = load_symvers(symvers)[0]
+    for name, crc in sorted(table.items()):
+        if name not in symbols:
+            violations.append("%s appears in the derived table but has no "
+                              "witness in the provenance" % name)
+            continue
+        if not symbols[name].get("witness_sha256"):
+            violations.append("%s has a provenance entry with no witness digest"
+                              % name)
+        recorded = str(symbols[name].get("crc", ""))
+        if recorded.lower() != "0x%08x" % crc:
+            violations.append("%s is 0x%08x in the table but %s in the "
+                              "provenance; one of them was not read from the "
+                              "witness bytes" % (name, crc, recorded or "<none>"))
+    return "DERIVED", summary, violations
+
+
+def audit(path, symvers=None, kallsyms=None, require_coverage=False,
+          provenance=None):
     r = {"file": path}
     with open(path, "rb") as f:
         raw = f.read()
@@ -244,6 +386,15 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False):
 
     # symbol-of-interest breakdown (the independent properties)
     symvers_crc, exported = (load_symvers(symvers) if symvers else ({}, set()))
+    # A symvers derived from stock modules is acceptable evidence, but only with
+    # its provenance record: the CRCs must be traceable to module bytes, not
+    # typed in. The generator marks its output; that marker triggers the demand.
+    if symvers:
+        prov_fail = check_derived_provenance(symvers, provenance, vermagic)
+        r["symvers_kind"] = prov_fail[0]
+        r["symvers_provenance"] = prov_fail[1]
+        if prov_fail[2]:
+            r["provenance_violations"] = prov_fail[2]
     # Name the evidence, not just the verdict: "COMPATIBLE" is meaningless
     # without saying which kernel's symbol table it was decided against.
     if symvers:
@@ -349,6 +500,10 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False):
         r["modversion_missing_in_symvers"] = stale
         if mismatches or unresolvable or not coverage_ok:
             verdict = "INCOMPATIBLE"
+        elif r.get("provenance_violations"):
+            # The CRCs may all agree, but agreement with a table nobody can trace
+            # to bytes is not evidence. Refuse rather than promote.
+            verdict = "UNVERIFIED"
         elif stale or not version_map:
             # Nothing contradicts the kernel, but nothing was proven either.
             verdict = "UNVERIFIED"
@@ -442,6 +597,16 @@ def human(r):
                  % (r["symvers_sha256"], r["symvers_symbols"]))
         L.append("  NOTE         : a Module.symvers names no kernel; this digest "
                  "is the record of WHICH one decided the verdict")
+        L.append("  kind         : %s" % r.get("symvers_kind", "?"))
+        prov = r.get("symvers_provenance")
+        if prov:
+            L.append("  provenance   : %s  (consensus %s)"
+                     % (prov.get("path"), prov.get("consensus")))
+            for w in prov.get("witnesses") or []:
+                L.append("    witness    %s" % w.get("device_path"))
+                L.append("               sha256 %s" % w.get("sha256"))
+        for v in r.get("provenance_violations") or []:
+            L.append("  [x] provenance: %s" % v)
     else:
         L.append("symvers        : <none supplied; no CRC can be decided>")
     for s in r["modversion_missing_entries"]:
@@ -497,9 +662,14 @@ def main():
                          "even without a Module.symvers. Use this when accepting "
                          "a newly built module: an incomplete table cannot load "
                          "on a CONFIG_MODVERSIONS kernel regardless of CRCs.")
+    ap.add_argument("--symvers-provenance",
+                    help="provenance JSON for a DERIVED symvers. Mandatory when "
+                         "the symvers carries the generator's marker; found "
+                         "automatically if it sits beside it.")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
-    r = audit(a.ko, a.symvers, a.kallsyms, a.require_modversion_coverage)
+    r = audit(a.ko, a.symvers, a.kallsyms, a.require_modversion_coverage,
+              a.symvers_provenance)
     if a.json:
         print(json.dumps(r, indent=2))
     else:

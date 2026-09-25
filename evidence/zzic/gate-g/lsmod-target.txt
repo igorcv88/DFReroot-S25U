@@ -1,0 +1,11 @@
+qca_cld3_kiwi_v2    13144064  0
+ipam                 4448256  20 qca_cld3_kiwi_v2,rmnet_core,ipanetm,rmnet_ctl
+cnss2                 471040  1 qca_cld3_kiwi_v2
+cfg80211             1142784  3 qca_cld3_kiwi_v2,wonder,mac80211
+cnss_utils             28672  2 qca_cld3_kiwi_v2,cnss2
+cnss_nl                24576  1 qca_cld3_kiwi_v2
+cnss_prealloc          20480  2 qca_cld3_kiwi_v2,cnss2
+hdm                    16384  2 qca_cld3_kiwi_v2,cnss2,[permanent]
+qcom_va_minidump       24576  6 camera,qca_cld3_kiwi_v2,msm_drm,ipam,msm_kgsl,gsim
+qcom_iommu_util        86016  9 camera,qca_cld3_kiwi_v2,msm_drm,ipam,msm_kgsl,coresight_tmc,cnss2,qcom_iommu_debug,arm_smmu,[permanent]
+sched_walt            524288  12 qca_cld3_kiwi_v2,rmnet_shs,msm_performance,qcom_lpm,cpufreq_limit,bwmon,sec_qc_summary,thermal_pause,cpucp_fast,ufs_qcom,[permanent]

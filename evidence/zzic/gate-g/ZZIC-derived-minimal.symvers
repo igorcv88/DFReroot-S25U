@@ -1,0 +1,14 @@
+# DFR-DERIVED-SYMVERS v1
+# NOT the Samsung build's Module.symvers. Derived by
+# tools/derive_zzic_symvers.py from the __versions tables of stock
+# modules of 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k. Every CRC is read from module bytes; none is typed.
+# Provenance (witness path + sha256 + vermagic per symbol) lives in the
+# companion JSON, which ko_audit.py REQUIRES for a file carrying this
+# marker.
+# The owner and export-type columns are NOT observable from __versions.
+# They are filled with 'vmlinux'/'EXPORT_SYMBOL_GPL' as an assumption, not an observation: a
+# GPL-only export is usable by a GPL module, so this errs strict.
+0xf0fdf6cb	__stack_chk_fail	vmlinux	EXPORT_SYMBOL_GPL
+0x92997ed8	_printk	vmlinux	EXPORT_SYMBOL_GPL
+0xdcb764ad	memset	vmlinux	EXPORT_SYMBOL_GPL
+0x661601de	sprint_symbol	vmlinux	EXPORT_SYMBOL_GPL

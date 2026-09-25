@@ -133,9 +133,13 @@ the kernel.
 Android filesystem, so searching the device for it is not a valid route. One of
 these is needed:
 
-- the `Module.symvers` from the exact ZZIC kernel build;
-- a module rebuilt from the matching source, config and toolchain;
-- another verifiable source of that kernel's symbol CRCs.
+- the `Module.symvers` from the exact ZZIC kernel build; **or**
+- a table derived from the `__versions` sections of stock modules of the exact
+  firmware, under the conditions AGENTS.md §3.5 now states — produced only by
+  `tools/derive_zzic_symvers.py`, never typed.
+
+The second route is the one that is actually available, and the evidence for it
+is committed: `evidence/zzic/gate-g/`.
 
 The resulting module must carry a `__versions` table consistent with
 `CONFIG_MODVERSIONS=y`. Matching the GKI base (`6.6.127`) and the 4k page tag is
@@ -228,6 +232,28 @@ Gate G and therefore unreachable until Gate G is closed: the `vendor_modprobe`
 SELinux domain and its exec transition, the seccomp filter's verdict on the
 syscalls the native flow needs, mount-namespace behaviour, and any Samsung
 DEFEX-style restriction.
+
+### 5. Dead pins: the four `network_stack_*` fields
+
+`network_stack_process`, `network_stack_uid` (1073), `network_stack_context` and
+`network_stack_cap_eff` (`0x800003c00`) are declared in `target_profile.h`, pinned
+in `target_profile.c` and in `tools/zzic_profile.json`, and **not one of the four
+is read anywhere**. The device reported `CapEff=0000000800003c00`, matching the
+pin — but a value nobody compares is not a check, it is a profile advertising a
+boundary it never enforces. That is the same defect the code itself calls out for
+`android_release`.
+
+This is not a one-line cleanup either way:
+
+- **To enforce them**, the runtime has to *observe* the real process's uid,
+  SELinux context and `CapEff` at the Gate D boundary and feed them to a
+  `dfr_network_stack_eval()` alongside the pinned values, with a negative case per
+  field — the shape `dfr_vendor_provenance_eval()` already uses.
+- **To remove them**, all four go out of both profiles and out of the header.
+
+Either is a change to the chain's runtime, so it is recorded here rather than
+bundled into unrelated work. Do not pin a fifth field of this kind in the
+meantime.
 
 ## Build, release and verification
 
