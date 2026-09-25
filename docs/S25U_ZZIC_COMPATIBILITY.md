@@ -966,7 +966,12 @@ same-boot `POST_ROOT_COMPLETE` state.
 
 The implementation plan for that work is now in `docs/HANDOFF.md`.
 
-## How to close the blocked gates on hardware
+## Historical hardware collection procedure (before v2.0.4)
+
+The commands below are retained as provenance for how the earlier unknowns were
+closed. They are **not** the current work queue. The current remaining work is
+the automatic post-root closeout described in `docs/HANDOFF.md`.
+
 
 ```sh
 # Identity, provenance and Gate G inputs — one read-only pass
@@ -988,7 +993,7 @@ adb shell su -c 'CLASSPATH=/data/local/tmp/df_installer.apk app_process /system/
     com.polygraphene.df.installer.InjectMain --diag-zzic'
 ```
 
-## What is still needed to make the ZZIC path executable
+## Historical Gate-G bring-up record
 
 One blocker remains. The two that `v2.0.2-zzic` stopped at are closed.
 
@@ -1011,7 +1016,7 @@ Redesigned as `ZZIC_VENDOR_PROVENANCE`; see "Vendor ELF: why the direct hash was
 the wrong proof" above. Still fail-closed, still refuses on any divergence, but
 the proof no longer requires a read the architecture itself avoids.
 
-### 1. A Gate-G validated kernel module — the remaining blocker
+### Closed — a Gate-G validated kernel module
 
 The device confirms `CONFIG_MODVERSIONS=y`. The bundled
 `dirtyfrag-android15-6.6.ko` shares the ZZIC kernel's GKI base (`6.6.127`) and
@@ -1111,10 +1116,10 @@ own answer.
 
 | Sub-gate | Question | State |
 |---|---|---|
-| **G1** loader / import ABI | does the exact ZZIC `dirtyfrag.ko` load? | **CLOSED (offline)** — the module exists and audits `COMPATIBLE`, `COMPLETE (5/5)`; see below |
-| **G2** symbol discovery | will the runtime `sprint_symbol` scan find `kallsyms_lookup_name` and `selinux_state`? | evidenced statically, `RUNTIME UNVERIFIED` |
-| **G3** `selinux_state` layout | is `enforcing` the first field? | the exact ZZIC BTF (`e13df32a…`) describes one `selinux_state`, 128 bytes, 9 fields, `enforcing` at bit offset 0 → **layout supported** |
-| **G4** write safety | is writing 0 there safe on this running kernel? | `UNVERIFIED`, and nothing above establishes it |
+| **G1** loader / import ABI | does the exact ZZIC `dirtyfrag.ko` load? | **physical PASS**; before hardware execution the exact module already audited `COMPATIBLE`, `COMPLETE (5/5)` |
+| **G2** symbol discovery | does the runtime `sprint_symbol` scan find `kallsyms_lookup_name` and `selinux_state`? | **physical PASS**; the helper reached the success path and changed the observed enforcing state |
+| **G3** `selinux_state` layout | is `enforcing` the first field used by the helper? | **physical PASS**, consistent with the exact ZZIC BTF prediction (128-byte struct, `enforcing` at bit offset 0) |
+| **G4** write safety | is writing 0 there viable on this running kernel? | **physical PASS**; the phone remained operational, KernelSU late-load completed and root worked |
 
 #### G1 — what closed it, and what it cost to find out
 
@@ -1208,7 +1213,12 @@ deliberately. That is the intended trade-off, and reversing it is a policy
 decision for the repository owner, made in the open, not a patch an agent applies
 on its own.
 
-### 2. Runtime evidence that no static check can supply
+### Runtime evidence captured on hardware
+
+The v2.0.4 run supplied the downstream runtime evidence that was missing when
+this section was originally written. Keep the table below as a map from evidence
+to boundary; current gate states are authoritative in the matrix above.
+
 
 Everything else in the gate matrix needs a logcat capture from the device, and
 each item names the boundary that produces it:
