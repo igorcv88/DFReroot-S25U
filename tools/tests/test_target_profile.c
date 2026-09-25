@@ -33,7 +33,7 @@ static int g_total = 0;
 static struct ObservedTarget zzic_observed(void) {
     struct ObservedTarget o;
     memset(&o, 0, sizeof(o));
-    o.manufacturer  = "Samsung";
+    o.manufacturer  = "samsung";
     o.model         = "SM-S938B";
     o.device        = "pa3q";
     o.sdk           = 37;
@@ -64,6 +64,12 @@ static void test_target_detection(void) {
     struct ObservedTarget o = zzic_observed();
     dfr_target_class c = dfr_classify_target(&o, &m);
     CHECK(c == DFR_TARGET_S25U_ZZIC, "exact ZZIC -> %s (all_ok=%d)", cls_name(c), m.all_ok);
+
+    /* Exact property is lowercase on-device; different case must fail exact match. */
+    o = zzic_observed();
+    o.manufacturer = "Samsung";
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_MISMATCH, "different manufacturer case -> %s (must be MISMATCH)", cls_name(c));
 
     /* SM-S938B + ZZI4 firmware: right model, ZZI4 display/fingerprint/kernel */
     o = zzic_observed();
