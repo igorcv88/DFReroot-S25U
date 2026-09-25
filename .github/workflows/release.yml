@@ -56,50 +56,12 @@ jobs:
           [ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"
           test -n "$TAG" || { echo "::error::no tag to publish"; exit 1; }
 
-          # Emptiness of stdout cannot decide whether the tag exists: `gh api`
-          # writes its error BODY to stdout, so a 404 left REF_JSON holding
-          # {"message":"Not Found",...}, took the tag-exists branch, and jq read
-          # .object.sha as the string "null" - which never equals GITHUB_SHA. The
-          # effect was that publishing a NEW tag was impossible; only re-running
-          # from an already-existing tag worked.
-          #
-          # Use the exit status instead, and distinguish "absent" from "could not
-          # tell". A transport or auth failure must not be read as "absent": that
-          # would create a tag over one that already exists, which is exactly what
-          # this check was written to prevent.
-          set +e
-          REF_JSON=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>/dev/null)
-          REF_RC=$?
-          set -e
-
-          if [ "$REF_RC" -eq 0 ]; then
-            TAG_SHA=$(printf '%s' "$REF_JSON" | jq -r '.object.sha // empty')
-            # An annotated tag points at a tag object; dereference to the commit.
-            if [ "$(printf '%s' "$REF_JSON" | jq -r '.object.type // empty')" = "tag" ]; then
-              TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_SHA" --jq '.object.sha')
-            fi
-            if [ -z "$TAG_SHA" ]; then
-              echo "::error::$TAG resolved, but no commit sha could be read from it."
-              printf '%s\n' "$REF_JSON"
-              exit 1
-            fi
-            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
-              echo "::error::tag $TAG points at $TAG_SHA but this run built $GITHUB_SHA."
-              echo "::error::Re-run this workflow from the tag itself, or publish a new tag."
-              exit 1
-            fi
-            echo "tag $TAG already exists and matches this commit; the release will be updated"
-            echo "TAG_EXISTS=1" >> "$GITHUB_ENV"
-          elif printf '%s' "$REF_JSON" | jq -e '.status == "404" or .message == "Not Found"' >/dev/null 2>&1; then
-            echo "tag $TAG does not exist yet; it will be created at $GITHUB_SHA"
-            echo "TAG_EXISTS=0" >> "$GITHUB_ENV"
-          else
-            echo "::error::cannot determine whether tag $TAG exists (gh api rc=$REF_RC)."
-            echo "::error::Refusing rather than guessing: creating a tag that already"
-            echo "::error::exists elsewhere would attach these artifacts to another commit."
-            printf '%s\n' "$REF_JSON"
-            exit 1
-          fi
+          # tools/resolve_release_tag.sh owns this decision and is unit-tested
+          # off-CI (tools/tests/test_resolve_release_tag.sh, 8 cases). It is run
+          # AGAIN immediately before publishing, because the tag can appear during
+          # the several minutes this build takes.
+          sh tools/resolve_release_tag.sh "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" \
+            >> "$GITHUB_ENV"
           echo "VER=$VER" >> "$GITHUB_ENV"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
 
@@ -127,11 +89,51 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
 
       # --- gates that do not need a device, before spending a build on it ---
+      # CI is manual-only now, so these are the gates. They run before the signed
+      # build so a logic regression costs seconds, not a whole build.
       - name: Gate A - target profile unit + regression tests
         run: sh tools/tests/run_tests.sh
 
+      - name: Release tag resolution tests (stubbed gh, no network)
+        run: sh tools/tests/test_resolve_release_tag.sh
+
       - name: Profile / module binding invariant (dossier section 39)
         run: python3 tools/profile_binding_audit.py
+
+      - name: Gate F - userspace ELF audit tool (no artefacts, expect UNVERIFIED)
+        run: python3 tools/elf_audit.py
+
+      - name: Gate H - installer round-trip on a synthetic packages.xml
+        run: |
+          cat > "$RUNNER_TEMP/packages.xml" <<'XML'
+          <?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+          <packages>
+            <shared-user name="android.uid.system" userId="1000">
+              <sigs count="1">
+                <cert index="0" key="30820122300d06092a864886f70d01010105000382010f00" />
+              </sigs>
+            </shared-user>
+            <package name="com.example.app" codePath="/data/app/example" userId="10123">
+              <sigs count="1"><cert index="0" /></sigs>
+            </package>
+          </packages>
+          XML
+          python3 tools/installer_audit.py "$RUNNER_TEMP/packages.xml"
+
+      - name: Python tool syntax
+        run: python3 -m compileall -q tools
+
+      - name: Shell script syntax
+        run: |
+          for s in build.sh build-splice.sh create-keystore.sh \
+                   tools/ci_build_audit.sh tools/repro_report.sh \
+                   tools/tests/run_tests.sh tools/zzic_collect.sh \
+                   tools/resolve_release_tag.sh \
+                   tools/tests/test_resolve_release_tag.sh \
+                   dirtyfrag-lkm/build.sh; do
+            sh -n "$s"
+            echo "ok  $s"
+          done
 
       - name: Gate G - bundled kernel module ABI audit
         run: |
@@ -228,6 +230,22 @@ jobs:
             echo "Build provenance (toolchain, commit, payload hashes) is attached as"
             echo "\`build-provenance.txt\`."
           } > release-notes.md
+
+          # Re-validate the tag NOW, not just before the build. The earlier check
+          # is several minutes stale: another manual run selecting the same absent
+          # tag, or any actor creating it meanwhile, would leave this run happily
+          # taking the update path and overwriting that release's assets with a
+          # build of a different commit. `gh release create --target` does not
+          # protect against this either - it only affects tag creation when no
+          # matching tag exists yet. So ask again, and refuse if the answer changed.
+          #
+          # This is a check, not a lock: nothing here can reserve a ref. It closes
+          # the window from minutes to the gap between this call and the publish
+          # below, which is the best a non-atomic API allows.
+          sh tools/resolve_release_tag.sh "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" \
+            > "$RUNNER_TEMP/tagstate"
+          cat "$RUNNER_TEMP/tagstate"
+          . "$RUNNER_TEMP/tagstate"   # refreshes TAG_EXISTS for this step
 
           # Resolve the prerelease policy ONCE, before the create/update split.
           # `inputs.prerelease` is empty on a tag push (inputs only exist for

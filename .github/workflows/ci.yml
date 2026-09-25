@@ -4,11 +4,24 @@ name: CI
 # the fail-closed logic, the offline audits and the build still hold. The gate
 # matrix in docs/S25U_ZZIC_COMPATIBILITY.md is the authority on what is actually
 # verified on the ZZIC device.
-
+#
+# MANUAL ONLY, on purpose. This previously ran on every push to every branch,
+# which meant a full SDK + NDK + Gradle build per commit - minutes spent
+# re-proving what release.yml already gates before it spends a signed build (it
+# runs Gate A, the section 39 binding audit and Gate G first, then Gate E and the
+# signature identity check after). Every offline gate here also runs locally with
+# no runner at all:
+#
+#   sh tools/tests/run_tests.sh
+#   sh tools/tests/test_resolve_release_tag.sh
+#   python3 tools/profile_binding_audit.py
+#   python3 tools/elf_audit.py
+#   for ko in app/src/main/jni/dirtyfrag-android*.ko; do python3 tools/ko_audit.py "$ko"; done
+#
+# Run this workflow by hand (Actions -> CI -> Run workflow) when a change needs
+# the compile checked without cutting a release. Restoring per-push runs is a
+# one-line change to the trigger below.
 on:
-  push:
-    branches: ['**']
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -23,6 +36,9 @@ jobs:
 
       - name: Gate A - target profile unit + regression tests
         run: sh tools/tests/run_tests.sh
+
+      - name: Release tag resolution tests (stubbed gh, no network)
+        run: sh tools/tests/test_resolve_release_tag.sh
 
       - name: Profile / module binding invariant (dossier section 39)
         run: python3 tools/profile_binding_audit.py
@@ -72,6 +88,8 @@ jobs:
           for s in build.sh build-splice.sh create-keystore.sh \
                    tools/ci_build_audit.sh tools/repro_report.sh \
                    tools/tests/run_tests.sh tools/zzic_collect.sh \
+                   tools/resolve_release_tag.sh \
+                   tools/tests/test_resolve_release_tag.sh \
                    dirtyfrag-lkm/build.sh; do
             sh -n "$s"
             echo "ok  $s"
