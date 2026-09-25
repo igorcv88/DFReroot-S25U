@@ -81,13 +81,34 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
         "b82c194db398ace90fa777bed4d8419c70041eb99d7bbe2915caa900100de75f",
     .ksud_size        = 6664728,
 
-    /* No ZZIC-validated module is bundled: only the generic Gate-G UNVERIFIED
-     * android15-6.6 .ko exists. Keep fail-closed until one is proven. When one
-     * is, set all three fields together (see the header's invariant): the flag
-     * alone grants nothing without the pinned digest of the exact bytes. */
-    .ko_zzic_verified = 0,
-    .ko_filename      = NULL,
-    .ko_sha256        = NULL,
+    /* The three fields move together or not at all (see the header's
+     * invariant): the flag alone grants nothing without the pinned digest of
+     * the exact bytes, and patch_ko() re-hashes the payload it actually
+     * selected before writing anything.
+     *
+     * What justifies them here, and nothing less would:
+     *
+     *   tools/ko_audit.py <the bundled bytes>
+     *     --symvers            evidence/zzic/gate-g/ZZIC-derived-minimal.symvers
+     *     --symvers-provenance evidence/zzic/gate-g/ZZIC-modversion-provenance.json
+     *     --require-modversion-coverage
+     *   => MODVERSION_COVERAGE = COMPLETE (5/5)
+     *      MODULE_VS_ZZIC_KERNEL = COMPATIBLE
+     *
+     * against a table whose every CRC was read out of the bytes of a stock
+     * module of this exact firmware that the target kernel has itself loaded.
+     * The module was built by .github/workflows/build-zzic-dirtyfrag.yml, and
+     * the same bytes came out of an independent local build of the same image -
+     * b941d323... both times, so the digest below names a reproducible artefact
+     * rather than one runner's output.
+     *
+     * This closes Gate G boundary G1 (loader/import ABI) only. G2 (runtime
+     * symbol discovery), G3 (selinux_state layout) and G4 (write safety) are
+     * still unproven, and nothing here promotes them. */
+    .ko_zzic_verified = 1,
+    .ko_filename      = "dirtyfrag-android15-6.6-S938BXXUCZZIC.ko",
+    .ko_sha256 =
+        "b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017",
 };
 
 int dfr_streq(const char *a, const char *b) {

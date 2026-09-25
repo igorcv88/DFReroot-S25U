@@ -41,6 +41,14 @@ JNI_DIR = os.path.join(ROOT, "app", "src", "main", "jni")
 PROFILE_JSON = os.path.join(HERE, "zzic_profile.json")
 EXP_C = os.path.join(ROOT, "app", "src", "main", "jni", "exp.c")
 
+# The committed Gate-G evidence: the derived ZZIC CRC table and the provenance
+# that binds every one of them to witness bytes. ko_audit REQUIRES the record for
+# a table carrying the derived marker, so naming the table alone would not be
+# enough to re-establish the verdict here.
+GATE_G_DIR = os.path.join(ROOT, "evidence", "zzic", "gate-g")
+DERIVED_SYMVERS = os.path.join(GATE_G_DIR, "ZZIC-derived-minimal.symvers")
+DERIVED_PROVENANCE = os.path.join(GATE_G_DIR, "ZZIC-modversion-provenance.json")
+
 # Runtime sources of both apps: everything that ships inside an APK. Build
 # scripts and the offline tools are excluded on purpose - they never run on the
 # device. The removed override token is rejected anywhere in here.
@@ -239,6 +247,42 @@ def audit():
                          % (ko_name, actual, ko_sha))
                 else:
                     r["checks"]["ZZIC_MODULE_BINDING"] = "PASS"
+                    # The digest proves the bundled bytes are the ones that were
+                    # pinned. It says nothing about WHY they were pinned, and
+                    # AGENTS.md 3.5 allows exactly one answer: a COMPATIBLE
+                    # verdict from ko_audit against the exact kernel's CRCs. So
+                    # re-run that verdict here, against the committed derived
+                    # table and its provenance, rather than trusting that
+                    # someone once did. A digest can be re-pinned to any file;
+                    # this check refuses unless the file still wins the argument.
+                    try:
+                        full = ko_audit.audit(
+                            ko_path,
+                            symvers=DERIVED_SYMVERS,
+                            provenance=DERIVED_PROVENANCE,
+                            require_coverage=True)
+                    except Exception as ex:
+                        fail("ko_zzic_verified=1 but %s cannot be audited "
+                             "against the derived ZZIC table: %s" % (ko_name, ex))
+                        full = None
+                    if full is not None:
+                        got = full.get("MODULE_VS_ZZIC_KERNEL")
+                        cov = full.get("MODVERSION_COVERAGE")
+                        r["checks"]["ZZIC_MODULE_VERDICT"] = got
+                        r["checks"]["ZZIC_MODULE_COVERAGE"] = cov
+                        if got != "COMPATIBLE":
+                            fail("ko_zzic_verified=1 but the bundled %s audits "
+                                 "%r against the derived ZZIC table, not "
+                                 "COMPATIBLE" % (ko_name, got))
+                        if full.get("provenance_violations"):
+                            fail("ko_zzic_verified=1 but the derived table's "
+                                 "provenance does not hold up: %s"
+                                 % full["provenance_violations"])
+                        # Name the table the verdict rests on, per AGENTS.md 3.5:
+                        # a Module.symvers carries no kernel release, so the
+                        # digest is the only record of WHICH table decided it.
+                        r["checks"]["ZZIC_MODULE_SYMVERS"] = "%s (%s)" % (
+                            full.get("symvers_sha256"), full.get("symvers_kind"))
     else:
         # flag is 0: nothing may be pinned that could later be mistaken for proof
         if ko_sha:
@@ -255,10 +299,14 @@ def audit():
     # source: a refactor that drops the coverage requirement still trips this.
     #
     # The hole being closed: comparing only the entries __versions HAPPENS to
-    # contain is fail-open. The kernel refuses a load when the table exists but
-    # names no version for a symbol it is resolving, so a table covering three
-    # of four imports is unloadable - while an entries-only diff finds every
-    # present entry in agreement and reads COMPATIBLE.
+    # contain is fail-open. An entries-only diff finds every present entry in
+    # agreement and reads COMPATIBLE while the table says nothing about the rest.
+    #
+    # Note what the kernel actually does with such a hole, because AGENTS.md 3.5
+    # used to state this wrongly and the fix matters here: check_version() warns
+    # once and LETS THE LOAD PROCEED. The module is not unloadable - it loads
+    # with that symbol unchecked, which is the silent ABI mismatch this gate
+    # exists to prevent. So the refusal below is "unverified", not "unloadable".
     cov_reports = {}
     for ko_file in sorted(glob.glob(os.path.join(JNI_DIR, "dirtyfrag-android*.ko"))):
         base = os.path.basename(ko_file)
@@ -289,8 +337,8 @@ def audit():
                                                 ", ".join(missing)))
             if candidate and strict.get("MODULE_VS_ZZIC_KERNEL") != "INCOMPATIBLE":
                 fail("%s: %d import(s) have no __versions entry but "
-                     "--require-modversion-coverage still yields %r; an "
-                     "unloadable module must not pass"
+                     "--require-modversion-coverage still yields %r; a module "
+                     "whose version checks the kernel would skip must not pass"
                      % (base, len(missing), strict.get("MODULE_VS_ZZIC_KERNEL")))
         # An imported symbol reported as "not imported" is a false label on
         # exactly the hole that matters (AGENTS.md 3.7: signals never collapsed).
@@ -620,6 +668,47 @@ def audit():
         else "MISSING in %s" % ", ".join(unguarded)
     )
 
+    # --- the ZZIC module must be reachable ONLY by identity -----------------
+    # Kernel-family selection keys on (android_release, major, minor), and on
+    # this firmware that is (15, 6, 6) - the same key as the generic upstream
+    # android15-6.6 module that every other android15/6.6 device gets. The two
+    # modules differ only in their __versions CRCs, so putting the ZZIC image
+    # anywhere dfr_select_ko_image() can reach would offer a table built for THIS
+    # kernel to a device that merely shares the family. That device would then
+    # load a module whose CRCs disagree - refused by its kernel at insmod if it
+    # is lucky, and this is not a gate the app can re-check afterwards.
+    #
+    # None of this is unit-testable: it is C that only runs on the device. So the
+    # shape is asserted statically, per AGENTS.md section 5.
+    exp_src = exp_src_holder[0]
+    zzic_sel = {}
+    zzic_sel["image_defined"] = "ko_image_zzic" in exp_src
+    # The override must be the ZZIC identity branch, not family selection.
+    zzic_sel["selected_by_identity"] = bool(
+        re.search(r"cls == DFR_TARGET_S25U_ZZIC", exp_src)
+        and re.search(r"ko\s*=\s*&ko_image_zzic\s*;", exp_src))
+    # ko_images[] is the family table; the ZZIC image must not appear in it.
+    table = re.search(r"ko_images\[\]\s*=\s*\{(.*?)\};", exp_src, re.S)
+    zzic_sel["absent_from_family_table"] = bool(
+        table and "zzic" not in table.group(1).lower())
+    bundled_zzic = ko_name and "S938BXXUCZZIC" in str(ko_name)
+    if bundled_zzic or zzic_sel["image_defined"]:
+        if not zzic_sel["image_defined"]:
+            fail("ko_filename names the exact-kernel module but exp.c defines no "
+                 "ko_image_zzic to select it")
+        if not zzic_sel["selected_by_identity"]:
+            fail("exp.c does not assign ko = &ko_image_zzic inside the "
+                 "DFR_TARGET_S25U_ZZIC branch; the exact-kernel module is "
+                 "bundled but patch_ko would write the generic one")
+        if not zzic_sel["absent_from_family_table"]:
+            fail("the ZZIC module appears in ko_images[]; family selection "
+                 "would offer a table built for this exact kernel to any "
+                 "android15/6.6 device")
+    if not table:
+        fail("cannot find ko_images[] in exp.c; the family table guard is "
+             "no longer checking anything")
+    r["checks"]["zzic_module_selection"] = zzic_sel
+
     # --- the device collector must cover every compared field ---------------
     #
     # tools/zzic_collect.sh is what an operator actually runs on the device, and a
@@ -705,6 +794,12 @@ def human(r):
     if "ko_sha256_actual" in ck:
         L.append("ko_sha256 (bundled) : %s" % ck["ko_sha256_actual"])
     L.append("ZZIC_MODULE_BINDING : %s" % ck.get("ZZIC_MODULE_BINDING", "n/a"))
+    if "ZZIC_MODULE_VERDICT" in ck:
+        # Print the verdict AND the table that decided it. A Module.symvers names
+        # no kernel, so the digest is the only record of which one was used.
+        L.append("  ko_audit verdict  %s, coverage %s"
+                 % (ck["ZZIC_MODULE_VERDICT"], ck.get("ZZIC_MODULE_COVERAGE")))
+        L.append("  against symvers   %s" % ck.get("ZZIC_MODULE_SYMVERS"))
     L.append("ZZIC_KSUD_BINDING   : %s" % ck.get("ZZIC_KSUD_BINDING", "n/a"))
     if ck.get("ksud_sha256_actual"):
         L.append("  assets/ksud       %s (%s bytes)"
@@ -726,6 +821,12 @@ def human(r):
     L.append("Kotlin Gate-D pins  : %d tied to both profiles"
              % len(ck.get("kotlin_gate_d_pins") or {}))
     L.append("append -> logcat    : %s" % ck.get("append_mirrors_to_logcat"))
+    zs = ck.get("zzic_module_selection") or {}
+    if zs:
+        L.append("ZZIC ko selection   : %s"
+                 % ("by identity, absent from the family table"
+                    if all(zs.values())
+                    else "PROBLEM %s" % zs))
     L.append("")
     for v in r["violations"]:
         L.append("  [x] %s" % v)

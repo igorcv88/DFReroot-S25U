@@ -10,6 +10,6 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${C_FLAGS} -I${CMAKE_SOURCE_DIR}  -Wall -Wex
 add_library(exp SHARED exp.c stage1.S elf_parser.c target_profile.c sha256.c)
 
 set_source_files_properties(exp.c PROPERTIES
-    OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/dirtyfrag-android12-5.10.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android13-5.10.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android13-5.15.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android14-5.15.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android14-6.1.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android15-6.6.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android16-6.12.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android17-6.18.ko;${CMAKE_SOURCE_DIR}/splicehelper")
+    OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/dirtyfrag-android12-5.10.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android13-5.10.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android13-5.15.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android14-5.15.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android14-6.1.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android15-6.6.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android15-6.6-S938BXXUCZZIC.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android16-6.12.ko;${CMAKE_SOURCE_DIR}/dirtyfrag-android17-6.18.ko;${CMAKE_SOURCE_DIR}/splicehelper")
 
 target_link_libraries(exp log)

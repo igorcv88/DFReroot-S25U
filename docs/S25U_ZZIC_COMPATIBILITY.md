@@ -1028,10 +1028,73 @@ own answer.
 
 | Sub-gate | Question | State |
 |---|---|---|
-| **G1** loader / import ABI | does the exact ZZIC `dirtyfrag.ko` load? | `UNVERIFIED` — the CRCs exist now; the module does not |
+| **G1** loader / import ABI | does the exact ZZIC `dirtyfrag.ko` load? | **CLOSED (offline)** — the module exists and audits `COMPATIBLE`, `COMPLETE (5/5)`; see below |
 | **G2** symbol discovery | will the runtime `sprint_symbol` scan find `kallsyms_lookup_name` and `selinux_state`? | evidenced statically, `RUNTIME UNVERIFIED` |
 | **G3** `selinux_state` layout | is `enforcing` the first field? | the exact ZZIC BTF (`e13df32a…`) describes one `selinux_state`, 128 bytes, 9 fields, `enforcing` at bit offset 0 → **layout supported** |
 | **G4** write safety | is writing 0 there safe on this running kernel? | `UNVERIFIED`, and nothing above establishes it |
+
+#### G1 — what closed it, and what it cost to find out
+
+`dirtyfrag-android15-6.6-S938BXXUCZZIC.ko`, built by
+`.github/workflows/build-zzic-dirtyfrag.yml` (run 36166575861), bundled at
+`app/src/main/jni/`:
+
+```text
+sha256    b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017
+size      6592 bytes (stripped)
+vermagic  6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k SMP preempt
+          mod_unload modversions aarch64
+__versions  5 entries, 0x140 bytes
+
+tools/ko_audit.py <that file>
+  --symvers            evidence/zzic/gate-g/ZZIC-derived-minimal.symvers
+  --symvers-provenance evidence/zzic/gate-g/ZZIC-modversion-provenance.json
+  --require-modversion-coverage
+=> MODVERSION_COVERAGE  = COMPLETE (5/5)
+   MODULE_VS_ZZIC_KERNEL = COMPATIBLE
+   symvers               = 340b840d63f3dd6fabe589aff9b52d365ee1c568e8303b47a052c3da7ac0a5dd (DERIVED)
+```
+
+An independent local build in the same image produced the **same digest**, so the
+artefact is reproducible rather than one runner's output.
+
+Two findings came out of getting there, both of which had been silently defeating
+the build:
+
+**The DDK ships a modpost that cannot emit versions.**
+`ghcr.io/ylarod/ddk-min:android15-6.6-20260828` has two lines commented out of
+`scripts/mod/modpost.c` — `s->module = exp->module;` in `check_exports()`, and
+that function's only call site. No import is ever matched to an export, so
+`add_versions()` skips every symbol and writes an **empty** table, with no
+warning, because the code that would have warned is the code that was removed.
+Three runs produced a 0-byte `__versions` and a green exit. The workflow now
+restores both lines, rebuilds `modpost` from the restored source, and refuses if
+the rebuilt binary is byte-identical to the shipped one.
+
+**`module_layout` is required and nobody imports it.** With modpost fixed, the
+table gained a fifth entry carrying the DDK's `0x4e276f37` instead of the
+target's `0x81972209`. `check_modstruct_version()` version-checks that symbol
+before resolving any other, and its CRC summarises the layouts the loader itself
+walks — but the module never references it, so it is absent from the undefined
+symbol table and an import-driven coverage rule cannot see it. A module with the
+DDK value passes every offline check and is refused at `insmod`. It is now in the
+derived table (its CRC read out of the same kernel-ratified witness bytes), in
+`ko_audit.py`'s `KERNEL_CHECKED_WITHOUT_IMPORT`, and in the workflow's
+committed-evidence gate.
+
+A correction belongs here too, because this document rests on it: the claim that
+the kernel refuses a load when `__versions` exists but names no version for a
+symbol being resolved is **false** on this kernel. `check_version()` warns once
+and the load proceeds. Coverage is still required — a hole stops the *checking*,
+not the module, so it loads with that symbol unverified, which is the failure this
+gate exists to prevent. The refusal is "unverified", not "unloadable".
+
+**The generic android15-6.6 module is untouched.** It still carries an empty
+table and is still what every other android15/6.6 device gets. The ZZIC image is
+reachable only from the `DFR_TARGET_S25U_ZZIC` branch in `patch_ko()`, never from
+`dfr_select_ko_image()`, because family selection keys on `(15, 6, 6)` and cannot
+tell the two apart. `tools/profile_binding_audit.py` fails if that image ever
+appears in `ko_images[]`, or if the identity branch stops selecting it.
 
 Two consequences worth stating plainly.
 

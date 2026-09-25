@@ -719,6 +719,28 @@ asm(
     "dirtyfrag_ko_17_6_18_end:\n"
 );
 
+/*
+ * The ZZIC module, deliberately NOT part of the family table above.
+ *
+ * dfr_select_ko_image() selects by (android_release, kernel major, minor), and
+ * on this firmware that is (15, 6, 6) - the same key as the generic upstream
+ * android15-6.6 module, which every other android15/6.6 device gets and which
+ * must keep getting it unchanged. So this image is reachable only from the
+ * explicit DFR_TARGET_S25U_ZZIC branch in patch_ko(), never from family
+ * selection. Kernel-family selection is not identity (AGENTS.md section 7), and
+ * this is the one place the difference is load-bearing: the two modules differ
+ * only in their __versions CRCs, and offering the ZZIC one to a device that is
+ * merely android15-6.6 would hand it a table built for another kernel.
+ */
+asm(
+    ".section .rodata\n"
+    ".global dirtyfrag_ko_zzic_start\n"
+    ".global dirtyfrag_ko_zzic_end\n"
+    "dirtyfrag_ko_zzic_start:\n"
+    ".incbin \"dirtyfrag-android15-6.6-S938BXXUCZZIC.ko\"\n"
+    "dirtyfrag_ko_zzic_end:\n"
+);
+
 asm(
     ".section .rodata\n"
     ".global splice_helper_start\n"
@@ -744,6 +766,8 @@ extern char dirtyfrag_ko_16_6_12_start[];
 extern char dirtyfrag_ko_16_6_12_end[];
 extern char dirtyfrag_ko_17_6_18_start[];
 extern char dirtyfrag_ko_17_6_18_end[];
+extern char dirtyfrag_ko_zzic_start[];
+extern char dirtyfrag_ko_zzic_end[];
 extern char splice_helper_start[];
 extern char splice_helper_end[];
 
@@ -765,6 +789,16 @@ static const struct KoImage ko_images[] = {
     {17, 6, 18, dirtyfrag_ko_17_6_18_start, dirtyfrag_ko_17_6_18_end},
 };
 #define KO_IMAGES_N (sizeof(ko_images) / sizeof(ko_images[0]))
+
+/*
+ * The exact-ZZIC module, selected by identity rather than by kernel family.
+ * The version triple is filled in for the log line only; nothing looks it up,
+ * because putting this image anywhere dfr_select_ko_image() can reach would
+ * make a generic android15-6.6 device eligible for it.
+ */
+static const struct KoImage ko_image_zzic = {
+    15, 6, 6, dirtyfrag_ko_zzic_start, dirtyfrag_ko_zzic_end
+};
 
 static const struct KoImage *select_ko_image(int android_release, int kver_major, int kver_minor) {
     return dfr_select_ko_image(ko_images, KO_IMAGES_N, android_release, kver_major, kver_minor);
@@ -1218,6 +1252,25 @@ int patch_ko(struct Reporter *reporter) {
         return 1;
 
     if (cls == DFR_TARGET_S25U_ZZIC) {
+        /*
+         * On the exact target, swap the family choice for the module built
+         * against THIS kernel. Family selection returned the generic
+         * android15-6.6 image a moment ago because (15,6,6) is all it can see;
+         * that image carries an empty __versions table, so the loader would
+         * check nothing and accept it - see AGENTS.md section 3.5 on why a hole
+         * is worse than a refusal.
+         *
+         * The swap happens BEFORE the digest binding below, so the bytes this
+         * stage writes are the bytes it hashed. Reporting both the swap and the
+         * size keeps the earlier "* ko android15-6.6" line from reading as the
+         * final answer (AGENTS.md section 3.7: no reader should have to guess
+         * which image was used).
+         */
+        ko = &ko_image_zzic;
+        REPORTLN("[DFR][MODULE] ZZIC_MODULE_SELECTED=PASS (%d bytes, exact-kernel"
+                 " image, not the generic android15-6.6 one)",
+                 (int)(ko->end - ko->start));
+
         /*
          * The policy above proved the three ko_* fields are present; it
          * deliberately did not look at the payload, because only this stage
