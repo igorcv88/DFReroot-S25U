@@ -131,6 +131,7 @@ struct ObservedTarget {
     const char *model;
     const char *device;
     int         sdk;
+    int         android_release; /* ro.build.version.release, parsed as integer */
     const char *display;
     const char *fingerprint;
     const char *kernel_release;
@@ -147,6 +148,7 @@ struct TargetMatch {
     int model_ok;
     int device_ok;
     int sdk_ok;
+    int android_release_ok;
     int display_ok;
     int fingerprint_ok;
     int kernel_release_ok;
