@@ -78,12 +78,19 @@ def main():
     add("| D — `network_stack` boundary | physical PASS | CONTROLLER binder received; "
         "the remote process now reports its own uid/context/`LIBEXP_LOADED` back to the UI |")
     if ko_ok:
-        add("| G — kernel module ABI | PASS | bound to `%s` (`%s`) |"
+        add("| G1 — kernel module loader/import ABI | PASS (offline) | bound to `%s` "
+            "(`%s`); exact ZZIC modversions are COMPLETE (5/5) |"
             % (c.get("ko_filename"), short(c.get("ko_sha256"))))
+        add("| G2 — runtime symbol discovery | **RUNTIME UNVERIFIED** | "
+            "`kallsyms_lookup_name` / `selinux_state` are resolved at runtime; "
+            "the first hardware run must prove that path |")
+        add("| G3 — `selinux_state` layout | supported offline | exact ZZIC BTF places "
+            "`enforcing` at offset 0; runtime confirmation is still pending |")
+        add("| G4 — SELinux write safety | **UNVERIFIED** | CRC agreement proves the "
+            "loader ABI, not that writing `selinux_state.enforcing = 0` is safe |")
     else:
-        add("| G — kernel module ABI | **UNVERIFIED** | the ZZIC kernel has "
-            "`CONFIG_MODVERSIONS=y` and the bundled module ships an empty `__versions`, "
-            "so no symbol-CRC agreement can be demonstrated |")
+        add("| G — kernel module ABI | **UNVERIFIED** | no positively validated "
+            "ZZIC module is bound to the profile |")
     add("| H — installer / `packages.xml` | physical PASS | ABX→TEXT→ABX round trip "
         "accepted by PMS; metadata and backup handling rewritten after the v2.0.2 field run |")
     add("")
@@ -101,10 +108,14 @@ def main():
         add("every boundary before Gate G is proven on hardware and the fail-closed")
         add("refusal still holds. Running it is an evidence-collection step.")
     else:
-        add("Gate G reports a module bound to this kernel. That is not the same as a")
-        add("confirmed run: the full chain has **not** been exercised end to end on")
-        add("hardware for this build. Treat the first run of it as a test, with a")
-        add("backup of `packages.xml` you have verified you can restore.")
+        add("G1 is closed offline, so this build is allowed to proceed past the old")
+        add("module-policy refusal. The first run is therefore a real hardware experiment:")
+        add("it may reach the page-cache writes and the helper may set SELinux permissive.")
+        add("G2 and G4 are still unverified, and automatic restoration to `Enforcing`")
+        add("after KernelSU readiness is not yet proven. Keep a verified `packages.xml`")
+        add("backup, capture the complete log from one boot, do not retry after `/dev/df`")
+        add("appears, and use a hard reboot as the recovery path if the run fails after")
+        add("the helper has executed.")
     add("")
     if not binding_ok:
         # Should be unreachable: release.yml runs the audit as a gate first.
