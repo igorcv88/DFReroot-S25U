@@ -1,314 +1,594 @@
 # DFReroot S25U / ZZIC — handoff
 
-**Where to pick up.** This file is the moving part: current state, what is
-blocked, what closes it. It is the only one of the three that is expected to go
-stale, so trust it least and re-derive from the audits when in doubt.
-
-- **`AGENTS.md`** (symlinked as `CLAUDE.md`) — the standing rules. Read it
-  first, before changing anything. It holds nothing version-specific.
-- **`docs/S25U_ZZIC_COMPATIBILITY.md`** — the authoritative gate matrix and
-  evidence record. If this file and that one disagree about what is *proven*,
-  that one wins.
-
-**State is POST-G1-BUILD / PRE-SECOND-PHYSICAL-TEST.** It reflects the first
-hardware execution of the chain (`v2.0.2-zzic`) plus the exact ZZIC helper and
-ksud integration that follow it. The next signed build is `2.0.4-zzic`
-(versionCode 7): G1 is closed offline, while G2/G4 and the downstream chain still
-need one same-boot hardware run.
-
-Three things this file used to say are no longer true and must not be
-reintroduced: the `scheduleReceiver` overload shape is **not** unknown,
-`crash_dump64`'s hash **has** been captured, and Gate H is **not** untested.
-
-## Target
-
-```
-Samsung Galaxy S25 Ultra, SM-S938B, codename pa3q
-Android 17 / SDK 37, One UI 9 Beta 3, firmware S938BXXUCZZIC
-kernel 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k, aarch64, 4096-byte pages
-```
-
-The userspace Android release (17) and the Android common kernel family
-(android15) are independent values; the kernel release string parsing to
-`android15` is **kernel-family** module selection, not identity.
-
-## What the code does
-
-Upstream DFReroot chain, unchanged for every device that is not this exact
-firmware: temp root → DFInstaller injects the signing key into
-`/data/system/packages.xml` → soft reboot → DFReroot installs as
-`android.uid.system` → it hops `system_server` → `com.android.networkstack.process`
-(which can `dlopen` and holds `CAP_NET_ADMIN`) → Dirty Frag page-cache writes to
-`crash_dump64`, the vendor file, `libc.so`, `libc++.so` → LKM sets SELinux
-permissive → `ksud`.
-
-Added for this target: a fail-closed profile (`app/src/main/jni/target_profile.{h,c}`,
-`DFR_PROFILE_ZZIC`) plus gates in `app/src/main/jni/exp.c`, boundary-tagged
-`[DFR][*]` diagnostics, and offline audit tools under `tools/`.
-
-## The rules
-
-They moved to **`AGENTS.md`** so they stop being restated (and drifting) once
-per handoff. Do not edit them here; edit them there. In short, and not as a
-substitute for reading it:
-
-1. Fail-closed. Missing evidence is a refusal, never a pass.
-2. Identity comparison is exact and case-sensitive; a partial match is a hard
-   `MISMATCH`.
-3. Every page-cache stage runs both gates — a gate enforced in one of three
-   entry points is not enforced.
-4. Proof may change form when an artefact is unreadable; it may not be skipped.
-5. Artefact hashes are scoped to the stage that writes them. Never widen a mask.
-6. A boolean is not evidence: `ko_zzic_verified` is bound to the bundled bytes.
-7. No execution override, under any name.
-8. DFInstaller's metadata source of truth is the original file, stat'd before
-   any write; backups are transactional and a bad one is fatal.
-9. The C profile and `tools/zzic_profile.json` must agree, and the JSON must
-   agree with itself.
+**Read `AGENTS.md` first.** This file is the moving implementation handoff:
+what is physically proven now, what still needs to be implemented, and the
+acceptance criteria for the next signed build. If this file disagrees with
+`docs/S25U_ZZIC_COMPATIBILITY.md` about evidence, the compatibility dossier wins.
 
 ## Current state
 
-The old Gate-G refusal is gone for the exact ZZIC target. The bundled
-`dirtyfrag-android15-6.6-S938BXXUCZZIC.ko` is selected only after exact target
-classification, is re-hashed before the first write, and is bound in the profile
-to SHA-256
-`b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017`.
-Its strict audit is `MODVERSION_COVERAGE = COMPLETE (5/5)` and
-`MODULE_VS_ZZIC_KERNEL = COMPATIBLE`; this closes G1 offline.
+The exact Galaxy S25 Ultra target is:
 
-Everything before that boundary remains proven from the first physical run:
-Gate A, Gate B (kernel / `crash_dump64` / vendor provenance), Gate C
-(`scheduleReceiver/12`), Gate D (`network_stack` + `libexp.so`) and Gate H.
-Gate F is also PASS offline.
+```text
+Samsung Galaxy S25 Ultra SM-S938B / pa3q
+Android 17 / SDK 37, One UI 9 Beta 3, firmware S938BXXUCZZIC
+kernel 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k
+aarch64 / 4096-byte pages
+```
 
-What is *not* promoted by G1: G2 runtime symbol discovery, G4 write safety, the
-downstream libc/libc++ stages, the stage2/ksud handoff, and full Gate I. Exact
-ZZIC BTF supports G3's layout assumption (`enforcing` at offset 0), but runtime
-confirmation remains pending. Automatic restoration of SELinux to `Enforcing`
-after KernelSU readiness is still open and must not be assumed.
+The signed validation release is `v2.0.4-zzic` (versionCode 7).
 
-The next run is therefore a real hardware experiment rather than a fail-closed
-evidence-only refusal. If it passes the module policy it may reach `patch #1`
-and, if the helper executes, may set SELinux permissive.
+The second physical run changed the project state materially: the exact ZZIC
+DirtyFrag helper, the complete userspace patch chain, the stage2 handoff, the
+DFR-specific ksud and KernelSU all executed on hardware in one boot. Root was
+obtained, SELinux was observed globally `Permissive`, manual
+`/system/bin/setenforce 1` restored `Enforcing`, and KernelSU root continued to
+work afterwards.
 
-## Pending work, in order
+That means the remaining engineering problem is **not "make root work"**. It is
+to make the post-root completion path deterministic, self-verifying and
+fail-closed so the app never reports success while leaving the phone in
+`Permissive`.
 
-### 0. Collect everything the device can supply, in one read-only pass
+## Physical evidence from the v2.0.4-zzic run
+
+All of the following belong to the same boot:
+
+```text
+boot_id=0643a5e2-9a44-4bb9-b7a4-31a3b255e3ac
+```
+
+Observed before / during the native run:
+
+```text
+TARGET_PROFILE=S25U_ZZIC
+PASS exact identity
+
+ZZIC_KERNEL_IDENTITY=PASS
+ZZIC_KERNEL_VERSION=PASS
+ZZIC_KERNEL_ARCH=PASS
+ZZIC_PAGE_SIZE=PASS
+
+ZZIC_CRASHDUMP_IDENTITY PASS
+ZZIC_VENDOR_PROVENANCE=PASS_AVB
+
+PROCESS_LOOKUP=PASS
+REMOTE_COMPONENT_REACHED=PASS
+NETWORK_STACK_CAP_EFF=PASS
+LIBEXP_LOADED=PASS
+
+ZZIC_MODULE_POLICY=ALLOW
+ZZIC_MODULE_SELECTED=PASS
+ko_filename=dirtyfrag-android15-6.6-S938BXXUCZZIC.ko
+ko_sha256_actual=b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017
+ZZIC_MODULE_BINDING=PASS
+```
+
+The page-cache stages completed physically:
+
+```text
+patch #1        patched 832 bytes
+patch #2        patched 6592 bytes
+patch #3        patched 652 bytes
+patch #4        patched 4 bytes
+patch #5        patched 348 bytes
+patch #6        patched 4 bytes
+```
+
+The libc and libc++ stage-specific runtime checks both passed before their writes.
+
+The native trigger then reported:
+
+```text
+trying to trigger (0): mark: 0 0 0 0
+trying to trigger (1): mark: 1 1 1 0
+runAll done res=0
+Done. Check KSU Manager.
+```
+
+Important: the four values printed by current `runAll()` are
+`/dev/df`, `/dev/dfm2`, `/dev/dfm3`, `/dev/dfm4`. They do **not** include
+`dfm1`. Do not read that old log as evidence that `dfm1` existed.
+
+Immediately afterwards, from a real KernelSU root shell:
+
+```text
+uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0
+getenforce=Permissive
+/sys/fs/selinux/enforce=0
+
+/dev/df   present
+/dev/dfm2 present
+/dev/dfm3 present
+/dev/dfm1 absent
+/dev/dfm4 absent
+```
+
+Kernel logs showed active KernelSU handling, including:
+
+```text
+KernelSU: sys_execve su found
+KernelSU: Samsung KDP task-scoped credential install ...
+KernelSU: ksu fd installed ...
+```
+
+Manual restoration was then tested in the **same boot**:
 
 ```sh
-# in Termux, or: adb shell sh /data/local/tmp/zzic_collect.sh
-sh tools/zzic_collect.sh > zzic-identity.txt 2>&1
+su -c '/system/bin/setenforce 1'
 ```
 
-Writes nothing; no root needed except for the `/proc/kallsyms` section. It prints
-every field `dfr_classify_target()` compares, the `crash_dump64` hash, `boot_id`
-and the network_stack process state, and says which of the remaining blockers a
-device capture cannot close.
+and verified as:
 
-**Check the identity block first.** All twelve fields are compared exactly and
-case-sensitively; one difference classifies the real device `MISMATCH` and refuses
-the whole chain. `kernel_version` is a build timestamp
-(`#1 SMP PREEMPT Wed Sep 16 14:21:43 UTC 2026`) and is the field most likely to
-have moved. If the device disagrees with the profile, **the profile is wrong** —
-correct it from the observed values, never the reverse.
-
-`tools/profile_binding_audit.py` fails CI if the collector stops printing a field
-the runtime gate compares.
-
-### 1. ~~`crash_dump64` SHA-256~~ — CLOSED
-
-Captured from the device and pinned in `app/src/main/jni/target_profile.c` and
-`tools/zzic_profile.json` (both the top-level field and the `targets[]` entry;
-CI now fails if those two disagree with each other, not just if C and JSON do):
-
-```
-9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f
+```text
+getenforce=Enforcing
+/sys/fs/selinux/enforce=1
+uid=0(root) ... context=u:r:ksu:s0
 ```
 
-`crash_dump64` IS readable from the domain the chain runs in, so it stays a
-direct runtime SHA-256 check. The vendor ELF is not — see invariant 3b.
+KernelSU remained operational after SELinux returned to enforcing. This is the
+critical fact the next implementation should automate.
 
-### 2. ~~A Gate-G validated kernel module~~ — G1 CLOSED
+## Gate state after that run
 
-The exact helper is now bundled separately from the generic android15/6.6 image:
+| Gate | State now |
+|---|---|
+| A exact target identity | physical PASS |
+| B kernel / crash_dump / vendor provenance | physical PASS |
+| B libc / libc++ runtime identity | physical PASS |
+| C AMS / Android 17 reflection path | physical PASS |
+| D network_stack / capabilities / dlopen | physical PASS |
+| E native packaging | PASS |
+| F userspace ELF audit | PASS |
+| G1 module loader/import ABI | physical PASS, with prior strict offline COMPLETE (5/5) / COMPATIBLE |
+| G2 runtime discovery of kallsyms_lookup_name / selinux_state | physical PASS |
+| G3 selinux_state layout | physical PASS; exact BTF already supported it |
+| G4 enforcing write | physical PASS |
+| H packages.xml persistence | physical PASS |
+| I end-to-end automatic safe completion | **NOT CLOSED**: current app returns success before proving KernelSU readiness + SELinux restoration |
+
+Do not regress the distinction between "root happened" and "the app completed
+safely". `v2.0.4-zzic` proves the former and still lacks the latter.
+
+## Exact current assets
+
+DirtyFrag helper:
 
 ```text
 app/src/main/jni/dirtyfrag-android15-6.6-S938BXXUCZZIC.ko
-sha256  b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017
-size    6592 bytes
-vermagic 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k SMP preempt mod_unload modversions aarch64
-MODVERSION_COVERAGE = COMPLETE (5/5)
-MODULE_VS_ZZIC_KERNEL = COMPATIBLE
+size      6592
+sha256    b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017
+vermagic  6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k SMP preempt mod_unload modversions aarch64
+modversions COMPLETE (5/5)
 ```
 
-The five required entries are `module_layout`, `__stack_chk_fail`, `_printk`,
-`memset` and `sprint_symbol`. Their CRCs come from the provenance-bound
-stock-module witness in `evidence/zzic/gate-g/`. The build workflow repairs the
-DDK's intentionally disabled modpost export matching before building; do not
-replace that with a hand-built four-entry table, because `module_layout` is
-checked by the kernel even though it is not an undefined import.
+DFR-specific ksud:
 
-The ZZIC image is deliberately absent from `ko_images[]`. A generic
-android15/6.6 device still gets the untouched generic module; only
-`DFR_TARGET_S25U_ZZIC` may select the exact image. The binding audit guards that
-separation and verifies the bundled bytes and CRC table.
-
-Remaining Gate-G boundaries:
-
-- G2 — runtime discovery of `kallsyms_lookup_name` and `selinux_state`:
-  **RUNTIME UNVERIFIED**.
-- G3 — layout: exact BTF supports `enforcing` at offset 0; runtime confirmation
-  pending.
-- G4 — the write itself: **UNVERIFIED**.
-
-A real helper load is not a clean G1 probe because its init path performs G4.
-The next signed run intentionally collects that hardware evidence; treat it as a
-single-run experiment, not as a retry loop.
-
-### 3. ~~`scheduleReceiver` overload shape~~ — CLOSED
-
-Android 17 / One UI 9 exposes the same 12-parameter overload `StageHop` already
-invokes, observed physically:
-
-```
-[DFR][AMS] scheduleReceiver/12 params=[Intent, ActivityInfo, CompatibilityInfo,
-    int, String, Bundle, boolean, boolean, int, int, int, String]
+```text
+asset      app/src/main/assets/ksud
+staging    /data/system/dfreroot-ksud
+sha256     b82c194db398ace90fa777bed4d8419c70041eb99d7bbe2915caa900100de75f
+size       6664728
 ```
 
-`getProcessRecordLocked` is **absent** on this build; the `mProcessNames`
-fallback is what resolves the ProcessRecord, and `mOnewayThread` is the correct
-thread field. None of that is a blocker, and the log now says so explicitly
-(`PROCESS_LOOKUP_PRIMARY=UNAVAILABLE`, `PROCESS_LOOKUP_FALLBACK=mProcessNames`,
-`PROCESS_LOOKUP=PASS`) instead of leaving a bare `UNKNOWN`.
+The ksud is generated by `igorcv88/RMGLabs-Payloads` using
+`.github/workflows/build-zzic-exact-port.yml` with
+`staging_profile=dfreroot`. Its current staging contract is implemented by
+`kernelsu/patches/apply-v330-staged-daemon-hotfix.py`.
 
-The rule that produced this outcome still stands for the next firmware: **do not
-guess a fallback overload.** Invoking an unknown shape with fabricated arguments
-runs inside `system_server`. Wire a new shape only from an observed
-`[DFR][AMS] scheduleReceiver/<n> params=[...]` line.
+## Why the current success condition is wrong
 
-### 4. Remaining runtime captures
+There are two independent issues.
+
+### 1. runAll() declares success at dfm3
+
+`app/src/main/jni/exp.c::runAll()` currently returns 0 as soon as
+`/dev/dfm3` exists.
+
+That marker means the stage2 private namespace exists and the staged ksud was
+bind-mounted over `/system/bin/logcat`. It does **not** prove:
+
+- KernelSU's module/control channel is functional;
+- ksud completed its blocking initialization;
+- SELinux was restored to enforcing;
+- the final system state is safe.
+
+Therefore `dfm3 == present` may remain a useful progress signal, but must stop
+being the application's final success predicate.
+
+### 2. stage2 ignores finit_module()'s return value
+
+`app/src/main/jni/stage1.S` calls `SYS_finit_module` and immediately continues.
+
+For this helper, a conventional "zero means success" rule would itself be wrong:
+`dirtyfrag-lkm/dirtyfrag.c` intentionally returns `-E2BIG` **after** it has:
+
+1. self-checked the `sprint_symbol` anchor;
+2. found `kallsyms_lookup_name`;
+3. resolved `selinux_state`;
+4. written `enforcing = 0`;
+5. emitted the success printk.
+
+So the expected raw syscall result for the intended success path is
+`-E2BIG`. `-ENODEV` is used by the helper for anchor / scan / symbol
+resolution failure. Loader / policy / ABI failures can return other negative
+errors.
+
+The next version should record and branch on that fact instead of discarding it.
+
+## dfm1 anomaly — explanation and required fix
+
+`/dev/dfm1` was absent after the successful run, while `dfm2` and `dfm3`
+were present.
+
+The current assembly attempts `dfm1` **before** `finit_module()`, while the
+system is still SELinux Enforcing. `create_mark` ignores the result of
+`openat(O_CREAT|O_EXCL)`, so a denied creation is invisible and execution
+continues. After the helper changes SELinux to permissive, the later `dfm2` and
+`dfm3` creations can succeed.
+
+This should be fixed as telemetry, not "papered over":
+
+- move the positive `dfm1` marker to after an observed expected
+  `finit_module == -E2BIG`;
+- treat it as **HELPER_SUCCESS**, not merely "stage2 entered";
+- keep `dfm2` = private mount namespace established;
+- keep `dfm3` = ksud bind succeeded;
+- keep `dfm4` = ksud `execve` failed;
+- label every marker explicitly in logs. No more unlabeled four-integer
+  `mark:` line.
+
+Do not make a failure marker mandatory before SELinux becomes permissive; the
+same policy that explains the missing old dfm1 can prevent that marker from
+being created. Positive milestones are safer evidence here.
+
+# Next implementation — post-root closeout
+
+The next implementation should span **two repositories**:
+
+1. `igorcv88/RMGLabs-Payloads` — DFR-specific ksud behavior;
+2. `igorcv88/DFReroot-S25U` — stage2 telemetry, app state machine, pins and UI.
+
+Do not modify the normal RMG staging profile to solve a DFR-only postcondition.
+
+## Phase 1 — make the DFR-specific ksud own SELinux restoration
+
+Implement the closeout in
+`RMGLabs-Payloads/kernelsu/patches/apply-v330-staged-daemon-hotfix.py` only
+when `--profile dfreroot` is selected.
+
+The DFR-specific late-load flow should become:
+
+```text
+load kernelsu.ko
+  -> establish KernelSU userspace/control channel
+  -> install ksud
+  -> apply sepolicy / profiles / features
+  -> run blocking late-load stage
+  -> system.prop
+  -> metamodule mount
+  -> run blocking post-mount stage
+  -> launch nonblocking service / boot-completed stages
+  -> prove KernelSU control channel is alive
+  -> restore SELinux Enforcing
+  -> verify /sys/fs/selinux/enforce == 1
+  -> re-prove KernelSU control channel
+  -> publish POST_ROOT_COMPLETE record
+```
+
+The control-channel proof should use KernelSU's own UAPI, not a filesystem marker.
+The exact KernelSU source already provides:
+
+```rust
+crate::ksucalls::get_info()
+crate::ksucalls::ensure_uapi_version_matched()
+crate::ksucalls::is_late_load()
+```
+
+At minimum require:
+
+- the control ioctl is actually answering;
+- UAPI matches the bundled ksud;
+- runtime mode is late-load;
+- the reported KernelSU version is non-zero and, for this exact pair, should be
+  checked against the expected 32601 rather than treated as an arbitrary value.
+
+The existing `/data/system/dfreroot-ksu-ready` file remains **serialization
+only**. Do not upgrade it into authority.
+
+## Phase 2 — restore enforcing with a verified postcondition
+
+The physically proven operation was:
 
 ```sh
-adb logcat -c && adb logcat -s DFReroot DirtyFrag | tee zzic-run.log
-grep '\[DFR\]' zzic-run.log
-adb shell cat /proc/sys/kernel/random/boot_id
+/system/bin/setenforce 1
 ```
 
-| Needed | Boundary that emits it | State |
-|---|---|---|
-| AMS / ProcessRecord / IApplicationThread shapes (Gate C) | `[DFR][AMS] *` | captured |
-| network_stack identity (Gate D) | `[DFR][PROCESS] REMOTE_COMPONENT_REACHED` | captured |
-| `libexp.so` actually loaded | `[DFR][PROCESS] LIBEXP_LOADED` | captured |
-| packages.xml semantics (Gate H) | `InjectMain --diag-zzic` → `[DFR][INSTALLER] *` | captured |
-| vendor provenance chain | `[DFR][USERSPACE] VENDOR_PROV *` | new in 2.0.3, needs one run |
-| SELinux / seccomp viability for XFRM and native load | `[DFR][PROCESS]` capability + seccomp fields, plus denials in `dmesg`/`logcat` | partial |
+Use the absolute path if that mechanism is chosen. Whatever implementation is
+used, success requires a read-back:
 
-Still needing device evidence downstream of G1: the `vendor_modprobe` SELinux
-domain and its exec transition, the seccomp verdict on the native syscalls,
-mount-namespace behaviour, the staged-ksud rename from `/data/system`, any
-Samsung DEFEX-style restriction, KernelSU readiness, and restoration of SELinux
-to `Enforcing`.
+```text
+/sys/fs/selinux/enforce == 1
+```
 
-### 5. ~~Dead pins: the four `network_stack_*` fields~~ — CLOSED
+Do not treat exit status alone as proof.
 
-All four are now compared at run time and tied to the pins statically.
-`network_stack_process`, `network_stack_uid` and `network_stack_context` were
-already compared in `Diagnostics.kt`/`StageHop.kt` — but against Kotlin constants,
-not against the profiles, so the pins themselves were dead and a third copy of
-each value could drift unnoticed. `network_stack_cap_eff` was compared nowhere at
-all; it now emits `NETWORK_STACK_CAP_EFF=PASS/FAIL/SKIP/UNKNOWN`, with an
-unreadable `CapEff` reported `UNKNOWN` rather than counted as agreement.
+Recommended shape for the DFR-specific ksud:
 
-`tools/profile_binding_audit.py` ties each Kotlin constant to both profiles and
-fails on drift, on a removed constant, and on a removed emit — the static-guard
-pattern AGENTS.md §5 prescribes for Kotlin that needs an Android runtime. Each of
-those was verified by sabotage.
+```text
+POST_ROOT_KSU_CONTROL=PASS
+SELINUX_BEFORE_RESTORE=0
+SELINUX_RESTORE_ATTEMPT=...
+SELINUX_RESTORE=PASS
+SELINUX_AFTER_RESTORE=1
+POST_ROOT_KSU_CONTROL_AFTER_RESTORE=PASS
+POST_ROOT_COMPLETE=PASS
+```
 
-Two more signals were fixed in the same pass:
+If SELinux is already enforcing, record that explicitly and continue to the
+post-restore KernelSU control check.
 
-- `NATIVE_LIBRARY_DISCOVERABLE` is gone. It could never read PASS on any device:
-  the APK ships `lib/arm64-v8a/libexp.so` Stored with
-  `android:extractNativeLibs="false"`, so nothing is written to
-  `nativeLibraryDir`. It was observed `UNKNOWN` next to `LIBEXP_LOADED=PASS` in
-  the same process. Replaced by `NATIVE_PAYLOAD_PACKAGED` (the APK zip entry,
-  which can actually pass) and `NATIVE_PAYLOAD_EXTRACTED` (the fact, with `NO`
-  stated as expected). `LIBEXP_LOADED` remains the only proof `dlopen` succeeded.
-  The audit fails if the old signal comes back.
-- `MainActivity.append()` now mirrors every line to logcat before touching the
-  UI. Until now `runAll done res=`, the remote-boundary block and the CONTROLLER
-  binder receipt existed only on screen, which made every "wait for X in logcat"
-  instruction in these docs impossible to follow.
+### Failure behavior
 
-#### Original note
+If anything after the helper executes fails, the DFR-specific ksud should make a
+best-effort attempt to restore enforcing before returning an error.
 
-`network_stack_process`, `network_stack_uid` (1073), `network_stack_context` and
-`network_stack_cap_eff` (`0x800003c00`) are declared in `target_profile.h`, pinned
-in `target_profile.c` and in `tools/zzic_profile.json`, and **not one of the four
-is read anywhere**. The device reported `CapEff=0000000800003c00`, matching the
-pin — but a value nobody compares is not a check, it is a profile advertising a
-boundary it never enforces. That is the same defect the code itself calls out for
-`android_release`.
+The implementation should be structured so error exits cannot silently bypass
+that attempt. Prefer one wrapper / closeout path rather than sprinkling
+`setenforce` calls through individual branches.
 
-This is not a one-line cleanup either way:
+A failed restoration is a final **post-root failure**, even if KernelSU loaded.
+Never publish `POST_ROOT_COMPLETE` in that state.
 
-- **To enforce them**, the runtime has to *observe* the real process's uid,
-  SELinux context and `CapEff` at the Gate D boundary and feed them to a
-  `dfr_network_stack_eval()` alongside the pinned values, with a negative case per
-  field — the shape `dfr_vendor_provenance_eval()` already uses.
-- **To remove them**, all four go out of both profiles and out of the header.
+## Phase 3 — publish a same-boot completion record
 
-Either is a change to the chain's runtime, so it is recorded here rather than
-bundled into unrelated work. Do not pin a fifth field of this kind in the
-meantime.
+The app needs a way to display final state without using a marker as authority for
+any risky operation.
 
-## Build, release and verification
+Add a DFR-only record such as:
 
-The commands, the toolchain versions and the release conventions are in
-`AGENTS.md` §5 and §6. Two things worth repeating because getting them wrong is
-expensive:
+```text
+/data/system/dfreroot-post-root
+```
 
-- **Both APKs must be signed with the same key.** DFInstaller writes DFReroot's
-  certificate into `packages.xml`; a mismatch makes the injected key useless.
-  The release workflow compares the certificate digests and fails if they differ.
-- **Runner minutes are billed to the owner.** `ci.yml` is manual-dispatch only
-  and is disabled at the repository level; `release.yml` runs the same offline
-  gate set before it spends a signed build, so there is no second run to
-  schedule. Run the checks below locally instead, and dispatch a workflow only
-  when a release is actually wanted (`AGENTS.md` §6.1).
-- **Every change goes through a PR** unless the owner says otherwise
-  (`AGENTS.md` §6.2), and releases are published as stable/latest, with the
-  compatibility state carried by the generated notes (`AGENTS.md` §6.3).
+It is telemetry produced **after** the authoritative checks above, not an
+execution gate.
 
-Expected counts, so a drop is noticeable:
+Write it atomically and include at least:
+
+```text
+state=POST_ROOT_COMPLETE
+boot_id=<current boot id>
+ksu_version=32601
+uapi_version=<value>
+runtime_mode=late-load
+selinux=1
+```
+
+Ownership/mode should allow the DFReroot system-UID app to read it without making
+it world-writable. A stale record from a previous boot must never count: the app
+must compare the record's `boot_id` to
+`/proc/sys/kernel/random/boot_id`.
+
+On failure, writing a same-boot diagnostic status is useful, but absence of a
+record must remain "unknown / incomplete", never success.
+
+## Phase 4 — fix stage2 helper-result telemetry
+
+In `app/src/main/jni/stage1.S`:
+
+1. preserve the raw `finit_module` return before any subsequent syscall;
+2. compare it with the helper's intentional `-E2BIG`;
+3. only proceed to namespace/bind/exec on that expected result;
+4. create `dfm1` after that comparison as HELPER_SUCCESS;
+5. abort the stage on any other return;
+6. add debug/reporting that distinguishes expected `-E2BIG`, `-ENODEV` and
+   other loader errors when possible.
+
+Do **not** rewrite the helper to return 0 just to simplify stage2: returning an
+error is how it leaves no loaded transient DirtyFrag module behind.
+
+## Phase 5 — fix runAll() progress semantics
+
+In `app/src/main/jni/exp.c`:
+
+- probe `dfm1` as well as the existing markers;
+- print names, not positional integers, for example:
+
+```text
+[DFR][MARKER] df=1 helper=1 ns=1 bind=1 exec_fail=0
+```
+
+- `dfm4 == 1` remains immediate failure;
+- `dfm3 == 1` means **BOOTSTRAP_HANDOFF=PASS**, not final root success;
+- the native return code should represent completion of the native/bootstrap
+  portion only. MainActivity must own the final post-root state.
+
+If retaining native return 0 for "stage2 exec launched", rename/log that state so
+the UI cannot present it as end-to-end success.
+
+## Phase 6 — MainActivity post-root state machine
+
+After the native transaction completes successfully, MainActivity should enter a
+new state such as `WAIT_POST_ROOT` instead of immediately painting the dialog
+green.
+
+Poll the same-boot post-root record for a bounded period. Validate:
+
+- `boot_id` equals the current boot;
+- `state=POST_ROOT_COMPLETE`;
+- expected exact KernelSU version / runtime mode;
+- `selinux=1`;
+- independently read `/sys/fs/selinux/enforce` when that read is permitted and
+  require 1.
+
+Only then:
+
+```text
+POST_ROOT_COMPLETE=PASS
+ROOT_RESULT=SUCCESS
+```
+
+and mark the UI successful.
+
+Timeout / malformed / stale status must be a failure or incomplete state, never
+a green success. If `/dev/df` is already present, continue refusing a second
+run and tell the operator that a hard reboot is the recovery boundary.
+
+## Phase 7 — keep the two repositories cryptographically coupled
+
+Changing the DFR-specific ksud changes its bytes.
+
+After the RMGLabs-Payloads build:
+
+1. record the new DFR ksud SHA-256 and size;
+2. replace `app/src/main/assets/ksud`;
+3. update the pin in:
+   - `KsudStage.kt`;
+   - `target_profile.c` / target profile fields;
+   - `tools/zzic_profile.json`;
+4. keep pre-write and post-write hashing;
+5. run `tools/profile_binding_audit.py` and add any new post-root contract
+   constants to its drift checks.
+
+The Manager fallback remains deleted. There must still be exactly one accepted
+ksud byte identity for the ZZIC path.
+
+## Phase 8 — tests before a signed build
+
+Add host tests for the new semantics.
+
+Required negative cases:
+
+- stale post-root record from another boot -> refuse;
+- malformed completion record -> refuse;
+- `state` not complete -> refuse;
+- `selinux != 1` -> refuse;
+- wrong KernelSU version/runtime mode -> refuse;
+- `dfm3` without post-root completion -> UI must not say success;
+- `finit_module` result other than expected `-E2BIG` -> stage2 must not
+  proceed to bind/exec;
+- exact helper success marker absent -> no final success;
+- app still refuses a second run when `/dev/df` exists.
+
+RMGLabs-Payloads self-tests must also prove:
+
+- `profile=rmg` keeps its existing contract unchanged;
+- `profile=dfreroot` contains the enforcing-restore closeout;
+- the DFR profile still references no world-writable staging path;
+- the completion record path is canonical and under `/data/system`;
+- a DFR build embeds the expected post-root strings and a normal RMG build does
+  not.
+
+Run the normal DFR repo offline gates as specified by `AGENTS.md` before
+dispatching a release.
+
+## Phase 9 — physical acceptance for the next release
+
+Use a full clean reboot and run once.
+
+Before running:
+
+```text
+getenforce = Enforcing
+/sys/fs/selinux/enforce = 1
+/dev/df absent
+```
+
+Expected same-boot sequence:
+
+```text
+TARGET_PROFILE=S25U_ZZIC PASS
+...
+ZZIC_MODULE_BINDING=PASS
+...
+[DFR][MARKER] helper=1
+[DFR][MARKER] ns=1
+[DFR][MARKER] bind=1
+POST_ROOT_KSU_CONTROL=PASS
+SELINUX_RESTORE=PASS
+POST_ROOT_KSU_CONTROL_AFTER_RESTORE=PASS
+POST_ROOT_COMPLETE=PASS
+```
+
+Final Termux acceptance:
 
 ```sh
-sh tools/tests/run_tests.sh              # 72/72, the exp.c syntax pass,
-                                         # then 38/38 (ko_audit modversion rules)
-sh tools/tests/run_installer_tests.sh    # 49/49 (SafeWrite)
-sh tools/tests/test_resolve_release_tag.sh   # 8/8
-python3 tools/verify_zzic_avb.py          # AVB provenance, reproducible
+getenforce
+su -c 'cat /sys/fs/selinux/enforce'
+su -c 'id; cat /proc/self/attr/current'
+cat /proc/sys/kernel/random/boot_id
 ```
 
-The one command that is specific to this handoff rather than to the repo:
+Required final state:
 
-```sh
-sh tools/zzic_collect.sh > zzic-identity.txt 2>&1   # on-device, read-only
+```text
+Enforcing
+1
+uid=0(root) ... context=u:r:ksu:s0
+same boot_id as the run
 ```
 
-It writes nothing, needs root only for its `/proc/kallsyms` section, and prints
-every field the identity gate compares plus the whole vendor-provenance chain.
+Only after that should Gate I / automatic safe completion be promoted to PASS.
 
-## Things that must not be quietly "fixed"
+## Release discipline
 
-See `AGENTS.md` §7 ("Things that look like defects and are not") and §3.6
-("No execution override, under any name"). The short list, for orientation:
-the `org.lsposed.lspromise.DirtyFrag` JNI package name is load-bearing;
-`libexp.so` is arm64-only by design; `REFERENCE_DIRTYFRAG_FIX_ABSENT` is an
-independent fact and not proof of anything; and a run that refuses at a gate and
-writes nothing is the tool working.
+Do not spend signing secrets on intermediate iterations. Build the new
+DFR-specific ksud first, integrate/pin it, run all offline tests, then dispatch
+one signed DFReroot release when the tree is ready for the physical acceptance
+run.
 
-Gate promotion still needs independent evidence for every boundary, recorded in
-`docs/S25U_ZZIC_COMPATIBILITY.md`. Today: A, B, C, D, E, F, H and G1 are PASS
-(G1 offline; A/B/C/D/H include physical evidence). G2 and G4 are unverified, G3
-is supported offline but awaits runtime confirmation, and Gate I is pending the
-next same-boot physical run.
+The current stable validation release remains `v2.0.4-zzic`; it proves the
+root chain but can leave SELinux permissive until manually restored. Do not
+describe it as automatic safe completion.
+
+## Things not to change while doing this
+
+- Do not weaken the exact target classifier.
+- Do not relax Gate G or modversion coverage.
+- Do not replace the exact ZZIC module with the generic android15/6.6 image.
+- Do not use `/data/local/tmp` for a DFR runtime marker or staging path.
+- Do not use `/data/system/dfreroot-ksu-ready` as KernelSU authority.
+- Do not make `dfm3` mean root complete.
+- Do not remove the hard-reboot / second-run guard.
+- Do not restore SELinux before KernelSU's policy/control path is demonstrably
+  alive, except as a best-effort failure cleanup.
+- Do not call a post-root state PASS without reading the final enforcing state
+  back.
+
+## New-conversation starting point
+
+The next implementation conversation should begin by reading:
+
+```text
+AGENTS.md
+docs/HANDOFF.md
+docs/S25U_ZZIC_COMPATIBILITY.md
+```
+
+Then inspect these exact implementation points before editing:
+
+```text
+DFReroot-S25U:
+  app/src/main/jni/stage1.S
+  app/src/main/jni/include.inc
+  app/src/main/jni/exp.c
+  app/src/main/java/com/polygraphene/df/reroot/MainActivity.kt
+  app/src/main/java/com/polygraphene/df/reroot/KsudStage.kt
+  tools/profile_binding_audit.py
+
+RMGLabs-Payloads:
+  kernelsu/patches/apply-v330-staged-daemon-hotfix.py
+  .github/workflows/build-zzic-exact-port.yml
+```
+
+The implementation target is:
+
+```text
+root functional
++ KernelSU control channel verified
++ SELinux automatically restored and read back as Enforcing
++ KernelSU re-verified after restoration
++ same-boot POST_ROOT_COMPLETE
++ no green UI success before all of the above
+```
