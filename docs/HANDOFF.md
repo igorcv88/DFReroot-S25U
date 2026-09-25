@@ -123,6 +123,23 @@ direct runtime SHA-256 check. The vendor ELF is not — see invariant 3b.
 
 ### 2. A Gate-G validated kernel module — unblocks the module load
 
+**The CRCs are no longer the blocker; the build is.** The four ZZIC symbol
+versions are derived, committed and bound to witness bytes in
+`evidence/zzic/gate-g/`, and the witness is kernel-loaded. What remains is
+compiling the helper against them, which needs a Docker-capable Linux host — not
+the phone, not a cloud session without a Docker daemon. The full recipe,
+acceptance criteria and the one code change it requires are in
+[`docs/GATE_G_LKM_BUILD.md`](GATE_G_LKM_BUILD.md).
+
+One finding from that write-up belongs here too, because it is easy to get wrong:
+`ko_filename` is a **label**. `select_ko_image()` chooses by kernel family and
+`patch_ko()` hashes the bytes it selected, so dropping the ZZIC module in as
+`dirtyfrag-android15-6.6.ko` would work for ZZIC and silently regress every other
+android15/6.6 device. It needs its own `.incbin` entry and a ZZIC-only selection
+branch, landing in the same commit as the module.
+
+#### Original note
+
 The bundled `dirtyfrag-android15-6.6.ko` shares the ZZIC kernel's GKI base
 (`6.6.127`) and page tag (`4k`) but ships an **empty `__versions` table** while
 the kernel has `CONFIG_MODVERSIONS=y`, so no symbol-CRC agreement can be
