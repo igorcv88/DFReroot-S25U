@@ -16,7 +16,7 @@
  */
 const struct TargetProfile DFR_PROFILE_ZZIC = {
     .id            = "S25U_ZZIC",
-    .manufacturer  = "Samsung",
+    .manufacturer  = "samsung",
     .model         = "SM-S938B",
     .device        = "pa3q",
     .sdk           = 37,
@@ -34,6 +34,9 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
         "470d40df59320e01b1449f8dbe962e0d44d735c817b99293dc6da286175ffcf3",
     .btf_sha256 =
         "e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c",
+    /* First mutation target. Keep NULL until the exact ZZIC file hash is
+     * captured from hardware; Gate B treats an unpinned required target as FAIL. */
+    .crashdump_sha256 = NULL,
     .vendor_target_sha256 =
         "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
     .libc_sha256 =
@@ -47,7 +50,8 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
     .network_stack_cap_eff = 0x800003c00L,
 
     /* No ZZIC-validated module is bundled: only the generic Gate-G UNVERIFIED
-     * android15-6.6 .ko exists. Keep fail-closed until one is proven. */
+     * android15-6.6 .ko exists. All mutating ZZIC entry points stay fail-closed
+     * until a module is positively validated and bundled. */
     .ko_zzic_verified = 0,
 };
 
