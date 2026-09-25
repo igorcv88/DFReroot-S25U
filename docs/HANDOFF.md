@@ -145,8 +145,17 @@ symbols.
 
 ```sh
 python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko \
+    --require-modversion-coverage \
     --symvers Module.symvers --kallsyms kallsyms.txt
 ```
+
+`--require-modversion-coverage` is mandatory on the acceptance run for a newly
+built module. A `__versions` table that covers only *some* imports cannot load
+(`check_version()` refuses with `no symbol version for %s`, and
+`CONFIG_MODULE_FORCE_LOAD` is not set), so the audit requires
+`imports_requiring_modversion - __versions entries == {}` and names every hole.
+Weak undefined symbols are exempt; an import absent from `Module.symvers`
+altogether is reported separately, as the harder `Unknown symbol` failure.
 
 `MODULE_VS_ZZIC_KERNEL = COMPATIBLE` is the only result that justifies setting
 the three `ko_*` profile fields. The module imports only `sprint_symbol`,
@@ -230,7 +239,8 @@ expensive:
 Expected counts, so a drop is noticeable:
 
 ```sh
-sh tools/tests/run_tests.sh              # 72/72, then the exp.c syntax pass
+sh tools/tests/run_tests.sh              # 72/72, the exp.c syntax pass,
+                                         # then 38/38 (ko_audit modversion rules)
 sh tools/tests/run_installer_tests.sh    # 49/49 (SafeWrite)
 sh tools/tests/test_resolve_release_tag.sh   # 8/8
 ```

@@ -16,3 +16,7 @@ trap 'rm -rf "$OUT"' EXIT
 # The JNI payload holds every fail-closed gate; syntax-check it here too so a
 # typo in one costs a second on any host instead of a whole signed NDK build.
 sh tools/tests/exp_syntax_check.sh
+
+# Gate G rule tests: the modversion coverage requirement, on synthetic .ko files.
+# Pure host Python - no kernel, no NDK, no device.
+python3 tools/tests/test_ko_audit.py

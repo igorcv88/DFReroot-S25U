@@ -456,11 +456,17 @@ sha256      : 6658df7da8b2e90a9d15dd551cbdc7a2405d707fdd13ee8892a1d7c635d884c0  
 machine     : AArch64 (OK)          module: dirtyfrag   license: GPL   depends: <none>
 vermagic    : 6.6.127-4k-g46a034eca005-dirty SMP preempt mod_unload modversions aarch64
 signed      : False
-imports (4) : __stack_chk_fail, _printk, memset, sprint_symbol
+imports (4) : __stack_chk_fail, _printk, memset, sprint_symbol   (4 need a version entry, 0 weak)
 __versions  : 0 entries   (section present, size 0 — no per-symbol CRC table)
+MODVERSION_COVERAGE = EMPTY (__versions holds no entries; 4 import(s) need one)
 relocations : .rela.text 8, .rela.init.text 25, .rela.init.data 1, .rela.gnu.linkonce.this_module 1
 GENERIC_ANDROID15_6_6_MODULE = UNVERIFIED
 ```
+
+With `--require-modversion-coverage` the same module is `INCOMPATIBLE`: the empty
+table alone makes it unloadable on a `CONFIG_MODVERSIONS=y` kernel, independently
+of any CRC. The plain invocation stays `UNVERIFIED` (exit 0) on purpose, so the
+release audit is not blocked by evidence that is merely absent.
 
 Key findings, reported as **four independent properties** (never collapsed):
 - The module imports **only** `sprint_symbol`, `_printk`, `memset`,
@@ -478,6 +484,12 @@ Key findings, reported as **four independent properties** (never collapsed):
   module ships an **empty `__versions` table**, so no CRC can be checked offline.
   Verdict is therefore `UNVERIFIED` — resolve with the ZZIC `Module.symvers`:
   `tools/ko_audit.py … --symvers Module.symvers --kallsyms kallsyms.txt`.
+- `MODVERSION_COVERAGE=EMPTY` is reported as its own value, distinct from
+  `INCOMPLETE` and from the CRC diff. "The table has no entry for this import"
+  and "the entry disagrees with the kernel" are different facts; so are
+  `SYMBOL_HAS_MODVERSION_ENTRY` and `MODVERSION_MATCH`. An imported symbol with
+  no entry reports `MISSING (imported, no __versions entry)` — it used to report
+  `N/A (not imported)`, a false label on exactly the hole that matters.
 
 ## Native packaging (Gate E) — built and verified in this environment
 
@@ -845,6 +857,51 @@ Then:
 python3 tools/ko_audit.py <new-module.ko> \
     --symvers <exact-Module.symvers> --kallsyms <captured-kallsyms.txt>
 ```
+
+#### Modversion coverage is part of that verdict
+
+Comparing only the entries `__versions` *happens to contain* is fail-open. The
+kernel's `check_version()` walks the table for the symbol it is resolving and
+refuses the load when the table exists but names no version for it (`no symbol
+version for %s`); `CONFIG_MODULE_FORCE_LOAD` is not set on this kernel, so there
+is no escape hatch. A table covering three of four imports is therefore
+**unloadable** — yet an entries-only diff finds every present entry in agreement
+and would read `COMPATIBLE`.
+
+So `ko_audit.py` requires, and reports separately:
+
+```text
+MODVERSION_COVERAGE          imports_requiring_modversion - __versions entries == {}
+modversion_missing_entries   the imports with no entry, named
+modversion_unresolvable_imports  imports absent from Module.symvers entirely
+SYMBOL_HAS_MODVERSION_ENTRY  per symbol, distinct from MODVERSION_MATCH
+```
+
+Rules that follow from that:
+
+- A hole in the table is `INCOMPATIBLE` when a `Module.symvers` is supplied, and
+  is reported as a **hole**, never as a CRC mismatch — different failure,
+  different fix.
+- An import absent from `Module.symvers` is a separate, harder failure: the load
+  dies on `Unknown symbol` before any version check runs.
+- Weak (`STB_WEAK`) undefined symbols are exempt. `simplify_symbols()` leaves an
+  unresolved weak import at zero instead of failing, so counting one as a hole
+  would invent a refusal.
+- Coverage is decidable from the `.ko` alone, so it is always reported. Without a
+  `Module.symvers` the verdict still stays `UNVERIFIED` — absent evidence is not
+  a defect in the module — unless `--require-modversion-coverage` is passed, which
+  the new-module acceptance path **must** pass:
+
+```sh
+python3 tools/ko_audit.py <new-module.ko> --require-modversion-coverage \
+    --symvers <exact-Module.symvers> --kallsyms <captured-kallsyms.txt>
+```
+
+`tools/tests/test_ko_audit.py` carries one negative case per element, including
+the one this rule exists for: a partial table whose every present entry agrees.
+`tools/profile_binding_audit.py` exercises `ko_audit` on the bundled modules and
+fails if a named hole ever stops being fatal, so the rule cannot be refactored
+away silently.
 
 `MODULE_VS_ZZIC_KERNEL = COMPATIBLE` is the only result that justifies setting
 the three profile fields, and they move together or not at all:
