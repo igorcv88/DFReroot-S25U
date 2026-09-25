@@ -16,7 +16,7 @@
  */
 const struct TargetProfile DFR_PROFILE_ZZIC = {
     .id            = "S25U_ZZIC",
-    .manufacturer  = "Samsung",
+    .manufacturer  = "samsung",
     .model         = "SM-S938B",
     .device        = "pa3q",
     .sdk           = 37,
