@@ -124,18 +124,17 @@ object Diagnostics {
             uid == StageHop.NETWORK_STACK_UID &&
                 procName == StageHop.NETWORK_STACK_PROCESS &&
                 selinux == NETWORK_STACK_CONTEXT
-        emit(
-            sb,
-            "[DFR][PROCESS] NETWORKSTACK_PROCESS_FOUND=" +
-                "${if (isNetworkStack) "PASS" else "FAIL"} " +
-                "(uid=$uid name=$procName context=$selinux)"
-        )
-        val reached = when {
+        val networkStackState = when {
             where != "network_stack" -> "SKIP"
             isNetworkStack -> "PASS"
             else -> "FAIL"
         }
-        emit(sb, "[DFR][PROCESS] REMOTE_COMPONENT_REACHED=$reached")
+        emit(
+            sb,
+            "[DFR][PROCESS] NETWORKSTACK_PROCESS_FOUND=$networkStackState " +
+                "(uid=$uid name=$procName context=$selinux)"
+        )
+        emit(sb, "[DFR][PROCESS] REMOTE_COMPONENT_REACHED=$networkStackState")
 
         val libexp = File(nld, "libexp.so")
         val discoverable = try { libexp.exists() } catch (_: Throwable) { false }
