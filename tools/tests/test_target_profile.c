@@ -33,7 +33,7 @@ static int g_total = 0;
 static struct ObservedTarget zzic_observed(void) {
     struct ObservedTarget o;
     memset(&o, 0, sizeof(o));
-    o.manufacturer  = "Samsung";
+    o.manufacturer  = "samsung";
     o.model         = "SM-S938B";
     o.device        = "pa3q";
     o.sdk           = 37;
