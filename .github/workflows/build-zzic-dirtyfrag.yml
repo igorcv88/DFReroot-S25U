@@ -57,6 +57,7 @@ jobs:
 
           for line in path.read_text().splitlines():
               fields = line.split()
+
               if len(fields) < 2:
                   continue
 
@@ -72,8 +73,8 @@ jobs:
 
           if set(got) != set(required):
               raise SystemExit(
-                  f"Required symbol set mismatch: got={sorted(got)} "
-                  f"expected={sorted(required)}"
+                  f"Required symbol set mismatch: "
+                  f"got={sorted(got)} expected={sorted(required)}"
               )
 
           for symbol in sorted(required):
@@ -146,8 +147,7 @@ jobs:
               cat "$EXACT"
 
               #
-              # Force the external module to carry the exact Samsung ZZIC
-              # release string rather than the generic DDK release.
+              # Force exact ZZIC kernel release into the external module.
               #
               mkdir -p \
                 "$KDIR/include/config" \
@@ -167,20 +167,12 @@ jobs:
                 "$KDIR/Module.symvers" || true
 
               #
-              # IMPORTANT:
+              # The committed derived symvers is authoritative only for:
               #
-              # The derived ZZIC symvers is evidence for CRC + symbol only.
-              # Its owner/export-type fields are deliberately assumptions and
-              # it has no observable namespace.
+              #     CRC + symbol
               #
-              # Therefore DO NOT copy its whole lines into KDIR/Module.symvers.
-              #
-              # Instead:
-              #   1. read only CRC + symbol from the exact ZZIC evidence;
-              #   2. find the corresponding existing DDK entry;
-              #   3. replace ONLY field 1 (CRC);
-              #   4. preserve all remaining DDK fields exactly, including the
-              #      Linux 6.6 namespace field.
+              # Preserve the DDKs existing owner/export-type/namespace fields
+              # and replace only the CRC for the four imports.
               #
               python3 - "$KDIR/Module.symvers" "$EXACT" <<'"'"'PY'"'"'
           import sys
@@ -216,8 +208,8 @@ jobs:
 
           if set(exact_crc) != required:
               raise SystemExit(
-                  "Derived ZZIC symvers does not contain the exact required "
-                  f"symbol set. got={sorted(exact_crc)} "
+                  "Derived ZZIC symvers does not contain exactly the "
+                  f"required symbols. got={sorted(exact_crc)} "
                   f"expected={sorted(required)}"
               )
 
@@ -227,11 +219,6 @@ jobs:
           output = []
 
           for line in original_lines:
-              #
-              # Module.symvers is tab-separated.
-              # Preserve the complete existing DDK entry, including empty
-              # namespace field(s), and change only its CRC.
-              #
               fields = line.split("\t")
 
               if len(fields) >= 2 and fields[1] in required:
@@ -259,11 +246,12 @@ jobs:
           ddk_path.write_text("\n".join(output) + "\n")
 
           print("Patched exact ZZIC CRCs into DDK Module.symvers:")
+
           for symbol in sorted(required):
               print(f"  {symbol:20s} 0x{exact_crc[symbol]:08x}")
 
           print()
-          print("All non-CRC Module.symvers fields were preserved.")
+          print("All non-CRC Module.symvers fields preserved.")
           PY
 
               echo
@@ -323,11 +311,34 @@ jobs:
                       f"0x{expected[symbol]:08x}"
                   )
 
-              print(f"{symbol:20s} 0x{got[symbol]:08x} PASS")
+              print(
+                  f"{symbol:20s} "
+                  f"0x{got[symbol]:08x} PASS"
+              )
           PY
 
+              echo
+              echo "=== MODVERSION CONFIG ==="
+
+              if [ -f "$KDIR/include/config/auto.conf" ]; then
+                grep -E \
+                  "^(CONFIG_MODVERSIONS|CONFIG_BASIC_MODVERSIONS|CONFIG_EXTENDED_MODVERSIONS|CONFIG_RUST)=" \
+                  "$KDIR/include/config/auto.conf" || true
+              else
+                echo "auto.conf not present"
+              fi
+
+              echo
+              echo "=== MODPOST MODE SUPPORT ==="
+
+              grep -R \
+                -E "CONFIG_(BASIC|EXTENDED)_MODVERSIONS" \
+                /opt/ddk/src/android15-6.6/scripts/Makefile.modpost \
+                /opt/ddk/src/android15-6.6/scripts/mod 2>/dev/null \
+                | head -100 || true
+
               #
-              # Clean only the external DirtyFrag module directory.
+              # Clean only the external DirtyFrag module tree.
               #
               cd /work/dirtyfrag-lkm
 
@@ -342,12 +353,21 @@ jobs:
               echo
               echo "=== BUILD ==="
 
+              #
+              # Explicitly request BASIC modversions.
+              #
+              # The exact ZZIC stock witness stores CRC/name pairs in
+              # __versions, and ko_audit currently verifies that representation.
+              #
               make -C "$KDIR" \
                 M="$PWD" \
                 src="$PWD" \
                 ARCH=arm64 \
                 LLVM=1 \
                 LLVM_IAS=1 \
+                CONFIG_MODVERSIONS=y \
+                CONFIG_BASIC_MODVERSIONS=y \
+                CONFIG_EXTENDED_MODVERSIONS= \
                 modules \
                 -j"$(nproc)"
 
@@ -359,11 +379,16 @@ jobs:
               readelf -h dirtyfrag.ko \
                 | grep -F "AArch64"
 
-              readelf -SW dirtyfrag.ko \
-                | grep -F "__versions"
-
               strings dirtyfrag.ko \
                 | grep -F "$TARGET_RELEASE"
+
+              echo
+              echo "=== PRE-STRIP VERSION SECTIONS ==="
+
+              readelf -SW dirtyfrag.ko \
+                | grep -E \
+                  "__versions|__version_ext_names|__version_ext_crcs" \
+                || true
 
               echo
               echo "=== PRE-STRIP MODINFO ==="
@@ -375,18 +400,33 @@ jobs:
 
               sha256sum dirtyfrag.ko
 
-              #
-              # Keep an unstripped copy for diagnosis/provenance.
-              #
-              cp dirtyfrag.ko "/out/${OUT_NAME%.ko}-unstripped.ko"
+              echo
+              echo "=== PRE-STRIP STRICT GATE G ==="
+
+              python3 /work/tools/ko_audit.py dirtyfrag.ko \
+                --symvers /work/evidence/zzic/gate-g/ZZIC-derived-minimal.symvers \
+                --symvers-provenance /work/evidence/zzic/gate-g/ZZIC-modversion-provenance.json \
+                --require-modversion-coverage
+
+              echo
+              echo "=== PRE-STRIP GATE G PASS ==="
 
               #
-              # Same size reduction strategy used by the original project.
-              # The final STRIPPED bytes are the bytes Gate G will audit and
-              # eventually pin into the target profile.
+              # Keep the exact unstripped module for diagnosis/provenance.
+              #
+              cp \
+                dirtyfrag.ko \
+                "/out/${OUT_NAME%.ko}-unstripped.ko"
+
+              #
+              # For this validation build use --strip-debug rather than
+              # --strip-unneeded.
+              #
+              # This isolates whether stripping could remove load-critical
+              # modversion data.
               #
               llvm-objcopy \
-                --strip-unneeded \
+                --strip-debug \
                 -R .comment \
                 -R .note.gnu.build-id \
                 -R .note.gnu.property \
@@ -412,11 +452,16 @@ jobs:
               readelf -h "/out/$OUT_NAME" \
                 | grep -F "AArch64"
 
-              readelf -SW "/out/$OUT_NAME" \
-                | grep -F "__versions"
-
               strings "/out/$OUT_NAME" \
                 | grep -F "$TARGET_RELEASE"
+
+              echo
+              echo "=== FINAL VERSION SECTIONS ==="
+
+              readelf -SW "/out/$OUT_NAME" \
+                | grep -E \
+                  "__versions|__version_ext_names|__version_ext_crcs" \
+                || true
 
               echo
               echo "=== FINAL MODINFO ==="
@@ -431,7 +476,9 @@ jobs:
               echo
               echo "=== FINAL SIZE ==="
 
-              stat -c "%n %s bytes" "/out/$OUT_NAME"
+              stat -c \
+                "%n %s bytes" \
+                "/out/$OUT_NAME"
             '
 
       - name: Gate G strict audit
@@ -460,7 +507,8 @@ jobs:
             --json \
             > "$RUNNER_TEMP/dirtyfrag-out/$OUT_NAME.audit.json"
 
-          test -s "$RUNNER_TEMP/dirtyfrag-out/$OUT_NAME.audit.json"
+          test -s \
+            "$RUNNER_TEMP/dirtyfrag-out/$OUT_NAME.audit.json"
 
       - name: Record final artifact identity
         run: |
@@ -471,8 +519,10 @@ jobs:
           sha256sum "$OUT_NAME" \
             | tee "$OUT_NAME.sha256"
 
-          sha256sum "${OUT_NAME%.ko}-unstripped.ko" \
-            | tee "${OUT_NAME%.ko}-unstripped.ko.sha256"
+          sha256sum \
+            "${OUT_NAME%.ko}-unstripped.ko" \
+            | tee \
+              "${OUT_NAME%.ko}-unstripped.ko.sha256"
 
           echo
           echo "=== FINAL ARTIFACT ==="
@@ -482,12 +532,18 @@ jobs:
             "$OUT_NAME"
 
           echo
-          echo "=== SHA256 ==="
+          echo "=== FINAL SHA256 ==="
 
           cat "$OUT_NAME.sha256"
 
           echo
+          echo "=== UNSTRIPPED SHA256 ==="
+
+          cat "${OUT_NAME%.ko}-unstripped.ko.sha256"
+
+          echo
           echo "=== EXPECTED TARGET RELEASE ==="
+
           echo "$TARGET_RELEASE"
 
       - name: Upload ZZIC DirtyFrag artifacts
