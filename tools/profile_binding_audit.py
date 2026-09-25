@@ -33,6 +33,7 @@ ROOT = os.path.dirname(HERE)
 PROFILE_C = os.path.join(ROOT, "app", "src", "main", "jni", "target_profile.c")
 JNI_DIR = os.path.join(ROOT, "app", "src", "main", "jni")
 PROFILE_JSON = os.path.join(HERE, "zzic_profile.json")
+EXP_C = os.path.join(ROOT, "app", "src", "main", "jni", "exp.c")
 
 # Fields compared between the C profile and the JSON profile.
 SHARED_STRINGS = [
@@ -147,6 +148,17 @@ def audit():
         fail("manufacturer is %r; ro.product.manufacturer is lowercase "
              "'samsung' on this firmware and the compare is case-sensitive"
              % (c.get("manufacturer"),))
+
+    # Exact ZZIC support must never gain an operator marker that bypasses an
+    # UNVERIFIED module decision. Missing Gate-G evidence is a hard refusal.
+    with open(EXP_C) as f:
+        exp_src = f.read()
+    bypass_token = "dfr_allow_unverified_ko"
+    if bypass_token in exp_src:
+        fail("unsafe Gate-G override token is present in exp.c: %s" % bypass_token)
+    r["checks"]["unverified_module_override"] = (
+        "absent" if bypass_token not in exp_src else "present"
+    )
 
     r["status"] = "PASS" if not r["violations"] else "FAIL"
     return r
