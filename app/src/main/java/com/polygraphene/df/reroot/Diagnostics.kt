@@ -18,6 +18,7 @@ import java.io.File
  */
 object Diagnostics {
     private const val TAG = "DFReroot"
+    private const val NETWORK_STACK_CONTEXT = "u:r:network_stack:s0"
 
     private fun emit(sb: StringBuilder?, line: String) {
         Log.i(TAG, line)
@@ -100,20 +101,41 @@ object Diagnostics {
         emit(sb, "[DFR][PROCESS] ENTER gate D ($where)")
         val pid = Process.myPid()
         val uid = Process.myUid()
+        val statusUid = readStatusId("Uid")
         val gid = readStatusId("Gid")
-        emit(sb, "[DFR][PROCESS] pid=$pid uid=$uid (status uid=${readStatusId("Uid")}) gid=$gid")
-        emit(sb, "[DFR][PROCESS] process_name=${readProcName()}")
-        emit(sb, "[DFR][PROCESS] selinux_context=${readSelinux()}")
+        val procName = readProcName()
+        val selinux = readSelinux()
+        val capEff = readStatusField("CapEff")
+        val capBnd = readStatusField("CapBnd")
+        val seccomp = readStatusField("Seccomp")
+        val noNewPrivs = readStatusField("NoNewPrivs")
+
+        emit(sb, "[DFR][PROCESS] pid=$pid uid=$uid (status uid=$statusUid) gid=$gid")
+        emit(sb, "[DFR][PROCESS] process_name=$procName")
+        emit(sb, "[DFR][PROCESS] selinux_context=$selinux")
+        emit(sb, "[DFR][PROCESS] CapEff=$capEff CapBnd=$capBnd Seccomp=$seccomp NoNewPrivs=$noNewPrivs")
         emit(sb, "[DFR][PROCESS] abi=${supportedAbi()}")
         emit(sb, "[DFR][PROCESS] classloader=${javaClass.classLoader}")
         val nld = try { context.applicationInfo.nativeLibraryDir } catch (e: Throwable) { "UNKNOWN($e)" }
         emit(sb, "[DFR][PROCESS] nativeLibraryDir=$nld")
 
-        // network_stack observation, kept separate from "reached" (see below).
-        val isNet = uid == StageHop.NETWORK_STACK_UID
-        emit(sb, "[DFR][PROCESS] NETWORKSTACK_PROCESS_FOUND=${if (isNet) "PASS" else "SKIP"} (uid=$uid)")
-        emit(sb, "[DFR][PROCESS] REMOTE_COMPONENT_REACHED=" +
-            if (where == "network_stack") "PASS" else "SKIP")
+        // Prove the remote boundary from observed identity, never from the caller label.
+        val isNetworkStack =
+            uid == StageHop.NETWORK_STACK_UID &&
+                procName == StageHop.NETWORK_STACK_PROCESS &&
+                selinux == NETWORK_STACK_CONTEXT
+        emit(
+            sb,
+            "[DFR][PROCESS] NETWORKSTACK_PROCESS_FOUND=" +
+                "${if (isNetworkStack) "PASS" else "FAIL"} " +
+                "(uid=$uid name=$procName context=$selinux)"
+        )
+        val reached = when {
+            where != "network_stack" -> "SKIP"
+            isNetworkStack -> "PASS"
+            else -> "FAIL"
+        }
+        emit(sb, "[DFR][PROCESS] REMOTE_COMPONENT_REACHED=$reached")
 
         val libexp = File(nld, "libexp.so")
         val discoverable = try { libexp.exists() } catch (_: Throwable) { false }
@@ -122,12 +144,15 @@ object Diagnostics {
     }
 
     /** Real uid/gid from /proc/self/status ("Uid:\treal\teff\tsaved\tfs"). */
-    private fun readStatusId(key: String): String = try {
+    private fun readStatusId(key: String): String =
+        readStatusField(key).split(Regex("\\s+")).firstOrNull() ?: "UNKNOWN"
+
+    /** One raw scalar/list field from /proc/self/status. */
+    private fun readStatusField(key: String): String = try {
         File("/proc/self/status").readLines()
             .firstOrNull { it.startsWith("$key:") }
-            ?.split(Regex("\\s+"))?.getOrNull(1) ?: "UNKNOWN"
+            ?.substringAfter(':')?.trim() ?: "UNKNOWN"
     } catch (e: Throwable) { "UNKNOWN($e)" }
-
     private fun readProcName(): String = try {
         File("/proc/self/cmdline").readBytes()
             .toString(Charsets.UTF_8).trim('\u0000').substringBefore('\u0000')
