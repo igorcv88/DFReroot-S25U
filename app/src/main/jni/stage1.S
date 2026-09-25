@@ -206,8 +206,15 @@ argv_pkgname:
     .asciz "--package-name"
 argv_ksu:
     .asciz "me.weishu.kernelsu"
-argv_stage_from:
-    .asciz "--stage-from"
+/*
+ * There is deliberately no --stage-from here. The upstream DFReroot ksud
+ * accepted it; the RMG ZZIC build does not - it takes the staging path from
+ * stage_daemon_from("/data/system/dfreroot-ksud"), compiled in. clap rejects an
+ * unknown long option, so passing it would make late-load exit on a usage error
+ * before doing anything, and the failure would look like the hop failing rather
+ * than an argument nobody supports. Verified against the binaries: `stage-from`
+ * appears once in the old upstream asset and zero times in either RMG build.
+ */
 timespec_req:
     .quad 1          /* tv_sec */
     .quad 0          /* tv_nsec */
@@ -302,8 +309,10 @@ matched:
 
     logdbg msg_s2_bind, logdw_path2, log_tag2
 
-    // argv = [logcat, late-load, --package-name,
-    //         me.weishu.kernelsu, --stage-from, ksud_path, NULL]
+    // argv = [logcat, late-load, --package-name, me.weishu.kernelsu, NULL]
+    //
+    // The staging path is NOT passed: the RMG ZZIC ksud has it compiled in as
+    // /data/system/dfreroot-ksud, which is where KsudStage already writes it.
     adr x0, argv_prog
     str x0, [sp]
 
@@ -316,13 +325,7 @@ matched:
     adr x0, argv_ksu
     str x0, [sp, 24]
 
-    adr x0, argv_stage_from
-    str x0, [sp, 32]
-
-    adr x0, ksud_path
-    str x0, [sp, 40]
-
-    str xzr, [sp, 48]
+    str xzr, [sp, 32]
 
     adr x0, logcat_path
     mov x1, sp

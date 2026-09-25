@@ -239,16 +239,17 @@ class MainActivity : Activity() {
         } catch (t: Throwable) {
             "[x] asset staging failed: $t\n"
         }
-        if (!fromAssets.contains("[+] staged")) {
-            try {
-                val app = packageManager.getApplicationInfo("me.weishu.kernelsu", 0)
-                val raw = java.io.File(app.nativeLibraryDir, "libksud.so").readBytes()
-                return fromAssets + "[*] trying manager lib as source\n" +
-                    KsudStage.stageBytes(raw)
-            } catch (t: Throwable) {
-                return fromAssets + "[x] manager fallback failed: ${t.message}\n"
-            }
-        }
+        /*
+         * The manager-app fallback is gone. It read the daemon out of whatever
+         * KernelSU manager happened to be installed and staged those bytes -
+         * an unpinned daemon from a third-party package, about to be handed uid
+         * 0. KsudStage now refuses anything but the pinned ZZIC digest, so that
+         * fallback could only ever have been refused or, worse, have been the
+         * one path where the pin did not apply.
+         *
+         * If assets/ksud is wrong or missing, that is a build defect to fix in
+         * the build, not to route around at run time.
+         */
         return fromAssets
     }
 

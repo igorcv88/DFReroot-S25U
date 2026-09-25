@@ -70,6 +70,17 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
     .network_stack_context = "u:r:network_stack:s0",
     .network_stack_cap_eff = 0x800003c00L,
 
+    /*
+     * The exact ZZIC ksud from RMGLabs-Payloads, built with the `dfreroot`
+     * staging contract: it stages from /data/system/dfreroot-ksud, which is
+     * KsudStage.DEST, instead of the world-writable directory AGENTS.md 3.6
+     * forbids naming here at all. Verified from the bytes: both /data/system
+     * literals are present and neither forbidden one is.
+     */
+    .ksud_sha256 =
+        "b82c194db398ace90fa777bed4d8419c70041eb99d7bbe2915caa900100de75f",
+    .ksud_size        = 6664728,
+
     /* No ZZIC-validated module is bundled: only the generic Gate-G UNVERIFIED
      * android15-6.6 .ko exists. Keep fail-closed until one is proven. When one
      * is, set all three fields together (see the header's invariant): the flag

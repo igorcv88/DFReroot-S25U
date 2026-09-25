@@ -777,6 +777,62 @@ Four review findings were verified and fixed:
 - **P2 — `elf_audit.py --root` absolute-symlink rebasing.** Absolute link targets
   now resolve under the pulled root, so Gate F can be closed from a pulled tree.
 
+## The ksud handoff — pinned to the exact RMG ZZIC daemon
+
+The bundled `assets/ksud` was an opaque 6.6 MB binary, unpinned, and demonstrably
+**not** the exact ZZIC build. It is now the RMGLabs-Payloads artefact built with
+the `dfreroot` staging contract, byte-identical to it:
+
+```text
+app/src/main/assets/ksud
+SHA-256  b82c194db398ace90fa777bed4d8419c70041eb99d7bbe2915caa900100de75f
+size     6,664,728
+```
+
+Verified from the bytes, not from the build log: it contains
+`/data/system/dfreroot-ksud` and `/data/system/dfreroot-ksu-ready`, and **zero**
+occurrences of either world-writable path the earlier `rmg` contract used. That is
+what makes it usable here at all — AGENTS.md §3.6 forbids naming such a directory
+anywhere in shipped code, and the audit enforces it by mechanism.
+
+Three things changed together, because any one of them alone would be a hole:
+
+1. **`stage1.S` no longer passes `--stage-from`.** The upstream DFReroot ksud
+   accepted it; neither RMG build does — the path is compiled in via
+   `stage_daemon_from()`. Measured on the binaries: the clap long-name
+   `stage-from` appears once in the old asset and **zero** times in either RMG
+   build. `clap` rejects an unknown long option, so passing it would have made
+   `late-load` exit on a usage error before doing anything, and the failure would
+   have looked like the hop failing.
+2. **`ksud_sha256` / `ksud_size` are pinned** in `target_profile.c` and
+   `tools/zzic_profile.json`, and `KsudStage` compares the asset bytes **before**
+   writing and re-reads the staged file afterwards. Size is checked separately so
+   a truncated read is named as truncation rather than as the wrong binary.
+   Unpinned is allowed and means `KsudStage` refuses to stage: an unverified
+   daemon about to receive uid 0 is exactly the failure shape this repository
+   exists to prevent.
+3. **The manager-app fallback is removed.** It read the daemon out of whatever
+   KernelSU manager happened to be installed and staged those bytes — unpinned,
+   third-party, into a uid-0 handoff. With the pin in place that path could only
+   be refused, or be the one place the pin did not apply.
+
+`tools/profile_binding_audit.py` guards all of it: digest/size drift between the
+two profiles and the Kotlin copy, a bundled asset that does not match the pin, a
+bundled ksud that lacks the `dfreroot` path or still carries the forbidden one,
+`--stage-from` reappearing in `stage1.S`, the identity signals disappearing from
+`KsudStage`, and the fallback coming back. Each was verified by sabotage.
+
+### What this does not establish
+
+`stage_daemon_from()` renames the staged file out of `/data/system` in ksud's
+pre-KernelSU bootstrap context — uid 0, but SELinux and DEFEX fully in force, so
+`remove_name` on `system_data_file` is **not** proven from there. If it is
+refused it must surface as a named refusal, never as a fallback to a
+world-writable path. That is the one untested step in the new contract.
+
+Restoring SELinux to `Enforcing` after readiness is published also remains open,
+and must be verified rather than assumed.
+
 ## Gate matrix (never auto-promoted to global compatibility)
 
 Updated after the `v2.0.2-zzic` physical run. "physical PASS" means observed on
