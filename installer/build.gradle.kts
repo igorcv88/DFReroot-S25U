@@ -24,8 +24,8 @@ android {
         applicationId = "com.polygraphene.df.installer"
         minSdk = 32
         targetSdk = 36
-        versionCode = 6
-        versionName = "2.0.3-zzic"
+        versionCode = 7
+        versionName = "2.0.4-zzic"
     }
     signingConfigs {
         // Must use the same signing key as DFReroot: the key inserted into
