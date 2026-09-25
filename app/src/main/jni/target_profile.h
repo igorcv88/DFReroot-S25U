@@ -151,6 +151,23 @@ struct TargetProfile {
     long        vendor_target_size;   /* st_size of the vendor ELF, 0 = unpinned */
     const char *vendor_target_context;/* its SELinux label, NULL = unpinned */
 
+    /*
+     * The ksud that stage2 hands the privileged handoff to. Pinned by bytes for
+     * the same reason the module is: the asset is an opaque 6.6 MB binary, and
+     * "we shipped a ksud" is not evidence that we shipped THIS one.
+     *
+     *   ksud_sha256 pinned
+     *     IMPLIES ksud_size is pinned
+     *     AND SHA-256(the asset bytes actually staged) == ksud_sha256
+     *
+     * NULL/0 = unpinned, and KsudStage then refuses to stage: an unverified
+     * daemon getting uid 0 is exactly the shape of failure this repository
+     * exists to prevent. The size is pinned alongside the digest so a truncated
+     * read is named as truncation rather than as a digest mismatch.
+     */
+    const char *ksud_sha256;
+    long        ksud_size;
+
     /* NetworkStack expectations */
     const char *network_stack_process;
     int         network_stack_uid;

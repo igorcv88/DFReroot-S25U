@@ -304,6 +304,108 @@ def audit():
              "has nothing to guard")
     r["checks"]["modversion_coverage"] = cov_reports
 
+    main_kt_path = os.path.join(ROOT, "app", "src", "main", "java", "com",
+                                "polygraphene", "df", "reroot", "MainActivity.kt")
+    try:
+        with open(main_kt_path, encoding="utf-8") as f:
+            main_src_holder = [f.read()]
+    except OSError as ex:
+        fail("cannot read MainActivity.kt: %s" % ex)
+        main_src_holder = [""]
+
+    # --- the ksud that gets handed uid 0 -----------------------------------
+    # Same invariant shape as the module's, and for the same reason: the asset is
+    # an opaque 6.6 MB binary, so "a ksud is bundled" is not evidence that THIS
+    # one is. Unpinned is allowed and means KsudStage refuses to stage; pinned
+    # must match the bytes that actually ship.
+    ksud_sha_c, ksud_sha_j = c.get("ksud_sha256"), j.get("ksud_sha256")
+    ksud_size_c, ksud_size_j = c.get("ksud_size"), j.get("ksud_size")
+    r["checks"]["ksud_sha256_pinned"] = ksud_sha_c
+    if ksud_sha_c != ksud_sha_j:
+        fail("ksud_sha256 drift: C=%r json=%r" % (ksud_sha_c, ksud_sha_j))
+    if ksud_size_c != ksud_size_j:
+        fail("ksud_size drift: C=%r json=%r" % (ksud_size_c, ksud_size_j))
+    ksud_asset = os.path.join(ROOT, "app", "src", "main", "assets", "ksud")
+    if ksud_sha_c:
+        if not ksud_size_c:
+            fail("ksud_sha256 is pinned but ksud_size is not; a truncated read "
+                 "would read as the wrong binary instead of as truncation")
+        if not os.path.exists(ksud_asset):
+            fail("ksud_sha256 is pinned but app/src/main/assets/ksud is absent")
+        else:
+            with open(ksud_asset, "rb") as f:
+                blob = f.read()
+            actual = hashlib.sha256(blob).hexdigest()
+            r["checks"]["ksud_sha256_actual"] = actual
+            r["checks"]["ksud_size_actual"] = len(blob)
+            if actual != ksud_sha_c:
+                fail("bundled assets/ksud sha256=%s does not match pinned "
+                     "ksud_sha256=%s" % (actual, ksud_sha_c))
+            elif ksud_size_c and len(blob) != ksud_size_c:
+                fail("bundled assets/ksud is %d bytes, pinned ksud_size=%s"
+                     % (len(blob), ksud_size_c))
+            else:
+                r["checks"]["ZZIC_KSUD_BINDING"] = "PASS"
+            # The whole point of the dfreroot staging contract: this binary must
+            # stage from a path this app is allowed to name.
+            if b"/data/system/dfreroot-ksud" not in blob:
+                fail("the bundled ksud does not contain /data/system/dfreroot-ksud;"
+                     " it is not the dfreroot staging-contract build")
+            if b"/data/local/tmp/.ksud-stage" in blob:
+                fail("the bundled ksud still stages from the world-writable "
+                     "/data/local/tmp/.ksud-stage; that is the contract AGENTS.md "
+                     "3.6 exists to keep out of this app")
+    elif ksud_size_c:
+        fail("ksud_size is pinned (%s) while ksud_sha256 is not; a size alone is "
+             "not identity" % ksud_size_c)
+    else:
+        r["checks"]["ZZIC_KSUD_BINDING"] = "UNVERIFIED (fail-closed, as expected)"
+
+    # The RMG ksud takes its staging path from stage_daemon_from(), compiled in.
+    # It has no --stage-from option, and clap rejects an unknown long option, so
+    # passing one would make late-load exit on a usage error before doing
+    # anything - and the failure would look like the hop failing.
+    s1 = os.path.join(ROOT, "app", "src", "main", "jni", "stage1.S")
+    try:
+        with open(s1, encoding="utf-8") as f:
+            s1_src = f.read()
+    except OSError as ex:
+        fail("cannot read stage1.S: %s" % ex)
+        s1_src = ""
+    s1_code = re.sub(r"/\*.*?\*/", "", s1_src, flags=re.S)
+    s1_code = re.sub(r"//[^\n]*", "", s1_code)
+    if "--stage-from" in s1_code:
+        fail("stage1.S passes --stage-from, which the RMG ksud does not accept; "
+             "clap would reject it and late-load would never run")
+    r["checks"]["stage2_argv_stage_from"] = "absent"
+
+    # A pin nothing compares is dead weight, so KsudStage must still verify.
+    ks = os.path.join(ROOT, "app", "src", "main", "java", "com", "polygraphene",
+                      "df", "reroot", "KsudStage.kt")
+    try:
+        with open(ks, encoding="utf-8") as f:
+            ks_src = f.read()
+    except OSError as ex:
+        fail("cannot read KsudStage.kt: %s" % ex)
+        ks_src = ""
+    if ksud_sha_c and ksud_sha_c not in ks_src:
+        fail("KsudStage.kt does not carry the pinned ksud digest, so it cannot "
+             "be comparing the bytes it stages")
+    for marker in ("KSUD_IDENTITY=PASS", "KSUD_STAGED_VERIFY=PASS"):
+        if marker not in ks_src:
+            fail("KsudStage.kt no longer emits %s; the daemon would be staged "
+                 "without a verified identity" % marker)
+    # Strip comments first: a comment explaining why the fallback was removed
+    # still contains its name, and this guard is about code.
+    def code_only(src):
+        out = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+        return re.sub(r"//[^\n]*", "", out)
+
+    if "libksud.so" in code_only(ks_src) \
+            or "libksud.so" in code_only(main_src_holder[0]):
+        fail("the manager-app libksud.so fallback is back; it stages unpinned "
+             "bytes from a third-party package into a uid-0 handoff")
+
     # --- the Kotlin copies of the Gate-D pins ------------------------------
     # The network_stack identity is COMPARED in Kotlin (Diagnostics/StageHop),
     # because that is where the observation exists - but the values are PINNED in
@@ -603,6 +705,11 @@ def human(r):
     if "ko_sha256_actual" in ck:
         L.append("ko_sha256 (bundled) : %s" % ck["ko_sha256_actual"])
     L.append("ZZIC_MODULE_BINDING : %s" % ck.get("ZZIC_MODULE_BINDING", "n/a"))
+    L.append("ZZIC_KSUD_BINDING   : %s" % ck.get("ZZIC_KSUD_BINDING", "n/a"))
+    if ck.get("ksud_sha256_actual"):
+        L.append("  assets/ksud       %s (%s bytes)"
+                 % (ck["ksud_sha256_actual"], ck.get("ksud_size_actual")))
+    L.append("stage2 --stage-from : %s" % ck.get("stage2_argv_stage_from", "n/a"))
     for base, cov in sorted((ck.get("modversion_coverage") or {}).items()):
         L.append("  modversions %-28s %s" % (base, cov))
     L.append("profile drift       : %s" % ck.get("profile_drift"))
