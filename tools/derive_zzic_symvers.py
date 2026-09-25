@@ -119,7 +119,25 @@ def witness(path, expect_release, origin=None):
     return record, {n: (c & 0xFFFFFFFF) for n, c in entries}
 
 
-def derive(paths, required, expect_release, origins=None):
+def load_lsmod(path):
+    """Module names present in a captured `lsmod` output, plus its digest.
+
+    Why this matters more than a witness count: under CONFIG_MODVERSIONS a
+    disagreeing CRC fails the load, so a stock module the kernel HAS loaded has
+    had its whole __versions table ratified by the kernel itself. One ratified
+    witness beats many unratified ones.
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    names = set()
+    for line in raw.decode("utf-8", "replace").splitlines():
+        tok = line.split()
+        if tok and not tok[0].startswith("Module"):
+            names.add(tok[0])
+    return names, hashlib.sha256(raw).hexdigest(), os.path.basename(path)
+
+
+def derive(paths, required, expect_release, origins=None, lsmod=None):
     r = {
         "tool": "tools/derive_zzic_symvers.py",
         "marker": DERIVED_MARKER,
@@ -141,6 +159,11 @@ def derive(paths, required, expect_release, origins=None):
         except (ValueError, OSError) as ex:
             r["rejected"].append({"local_path": path, "reason": str(ex)})
             continue
+        if lsmod is not None:
+            loaded_names, lsmod_digest, lsmod_name = lsmod
+            rec["kernel_loaded"] = rec["module_name"] in loaded_names
+            rec["kernel_loaded_evidence"] = lsmod_name
+            rec["kernel_loaded_evidence_sha256"] = lsmod_digest
         r["witnesses"].append(rec)
         for name, crc in entries.items():
             seen.setdefault(name, {}).setdefault(crc, []).append(rec["sha256"])
@@ -236,6 +259,11 @@ def human(r):
         L.append("           device %s" % w["device_path"])
         L.append("           sha256 %s  (%d __versions entries)"
                  % (w["sha256"], w["versions_entries"]))
+        if "kernel_loaded" in w:
+            L.append("           kernel-loaded: %s  (per %s)"
+                     % ("YES - its CRCs are ratified by the kernel"
+                        if w["kernel_loaded"] else "no",
+                        w["kernel_loaded_evidence"]))
     for rej in r["rejected"]:
         L.append("  REJECTED %s" % os.path.basename(rej["local_path"]))
         L.append("           %s" % rej["reason"])
@@ -255,9 +283,16 @@ def human(r):
         L.append("")
         L.append("Single-witness symbols rest on one module's bytes: %s."
                  % ", ".join(r["singletons"]))
-        L.append("If that module is loaded on the target (check with lsmod), the")
-        L.append("kernel itself has ratified its CRCs - a disagreeing CRC would")
-        L.append("have failed the load. Record that, it is stronger than a count.")
+        ratified = [w for w in r["witnesses"] if w.get("kernel_loaded")]
+        if ratified:
+            L.append("But %d of them is loaded on the target, so the kernel has"
+                     % len(ratified))
+            L.append("ratified its whole table: a disagreeing CRC would have")
+            L.append("failed that load. That is the stronger evidence.")
+        else:
+            L.append("If that module is loaded on the target (check with lsmod),")
+            L.append("the kernel itself has ratified its CRCs - a disagreeing CRC")
+            L.append("would have failed the load. Pass --lsmod to record it.")
     L.append("")
     if r["violations"]:
         L.append("violations:")
@@ -282,6 +317,10 @@ def main():
                     metavar="LOCAL=DEVICE_PATH",
                     help="record the module's on-device path (repeatable); "
                          "without it the provenance says <not recorded>")
+    ap.add_argument("--lsmod", metavar="CAPTURE",
+                    help="a captured `lsmod` from the target. A witness the "
+                         "kernel has loaded has had its whole __versions table "
+                         "ratified by that kernel - better evidence than a count.")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 
@@ -294,7 +333,8 @@ def main():
 
     required = a.require or list(DEFAULT_REQUIRED)
     release = a.release or target_release()
-    r = derive(a.modules, required, release, origins)
+    r = derive(a.modules, required, release, origins,
+               load_lsmod(a.lsmod) if a.lsmod else None)
 
     # Evidence must bind every witness to a firmware path. Without --origin the
     # record says "<not recorded>", which is not provenance - so refuse to EMIT,

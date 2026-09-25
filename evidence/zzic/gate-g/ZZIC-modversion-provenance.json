@@ -1,7 +1,7 @@
 {
   "CONSENSUS": "COMPLETE",
   "conflicts": [],
-  "generated_utc": "2026-09-25T15:32:59Z",
+  "generated_utc": "2026-09-25T15:36:23Z",
   "marker": "DFR-DERIVED-SYMVERS v1",
   "missing_required": [],
   "rejected": [],
@@ -4143,6 +4143,9 @@
   "witnesses": [
     {
       "device_path": "/vendor_dlkm/lib/modules/qca_cld3_kiwi_v2.ko",
+      "kernel_loaded": true,
+      "kernel_loaded_evidence": "lsmod-target.txt",
+      "kernel_loaded_evidence_sha256": "d5b0ff5248d0a890d459baab9d9bd0b016101973837cf0228730312d2f547ace",
       "local_path_at_derivation": "/tmp/claude-0/-home-user-DFReroot-S25U/6cc6ca63-9d13-5513-b07d-5f895cf25797/scratchpad/bin/DFReroot-ZZIC-binaries/modules/qca_cld3_kiwi_v2.ko",
       "module_name": "qca_cld3_kiwi_v2",
       "sha256": "bc6595275164fcf7ff1c3ac582a1be236ae9d5693c83e6ea0bc05b84fa6dd16a",

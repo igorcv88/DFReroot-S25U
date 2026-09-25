@@ -60,22 +60,29 @@ More witnesses would raise the count, and any that disagreed would be a **hard
 failure** rather than a vote: one kernel's CRCs are self-consistent, so a conflict
 means an input is not from that kernel.
 
-### The stronger argument, if you can capture it
+### The witness is kernel-ratified — captured
 
 Witness count is not the best evidence available. Under `CONFIG_MODVERSIONS` the
-kernel refuses a load when a CRC disagrees — so a stock driver that is **actually
-loaded** on the target has had its entire table ratified by the kernel itself.
-`qca_cld3_kiwi_v2` is the WLAN host driver; if Wi-Fi works, it is loaded.
+kernel refuses a load when a CRC disagrees, so a stock driver that is **actually
+loaded** has had its entire table ratified by the kernel itself.
 
-One line closes this:
+`evidence/zzic/gate-g/lsmod-target.txt` is that capture, and the provenance
+records it per witness (`kernel_loaded: true`, plus the capture's own digest):
 
-```sh
-su -c 'lsmod | grep qca_cld3_kiwi_v2'
+```text
+qca_cld3_kiwi_v2    13144064  0
+ipam                 4448256  20 qca_cld3_kiwi_v2,rmnet_core,ipanetm,rmnet_ctl
+cnss2                 471040  1 qca_cld3_kiwi_v2
+cfg80211             1142784  3 qca_cld3_kiwi_v2,wonder,mac80211
+…
 ```
 
-A loaded `qca_cld3_kiwi_v2` with that exact digest is better evidence for these
-four CRCs than any number of unratified witnesses, and it belongs in
-`docs/S25U_ZZIC_COMPATIBILITY.md` when captured.
+So all four CRCs rest on one witness **whose 588 entries the target kernel
+accepted at load time**. That is stronger than 374 unratified agreements: the
+kernel is the authority these CRCs are supposed to match, and it already voted.
+
+The evidence is still one module. If a future capture adds witnesses, any that
+disagreed would be a hard failure — see `--lsmod` and the conflict rule.
 
 ## What this does and does not establish
 
