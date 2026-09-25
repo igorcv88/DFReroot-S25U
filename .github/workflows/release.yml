@@ -94,6 +94,12 @@ jobs:
       - name: Gate A - target profile unit + regression tests
         run: sh tools/tests/run_tests.sh
 
+      # The packages.xml write path, driven against an in-memory filesystem so
+      # the EPERM-then-rename branch that lost the file's metadata on hardware
+      # is covered by a test rather than by the next field run.
+      - name: Gate H - installer SafeWrite regression suite
+        run: sh tools/tests/run_installer_tests.sh
+
       - name: Release tag resolution tests (stubbed gh, no network)
         run: sh tools/tests/test_resolve_release_tag.sh
 
@@ -123,11 +129,18 @@ jobs:
       - name: Python tool syntax
         run: python3 -m compileall -q tools
 
+      # The release notes are generated from the profile. If that generator is
+      # broken, find out here and not while publishing.
+      - name: Release notes generate from the profile
+        run: python3 tools/release_notes.py
+
       - name: Shell script syntax
         run: |
           for s in build.sh build-splice.sh create-keystore.sh \
                    tools/ci_build_audit.sh tools/repro_report.sh \
                    tools/tests/run_tests.sh tools/zzic_collect.sh \
+                   tools/tests/run_installer_tests.sh \
+                   tools/tests/exp_syntax_check.sh \
                    tools/resolve_release_tag.sh \
                    tools/tests/test_resolve_release_tag.sh \
                    dirtyfrag-lkm/build.sh; do
@@ -202,25 +215,10 @@ jobs:
             echo "Install \`df_installer_${VER}.apk\` first; \`df_reroot_${VER}.apk\` is also"
             echo "bundled inside it, so it does not need to be sideloaded separately."
             echo
-            echo "### Compatibility state — read before installing"
-            echo
-            echo "The fail-closed S25U_ZZIC profile refuses to run unless the device matches"
-            echo "the pinned firmware exactly. Runtime compatibility on this firmware is"
-            echo "**UNVERIFIED**: see \`docs/S25U_ZZIC_COMPATIBILITY.md\` for the gate matrix"
-            echo "and which gates still need on-device evidence."
-            echo
-            echo "On the exact ZZIC target this build **will refuse to root the device**, by"
-            echo "design, at two boundaries that no runtime option overrides:"
-            echo
-            echo "1. \`[DFR][USERSPACE] ZZIC_CRASHDUMP_IDENTITY FAIL required hash is not pinned\`"
-            echo "   — \`crash_dump64\`'s pristine SHA-256 has never been captured from hardware."
-            echo "2. \`[DFR][MODULE] ZZIC_MODULE_POLICY=REFUSE_UNVERIFIED\` — the bundled"
-            echo "   \`android15-6.6\` module is Gate-G UNVERIFIED against this kernel."
-            echo
-            echo "Running it is therefore an **evidence-collection** step: the hop into"
-            echo "\`network_stack\` and the \`[DFR][*]\` diagnostics still execute and are what"
-            echo "\`docs/HANDOFF.md\` asks for. Nothing is written to the page cache."
-            echo
+            # Generated from tools/zzic_profile.json and the binding audit, never
+            # hand-maintained here: the v2.0.2 notes described two blockers the
+            # build had already cleared, because prose cannot notice a profile change.
+            python3 tools/release_notes.py
             echo "### Checksums"
             echo
             echo '```'

@@ -1,8 +1,14 @@
 # DFReroot S25U / ZZIC — handoff
 
-State as of the merge of PR #4. Read this with
-`docs/S25U_ZZIC_COMPATIBILITY.md`, which is the authoritative gate matrix and
-evidence record; this file is only the "where to pick up" summary.
+**State is POST-PHYSICAL-TEST.** It reflects the first hardware execution of
+the chain — `v2.0.2-zzic` (versionCode 5) on SM-S938B / `S938BXXUCZZIC` — and
+the fixes that run produced, which ship as `2.0.3-zzic` (versionCode 6). Read it
+with `docs/S25U_ZZIC_COMPATIBILITY.md`, which is the authoritative gate matrix
+and evidence record; this file is only the "where to pick up" summary.
+
+Three things this file used to say are no longer true and must not be
+reintroduced: the `scheduleReceiver` overload shape is **not** unknown,
+`crash_dump64`'s hash **has** been captured, and Gate H is **not** untested.
 
 ## Target
 
@@ -58,6 +64,24 @@ Added for this target: a fail-closed profile (`app/src/main/jni/target_profile.{
 3. **A required artefact with no pinned hash is a FAIL, not an UNKNOWN.** "We
    never captured the hash" is not evidence of a match.
 
+3b. **An unreadable artefact is not an excuse to skip the proof — only to change
+   its form.** `/vendor/lib64/libstagefrighthw.so` cannot be `open`ed from
+   `system_server` or `network_stack` on this firmware (`EACCES`), which is why
+   `patch_ko()` writes it through the `crash_dump64` helper instead. The gate
+   therefore proves the AVB chain the pinned digest was captured under (vbmeta
+   digest, `verifiedbootstate=green`, `device_state=locked`, `flash.locked=1`,
+   `veritymode=enforcing`, `/vendor` erofs read-only) and refuses on any
+   divergence. `EACCES` never becomes a PASS by itself, and a file that IS
+   readable but hashes differently is always a hard refusal.
+
+3c. **DFInstaller's metadata source of truth is the ORIGINAL file, stat'd before
+   any write.** Never the backup, never a hardcoded `0600`. The device's
+   `packages.xml` is `1000:1000 0660 u:object_r:system_data_file:s0`, and a
+   freshly created file in a root-run `app_process` is `root:root 0644` — that
+   mismatch is exactly the v2.0.2 defect. A backup is created transactionally
+   and verified by size and digest; an existing backup that is empty, truncated
+   or unparsable is a hard failure, not a log line.
+
 4. **No validation happens after a write.** All identity checks, module
    selection and the Gate-G policy run before the first page-cache write, so a
    refusal never leaves a corrupted file behind.
@@ -82,15 +106,23 @@ Added for this target: a fail-closed profile (`app/src/main/jni/target_profile.{
 
 ## Current state
 
-The ZZIC path **refuses by design**, at:
+The chain was demonstrated on hardware up to Gate G. It now **refuses by design**
+at exactly one boundary:
 
 ```
-[DFR][USERSPACE] ZZIC_CRASHDUMP_IDENTITY FAIL required hash is not pinned
+[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED
+[DFR][MODULE] ZZIC_MODULE_POLICY=REFUSE_UNVERIFIED
 ```
 
-That is correct behaviour, not a bug. Everything static is done and verified:
-the project builds, both APKs are produced and signed with one key, 36/36 host
-gate tests pass, and the offline audits pass. What remains is evidence only.
+Everything before it is proven: Gate A (exact identity), Gate B (kernel,
+`crash_dump64`, vendor provenance), Gate C (`scheduleReceiver/12` on Android 17),
+Gate D (`network_stack` boundary, `libexp.so` loaded) and Gate H (packages.xml
+injection surviving a soft reboot). A `2.0.3-zzic` run is expected to end
+`runAll done res=3` with **no** `patch #1` and no page-cache write; that is the
+test passing.
+
+Off-device: 72/72 host gate checks, 49/49 installer write-path checks, and the
+offline audits pass. Both APKs build and are signed with one key.
 
 ## Pending work, in order
 
@@ -116,20 +148,18 @@ correct it from the observed values, never the reverse.
 `tools/profile_binding_audit.py` fails CI if the collector stops printing a field
 the runtime gate compares.
 
-### 1. `crash_dump64` SHA-256 — unblocks Gate B
+### 1. ~~`crash_dump64` SHA-256~~ — CLOSED
 
-```sh
-adb shell sha256sum /apex/com.android.runtime/bin/crash_dump64
+Captured from the device and pinned in `app/src/main/jni/target_profile.c` and
+`tools/zzic_profile.json` (both the top-level field and the `targets[]` entry;
+CI now fails if those two disagree with each other, not just if C and JSON do):
+
+```
+9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f
 ```
 
-Set the value in **both** files (the CI drift check enforces agreement):
-
-- `app/src/main/jni/target_profile.c` → `.crashdump_sha256 = "<hex>"`
-- `tools/zzic_profile.json` → `"crashdump_sha256": "<hex>"`
-
-For the full §26 record, also pull the file and run
-`python3 tools/elf_audit.py --root ./pulled` (size, build-id, program/section
-headers, `DT_NEEDED`, APEX provenance).
+`crash_dump64` IS readable from the domain the chain runs in, so it stays a
+direct runtime SHA-256 check. The vendor ELF is not — see invariant 3b.
 
 ### 2. A Gate-G validated kernel module — unblocks the module load
 
@@ -139,7 +169,19 @@ the kernel has `CONFIG_MODVERSIONS=y`, so no symbol-CRC agreement can be
 established offline. Verdict is `UNVERIFIED`; an ABI-mismatched module can fault
 the kernel.
 
-Needed from the device/kernel: `Module.symvers` and a captured `/proc/kallsyms`.
+`Module.symvers` is a kernel **build** artefact and is not present on a running
+Android filesystem, so searching the device for it is not a valid route. One of
+these is needed:
+
+- the `Module.symvers` from the exact ZZIC kernel build;
+- a module rebuilt from the matching source, config and toolchain;
+- another verifiable source of that kernel's symbol CRCs.
+
+The resulting module must carry a `__versions` table consistent with
+`CONFIG_MODVERSIONS=y`. Matching the GKI base (`6.6.127`) and the 4k page tag is
+**not** sufficient and must never be treated as if it were. A captured
+`/proc/kallsyms` supplies existence evidence for the two runtime-resolved
+symbols.
 
 ```sh
 python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko \
@@ -163,17 +205,26 @@ firmware today, deliberately or otherwise. Restoring an at-own-risk opt-in is a
 policy decision for the repository owner; it is not something to reinstate quietly
 because a run is inconvenient.
 
-### 3. `scheduleReceiver` overload shape — the one runtime unknown
+### 3. ~~`scheduleReceiver` overload shape~~ — CLOSED
 
-`StageHop.hopToNetworkStack()` invokes the **12-parameter** `scheduleReceiver`
-overload. If Android 17 changed that shape the hop fails and logs every overload
-it found. **Do not guess a fallback**: invoking an unknown overload with
-fabricated arguments runs inside `system_server`. Wire the real shape only from
-an observed log line:
+Android 17 / One UI 9 exposes the same 12-parameter overload `StageHop` already
+invokes, observed physically:
 
 ```
-[DFR][AMS] scheduleReceiver/<n> params=[...]
+[DFR][AMS] scheduleReceiver/12 params=[Intent, ActivityInfo, CompatibilityInfo,
+    int, String, Bundle, boolean, boolean, int, int, int, String]
 ```
+
+`getProcessRecordLocked` is **absent** on this build; the `mProcessNames`
+fallback is what resolves the ProcessRecord, and `mOnewayThread` is the correct
+thread field. None of that is a blocker, and the log now says so explicitly
+(`PROCESS_LOOKUP_PRIMARY=UNAVAILABLE`, `PROCESS_LOOKUP_FALLBACK=mProcessNames`,
+`PROCESS_LOOKUP=PASS`) instead of leaving a bare `UNKNOWN`.
+
+The rule that produced this outcome still stands for the next firmware: **do not
+guess a fallback overload.** Invoking an unknown shape with fabricated arguments
+runs inside `system_server`. Wire a new shape only from an observed
+`[DFR][AMS] scheduleReceiver/<n> params=[...]` line.
 
 ### 4. Remaining runtime captures
 
@@ -183,15 +234,17 @@ grep '\[DFR\]' zzic-run.log
 adb shell cat /proc/sys/kernel/random/boot_id
 ```
 
-| Needed | Boundary that emits it |
-|---|---|
-| AMS / ProcessRecord / IApplicationThread shapes (Gate C) | `[DFR][AMS] *` |
-| network_stack identity (Gate D) | `[DFR][PROCESS] REMOTE_COMPONENT_REACHED` |
-| `libexp.so` actually loaded | `[DFR][PROCESS] LIBEXP_LOADED` |
-| SELinux / seccomp viability for XFRM and native load | `[DFR][PROCESS]` capability + seccomp fields, plus denials in `dmesg`/`logcat` |
-| packages.xml semantics (Gate H) | `InjectMain --diag-zzic` → `[DFR][INSTALLER] *` |
+| Needed | Boundary that emits it | State |
+|---|---|---|
+| AMS / ProcessRecord / IApplicationThread shapes (Gate C) | `[DFR][AMS] *` | captured |
+| network_stack identity (Gate D) | `[DFR][PROCESS] REMOTE_COMPONENT_REACHED` | captured |
+| `libexp.so` actually loaded | `[DFR][PROCESS] LIBEXP_LOADED` | captured |
+| packages.xml semantics (Gate H) | `InjectMain --diag-zzic` → `[DFR][INSTALLER] *` | captured |
+| vendor provenance chain | `[DFR][USERSPACE] VENDOR_PROV *` | new in 2.0.3, needs one run |
+| SELinux / seccomp viability for XFRM and native load | `[DFR][PROCESS]` capability + seccomp fields, plus denials in `dmesg`/`logcat` | partial |
 
-Still entirely unknown and needing device evidence: the `vendor_modprobe`
+Still entirely unknown and needing device evidence, all of it downstream of
+Gate G and therefore unreachable until Gate G is closed: the `vendor_modprobe`
 SELinux domain and its exec transition, the seccomp filter's verdict on the
 syscalls the native flow needs, mount-namespace behaviour, and any Samsung
 DEFEX-style restriction.
@@ -226,7 +279,8 @@ signed with a throwaway key.
 
 ```sh
 sh tools/zzic_collect.sh                 # on-device, read-only evidence pass
-sh tools/tests/run_tests.sh              # 36/36 expected
+sh tools/tests/run_tests.sh              # 72/72 expected, + exp.c syntax pass
+sh tools/tests/run_installer_tests.sh    # 49/49 expected (SafeWrite)
 python3 tools/profile_binding_audit.py   # §39 invariant + C/JSON drift
 python3 tools/ko_audit.py <ko>           # Gate G; exits 1 on INCOMPATIBLE
 python3 tools/apk_audit.py df_reroot.apk  # Gate E
@@ -249,5 +303,12 @@ successful on purpose (evidence absent, or not a candidate — neither is a defe
 - `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is an independent static fact. It is
   not proof of exploitability and must not be used to promote any gate.
 - No gate may be promoted to `SUPPORTED` without independent evidence for every
-  boundary. Today: Gate A and Gate E `PASS`, Gate G `UNVERIFIED`, everything else
-  `BLOCKED`.
+  boundary. Today: Gates A, B (kernel/crash_dump64/vendor provenance), C, D, E
+  and H are `PASS` — A/B/C/D/H from the physical run; Gate G is `UNVERIFIED`;
+  Gates F and I remain `BLOCKED`.
+- `ZZIC_VENDOR_PROVENANCE` must not be "simplified" back into a direct
+  `gate_hash()` of the vendor ELF. That read returns `EACCES` in every domain
+  the chain runs in, so the simplification makes the ZZIC path unrunnable —
+  `tools/profile_binding_audit.py` fails CI if the old call shape reappears.
+- DFInstaller's write path must keep going through `SafeWrite`. Inlining it
+  again is how the metadata source of truth drifts back onto the backup file.

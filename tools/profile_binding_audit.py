@@ -68,6 +68,13 @@ COLLECTED_PROPS = [
     "ro.build.fingerprint", "ro.product.cpu.abi",
     "uname -r", "uname -v", "uname -m", "PAGESIZE",
     "/apex/com.android.runtime/bin/crash_dump64", "boot_id",
+    # vendor-provenance inputs: every element dfr_vendor_provenance_eval()
+    # compares must be printable by the same single collector run, or the
+    # operator has no way to diff a FAIL_CHAIN against the profile.
+    "ro.boot.verifiedbootstate", "ro.boot.vbmeta.device_state",
+    "ro.boot.flash.locked", "ro.boot.veritymode", "ro.boot.vbmeta.digest",
+    "ro.boot.vbmeta.avb_version", "ro.boot.vbmeta.hash_alg",
+    "/proc/self/mountinfo", "/vendor/lib64/libstagefrighthw.so",
 ]
 
 
@@ -109,9 +116,40 @@ SHARED_STRINGS = [
     "kernel_release", "kernel_version", "abi", "kernel_arch",
     "kernel_image_sha256", "btf_sha256", "crashdump_sha256",
     "vendor_target_sha256", "libc_sha256", "libcxx_sha256",
+    "vbmeta_digest", "vbmeta_avb_version", "vbmeta_hash_alg",
+    "verified_boot_state", "vbmeta_device_state", "flash_locked",
+    "verity_mode", "vendor_fstype", "vendor_target_context",
     "network_stack_process", "network_stack_context",
 ]
-SHARED_INTS = ["sdk", "android_release", "page_size", "network_stack_uid"]
+SHARED_INTS = ["sdk", "android_release", "page_size", "network_stack_uid",
+               "vendor_mount_ro", "vendor_target_size"]
+
+# Artefact hashes that appear TWICE in zzic_profile.json: once as a top-level
+# field mirrored from the C profile, and once keyed by the path it belongs to
+# under "targets". The two are edited by hand at different moments (the device
+# collector prints both lines), so a value updated in one place and not the
+# other is the exact drift this check exists to catch - it would leave a tool
+# validating one hash while the runtime pins another.
+TARGET_PATH_FIELDS = {
+    "/apex/com.android.runtime/bin/crash_dump64": "crashdump_sha256",
+    "/vendor/lib64/libstagefrighthw.so": "vendor_target_sha256",
+    "/system/lib64/libc.so": "libc_sha256",
+    "/system/lib64/libc++.so": "libcxx_sha256",
+}
+
+# Provenance anchors that must ALL be pinned together. The runtime refuses with
+# FAIL_NO_PIN when any of them is missing, so a profile that ships half a chain
+# is a profile whose ZZIC path can never run - catch it here instead.
+VENDOR_PROVENANCE_STRINGS = [
+    "vendor_target_sha256", "vbmeta_digest", "vbmeta_avb_version",
+    "vbmeta_hash_alg", "verified_boot_state", "vbmeta_device_state",
+    "flash_locked", "verity_mode", "vendor_fstype",
+]
+
+# Artefacts the chain WRITES and therefore must have a pristine digest pinned
+# for. gate_hash() treats an unpinned required artefact as a FAIL, so shipping
+# one unpinned is shipping a build that cannot reach its own next boundary.
+REQUIRED_ARTEFACT_HASHES = ["crashdump_sha256", "libc_sha256", "libcxx_sha256"]
 
 
 def parse_c_profile(path):
@@ -157,6 +195,14 @@ def audit():
 
     def fail(msg):
         r["violations"].append(msg)
+
+    # exp.c is inspected by several checks below; read it once.
+    try:
+        with open(EXP_C, encoding="utf-8") as f:
+            exp_src_holder = [f.read()]
+    except OSError as ex:
+        fail("cannot read %s: %s" % (rel(EXP_C), ex))
+        exp_src_holder = [""]
 
     # --- the section 39 invariant -------------------------------------------
     verified = c.get("ko_zzic_verified")
@@ -211,6 +257,52 @@ def audit():
     for d in drift:
         fail("runtime profile and tools/zzic_profile.json disagree on %s" % d)
 
+    # --- the JSON's two copies of each artefact hash must agree -------------
+    targets = j.get("targets") or {}
+    tdrift = []
+    for path, field in TARGET_PATH_FIELDS.items():
+        top = j.get(field)
+        per_path = targets.get(path, "<absent>")
+        if top != per_path:
+            tdrift.append("%s: %s=%r targets[%s]=%r" % (field, field, top, path, per_path))
+    r["checks"]["target_path_drift"] = tdrift or "none"
+    for d in tdrift:
+        fail("tools/zzic_profile.json disagrees with itself on %s" % d)
+
+    # --- required artefact digests must be pinned --------------------------
+    unpinned = [k for k in REQUIRED_ARTEFACT_HASHES if not c.get(k)]
+    for k in unpinned:
+        fail("%s is not pinned; the chain writes that artefact, and gate_hash() "
+             "treats an unpinned required artefact as a hard FAIL" % k)
+    r["checks"]["required_artefact_hashes"] = (
+        "all pinned" if not unpinned else "MISSING %s" % ", ".join(unpinned))
+
+    # --- vendor provenance is all-or-nothing -------------------------------
+    missing_prov = [k for k in VENDOR_PROVENANCE_STRINGS if not c.get(k)]
+    if c.get("vendor_mount_ro") not in (0, 1):
+        missing_prov.append("vendor_mount_ro")
+    for k in missing_prov:
+        fail("vendor provenance anchor %s is not pinned; "
+             "dfr_vendor_provenance_eval() refuses with FAIL_NO_PIN" % k)
+    r["checks"]["vendor_provenance_anchors"] = (
+        "all %d pinned" % (len(VENDOR_PROVENANCE_STRINGS) + 1)
+        if not missing_prov else "MISSING %s" % ", ".join(missing_prov))
+
+    # --- the vendor gate must not have regressed to a direct-hash-only check -
+    #
+    # The v2.0.2 gate hashed /vendor/lib64/libstagefrighthw.so directly, which
+    # EACCESes in every domain this chain runs in. Reintroducing that call would
+    # make the ZZIC path unrunnable again, and would do it silently, so name the
+    # shape rather than trusting review to notice.
+    if 'gate_hash(reporter, "ZZIC_VENDOR_ELF"' in exp_src_holder[0]:
+        fail("exp.c hashes the vendor ELF directly again; that open(2) returns "
+             "EACCES from system_server and network_stack on this firmware "
+             "(use gate_vendor_provenance)")
+    if "gate_vendor_provenance(" not in exp_src_holder[0]:
+        fail("exp.c does not call gate_vendor_provenance(); the vendor artefact "
+             "would be written with no provenance established")
+    r["checks"]["vendor_gate"] = "gate_vendor_provenance"
+
     # --- the target's own casing is load-bearing ---------------------------
     if c.get("manufacturer") != "samsung":
         fail("manufacturer is %r; ro.product.manufacturer is lowercase "
@@ -257,12 +349,7 @@ def audit():
     # patch_libc() and patch_cxx() are each reachable on their own (JNI natives,
     # StageReceiver transactions 1-3), so a policy enforced in one of them is not
     # enforced at all. Require the call in each.
-    try:
-        with open(EXP_C, encoding="utf-8") as f:
-            exp_src = f.read()
-    except OSError as ex:
-        fail("cannot read %s: %s" % (rel(EXP_C), ex))
-        exp_src = ""
+    exp_src = exp_src_holder[0]
     unguarded = [s for s in PATCH_STAGES if not stage_calls_policy(exp_src, s)]
     for s in unguarded:
         fail("%s() does not call gate_module_policy(); a page-cache stage that "
@@ -293,6 +380,57 @@ def audit():
         else "MISSING %s" % ", ".join(missing)
     )
 
+    # --- Gate C/D signal regressions ---------------------------------------
+    #
+    # These live in Kotlin and need an Android runtime to execute, so they
+    # cannot be unit-tested off-device. What CAN be checked offline is that the
+    # signals the v2.0.2-zzic physical run established are still emitted, and
+    # that the shapes that run proved are still the ones invoked. Each entry is
+    # (file, required substring, why it matters).
+    signals = [
+        (os.path.join(ROOT, "app", "src", "main", "java", "com", "polygraphene",
+                      "df", "reroot", "StageHop.kt"),
+         "parameterCount == 12",
+         "Android 17 / One UI 9 exposes scheduleReceiver/12; that shape was "
+         "observed physically and must stay the one invoked"),
+        (os.path.join(ROOT, "app", "src", "main", "java", "com", "polygraphene",
+                      "df", "reroot", "StageHop.kt"),
+         "mProcessNames",
+         "getProcessRecordLocked is ABSENT on Android 17; the mProcessNames "
+         "fallback is the only path that resolved the ProcessRecord"),
+        (os.path.join(ROOT, "app", "src", "main", "java", "com", "polygraphene",
+                      "df", "reroot", "StageHop.kt"),
+         "PROCESS_LOOKUP=",
+         "the lookup must end on an explicit PASS/FAIL verdict, not on a bare "
+         "UNKNOWN after a fallback has already succeeded"),
+        (os.path.join(ROOT, "app", "src", "main", "java", "com", "polygraphene",
+                      "df", "reroot", "StageReceiver.kt"),
+         "EXTRA_DIAG",
+         "the remote boundary's own evidence must travel back to the UI, not "
+         "live only in logcat"),
+        (os.path.join(ROOT, "app", "src", "main", "java", "com", "polygraphene",
+                      "df", "reroot", "Diagnostics.kt"),
+         "PROCESS_LOOKUP_PRIMARY=",
+         "an absent primary lookup must be reported as UNAVAILABLE, which is "
+         "not a blocker, rather than as a bare UNKNOWN"),
+    ]
+    missing_signals = []
+    for path, needle, why in signals:
+        try:
+            with open(path, encoding="utf-8") as f:
+                src = f.read()
+        except OSError as ex:
+            fail("cannot read %s: %s" % (rel(path), ex))
+            continue
+        if needle not in src:
+            missing_signals.append("%s no longer contains %r: %s"
+                                   % (rel(path), needle, why))
+    for m in missing_signals:
+        fail("Gate C/D signal regression: %s" % m)
+    r["checks"]["gate_cd_signals"] = ("all %d present" % len(signals)
+                                      if not missing_signals
+                                      else "MISSING %d" % len(missing_signals))
+
     r["status"] = "PASS" if not r["violations"] else "FAIL"
     return r
 
@@ -312,6 +450,11 @@ def human(r):
     L.append("Gate-G override     : %s" % ck.get("unverified_module_override"))
     L.append("policy call sites   : %s" % ck.get("module_policy_call_sites"))
     L.append("device collector    : %s" % ck.get("device_collector"))
+    L.append("targets[] drift     : %s" % ck.get("target_path_drift"))
+    L.append("required hashes     : %s" % ck.get("required_artefact_hashes"))
+    L.append("vendor provenance   : %s" % ck.get("vendor_provenance_anchors"))
+    L.append("vendor gate         : %s" % ck.get("vendor_gate"))
+    L.append("gate C/D signals    : %s" % ck.get("gate_cd_signals"))
     L.append("")
     for v in r["violations"]:
         L.append("  [x] %s" % v)

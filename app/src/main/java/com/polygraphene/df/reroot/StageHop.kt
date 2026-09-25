@@ -145,6 +145,19 @@ object StageHop {
      * Overload shapes are logged so the next mismatch is diagnosable on sight.
      */
     private fun findProcessRecord(ams: Any, amsClass: Class<*>, log: StringBuilder): Any? {
+        val r = findProcessRecordInner(ams, amsClass, log)
+        /*
+         * State the CONCLUSION, not just the attempts. On Android 17 / One UI 9
+         * the primary lookup is simply absent, and v2.0.2-zzic logged that as a
+         * bare "UNKNOWN" with no verdict after the fallback had already
+         * succeeded - which reads like a blocker when it is not one. Gate C now
+         * ends on an explicit PASS/FAIL line either way.
+         */
+        log.appendLine("[DFR][AMS] PROCESS_LOOKUP=${if (r != null) "PASS" else "FAIL"}")
+        return r
+    }
+
+    private fun findProcessRecordInner(ams: Any, amsClass: Class<*>, log: StringBuilder): Any? {
         val overloads = try {
             amsClass.declaredMethods.filter { it.name == "getProcessRecordLocked" }
         } catch (e: Exception) {
@@ -155,6 +168,10 @@ object StageHop {
             "[*] getProcessRecordLocked overloads: " +
                 overloads.map { m -> m.parameterTypes.map { it.simpleName } }
         )
+        if (overloads.isEmpty()) {
+            log.appendLine("[DFR][AMS] PROCESS_LOOKUP_PRIMARY=UNAVAILABLE " +
+                "(no getProcessRecordLocked on this build)")
+        }
         overloads.firstOrNull { it.parameterTypes.size == 2 }?.let { m ->
             try {
                 m.isAccessible = true
@@ -163,6 +180,7 @@ object StageHop {
                 }
                 if (r != null) {
                     log.appendLine("[+] via getProcessRecordLocked(String,int)")
+                    log.appendLine("[DFR][AMS] PROCESS_LOOKUP_METHOD=getProcessRecordLocked/2")
                     return r
                 }
                 log.appendLine("[!] 2-arg overload returned null, trying others")
@@ -178,6 +196,7 @@ object StageHop {
                 }
                 if (r != null) {
                     log.appendLine("[+] via getProcessRecordLocked(String,int,boolean)")
+                    log.appendLine("[DFR][AMS] PROCESS_LOOKUP_METHOD=getProcessRecordLocked/3")
                     return r
                 }
             } catch (e: Exception) {
@@ -199,11 +218,17 @@ object StageHop {
             }
             if (r != null) {
                 log.appendLine("[+] via mProcessNames map")
+                // The path that actually worked on ZZIC: ProcessMap.get(String,int)
+                // is far older and more stable than getProcessRecordLocked.
+                log.appendLine("[DFR][AMS] PROCESS_LOOKUP_FALLBACK=mProcessNames")
+                log.appendLine("[DFR][AMS] PROCESS_LOOKUP_METHOD=ProcessList.mProcessNames.get/2")
                 return r
             }
             log.appendLine("[!] map path returned null")
+            log.appendLine("[DFR][AMS] PROCESS_LOOKUP_FALLBACK=mProcessNames (no entry)")
         } catch (e: Exception) {
             log.appendLine("[!] map path failed: $e")
+            log.appendLine("[DFR][AMS] PROCESS_LOOKUP_FALLBACK=FAIL $e")
             try {
                 // No instance needed: list candidate fields from the type itself.
                 val plType = amsClass.getDeclaredField("mProcessList").type

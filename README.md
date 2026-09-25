@@ -19,10 +19,19 @@ kernel 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k
 
 That profile is **not** a support claim — it is the opposite. On a device
 asserting the S25 Ultra model or codename, the chain refuses unless every pinned
-identity field matches exactly, and today it refuses regardless: the pristine
-`crash_dump64` hash has never been captured from hardware, and the bundled kernel
-module is Gate-G `UNVERIFIED` against this kernel. Running the app on that
-firmware collects `[DFR][*]` diagnostics and writes nothing.
+identity field matches exactly.
+
+The first physical run (`v2.0.2-zzic`) showed the adaptation to Android 17 /
+One UI 9 working end to end **up to the kernel module**: the `packages.xml`
+injection, the `system_server` host, the AMS `scheduleReceiver/12` hop into
+`com.android.networkstack.process`, and `libexp.so` loading there are all
+observed, and the exact identity and kernel gates pass on hardware.
+
+It still **refuses to root the device**, at one boundary and by design: the ZZIC
+kernel has `CONFIG_MODVERSIONS=y` and the bundled module ships an empty
+`__versions` table, so Gate G is `UNVERIFIED` and no symbol-CRC agreement can be
+demonstrated. There is no runtime override. Running the app on that firmware
+collects `[DFR][*]` diagnostics and writes nothing to the page cache.
 
 `docs/S25U_ZZIC_COMPATIBILITY.md` is the authoritative gate matrix;
 `docs/HANDOFF.md` lists the remaining evidence and the exact command that closes
@@ -110,7 +119,12 @@ Build ksud from kdp-612-3.3.0 branch of [my fork](https://github.com/polygraphen
 
 ## Caveats
 
-- `packages.xml` is backed up once to `packages.xml.bak-df-installer`.
+- `packages.xml` is backed up once to `packages.xml.bak-df-installer`. The backup
+  is written transactionally and verified by size and SHA-256 before the original
+  is touched; an existing backup is never overwritten, but one that is empty,
+  truncated or unparsable makes the injection refuse rather than proceed without
+  a working rollback. The original file's uid/gid/mode/SELinux label are captured
+  before any write and re-verified afterwards; a divergence rolls back.
 
 ## Acknowledgments
 

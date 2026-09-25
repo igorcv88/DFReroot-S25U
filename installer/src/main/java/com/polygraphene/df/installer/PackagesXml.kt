@@ -40,7 +40,8 @@ import org.w3c.dom.Element
  */
 object PackagesXml {
     const val PACKAGES_XML = "/data/system/packages.xml"
-    const val BACKUP_SUFFIX = ".bak-df-installer"
+    /** One definition, owned by [SafeWrite] (which creates and validates it). */
+    @JvmField val BACKUP_SUFFIX: String = SafeWrite.BACKUP_SUFFIX
     const val FLAG_SHARED_USER_ID = "2"
 
     /** Parse either ABX or text into DOM. Returns doc; throws with reason. */
@@ -486,91 +487,50 @@ object PackagesXml {
             log.appendLine("[DFR][INSTALLER] round_trip FAIL: $e")
         }
         log.appendLine("[DFR][INSTALLER] ROUND_TRIP_VALID=${if (rtOk) "PASS" else "FAIL"}")
-        log.appendLine("[DFR][INSTALLER] backup_metadata=$xmlPath$BACKUP_SUFFIX (created on first write)")
-        log.appendLine("[DFR][INSTALLER] ${if (hasSystem && rtOk) "PASS" else "UNKNOWN"} gate H")
+        /*
+         * Backup state, read-only. The v2.0.2-zzic run left a ZERO-BYTE
+         * .bak-df-installer behind, which the old code would have reported as
+         * "backup already exists, keeping" - so the diagnostic now says what is
+         * actually in it, before anyone relies on it to roll back.
+         */
+        val backup = try {
+            SafeWrite.describeBackup(androidOps(), xmlPath)
+        } catch (e: Throwable) {
+            "BACKUP_PRESENT=UNKNOWN ($e)"
+        }
+        log.appendLine("[DFR][INSTALLER] $backup")
+        val backupOk = !backup.contains("BACKUP_VALID=FAIL")
+        log.appendLine("[DFR][INSTALLER] ${if (hasSystem && rtOk && backupOk) "PASS" else "UNKNOWN"} gate H")
     }
 
     /**
-     * Backup (once) + direct-overwrite-then-rename-swap write + perms +
-     * restorecon. Shared by inject and uninstall backends.
+     * Transactional replacement of packages.xml, shared by the inject and
+     * uninstall backends.
+     *
+     * The logic lives in [SafeWrite] (pure Java, host-tested against an
+     * in-memory filesystem); this method only supplies the Android filesystem
+     * and the parser [SafeWrite] validates backups with.
+     *
+     * Two v2.0.2-zzic field defects are fixed there and must not come back
+     * here: the final file's uid/gid/mode/label now come from a stat of the
+     * ORIGINAL taken before any write - never from the freshly created backup,
+     * which is root:root 0644 - and a backup that exists but is empty or
+     * truncated is a hard failure instead of a reassuring log line.
      */
     private fun writeBack(xmlPath: String, patched: ByteArray, log: StringBuilder) {
-        val bak = java.io.File(xmlPath + BACKUP_SUFFIX)
-        if (!bak.exists()) {
-            java.io.File(xmlPath).copyTo(bak, overwrite = false)
-            log.appendLine("[*] backup -> ${bak.absolutePath}")
-        } else {
-            log.appendLine("[*] backup already exists, keeping ${bak.absolutePath}")
-        }
-        // Original mode/owner for the final file (typically 0600 system:system).
-        var wantMode = 384 // 0600
-        var wantUid = 1000
-        var wantGid = 1000
-        try {
-            val st = android.system.Os.stat(xmlPath + BACKUP_SUFFIX)
-            wantMode = st.st_mode and 0x1FF
-            wantUid = st.st_uid
-            wantGid = st.st_gid
-        } catch (e: Exception) {
-            log.appendLine("[!] stat backup: $e (using 0600 system:system)")
-        }
-        // Write strategy: direct overwrite first (works where the inode
-        // allows it), then rename swap. NOTE: no setenforce games — EPERM was
-        // observed even with SELinux fully Permissive, so this is not a MAC
-        // denial (likely file-level protection); rename(2) walks a different
-        // vector (new-file create is allowed) and succeeds.
-        var done = false
-        try {
-            java.io.File(xmlPath).writeBytes(patched)
-            done = true
-            log.appendLine("[+] direct write ok")
-        } catch (e: Exception) {
-            log.appendLine("[!] direct write failed: $e")
-        }
-        if (!done) {
-            // Step 2: rename swap. Creating a NEW file in /data/system is
-            // allowed where overwriting the existing inode is MAC-denied
-            // (observed: backup copyTo succeeded, writeBytes failed), and
-            // rename(2) walks a different permission vector.
-            val newPath = "$xmlPath.new-df-installer"
-            java.io.File(newPath).writeBytes(patched)
-            applyPerms(newPath, wantMode, wantUid, wantGid, log)
-            execOk("restorecon", newPath)
-            try {
-                android.system.Os.rename(newPath, xmlPath)
-                done = true
-                log.appendLine("[+] rename swap ok")
-            } catch (e: Exception) {
-                log.appendLine("[x] rename swap failed: $e")
-                log.appendLine("    patched image kept at $newPath; manual option from an adb root shell:")
-                log.appendLine("      mv $newPath $xmlPath && chmod 600 $xmlPath && chown system:system $xmlPath && reboot")
-                throw RuntimeException("rename swap failed: $e")
-            }
-        }
-        if (done) {
-            applyPerms(xmlPath, wantMode, wantUid, wantGid, log)
-            execOk("restorecon", xmlPath)
-            log.appendLine("[+] wrote ${patched.size} bytes (TEXT xml; PMS re-reads either format)")
-        }
+        SafeWrite.writeBack(androidOps(), xmlPath, patched, log)
     }
 
-    private fun applyPerms(path: String, mode: Int, uid: Int, gid: Int, log: StringBuilder) {
-        try {
-            android.system.Os.chmod(path, mode)
-            android.system.Os.chown(path, uid, gid)
-        } catch (e: Exception) {
-            log.appendLine("[!] chmod/chown $path: $e")
-        }
-    }
-
-    /** exec(cmd, path), returns true on exit 0; never throws. */
-    private fun execOk(cmd: String, path: String): Boolean {
-        return try {
-            val bin = if (cmd.startsWith("/")) cmd else "/system/bin/$cmd"
-            Runtime.getRuntime().exec(arrayOf(bin, path)).waitFor() == 0
-        } catch (_: Exception) {
-            false
-        }
+    /** Filesystem surface for [SafeWrite], with our own packages.xml validator. */
+    private fun androidOps(): SafeWrite.FileOps = AndroidFileOps { image ->
+        // "Parses" means more than well-formed XML: a rollback image has to be
+        // a packages.xml, so require the document element and at least one
+        // <package> or <shared-user> in it.
+        val doc = parseToDom(image)
+        val root = doc.documentElement
+        root != null && root.tagName == "packages" &&
+            (doc.getElementsByTagName("package").length > 0 ||
+                doc.getElementsByTagName("shared-user").length > 0)
     }
 
     private fun child(el: Element, tag: String): Element? {
