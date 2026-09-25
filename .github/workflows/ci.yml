@@ -30,11 +30,37 @@ jobs:
       - name: Python tool syntax
         run: python3 -m compileall -q tools
 
+      # A workflow that does not parse fails with zero jobs and no log, which is
+      # how a broken release.yml would first be discovered: at publish time. This
+      # step cannot save a broken ci.yml (nothing would run it), but it does keep
+      # the release workflow honest.
+      - name: Workflow YAML parses
+        run: |
+          python3 - <<'PY'
+          import sys, yaml
+          rc = 0
+          for f in ("ci.yml", "release.yml"):
+              p = ".github/workflows/" + f
+              try:
+                  d = yaml.safe_load(open(p))
+              except Exception as e:
+                  print("[x] %s does not parse: %s" % (p, e)); rc = 1; continue
+              jobs = (d or {}).get("jobs") or {}
+              if not jobs:
+                  print("[x] %s declares no jobs" % p); rc = 1; continue
+              for jn, j in jobs.items():
+                  for i, s in enumerate(j.get("steps") or []):
+                      if not (s.get("name") or s.get("uses")):
+                          print("[x] %s: %s step %d has no name" % (p, jn, i)); rc = 1
+              print("ok  %s (%s)" % (p, ", ".join(jobs)))
+          sys.exit(rc)
+          PY
+
       # No ZZIC filesystem here, so this can only report UNVERIFIED. Running it
       # anyway keeps the Gate F tool itself exercised: it returned 0
       # unconditionally until it was given a real verdict, and a tool that cannot
       # fail is not a gate.
-      - name: Gate F - userspace ELF audit tool (no artefacts: expect UNVERIFIED)
+      - name: Gate F - userspace ELF audit tool (no artefacts, expect UNVERIFIED)
         run: python3 tools/elf_audit.py
 
       - name: Shell script syntax
