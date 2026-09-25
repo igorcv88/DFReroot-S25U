@@ -340,7 +340,140 @@ that attempt. Prefer one wrapper / closeout path rather than sprinkling
 A failed restoration is a final **post-root failure**, even if KernelSU loaded.
 Never publish `POST_ROOT_COMPLETE` in that state.
 
-## Phase 3 — publish a same-boot completion record
+## Phase 3 — preserve and validate the DEFEX / Zygisk Next / LSPosed path
+
+This is **already implemented in the exact ZZIC KernelSU build** and must not be
+lost when the DFR-specific ksud is rebuilt for the post-root closeout.
+
+The exact ZZIC workflow in `igorcv88/RMGLabs-Payloads`,
+`.github/workflows/build-zzic-exact-port.yml`, currently applies, in order:
+
+```text
+KernelSU-v3.3.0-samsung-kdp-rkp-defex.patch
+  -> apply-v330-staged-daemon-hotfix.py --profile <rmg|dfreroot>
+  -> apply-v330-lsposed-defex-fix.py
+  -> build exact ZZIC kernelsu.ko
+  -> embed that exact kernelsu.ko into ksud
+```
+
+The workflow already refuses a build if the permanent module no longer contains:
+
+```text
+LSPosed app_process64 exception enabled
+```
+
+The compatibility patch lives in:
+
+```text
+RMGLabs-Payloads/kernelsu/patches/apply-v330-lsposed-defex-fix.py
+```
+
+Its intended scope is deliberately narrow. It does **not** disable Samsung DEFEX
+globally. The bypass is limited to the DEFEX check reached by the current root
+`app_process64` task while opening the exact LSPosed Zygisk library dentry
+chain:
+
+```text
+/data/adb/modules/zygisk_lsposed/zygisk/arm64-v8a.so
+```
+
+The patch also retains the existing KernelSU Samsung KDP/RKP/DEFEX integration
+and KSU-task credential synchronization.
+
+### Build-time requirements for the next DFR-specific ksud
+
+When the post-root closeout changes the DFR-specific ksud, the exact-port
+workflow must still prove all of the following before publishing the pair:
+
+- `KernelSU-v3.3.0-samsung-kdp-rkp-defex.patch` is applied;
+- `apply-v330-staged-daemon-hotfix.py --profile dfreroot` is applied;
+- `apply-v330-lsposed-defex-fix.py` is applied **before the module is built**;
+- the final `kernelsu.ko` contains the LSPosed exception signature string;
+- the module remains the exact ZZIC no-LTO Samsung KDP/RKP/DEFEX
+  no-patch-text build;
+- the generated DFR-specific ksud embeds that exact module rather than a generic
+  android15/6.6 replacement;
+- the DFR staging path remains `/data/system/dfreroot-ksud`;
+- the normal `rmg` staging contract is not changed by the DFR-only SELinux
+  closeout work.
+
+The LSPosed/DEFEX patch is a **shared exact-ZZIC KernelSU compatibility property**,
+not a DFR-only feature. The new automatic SELinux closeout is DFR-only; do not
+accidentally conditionalize the LSPosed patch away from one of the two exact ZZIC
+profiles.
+
+### Do not make LSPosed a root-success dependency
+
+`POST_ROOT_COMPLETE` must describe DFReroot's own safe final state:
+
+```text
+KernelSU control alive
++ SELinux Enforcing
++ KernelSU control alive after restoration
+```
+
+It must **not** require Zygisk Next or LSPosed to be installed. Those modules are
+optional consumers of the rooted environment.
+
+If LSPosed is absent, the root result can still be complete. If it is present,
+its compatibility should be reported and tested as a separate post-root feature
+result, for example:
+
+```text
+POST_ROOT_LSPOSED_COMPAT=PASS
+POST_ROOT_LSPOSED_COMPAT=SKIP_NOT_INSTALLED
+POST_ROOT_LSPOSED_COMPAT=FAIL
+```
+
+Do not collapse that value into `POST_ROOT_COMPLETE`.
+
+### Physical ZZIC validation still required
+
+The permanent LSPosed/DEFEX exception was proven previously on S938BXXUCZZI4.
+For ZZIC, what is already proven is narrower: the exact KernelSU module that
+contains the patch was late-loaded successfully and KernelSU root worked.
+
+The **LSPosed/Zygisk behavior itself has not yet been separately validated on
+ZZIC**. The next physical acceptance run should close that after the core
+post-root state is already:
+
+```text
+POST_ROOT_COMPLETE=PASS
+getenforce=Enforcing
+/sys/fs/selinux/enforce=1
+KernelSU control/root still functional
+```
+
+With Zygisk Next + LSPosed installed/enabled, collect evidence in this order:
+
+1. verify the expected LSPosed module/library path exists;
+2. launch a newly forked app/process under SELinux Enforcing;
+3. inspect kernel/logcat evidence for the historical DEFEX denial shape;
+4. require that the exact LSPosed `app_process64` open is **not** followed by
+   the DEFEX Immutable Root violation that existed before the patch;
+5. verify LSPosed actually becomes active for newly created app processes;
+6. if the framework side still requires it, perform the same controlled zygote
+   restart used during the ZZI4 validation **only after** post-root completion,
+   then prove:
+   - `system_server` maps
+     `/data/adb/modules/zygisk_lsposed/zygisk/arm64-v8a.so`;
+   - `LSPosedBridge` is present in logs;
+   - SELinux remains Enforcing;
+   - KernelSU root remains functional.
+
+The strongest acceptance state is therefore:
+
+```text
+POST_ROOT_COMPLETE=PASS
+POST_ROOT_LSPOSED_COMPAT=PASS
+SELINUX_FINAL=Enforcing
+KSU_AFTER_LSPOSED_TEST=PASS
+```
+
+A failure of this optional LSPosed test must not be mislabeled as a failure to
+obtain root. It is a distinct post-root compatibility regression.
+
+## Phase 4 — publish a same-boot completion record
 
 The app needs a way to display final state without using a marker as authority for
 any risky operation.
@@ -373,7 +506,7 @@ must compare the record's `boot_id` to
 On failure, writing a same-boot diagnostic status is useful, but absence of a
 record must remain "unknown / incomplete", never success.
 
-## Phase 4 — fix stage2 helper-result telemetry
+## Phase 5 — fix stage2 helper-result telemetry
 
 In `app/src/main/jni/stage1.S`:
 
@@ -388,7 +521,7 @@ In `app/src/main/jni/stage1.S`:
 Do **not** rewrite the helper to return 0 just to simplify stage2: returning an
 error is how it leaves no loaded transient DirtyFrag module behind.
 
-## Phase 5 — fix runAll() progress semantics
+## Phase 6 — fix runAll() progress semantics
 
 In `app/src/main/jni/exp.c`:
 
@@ -407,7 +540,7 @@ In `app/src/main/jni/exp.c`:
 If retaining native return 0 for "stage2 exec launched", rename/log that state so
 the UI cannot present it as end-to-end success.
 
-## Phase 6 — MainActivity post-root state machine
+## Phase 7 — MainActivity post-root state machine
 
 After the native transaction completes successfully, MainActivity should enter a
 new state such as `WAIT_POST_ROOT` instead of immediately painting the dialog
@@ -435,7 +568,7 @@ Timeout / malformed / stale status must be a failure or incomplete state, never
 a green success. If `/dev/df` is already present, continue refusing a second
 run and tell the operator that a hard reboot is the recovery boundary.
 
-## Phase 7 — keep the two repositories cryptographically coupled
+## Phase 8 — keep the two repositories cryptographically coupled
 
 Changing the DFR-specific ksud changes its bytes.
 
@@ -454,7 +587,7 @@ After the RMGLabs-Payloads build:
 The Manager fallback remains deleted. There must still be exactly one accepted
 ksud byte identity for the ZZIC path.
 
-## Phase 8 — tests before a signed build
+## Phase 9 — tests before a signed build
 
 Add host tests for the new semantics.
 
@@ -479,11 +612,18 @@ RMGLabs-Payloads self-tests must also prove:
 - the completion record path is canonical and under `/data/system`;
 - a DFR build embeds the expected post-root strings and a normal RMG build does
   not.
+- the exact ZZIC build still applies `apply-v330-lsposed-defex-fix.py`;
+- the final ZZIC `kernelsu.ko` still contains
+  `LSPosed app_process64 exception enabled`;
+- the LSPosed bypass condition remains scoped to root `app_process64` plus the
+  exact `zygisk_lsposed/zygisk/arm64-v8a.so` dentry chain;
+- changing the DFR-only post-root closeout cannot remove the LSPosed/DEFEX patch
+  from either exact-ZZIC staging profile.
 
 Run the normal DFR repo offline gates as specified by `AGENTS.md` before
 dispatching a release.
 
-## Phase 9 — physical acceptance for the next release
+## Phase 10 — physical acceptance for the next release
 
 Use a full clean reboot and run once.
 
@@ -531,6 +671,32 @@ same boot_id as the run
 
 Only after that should Gate I / automatic safe completion be promoted to PASS.
 
+
+After Gate I's core safe-completion criteria pass, perform the **separate**
+LSPosed/Zygisk compatibility check when those modules are installed. Keep this
+after the Enforcing restoration so the test exercises the state users will
+actually keep.
+
+Minimum evidence:
+
+```text
+POST_ROOT_COMPLETE=PASS
+SELINUX_FINAL=Enforcing
+LSPosed library path present
+new app_process64 / app fork exercises the patched path
+no matching DEFEX Immutable Root violation
+LSPosed active for new processes
+KernelSU root still functional
+```
+
+If a controlled zygote restart is required to activate the framework side, do it
+only after the core completion state has been captured. Then additionally require
+`system_server` to map the LSPosed Zygisk library and `LSPosedBridge` to appear
+while SELinux remains Enforcing.
+
+Record that outcome separately as `POST_ROOT_LSPOSED_COMPAT=PASS|FAIL`; it does
+not redefine the root-success gate.
+
 ## Release discipline
 
 Do not spend signing secrets on intermediate iterations. Build the new
@@ -555,6 +721,11 @@ describe it as automatic safe completion.
   alive, except as a best-effort failure cleanup.
 - Do not call a post-root state PASS without reading the final enforcing state
   back.
+- Do not drop or conditionalize away the exact ZZIC
+  `apply-v330-lsposed-defex-fix.py` step while rebuilding the DFR-specific ksud.
+- Do not widen the LSPosed/DEFEX exception into a global DEFEX bypass.
+- Do not make LSPosed/Zygisk installation a prerequisite for
+  `POST_ROOT_COMPLETE`; track it as separate post-root compatibility evidence.
 
 ## New-conversation starting point
 
@@ -579,6 +750,8 @@ DFReroot-S25U:
 
 RMGLabs-Payloads:
   kernelsu/patches/apply-v330-staged-daemon-hotfix.py
+  kernelsu/patches/apply-v330-lsposed-defex-fix.py
+  kernelsu/patches/KernelSU-v3.3.0-samsung-kdp-rkp-defex.patch
   .github/workflows/build-zzic-exact-port.yml
 ```
 
@@ -591,4 +764,6 @@ root functional
 + KernelSU re-verified after restoration
 + same-boot POST_ROOT_COMPLETE
 + no green UI success before all of the above
++ preserve the exact ZZIC LSPosed/DEFEX compatibility patch in the rebuilt pair
++ separately validate Zygisk Next + LSPosed under final SELinux Enforcing
 ```
