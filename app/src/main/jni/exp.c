@@ -86,9 +86,25 @@ static const char *target_lib_path = "/vendor/lib64/libstagefrighthw.so";
 #define REPLAY_SEQ       100
 #define PAYLOAD_LEN      128
 
-/* Fail-closed target gate (defined below); every page-cache corruption entry
- * point must pass it before touching a file. */
-static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls);
+/*
+ * Fail-closed target gate (defined below); every page-cache corruption entry
+ * point must pass it before touching a file.
+ *
+ * `artefacts` selects which pinned userspace artefacts are hashed (Gate B/F).
+ * Each stage passes the artefact IT is about to write, and only that one: this
+ * chain rewrites the vendor file, libc and libc++ in the page cache, so a stage
+ * that re-hashed an artefact an earlier stage already patched would compare
+ * against the pristine pinned digest and abort the chain on its own writes.
+ * Scoping the check keeps every pinned artefact validated exactly once, while
+ * it is still pristine, immediately before it is written - a hash mismatch
+ * remains a hard, fail-closed refusal.
+ */
+#define DFR_ART_CRASHDUMP 0x1
+#define DFR_ART_VENDOR    0x2
+#define DFR_ART_LIBC      0x4
+#define DFR_ART_LIBCXX    0x8
+static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
+                       int artefacts);
 
 static void put_attr(struct nlmsghdr *nlh, int type, const void *data, size_t len) {
     struct rtattr *rta = (struct rtattr *) ((char *) nlh + NLMSG_ALIGN(nlh->nlmsg_len));
@@ -492,7 +508,7 @@ int find_hook_target(const char *libcxx, const char* symname, uint64_t *hook_tar
 int patch_libc(struct Reporter *reporter) {
     /* Independent JNI entry point: re-run the fail-closed gate so patchLibc()
      * cannot corrupt libc on a mismatched device without patch_ko() having run. */
-    if (gate_target(reporter, NULL) != 0) {
+    if (gate_target(reporter, NULL, DFR_ART_LIBC) != 0) {
         REPORTLN("[DFR][TARGET] aborting patch_libc: target gate refused");
         return 1;
     }
@@ -562,7 +578,7 @@ int patch_libc(struct Reporter *reporter) {
 int patch_cxx(int run_index, struct Reporter *reporter) {
     /* Independent JNI entry point: re-run the fail-closed gate so patchCxx()
      * cannot corrupt libc++ on a mismatched device without patch_ko() first. */
-    if (gate_target(reporter, NULL) != 0) {
+    if (gate_target(reporter, NULL, DFR_ART_LIBCXX) != 0) {
         REPORTLN("[DFR][TARGET] aborting patch_cxx: target gate refused");
         return 1;
     }
@@ -751,10 +767,19 @@ static void prop_get(const char *key, char *out, size_t outlen, const char *dflt
 
 /* Compare one userspace artefact's SHA-256 against the profile; log the gate. */
 static int gate_hash(struct Reporter *reporter, const char *tag,
-                     const char *path, const char *expected) {
+                     const char *path, const char *expected, int required) {
     if (expected == NULL || expected[0] == 0) {
+        if (required) {
+            /*
+             * An artefact this stage is about to WRITE must have an established
+             * pristine identity. "We never captured the hash" is not evidence of
+             * a match, so on the exact target it is a refusal, not an UNKNOWN.
+             */
+            REPORTLN("[DFR][USERSPACE] %s FAIL required hash is not pinned path=%s", tag, path);
+            return -1;
+        }
         REPORTLN("[DFR][USERSPACE] %s UNKNOWN (no pinned hash) path=%s", tag, path);
-        return 0; /* unknown != fail: do not block on an unpinned artefact */
+        return 0;
     }
     char hex[65];
     if (dfr_sha256_file_hex(path, hex) != 0) {
@@ -779,9 +804,10 @@ static int gate_hash(struct Reporter *reporter, const char *tag,
  * FAIL-CLOSED: on the ZZIC target every Gate B boundary must PASS or the whole
  * chain aborts before a single page-cache write happens.
  */
-static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls) {
+static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
+                       int artefacts) {
     char manufacturer[128], model[128], device[128], display[192], fingerprint[256];
-    char abi[64], sdkstr[32];
+    char abi[64], sdkstr[32], relstr[32];
     if (out_cls) *out_cls = DFR_TARGET_UPSTREAM_GENERIC;
     prop_get("ro.product.manufacturer", manufacturer, sizeof(manufacturer), "");
     prop_get("ro.product.model", model, sizeof(model), "");
@@ -790,6 +816,7 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls) {
     prop_get("ro.build.fingerprint", fingerprint, sizeof(fingerprint), "");
     prop_get("ro.product.cpu.abi", abi, sizeof(abi), "");
     prop_get("ro.build.version.sdk", sdkstr, sizeof(sdkstr), "0");
+    prop_get("ro.build.version.release", relstr, sizeof(relstr), "0");
 
     struct utsname u;
     memset(&u, 0, sizeof(u));
@@ -798,7 +825,8 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls) {
 
     struct ObservedTarget obs = {
         .manufacturer = manufacturer, .model = model, .device = device,
-        .sdk = atoi(sdkstr), .display = display, .fingerprint = fingerprint,
+        .sdk = atoi(sdkstr), .android_release = atoi(relstr),
+        .display = display, .fingerprint = fingerprint,
         .kernel_release = u.release, .kernel_version = u.version,
         .kernel_arch = u.machine, .page_size = page_size, .abi = abi,
     };
@@ -810,6 +838,7 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls) {
     REPORTLN("[DFR][TARGET] TARGET_DISPLAY=%s", display);
     REPORTLN("[DFR][TARGET] TARGET_FINGERPRINT=%s", fingerprint);
     REPORTLN("[DFR][TARGET] TARGET_SDK=%d", obs.sdk);
+    REPORTLN("[DFR][TARGET] TARGET_ANDROID_RELEASE=%d", obs.android_release);
     REPORTLN("[DFR][TARGET] TARGET_KERNEL_RELEASE=%s", u.release);
     REPORTLN("[DFR][TARGET] TARGET_KERNEL_VERSION=%s", u.version);
     REPORTLN("[DFR][TARGET] TARGET_PAGE_SIZE=%ld", page_size);
@@ -831,6 +860,7 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls) {
     if (!m.model_ok)        REPORTLN("[DFR][TARGET] MISMATCH model: got=%s want=%s", model, p->model);
     if (!m.device_ok)       REPORTLN("[DFR][TARGET] MISMATCH device: got=%s want=%s", device, p->device);
     if (!m.sdk_ok)          REPORTLN("[DFR][TARGET] MISMATCH sdk: got=%d want=%d", obs.sdk, p->sdk);
+    if (!m.android_release_ok) REPORTLN("[DFR][TARGET] MISMATCH android_release: got=%d want=%d", obs.android_release, p->android_release);
     if (!m.display_ok)      REPORTLN("[DFR][TARGET] MISMATCH display: got=%s want=%s", display, p->display);
     if (!m.fingerprint_ok)  REPORTLN("[DFR][TARGET] MISMATCH fingerprint: got=%s want=%s", fingerprint, p->fingerprint);
     if (!m.kernel_release_ok) REPORTLN("[DFR][TARGET] MISMATCH kernel_release: got=%s want=%s", u.release, p->kernel_release);
@@ -879,9 +909,32 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls) {
         REPORTLN("[DFR][USERSPACE] LIBC_SYMLINK not a symlink (errno=%d) - validating in place", errno);
     }
 
-    if (gate_hash(reporter, "ZZIC_VENDOR_ELF", target_lib_path, p->vendor_target_sha256)) rc = -1;
-    if (gate_hash(reporter, "ZZIC_LIBC_IDENTITY", "/system/lib64/libc.so", p->libc_sha256)) rc = -1;
-    if (gate_hash(reporter, "ZZIC_LIBCXX_IDENTITY", "/system/lib64/libc++.so", p->libcxx_sha256)) rc = -1;
+    /*
+     * Hash only the artefact this stage is about to write, while it is still
+     * pristine (see DFR_ART_* above). The artefacts this stage does not own are
+     * reported SKIP so a log reader never mistakes an unhashed artefact for a
+     * validated one.
+     */
+    if (artefacts & DFR_ART_CRASHDUMP) {
+        if (gate_hash(reporter, "ZZIC_CRASHDUMP_IDENTITY", kCrashDump, p->crashdump_sha256, 1)) rc = -1;
+    } else {
+        REPORTLN("[DFR][USERSPACE] ZZIC_CRASHDUMP_IDENTITY SKIP (not this stage's artefact)");
+    }
+    if (artefacts & DFR_ART_VENDOR) {
+        if (gate_hash(reporter, "ZZIC_VENDOR_ELF", target_lib_path, p->vendor_target_sha256, 1)) rc = -1;
+    } else {
+        REPORTLN("[DFR][USERSPACE] ZZIC_VENDOR_ELF SKIP (not this stage's artefact)");
+    }
+    if (artefacts & DFR_ART_LIBC) {
+        if (gate_hash(reporter, "ZZIC_LIBC_IDENTITY", "/system/lib64/libc.so", p->libc_sha256, 1)) rc = -1;
+    } else {
+        REPORTLN("[DFR][USERSPACE] ZZIC_LIBC_IDENTITY SKIP (not this stage's artefact)");
+    }
+    if (artefacts & DFR_ART_LIBCXX) {
+        if (gate_hash(reporter, "ZZIC_LIBCXX_IDENTITY", "/system/lib64/libc++.so", p->libcxx_sha256, 1)) rc = -1;
+    } else {
+        REPORTLN("[DFR][USERSPACE] ZZIC_LIBCXX_IDENTITY SKIP (not this stage's artefact)");
+    }
 
     if (rc == 0) {
         REPORTLN("[DFR][KERNEL] PASS");
@@ -901,25 +954,18 @@ int patch_ko(struct Reporter *reporter) {
      * takes the upstream generic path). A partial ZZIC match aborts here.
      */
     dfr_target_class cls = DFR_TARGET_UPSTREAM_GENERIC;
-    if (gate_target(reporter, &cls) != 0) {
+    /* patch_ko() writes BOTH crash_dump64 (patch #1) and the vendor file
+     * (patch #2), so it owns both artefact boundaries. */
+    if (gate_target(reporter, &cls, DFR_ART_CRASHDUMP | DFR_ART_VENDOR) != 0) {
         REPORTLN("[DFR][TARGET] aborting: target gate refused");
         return 1;
     }
-    //char buf[] = {1,2,3,4};
-    LOGD("patch1");
-    size_t len = splice_helper_end - splice_helper_start;
-    // "/vendor/lib/libstagefright_soft_g711dec.so"
-    LOGD("patching crashdump");
-    REPORTLN("* patch #1");
-    int ret =
-    patch_file(kCrashDump, splice_helper_start, len, 0, 0xdead0000, 0, reporter);
 
-    LOGD("patch crashdump ret %d", ret);
-    if (ret) {
-        REPORTLN("patch #1 ret %d", ret);
-        return ret;
-    }
-
+    /*
+     * Module selection and the Gate-G module policy are resolved BEFORE the
+     * first write: both are pure lookups, and a refusal here must not leave
+     * crash_dump64 already corrupted in the page cache.
+     */
     int android_release = 0;
     int kver_major = 0;
     int kver_minor = 0;
@@ -945,18 +991,65 @@ int patch_ko(struct Reporter *reporter) {
      * (profile.ko_zzic_verified) or the device operator has explicitly accepted
      * the risk by creating the override marker.
      */
-    if (cls == DFR_TARGET_S25U_ZZIC && !DFR_PROFILE_ZZIC.ko_zzic_verified) {
+    if (cls == DFR_TARGET_S25U_ZZIC) {
         REPORTLN("[DFR][MODULE] ENTER");
-        REPORTLN("[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED (no ZZIC-validated .ko bundled)");
-        if (access("/data/local/tmp/dfr_allow_unverified_ko", F_OK) == 0) {
-            REPORTLN("[DFR][MODULE] WARN proceeding: operator override marker present"
-                     " (/data/local/tmp/dfr_allow_unverified_ko); kernel-crash risk accepted");
+        if (!DFR_PROFILE_ZZIC.ko_zzic_verified) {
+            REPORTLN("[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED (no ZZIC-validated .ko bundled)");
+            if (access("/data/local/tmp/dfr_allow_unverified_ko", F_OK) == 0) {
+                REPORTLN("[DFR][MODULE] WARN proceeding: operator override marker present"
+                         " (/data/local/tmp/dfr_allow_unverified_ko); kernel-crash risk accepted");
+            } else {
+                REPORTLN("[DFR][MODULE] FAIL fail-closed: refusing to load an unverified module on ZZIC.");
+                REPORTLN("[DFR][MODULE]   bundle a Gate-G COMPATIBLE module, or (owner, at own risk)"
+                         " `touch /data/local/tmp/dfr_allow_unverified_ko` to override.");
+                return 1;
+            }
         } else {
-            REPORTLN("[DFR][MODULE] FAIL fail-closed: refusing to load an unverified module on ZZIC.");
-            REPORTLN("[DFR][MODULE]   bundle a Gate-G COMPATIBLE module, or (owner, at own risk)"
-                     " `touch /data/local/tmp/dfr_allow_unverified_ko` to override.");
-            return 1;
+            /*
+             * ko_zzic_verified=1 is only honoured when the bytes about to be
+             * written are provably the ones that were validated. A flag without
+             * a pinned digest, or a digest that does not match the selected
+             * payload, is a refusal - never an assumption (dossier section 39).
+             */
+            const char *want = DFR_PROFILE_ZZIC.ko_sha256;
+            if (want == NULL || want[0] == 0) {
+                REPORTLN("[DFR][MODULE] FAIL ko_zzic_verified=1 but no ko_sha256 is pinned;"
+                         " the flag alone is not evidence. Refusing.");
+                return 1;
+            }
+            dfr_sha256_ctx sc;
+            uint8_t digest[32];
+            char hex[65];
+            dfr_sha256_init(&sc);
+            dfr_sha256_update(&sc, ko->start, (size_t)(ko->end - ko->start));
+            dfr_sha256_final(&sc, digest);
+            dfr_sha256_hex(digest, hex);
+            REPORTLN("[DFR][MODULE] ko_filename=%s",
+                     DFR_PROFILE_ZZIC.ko_filename ? DFR_PROFILE_ZZIC.ko_filename : "<unnamed>");
+            REPORTLN("[DFR][MODULE] ko_sha256_actual=%s", hex);
+            if (strcmp(hex, want) != 0) {
+                REPORTLN("[DFR][MODULE] FAIL module digest does not match the profile.");
+                REPORTLN("[DFR][MODULE]   expected=%s", want);
+                REPORTLN("[DFR][MODULE] refusing: the bundled module is not the validated one.");
+                return 1;
+            }
+            REPORTLN("[DFR][MODULE] ZZIC_MODULE_BINDING=PASS (bundled bytes match pinned digest)");
         }
+    }
+
+    //char buf[] = {1,2,3,4};
+    LOGD("patch1");
+    size_t len = splice_helper_end - splice_helper_start;
+    // "/vendor/lib/libstagefright_soft_g711dec.so"
+    LOGD("patching crashdump");
+    REPORTLN("* patch #1");
+    int ret =
+    patch_file(kCrashDump, splice_helper_start, len, 0, 0xdead0000, 0, reporter);
+
+    LOGD("patch crashdump ret %d", ret);
+    if (ret) {
+        REPORTLN("patch #1 ret %d", ret);
+        return ret;
     }
 
     len = ko->end - ko->start;

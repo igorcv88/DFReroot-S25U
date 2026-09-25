@@ -187,6 +187,18 @@ def audit(path, symvers=None, kallsyms=None):
     if not (r["vermagic_base_ok"] and r["vermagic_page_ok"] and r["machine_ok"]):
         verdict = "INCOMPATIBLE"
 
+    # The verdict is about THIS module against the ZZIC kernel. A module built
+    # for another kernel family (e.g. the android17-6.18 image) is not a ZZIC
+    # candidate at all, so report N/A rather than INCOMPATIBLE: the latter would
+    # read as "this module was evaluated and rejected for its own kernel".
+    if not vermagic.startswith(EXPECTED_GENERIC_VERMAGIC_PREFIX):
+        verdict = ("N/A (vermagic base %s: built for another kernel family than "
+                   "the ZZIC target %s)"
+                   % (vermagic.split()[0] if vermagic else "<unknown>",
+                      EXPECTED_GENERIC_VERMAGIC_PREFIX))
+
+    r["MODULE_VS_ZZIC_KERNEL"] = verdict
+    # Historical key, kept so existing docs/scripts keep resolving.
     r["GENERIC_ANDROID15_6_6_MODULE"] = verdict
     return r
 
@@ -226,8 +238,22 @@ def human(r):
                   "SYMBOL_EXPORTED", "MODVERSION_MATCH"):
             L.append("        %-26s = %s" % (k, d[k]))
     L.append("")
-    L.append("GENERIC_ANDROID15_6_6_MODULE = %s" % r["GENERIC_ANDROID15_6_6_MODULE"])
+    L.append("MODULE_VS_ZZIC_KERNEL = %s" % r["MODULE_VS_ZZIC_KERNEL"])
     return "\n".join(L)
+
+
+def incompatibility_reasons(r):
+    """Why the verdict is INCOMPATIBLE, for the failure message."""
+    why = []
+    if not r.get("machine_ok"):
+        why.append("machine=%s (expected AArch64)" % r.get("machine"))
+    if not r.get("vermagic_base_ok"):
+        why.append("vermagic base != %s" % EXPECTED_GENERIC_VERMAGIC_PREFIX)
+    if not r.get("vermagic_page_ok"):
+        why.append("vermagic lacks the %s page tag" % EXPECTED_PAGE_TAG)
+    if r.get("modversion_mismatches"):
+        why.append("symbol CRC mismatch: %s" % ", ".join(r["modversion_mismatches"]))
+    return why or ["see the report above"]
 
 
 def main():
@@ -242,6 +268,21 @@ def main():
         print(json.dumps(r, indent=2))
     else:
         print(human(r))
+    # INCOMPATIBLE is a hard rejection - wrong architecture, wrong page tag, or
+    # a symbol-CRC mismatch against the supplied Module.symvers - and must be
+    # visible in the exit status, not only on stdout, or a CI gate that invokes
+    # this tool prints the failure and then proceeds anyway.
+    #
+    # UNVERIFIED and N/A stay successful on purpose: the first means the
+    # evidence needed to decide is absent (no Module.symvers), the second that
+    # this module was never a candidate for the ZZIC kernel. Neither is a defect
+    # in the module, and conflating them with INCOMPATIBLE would make the gate
+    # unusable while the ZZIC symbol table is still missing.
+    verdict = str(r.get("MODULE_VS_ZZIC_KERNEL", ""))
+    if verdict.startswith("INCOMPATIBLE"):
+        print("\nGate G FAILED: %s is INCOMPATIBLE (%s)"
+              % (a.ko, ", ".join(incompatibility_reasons(r))), file=sys.stderr)
+        return 1
     return 0
 
 

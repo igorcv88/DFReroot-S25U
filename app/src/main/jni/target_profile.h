@@ -96,6 +96,13 @@ struct TargetProfile {
     /* pinned artefact hashes (lowercase hex SHA-256) */
     const char *kernel_image_sha256;
     const char *btf_sha256;
+    /*
+     * First mutation target. NULL until the exact ZZIC file hash is captured
+     * from hardware; on the ZZIC target an unpinned REQUIRED artefact is a FAIL,
+     * not an UNKNOWN, so the chain refuses rather than writing to a file whose
+     * pristine identity was never established (dossier section 26).
+     */
+    const char *crashdump_sha256;     /* /apex/com.android.runtime/bin/crash_dump64 */
     const char *vendor_target_sha256; /* /vendor/lib64/libstagefrighthw.so */
     const char *libc_sha256;          /* resolved /system/lib64/libc.so target */
     const char *libcxx_sha256;        /* /system/lib64/libc++.so */
@@ -111,8 +118,21 @@ struct TargetProfile {
      * (Gate G COMPATIBLE against the ZZIC Module.symvers). 0 = only the generic
      * android15-6.6 module is available and it is Gate-G UNVERIFIED, so loading
      * it on ZZIC is fail-closed-refused unless the operator opts in explicitly.
+     *
+     * A bare boolean is not evidence. The invariant the runtime enforces is:
+     *
+     *   ko_zzic_verified == 1
+     *     IMPLIES ko_sha256 is pinned
+     *     AND SHA-256(bundled module bytes actually selected) == ko_sha256
+     *
+     * so flipping the flag without pinning the digest of the exact validated
+     * module, or bundling different bytes than the ones that were validated,
+     * refuses at run time instead of silently loading an unvalidated module.
+     * tools/profile_binding_audit.py enforces the same invariant in CI.
      */
     int         ko_zzic_verified;
+    const char *ko_filename;  /* validated module's filename, or NULL */
+    const char *ko_sha256;    /* its lowercase hex SHA-256, or NULL */
 };
 
 extern const struct TargetProfile DFR_PROFILE_ZZIC;
@@ -129,6 +149,7 @@ struct ObservedTarget {
     const char *model;
     const char *device;
     int         sdk;
+    int         android_release; /* ro.build.version.release as int (17) */
     const char *display;
     const char *fingerprint;
     const char *kernel_release;
@@ -145,6 +166,7 @@ struct TargetMatch {
     int model_ok;
     int device_ok;
     int sdk_ok;
+    int android_release_ok;
     int display_ok;
     int fingerprint_ok;
     int kernel_release_ok;

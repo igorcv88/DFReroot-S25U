@@ -1,0 +1,218 @@
+name: Release
+
+# Builds the signed release APKs and publishes them as GitHub Release assets.
+#
+# No workflow artifacts are uploaded: the Release itself is the only output.
+#
+# Required repository secrets:
+#   KEYSTORE_BASE64    base64 of the JKS/PKCS12 keystore (`base64 -w0 keystore.jks`)
+#   KEYSTORE_PASSWORD  keystore password
+#   KEY_ALIAS          key alias inside the keystore
+#   KEY_PASSWORD       key password
+#
+# DFReroot and DFInstaller are signed with the SAME key on purpose: DFInstaller
+# writes DFReroot's certificate into packages.xml, so a mismatch makes the
+# injected key useless. Both modules read the four values above (see
+# app/build.gradle.kts), so one keystore covers both.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create/publish (e.g. v2.0.2). Defaults to the current ref.'
+        required: false
+        type: string
+      prerelease:
+        description: 'Mark the release as a pre-release'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # repro_report.sh uses git describe
+
+      # A release must describe the commit that was actually built. On a manual
+      # dispatch the checkout is at the dispatched ref, which need not be the
+      # target of the tag being published, so publishing would attach these
+      # artifacts to a different commit's release. Refuse instead, and do it
+      # before spending a signed build.
+      - name: Resolve and validate the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          TAG="${{ inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"
+          test -n "$TAG" || { echo "::error::no tag to publish"; exit 1; }
+
+          REF_JSON=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>/dev/null || true)
+          if [ -n "$REF_JSON" ]; then
+            TAG_SHA=$(printf '%s' "$REF_JSON" | jq -r '.object.sha')
+            # An annotated tag points at a tag object; dereference to the commit.
+            if [ "$(printf '%s' "$REF_JSON" | jq -r '.object.type')" = "tag" ]; then
+              TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_SHA" --jq '.object.sha')
+            fi
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "::error::tag $TAG points at $TAG_SHA but this run built $GITHUB_SHA."
+              echo "::error::Re-run this workflow from the tag itself, or publish a new tag."
+              exit 1
+            fi
+            echo "tag $TAG already exists and matches this commit; the release will be updated"
+            echo "TAG_EXISTS=1" >> "$GITHUB_ENV"
+          else
+            echo "tag $TAG does not exist yet; it will be created at $GITHUB_SHA"
+            echo "TAG_EXISTS=0" >> "$GITHUB_ENV"
+          fi
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platforms;android-36
+            build-tools;36.0.0
+            ndk;27.0.12077973
+            cmake;3.22.1
+
+      - name: Export NDK location
+        run: |
+          NDK="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+          test -d "$NDK" || { echo "NDK missing at $NDK"; exit 1; }
+          echo "ANDROID_NDK=$NDK"      >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+      # --- gates that do not need a device, before spending a build on it ---
+      - name: Gate A - target profile unit + regression tests
+        run: sh tools/tests/run_tests.sh
+
+      - name: Profile / module binding invariant (dossier section 39)
+        run: python3 tools/profile_binding_audit.py
+
+      - name: Gate G - bundled kernel module ABI audit
+        run: |
+          for ko in app/src/main/jni/dirtyfrag-android*.ko; do
+            echo "### $ko"
+            python3 tools/ko_audit.py "$ko"
+          done
+
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::KEYSTORE_BASE64 secret is not set; a release build cannot be signed."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          # Keep the keystore OUT of the working tree so it can never be packaged.
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build signed APKs
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./build.sh
+
+      - name: Gate E - native packaging audit
+        run: ./tools/ci_build_audit.sh
+
+      - name: Verify APK signature and identity
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner | sort | tail -1)"
+          for apk in df_reroot.apk df_installer.apk; do
+            echo "### $apk"
+            "$APKSIGNER" verify --print-certs "$apk"
+          done
+          # Both APKs must carry the same certificate, or the injected key is useless.
+          a=$("$APKSIGNER" verify --print-certs df_reroot.apk    | grep -i 'SHA-256 digest' | head -1)
+          b=$("$APKSIGNER" verify --print-certs df_installer.apk | grep -i 'SHA-256 digest' | head -1)
+          test -n "$a" && test "$a" = "$b" || {
+            echo "::error::df_reroot.apk and df_installer.apk are signed with different keys"; exit 1; }
+
+      - name: Build provenance record
+        run: ./tools/repro_report.sh | tee build-provenance.txt
+
+      - name: Name and checksum the release assets
+        run: |
+          mkdir -p release
+          cp df_reroot.apk        "release/df_reroot_${VER}.apk"
+          cp df_installer.apk     "release/df_installer_${VER}.apk"
+          cp build-provenance.txt release/build-provenance.txt
+          cd release
+          sha256sum df_reroot_*.apk df_installer_*.apk build-provenance.txt > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "## DFReroot ${VER} — Galaxy S25 Ultra SM-S938B / S938BXXUCZZIC"
+            echo
+            echo "Install \`df_installer_${VER}.apk\` first; \`df_reroot_${VER}.apk\` is also"
+            echo "bundled inside it, so it does not need to be sideloaded separately."
+            echo
+            echo "### Compatibility state"
+            echo
+            echo "The fail-closed S25U_ZZIC profile refuses to run unless the device matches"
+            echo "the pinned firmware exactly. Runtime compatibility on this firmware is"
+            echo "**UNVERIFIED**: see \`docs/S25U_ZZIC_COMPATIBILITY.md\` for the gate matrix"
+            echo "and which gates still need on-device evidence."
+            echo
+            echo "### Checksums"
+            echo
+            echo '```'
+            cat release/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "Build provenance (toolchain, commit, payload hashes) is attached as"
+            echo "\`build-provenance.txt\`."
+          } > release-notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # --clobber only replaces assets of the SAME name, so a version bump
+            # would otherwise leave the previous version's APKs sitting in the
+            # release next to the new ones. Drop any APK we are not re-uploading.
+            for old in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
+              case "$old" in
+                *.apk)
+                  if [ ! -f "release/$old" ]; then
+                    echo "removing stale asset $old"
+                    gh release delete-asset "$TAG" "$old" -y
+                  fi
+                  ;;
+              esac
+            done
+            gh release upload "$TAG" release/* --clobber
+            gh release edit "$TAG" --notes-file release-notes.md
+          else
+            PRE=""
+            if [ "${{ inputs.prerelease }}" = "true" ]; then PRE="--prerelease"; fi
+            gh release create "$TAG" release/* \
+              --title "DFReroot ${VER} (${TAG})" \
+              --notes-file release-notes.md \
+              --target "$GITHUB_SHA" \
+              $PRE
+          fi

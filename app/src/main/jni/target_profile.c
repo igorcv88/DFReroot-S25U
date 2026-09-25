@@ -16,7 +16,11 @@
  */
 const struct TargetProfile DFR_PROFILE_ZZIC = {
     .id            = "S25U_ZZIC",
-    .manufacturer  = "Samsung",
+    /* ro.product.manufacturer is lowercase on Samsung firmware ("samsung",
+     * as the fingerprint prefix also shows). Comparison is case-sensitive,
+     * so the exact observed casing is mandatory here: "Samsung" would make
+     * the real target classify as MISMATCH and refuse everything. */
+    .manufacturer  = "samsung",
     .model         = "SM-S938B",
     .device        = "pa3q",
     .sdk           = 37,
@@ -34,6 +38,9 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
         "470d40df59320e01b1449f8dbe962e0d44d735c817b99293dc6da286175ffcf3",
     .btf_sha256 =
         "e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c",
+    /* Unknown: dossier section 26, the immediate Gate B blocker. Keep NULL so
+     * the ZZIC path refuses instead of patching an unvalidated crash_dump64. */
+    .crashdump_sha256 = NULL,
     .vendor_target_sha256 =
         "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
     .libc_sha256 =
@@ -47,8 +54,12 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
     .network_stack_cap_eff = 0x800003c00L,
 
     /* No ZZIC-validated module is bundled: only the generic Gate-G UNVERIFIED
-     * android15-6.6 .ko exists. Keep fail-closed until one is proven. */
+     * android15-6.6 .ko exists. Keep fail-closed until one is proven. When one
+     * is, set all three fields together (see the header's invariant): the flag
+     * alone grants nothing without the pinned digest of the exact bytes. */
     .ko_zzic_verified = 0,
+    .ko_filename      = NULL,
+    .ko_sha256        = NULL,
 };
 
 int dfr_streq(const char *a, const char *b) {
@@ -99,6 +110,12 @@ dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
     m.model_ok          = dfr_streq(obs->model, p->model);
     m.device_ok         = dfr_streq(obs->device, p->device);
     m.sdk_ok            = (obs->sdk == p->sdk);
+    /*
+     * android_release is compared, not merely stored: an SDK number can be
+     * shared by a platform release and its beta, so leaving the pinned value
+     * unenforced would mean the profile advertises a field it never checks.
+     */
+    m.android_release_ok = (obs->android_release == p->android_release);
     m.display_ok        = dfr_streq(obs->display, p->display);
     m.fingerprint_ok    = dfr_streq(obs->fingerprint, p->fingerprint);
     m.kernel_release_ok = dfr_streq(obs->kernel_release, p->kernel_release);
@@ -108,6 +125,7 @@ dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
     m.abi_ok            = dfr_streq(obs->abi, p->abi);
 
     m.all_ok = m.manufacturer_ok && m.model_ok && m.device_ok && m.sdk_ok &&
+               m.android_release_ok &&
                m.display_ok && m.fingerprint_ok && m.kernel_release_ok &&
                m.kernel_version_ok && m.kernel_arch_ok &&
                m.page_size_ok && m.abi_ok;

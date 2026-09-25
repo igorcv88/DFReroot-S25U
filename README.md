@@ -58,6 +58,20 @@ $ ./create-keystore.sh
 $ ANDROID_NDK_HOME=(ndk path) ANDROID_HOME=(sdk path) ./build.sh
 ```
 
+Signing is resolved from the environment when set, so CI never needs a committed
+key. Both APKs **must** use the same key — DFInstaller injects DFReroot's
+certificate into `packages.xml`:
+
+```sh
+$ KEYSTORE_FILE=/path/to/keystore.jks KEYSTORE_PASSWORD=... \
+  KEY_ALIAS=... KEY_PASSWORD=... ./build.sh
+```
+
+With none of those set, the `create-keystore.sh` development defaults are used.
+`.github/workflows/release.yml` builds and publishes signed APKs to GitHub
+Releases from the `KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` /
+`KEY_PASSWORD` repository secrets; push a `v*` tag or run it manually.
+
 The LKM rebuild needs Docker (GKI DDK), see `dirtyfrag-lkm/build.sh`.
 Build ksud from kdp-612-3.3.0 branch of [my fork](https://github.com/polygraphene/KernelSU/tree/kdp-612-3.3.0) of KernelSU.
 

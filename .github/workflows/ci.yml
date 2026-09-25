@@ -1,0 +1,120 @@
+name: CI
+
+# Host-side checks only. None of these prove hardware compatibility: they prove
+# the fail-closed logic, the offline audits and the build still hold. The gate
+# matrix in docs/S25U_ZZIC_COMPATIBILITY.md is the authority on what is actually
+# verified on the ZZIC device.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Offline gates (no device, no SDK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gate A - target profile unit + regression tests
+        run: sh tools/tests/run_tests.sh
+
+      - name: Profile / module binding invariant (dossier section 39)
+        run: python3 tools/profile_binding_audit.py
+
+      - name: Python tool syntax
+        run: python3 -m compileall -q tools
+
+      - name: Shell script syntax
+        run: |
+          # `sh -n "$s" && echo ...` would swallow a failure: on the left of &&
+          # the runner's `set -e` does not terminate the step, and the loop's
+          # status is that of its LAST iteration, so an early syntax error left
+          # the step green. Run the check as a bare command.
+          for s in build.sh build-splice.sh create-keystore.sh \
+                   tools/ci_build_audit.sh tools/repro_report.sh \
+                   tools/tests/run_tests.sh dirtyfrag-lkm/build.sh; do
+            sh -n "$s"
+            echo "ok  $s"
+          done
+
+      - name: Gate G - bundled kernel module ABI audit
+        run: |
+          for ko in app/src/main/jni/dirtyfrag-android*.ko; do
+            echo "### $ko"
+            python3 tools/ko_audit.py "$ko"
+          done
+
+      - name: Gate H - installer round-trip on a synthetic packages.xml
+        run: |
+          cat > /tmp/packages.xml <<'XML'
+          <?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+          <packages>
+            <shared-user name="android.uid.system" userId="1000">
+              <sigs count="1">
+                <cert index="0" key="30820122300d06092a864886f70d01010105000382010f00" />
+              </sigs>
+            </shared-user>
+            <package name="com.example.app" codePath="/data/app/example" userId="10123">
+              <sigs count="1"><cert index="0" /></sigs>
+            </package>
+          </packages>
+          XML
+          python3 tools/installer_audit.py /tmp/packages.xml
+
+  build:
+    name: Gate E - build + native packaging audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platforms;android-36
+            build-tools;36.0.0
+            ndk;27.0.12077973
+            cmake;3.22.1
+
+      - name: Export NDK location
+        run: |
+          NDK="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+          test -d "$NDK" || { echo "NDK missing at $NDK"; exit 1; }
+          echo "ANDROID_NDK=$NDK"      >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+      # CI has no release key: generate a throwaway one so the compile path is
+      # exercised. These APKs are NOT publishable - a release build must be
+      # signed with the real keystore (see release.yml), because DFInstaller
+      # injects DFReroot's certificate into packages.xml.
+      - name: Throwaway signing key (build check only)
+        run: |
+          keytool -genkeypair -keystore "$RUNNER_TEMP/ci.jks" -storetype JKS \
+            -keyalg RSA -keysize 2048 -validity 1 -alias dfreroot \
+            -storepass citestonly -keypass citestonly -dname "CN=dfreroot-ci-throwaway"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/ci.jks" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=citestonly"      >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=dfreroot"                >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=citestonly"           >> "$GITHUB_ENV"
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Native packaging audit
+        run: ./tools/ci_build_audit.sh
+
+      - name: Build provenance record
+        run: ./tools/repro_report.sh

@@ -3,6 +3,26 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+/*
+ * Release signing material. DFReroot and DFInstaller MUST be signed with the
+ * same key (the installer writes DFReroot's certificate into packages.xml), so
+ * both modules resolve it the same way:
+ *
+ *   KEYSTORE_FILE / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD  (environment)
+ *
+ * CI decodes the KEYSTORE_BASE64 secret to a file outside the working tree and
+ * points KEYSTORE_FILE at it, so no key or password is ever committed. With no
+ * environment set, the create-keystore.sh development defaults are used, which
+ * keeps `./build.sh` working locally exactly as before.
+ */
+val dfrKeystore: File = System.getenv("KEYSTORE_FILE")
+    ?.takeIf { it.isNotBlank() }
+    ?.let { File(it) }
+    ?: rootProject.file("app/keystore.jks")
+val dfrStorePassword: String = System.getenv("KEYSTORE_PASSWORD") ?: "dfreroot"
+val dfrKeyAlias: String = System.getenv("KEY_ALIAS") ?: "dfreroot"
+val dfrKeyPassword: String = System.getenv("KEY_PASSWORD") ?: "dfreroot"
+
 android {
     namespace = "com.polygraphene.df.reroot"
     compileSdk = 36
@@ -27,10 +47,10 @@ android {
     }
     signingConfigs {
         create("keystore") {
-            storeFile = file("keystore.jks")
-            storePassword = "dfreroot"
-            keyAlias = "dfreroot"
-            keyPassword = "dfreroot"
+            storeFile = dfrKeystore
+            storePassword = dfrStorePassword
+            keyAlias = dfrKeyAlias
+            keyPassword = dfrKeyPassword
         }
     }
     buildTypes {

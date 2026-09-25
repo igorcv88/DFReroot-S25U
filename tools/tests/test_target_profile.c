@@ -33,10 +33,11 @@ static int g_total = 0;
 static struct ObservedTarget zzic_observed(void) {
     struct ObservedTarget o;
     memset(&o, 0, sizeof(o));
-    o.manufacturer  = "Samsung";
+    o.manufacturer  = "samsung";  /* lowercase: the value the device reports */
     o.model         = "SM-S938B";
     o.device        = "pa3q";
     o.sdk           = 37;
+    o.android_release = 17;
     o.display       = "CP2A.260605.016.S938BXXUCZZIC";
     o.fingerprint   = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
                       "S938BXXUCZZIC_OXMCZZIC:user/release-keys";
@@ -120,9 +121,35 @@ static void test_target_detection(void) {
     c = dfr_classify_target(&o, &m);
     CHECK(c == DFR_TARGET_MISMATCH, "different kernel_arch -> %s (must be MISMATCH)", cls_name(c));
 
+    /*
+     * Property casing is part of the identity. `ro.product.manufacturer` is
+     * lowercase "samsung" on this firmware, so the profile must pin exactly
+     * that: a capitalised "Samsung" in the profile would turn the real device
+     * into a MISMATCH and refuse the whole chain. Assert both directions.
+     */
+    CHECK(strcmp(DFR_PROFILE_ZZIC.manufacturer, "samsung") == 0,
+          "profile pins lowercase manufacturer (got \"%s\")", DFR_PROFILE_ZZIC.manufacturer);
+    o = zzic_observed();
+    o.manufacturer = "Samsung";
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_MISMATCH && !m.manufacturer_ok,
+          "capitalised manufacturer -> %s (case-sensitive compare)", cls_name(c));
+
+    /* android_release is pinned AND enforced (dossier section 57). */
+    o = zzic_observed();
+    o.android_release = 16;
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_MISMATCH && !m.android_release_ok,
+          "android_release 16 on ZZIC hardware -> %s (must be MISMATCH)", cls_name(c));
+    o = zzic_observed();
+    o.android_release = 0; /* ro.build.version.release unreadable */
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_MISMATCH,
+          "missing android_release -> %s (fail-closed, never assumed)", cls_name(c));
+
     /* unrelated Samsung 6.6 device -> UPSTREAM_GENERIC (upstream path preserved) */
     o = zzic_observed();
-    o.model = "SM-S931B"; o.device = "s25"; o.sdk = 35;
+    o.model = "SM-S931B"; o.device = "s25"; o.sdk = 35; o.android_release = 15;
     o.display = "AP3A.240905.015.A1"; o.fingerprint = "samsung/s25.../...";
     o.kernel_release = "6.6.30-android15-4-gki-4k";
     c = dfr_classify_target(&o, &m);
