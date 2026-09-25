@@ -89,6 +89,7 @@ static const char *target_lib_path = "/vendor/lib64/libstagefrighthw.so";
 /* Fail-closed target gate (defined below); every page-cache corruption entry
  * point must pass it before touching a file. */
 static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls);
+static int gate_mutation_ready(struct Reporter *reporter, dfr_target_class *out_cls);
 
 static void put_attr(struct nlmsghdr *nlh, int type, const void *data, size_t len) {
     struct rtattr *rta = (struct rtattr *) ((char *) nlh + NLMSG_ALIGN(nlh->nlmsg_len));
@@ -492,8 +493,8 @@ int find_hook_target(const char *libcxx, const char* symname, uint64_t *hook_tar
 int patch_libc(struct Reporter *reporter) {
     /* Independent JNI entry point: re-run the fail-closed gate so patchLibc()
      * cannot corrupt libc on a mismatched device without patch_ko() having run. */
-    if (gate_target(reporter, NULL) != 0) {
-        REPORTLN("[DFR][TARGET] aborting patch_libc: target gate refused");
+    if (gate_mutation_ready(reporter, NULL) != 0) {
+        REPORTLN("[DFR][TARGET] aborting patch_libc: mutation readiness gate refused");
         return 1;
     }
     uint64_t hook_offset, shellcode_offset;
@@ -562,8 +563,8 @@ int patch_libc(struct Reporter *reporter) {
 int patch_cxx(int run_index, struct Reporter *reporter) {
     /* Independent JNI entry point: re-run the fail-closed gate so patchCxx()
      * cannot corrupt libc++ on a mismatched device without patch_ko() first. */
-    if (gate_target(reporter, NULL) != 0) {
-        REPORTLN("[DFR][TARGET] aborting patch_cxx: target gate refused");
+    if (gate_mutation_ready(reporter, NULL) != 0) {
+        REPORTLN("[DFR][TARGET] aborting patch_cxx: mutation readiness gate refused");
         return 1;
     }
     uint64_t hook_offset, shellcode_offset;
@@ -753,8 +754,8 @@ static void prop_get(const char *key, char *out, size_t outlen, const char *dflt
 static int gate_hash(struct Reporter *reporter, const char *tag,
                      const char *path, const char *expected) {
     if (expected == NULL || expected[0] == 0) {
-        REPORTLN("[DFR][USERSPACE] %s UNKNOWN (no pinned hash) path=%s", tag, path);
-        return 0; /* unknown != fail: do not block on an unpinned artefact */
+        REPORTLN("[DFR][USERSPACE] %s FAIL required hash is not pinned path=%s", tag, path);
+        return -1;
     }
     char hex[65];
     if (dfr_sha256_file_hex(path, hex) != 0) {
@@ -879,6 +880,7 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls) {
         REPORTLN("[DFR][USERSPACE] LIBC_SYMLINK not a symlink (errno=%d) - validating in place", errno);
     }
 
+    if (gate_hash(reporter, "ZZIC_CRASHDUMP_IDENTITY", kCrashDump, p->crashdump_sha256)) rc = -1;
     if (gate_hash(reporter, "ZZIC_VENDOR_ELF", target_lib_path, p->vendor_target_sha256)) rc = -1;
     if (gate_hash(reporter, "ZZIC_LIBC_IDENTITY", "/system/lib64/libc.so", p->libc_sha256)) rc = -1;
     if (gate_hash(reporter, "ZZIC_LIBCXX_IDENTITY", "/system/lib64/libc++.so", p->libcxx_sha256)) rc = -1;
@@ -894,6 +896,30 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls) {
     return rc;
 }
 
+
+/*
+ * Final fail-closed readiness boundary for any mutating ZZIC entry point.
+ * Identity/userspace validation alone is not enough: Gate G must also have a
+ * positively validated module. No operator marker can bypass this boundary.
+ * Unrelated upstream targets retain their historical behavior.
+ */
+static int gate_mutation_ready(struct Reporter *reporter, dfr_target_class *out_cls) {
+    dfr_target_class cls = DFR_TARGET_UPSTREAM_GENERIC;
+    if (gate_target(reporter, &cls) != 0) {
+        if (out_cls) *out_cls = cls;
+        return -1;
+    }
+    if (cls == DFR_TARGET_S25U_ZZIC && !DFR_PROFILE_ZZIC.ko_zzic_verified) {
+        REPORTLN("[DFR][MODULE] ENTER");
+        REPORTLN("[DFR][MODULE] FAIL Gate G is not positively validated for ZZIC.");
+        REPORTLN("[DFR][MODULE] No page-cache mutation is permitted until a ZZIC-validated module is bundled.");
+        if (out_cls) *out_cls = cls;
+        return -1;
+    }
+    if (out_cls) *out_cls = cls;
+    return 0;
+}
+
 int patch_ko(struct Reporter *reporter) {
     /*
      * Fail-closed Gate A/B chokepoint: no page-cache corruption runs until the
@@ -901,8 +927,8 @@ int patch_ko(struct Reporter *reporter) {
      * takes the upstream generic path). A partial ZZIC match aborts here.
      */
     dfr_target_class cls = DFR_TARGET_UPSTREAM_GENERIC;
-    if (gate_target(reporter, &cls) != 0) {
-        REPORTLN("[DFR][TARGET] aborting: target gate refused");
+    if (gate_mutation_ready(reporter, &cls) != 0) {
+        REPORTLN("[DFR][TARGET] aborting: mutation readiness gate refused");
         return 1;
     }
     //char buf[] = {1,2,3,4};
@@ -936,28 +962,7 @@ int patch_ko(struct Reporter *reporter) {
     }
     REPORTLN("* ko android%d-%d.%d (%d bytes)", ko->android_release, ko->kver_major, ko->kver_minor, (int)(ko->end - ko->start));
 
-    /*
-     * Fail-closed module policy: on the exact ZZIC target the only bundled
-     * module is the GENERIC android15-6.6 image, which Gate G reports as
-     * UNVERIFIED (empty __versions; no ZZIC Module.symvers to prove symbol-CRC
-     * agreement). Loading an ABI-mismatched module can crash/corrupt the
-     * kernel, so refuse unless either a ZZIC-validated module is bundled
-     * (profile.ko_zzic_verified) or the device operator has explicitly accepted
-     * the risk by creating the override marker.
-     */
-    if (cls == DFR_TARGET_S25U_ZZIC && !DFR_PROFILE_ZZIC.ko_zzic_verified) {
-        REPORTLN("[DFR][MODULE] ENTER");
-        REPORTLN("[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED (no ZZIC-validated .ko bundled)");
-        if (access("/data/local/tmp/dfr_allow_unverified_ko", F_OK) == 0) {
-            REPORTLN("[DFR][MODULE] WARN proceeding: operator override marker present"
-                     " (/data/local/tmp/dfr_allow_unverified_ko); kernel-crash risk accepted");
-        } else {
-            REPORTLN("[DFR][MODULE] FAIL fail-closed: refusing to load an unverified module on ZZIC.");
-            REPORTLN("[DFR][MODULE]   bundle a Gate-G COMPATIBLE module, or (owner, at own risk)"
-                     " `touch /data/local/tmp/dfr_allow_unverified_ko` to override.");
-            return 1;
-        }
-    }
+    /* Gate G was checked before patch #1 by gate_mutation_ready(). */
 
     len = ko->end - ko->start;
 
