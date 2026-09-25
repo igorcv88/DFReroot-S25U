@@ -24,6 +24,7 @@ import org.lsposed.lspromise.DirtyFrag
 class StageReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Log.i(TAG, "in network_stack, stage 2")
+        Diagnostics.processIdentity(context, "network_stack")  // Gate D
         try {
             stage2(context)
         } catch (t: Throwable) {

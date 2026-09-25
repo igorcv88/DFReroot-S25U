@@ -400,6 +400,96 @@ object PackagesXml {
         return log.toString()
     }
 
+    /** Serialize a DOM back to text XML bytes (used by the round-trip check). */
+    private fun domToText(doc: Document): ByteArray {
+        val out = ByteArrayOutputStream()
+        TransformerFactory.newInstance().newTransformer()
+            .transform(DOMSource(doc), StreamResult(out))
+        return out.toByteArray()
+    }
+
+    /**
+     * Gate H - read-only installer/packages.xml compatibility diagnostic for
+     * Android 17 Samsung. Zero writes. Emits `[DFR][INSTALLER]` gate lines:
+     *   PACKAGES_FORMAT, PACKAGES_PARSE, ANDROID_UID_SYSTEM_FOUND,
+     *   CERT_TABLE_PARSE, ROUND_TRIP_VALID, METADATA_CAPTURED
+     * plus owner/group/mode/SELinux label and per-target pastSigs shape, so the
+     * Samsung Android 17 structure can be confirmed understood by the parser.
+     */
+    fun diagnose(raw: ByteArray, xmlPath: String, targets: List<String>, log: StringBuilder) {
+        log.appendLine("[DFR][INSTALLER] ENTER gate H")
+        val format = if (Abx.isAbx(raw)) "ABX" else "TEXT"
+        log.appendLine("[DFR][INSTALLER] PACKAGES_FORMAT=$format")
+
+        // file metadata (owner/group/mode/SELinux)
+        var metaOk = false
+        try {
+            val st = android.system.Os.stat(xmlPath)
+            log.appendLine("[DFR][INSTALLER] owner_uid=${st.st_uid} group_gid=${st.st_gid} " +
+                "mode=0%o".format(st.st_mode and 0x1FF))
+            val ctx = try {
+                val p = Runtime.getRuntime().exec(arrayOf("/system/bin/ls", "-Z", xmlPath))
+                p.inputStream.bufferedReader().readText().trim().substringBefore(' ')
+            } catch (e: Exception) { "UNKNOWN($e)" }
+            log.appendLine("[DFR][INSTALLER] selinux_label=$ctx")
+            metaOk = true
+        } catch (e: Exception) {
+            log.appendLine("[DFR][INSTALLER] metadata FAIL: $e")
+        }
+        log.appendLine("[DFR][INSTALLER] METADATA_CAPTURED=${if (metaOk) "PASS" else "FAIL"}")
+
+        val doc = try {
+            parseToDom(raw).also { log.appendLine("[DFR][INSTALLER] PACKAGES_PARSE=PASS (parser=${if (format == "ABX") "Abx.resolvePullParser" else "JAXP"})") }
+        } catch (e: Exception) {
+            log.appendLine("[DFR][INSTALLER] PACKAGES_PARSE=FAIL: $e")
+            return
+        }
+
+        val sharedUsers = doc.getElementsByTagName("shared-user")
+        val names = (0 until sharedUsers.length).map { (sharedUsers.item(it) as Element).getAttribute("name") }
+        log.appendLine("[DFR][INSTALLER] shared_users=$names")
+        val hasSystem = names.contains("android.uid.system")
+        log.appendLine("[DFR][INSTALLER] ANDROID_UID_SYSTEM_FOUND=${if (hasSystem) "PASS" else "FAIL"}")
+
+        val table = try {
+            resolveKeyTable(doc).also {
+                log.appendLine("[DFR][INSTALLER] CERT_TABLE_PARSE=PASS (size=${it.size})")
+            }
+        } catch (e: Exception) {
+            log.appendLine("[DFR][INSTALLER] CERT_TABLE_PARSE=FAIL: $e")
+            mutableListOf<String?>()
+        }
+
+        for (t in targets) {
+            val su = (0 until sharedUsers.length)
+                .map { sharedUsers.item(it) as Element }
+                .firstOrNull { it.getAttribute("name") == t } ?: continue
+            val sigs = child(su, "sigs")
+            val pastCount = if (sigs != null) children(sigs, "pastSigs").sumOf { children(it, "cert").size } else 0
+            log.appendLine("[DFR][INSTALLER] target=$t pastSigs_certs=$pastCount")
+        }
+
+        // serialization round-trip: DOM -> text -> DOM, compare structure.
+        var rtOk = false
+        try {
+            val text = domToText(doc)
+            val doc2 = parseToDom(text)
+            val p1 = doc.getElementsByTagName("package").length
+            val p2 = doc2.getElementsByTagName("package").length
+            val c1 = doc.getElementsByTagName("cert").length
+            val c2 = doc2.getElementsByTagName("cert").length
+            val s1 = doc.getElementsByTagName("shared-user").length
+            val s2 = doc2.getElementsByTagName("shared-user").length
+            rtOk = (p1 == p2 && c1 == c2 && s1 == s2)
+            log.appendLine("[DFR][INSTALLER] round_trip packages=$p1/$p2 certs=$c1/$c2 shared_users=$s1/$s2")
+        } catch (e: Exception) {
+            log.appendLine("[DFR][INSTALLER] round_trip FAIL: $e")
+        }
+        log.appendLine("[DFR][INSTALLER] ROUND_TRIP_VALID=${if (rtOk) "PASS" else "FAIL"}")
+        log.appendLine("[DFR][INSTALLER] backup_metadata=$xmlPath$BACKUP_SUFFIX (created on first write)")
+        log.appendLine("[DFR][INSTALLER] ${if (hasSystem && rtOk) "PASS" else "UNKNOWN"} gate H")
+    }
+
     /**
      * Backup (once) + direct-overwrite-then-rename-swap write + perms +
      * restorecon. Shared by inject and uninstall backends.
