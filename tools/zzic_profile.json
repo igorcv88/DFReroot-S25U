@@ -1,6 +1,6 @@
 {
   "id": "S25U_ZZIC",
-  "manufacturer": "Samsung",
+  "manufacturer": "samsung",
   "model": "SM-S938B",
   "device": "pa3q",
   "sdk": 37,
@@ -28,7 +28,12 @@
     "/system/lib64/libc++.so": "cb118e98c74d3454858921123b9b51ba13df9cad7dfa141dd892c453661a4d78"
   },
   "symbol_checks": {
-    "/system/lib64/libc.so": ["__libc_init"],
-    "/system/lib64/libc++.so": ["_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_"]
-  }
+    "/system/lib64/libc.so": [
+      "__libc_init"
+    ],
+    "/system/lib64/libc++.so": [
+      "_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_"
+    ]
+  },
+  "crashdump_sha256": null
 }
