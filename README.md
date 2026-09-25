@@ -6,46 +6,48 @@ persist a system-UID app, then use Dirty Frag from it for all subsequent roots.
 
 ## Supported devices
 
-Verified end to end only on Galaxy S26 OneUI 8.5
+The upstream project is verified end to end on Galaxy S26 OneUI 8.5
 (`samsung/m1qjpnx/m1q:16/BP4A.251205.006/S942QOPU1AZDE_SJP1AZDE:user/release-keys`).
-Other firmware may work; nothing here asserts that it does.
 
-This fork adds a **fail-closed compatibility profile** for one further target:
+This fork also carries a **fail-closed exact-firmware profile** for:
 
-```
-Galaxy S25 Ultra, SM-S938B / pa3q, Android 17 / One UI 9 Beta 3, S938BXXUCZZIC
+```text
+Galaxy S25 Ultra, SM-S938B / pa3q
+Android 17 / One UI 9 Beta 3
+firmware S938BXXUCZZIC
 kernel 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k
 ```
 
-That profile is **not** a support claim — it is the opposite. On a device
-asserting the S25 Ultra model or codename, the chain refuses unless every pinned
-identity field matches exactly.
+On that exact S25 Ultra firmware, `v2.0.4-zzic` has now been physically
+validated through the complete root chain:
 
-The first physical run (`v2.0.2-zzic`) showed the adaptation to Android 17 /
-One UI 9 working end to end **up to the kernel module**: the `packages.xml`
-injection, the `system_server` host, the AMS `scheduleReceiver/12` hop into
-`com.android.networkstack.process`, and `libexp.so` loading there are all
-observed, and the exact identity and kernel gates pass on hardware.
+- exact target / kernel / userspace gates passed;
+- the exact ZZIC DirtyFrag helper was selected and hash-bound;
+- all six page-cache write stages completed;
+- the transient helper successfully drove SELinux to `Permissive`;
+- the DFR-specific ksud late-loaded KernelSU;
+- `su` returned `uid=0(root)` in `u:r:ksu:s0`;
+- manual `setenforce 1` restored `Enforcing`, and KernelSU root continued to
+  work afterwards in the same boot.
 
-It still **refuses to root the device**, at one boundary and by design: the ZZIC
-kernel has `CONFIG_MODVERSIONS=y` and the bundled module ships an empty
-`__versions` table, so Gate G is `UNVERIFIED` and no symbol-CRC agreement can be
-demonstrated. There is no runtime override. Running the app on that firmware
-collects `[DFR][*]` diagnostics and writes nothing to the page cache.
+That proves the root path. It does **not yet** make `v2.0.4-zzic` the final safe
+automation: the current app can report success at the stage2 bind marker while
+SELinux is still globally `Permissive`. The next implementation is to make
+KernelSU control-channel verification + SELinux restoration + read-back part of
+the automatic post-root completion state.
 
-`docs/S25U_ZZIC_COMPATIBILITY.md` is the authoritative gate matrix;
-`docs/HANDOFF.md` lists the remaining evidence and the exact command that closes
-each item.
+Until that lands, treat `v2.0.4-zzic` as the hardware-validation release for
+this firmware. If it is run, do not run it twice in the same boot; verify the
+final SELinux state and hard reboot if the post-root closeout is uncertain.
 
-A device unrelated to that firmware — one that reports neither `SM-S938B` nor
-`pa3q` — takes the unchanged upstream path. An S25 Ultra on *different*
-firmware does not: asserting the model or codename while differing in any
-pinned field classifies `MISMATCH`, and the chain refuses rather than falling
-back to generic behaviour.
+The profile remains exact and fail-closed. A device asserting `SM-S938B` or
+`pa3q` but differing in any pinned identity field is `MISMATCH` and refuses
+rather than falling through to generic behavior. An unrelated device takes the
+unchanged upstream family path.
 
-Contributing, by hand or with an agent: read **`AGENTS.md`** first (symlinked as
-`CLAUDE.md`). It holds the fail-closed rules the gates rest on and the offline
-checks that must pass — none of which need a device.
+`docs/S25U_ZZIC_COMPATIBILITY.md` is the authoritative evidence record and
+`docs/HANDOFF.md` is the current implementation plan. Contributors and agents
+must read **`AGENTS.md`** first (also exposed as `CLAUDE.md`).
 
 ## Background
 
@@ -55,7 +57,9 @@ Exploits of `ghostlock` vulnerability are somewhat unstable on Android. It's fru
 
 ```
 temp root (ghostlock) -> DFInstaller injects key -> soft reboot
-  -> install DFReroot as android.uid.system -> Run DirtyFrag -> root (ksud)
+  -> install DFReroot as android.uid.system -> Run DirtyFrag
+    -> transient helper sets SELinux permissive -> late-load KernelSU/ksud
+      -> verify KernelSU -> restore SELinux enforcing -> post-root complete
 ```
 
 1. **DFInstaller** (`com.polygraphene.df.installer`, normal app) edits
@@ -65,8 +69,11 @@ temp root (ghostlock) -> DFInstaller injects key -> soft reboot
 3. **DFReroot** (`com.polygraphene.df.reroot`, `sharedUserId="android.uid.system"`)
    installs as system UID and survives reboots.
 4. DFReroot hops `system_server -> network_stack` (which can `dlopen` and holds
-   `CAP_NET_ADMIN`), patches vendor/libc/libc++ via Dirty Frag, loads a tiny LKM
-   that sets SELinux permissive, and late-loads **ksud**.
+   `CAP_NET_ADMIN`), patches vendor/libc/libc++ via Dirty Frag, loads a transient
+   LKM that sets SELinux permissive, and late-loads the pinned **ksud**.
+5. On the ZZIC path, automatic post-root closeout is the current remaining work:
+   prove the KernelSU control channel, restore SELinux to enforcing, verify the
+   read-back, and only then report final success.
 
 ## Prerequisites
 
@@ -76,7 +83,7 @@ temp root (ghostlock) -> DFInstaller injects key -> soft reboot
 ## Usage
 
 1. Obtain temporary root with another explot (e.g. ghostlock).
-2. Install `df_installer_(version).apk` from [Release](https://github.com/polygraphene/DFReroot/releases), and grant root on it from root managers.
+2. Install `df_installer_(version).apk` from this fork's [Releases](https://github.com/igorcv88/DFReroot-S25U/releases), and grant root on it from the temporary-root environment/root manager.
 3. **Inject** -> **Soft reboot** (restarts the framework; PMS re-reads `packages.xml`).
 4. **Install DFReroot** (via `pm install`, needs `su` again after the reboot).
 5. Open DFReroot, press **Run DirtyFrag**.
@@ -128,6 +135,13 @@ Build ksud from kdp-612-3.3.0 branch of [my fork](https://github.com/polygraphen
 
 ## Caveats
 
+- **ZZIC v2.0.4 post-root state:** the root chain is physically proven, including
+  successful KernelSU root and a manual return from Permissive to Enforcing.
+  The current release does not yet automate that final restoration, so a green
+  native result is not equivalent to `POST_ROOT_COMPLETE`. See
+  `docs/HANDOFF.md` before changing or retesting this path.
+- `/dev/df` is a same-boot armed-hook guard. If it exists, do not run DirtyFrag
+  a second time; a hard reboot is the recovery boundary.
 - `packages.xml` is backed up once to `packages.xml.bak-df-installer`. The backup
   is written transactionally and verified by size and SHA-256 before the original
   is touched; an existing backup is never overwritten, but one that is empty,

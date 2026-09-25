@@ -835,63 +835,143 @@ world-writable path. That is the one untested step in the new contract.
 Restoring SELinux to `Enforcing` after readiness is published also remains open,
 and must be verified rather than assumed.
 
-## Gate matrix (never auto-promoted to global compatibility)
+## Second physical run — `v2.0.4-zzic`, full root path
 
-Updated after the `v2.0.2-zzic` physical run. "physical PASS" means observed on
-SM-S938B / `S938BXXUCZZIC`, not inferred.
+The exact ZZIC helper and DFR-specific ksud were then exercised on hardware.
+Every result below belongs to the same boot:
 
-| Gate | Result | Evidence |
-|---|---|---|
-| A — Target identity | **physical PASS** | all twelve fields matched on hardware; `TARGET_PROFILE=S25U_ZZIC`, `PASS exact identity`. 72/72 host checks incl. every required negative |
-| B — Kernel identity | **physical PASS** | `ZZIC_KERNEL_IDENTITY/VERSION/ARCH/PAGE_SIZE` all `PASS` on hardware |
-| B — `crash_dump64` identity | **PASS (pinned)** | `9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f`, captured from the device; readable from this domain, so it remains a direct runtime SHA-256 check |
-| B — vendor ELF provenance | **PASS_AVB, now reproducible** | direct read is `EACCES` in `system_server` and `network_stack`; identity rests on the AVB chain the digest was captured under (vbmeta digest, green, locked, verity enforcing, `/vendor` erofs ro). The pinned `vbmeta_digest` is no longer merely observed: `tools/verify_zzic_avb.py` re-derives `23a0e0b0…` from the four vbmeta blobs in `evidence/zzic/avb/` and checks the signed `vendor` hashtree descriptor (root `794944fa…`, salt `336ad2aa…`, 860461+6777=867238 blocks). Runtime gate unchanged. See "Vendor ELF" above |
-| B — `libc` / `libc++` identity | **PENDING physical run** | exact target hashes and symbols pass the offline Gate-F audit; the runtime stage-specific checks have not yet been observed after G1 was opened |
-| C — Java/system-server compat | **physical PASS** | `scheduleReceiver/12` observed on Android 17; `getProcessRecordLocked` absent, `mProcessNames` fallback resolved the ProcessRecord; `mOnewayThread` was the correct field |
-| D — NetworkStack identity | **physical PASS** | `scheduleReceiver sent` → `networkstack CONTROLLER binder received`, which only happens after `System.loadLibrary("exp")` inside `u:r:network_stack:s0`. Remote evidence is now reported back to the UI, not logcat-only |
-| E — Native packaging | **PASS** | real `./build.sh`; `libexp.so` AArch64, all JNI symbols, hashes recorded (apk_audit) |
-| F — Userspace ELF audit | **PASS** | `GATE_F=PASS (4 of 4 artefacts present)` against the ELFs pulled from the target: `crash_dump64` `9249d664…` (567,912 B), `libstagefrighthw.so` `308b254a…` (51,632 B), `libc.so` `88fba68b…` (1,330,432 B), `libc++.so` `cb118e98…` (1,152,760 B) — all four `identity: MATCH`, all ELF64/AArch64, `__libc_init` FOUND at `0x6e8ac`, `_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_` FOUND at `0xb8ae4`. The bytes are not committed (vendor binaries); the profile pins their digests and `elf_audit.py --map` re-runs against operator-supplied copies |
-| G1 — Module loader/import ABI | **PASS (offline)** | bundled `dirtyfrag-android15-6.6-S938BXXUCZZIC.ko`, SHA-256 `b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017`, exact vermagic, `__versions` 5/5 including target-derived `module_layout`; strict audit is `COMPATIBLE` |
-| G2 — Runtime symbol discovery | **RUNTIME UNVERIFIED** | `sprint_symbol`/scan logic and lookup of `kallsyms_lookup_name` + `selinux_state` have not yet been observed on the target |
-| G3 — `selinux_state` layout | **SUPPORTED OFFLINE** | exact ZZIC BTF describes one 128-byte `selinux_state` with `enforcing` at bit offset 0; runtime confirmation remains pending |
-| G4 — Write safety | **UNVERIFIED** | nothing in G1 proves that writing `selinux_state.enforcing = 0` is safe on the running kernel |
-| H — Installer format compatibility | **physical PASS** | `ABX → TEXT → ABX` accepted by PMS; injection survived the soft reboot; the two write-path defects the run exposed are fixed and regression-tested |
-| I — Full hardware compatibility | **PENDING physical run** | no longer blocked by G1. The next run is the evidence step for G2/G4, the downstream libc/libc++ stages, stage2/ksud handoff and post-root state. `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` remains independent, not proof |
-
-**Conclusion:** `SUPPORTED` is **not** granted. G1 is closed and the app is now
-allowed to pass the old module-policy boundary, but G2/G4 and the downstream
-runtime chain still require one same-boot physical run. Restoring SELinux to
-`Enforcing` after KernelSU readiness also remains open and must not be assumed.
-
-### Expected checkpoints of the first `2.0.4-zzic` run
-
-Before any write, the run must still reproduce the exact identity/provenance
-passes. The important new boundary is that the module policy and byte binding now
-pass rather than refuse:
-
+```text
+boot_id=0643a5e2-9a44-4bb9-b7a4-31a3b255e3ac
 ```
-TARGET_PROFILE=S25U_ZZIC          PASS exact identity
+
+The run repeated the already-proven A/B/C/D boundaries, then passed the newly
+opened exact-module boundary:
+
+```text
+TARGET_PROFILE=S25U_ZZIC
+PASS exact identity
 ZZIC_KERNEL_IDENTITY=PASS
 ZZIC_KERNEL_VERSION=PASS
 ZZIC_KERNEL_ARCH=PASS
 ZZIC_PAGE_SIZE=PASS
 ZZIC_CRASHDUMP_IDENTITY PASS
-ZZIC_VENDOR_DIRECT_HASH=UNAVAILABLE_EACCES
 ZZIC_VENDOR_PROVENANCE=PASS_AVB
-[DFR][AMS] PROCESS_LOOKUP=PASS
-[DFR][PROCESS] REMOTE_COMPONENT_REACHED=PASS
-[DFR][PROCESS] LIBEXP_LOADED=PASS
-[DFR][MODULE] ZZIC_MODULE_POLICY=ALLOW
-[DFR][MODULE] ZZIC_MODULE_BINDING=PASS
+PROCESS_LOOKUP=PASS
+REMOTE_COMPONENT_REACHED=PASS
+NETWORK_STACK_CAP_EFF=PASS
+LIBEXP_LOADED=PASS
+
+ZZIC_MODULE_POLICY=ALLOW
+ZZIC_MODULE_SELECTED=PASS
+ko_filename=dirtyfrag-android15-6.6-S938BXXUCZZIC.ko
+ko_sha256_actual=b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017
+ZZIC_MODULE_BINDING=PASS
 ```
 
-Everything after that is evidence, not an expected PASS. A successful helper
-load exercises G2/G3/G4 and may leave SELinux permissive if the later KernelSU
-handoff or readiness path fails. Do not combine evidence across boots; do not
-retry after `/dev/df` appears. A hard reboot is the recovery path for a failed
-first run after the helper has executed.
+All six page-cache stages completed. The stage-specific runtime checks observed
+`ZZIC_LIBC_IDENTITY PASS` before the libc write and
+`ZZIC_LIBCXX_IDENTITY PASS` before the libc++ write.
 
-## How to close the blocked gates on hardware
+The native trigger reached:
+
+```text
+mark: 0 0 0 0
+mark: 1 1 1 0
+runAll done res=0
+Done. Check KSU Manager.
+```
+
+The current four marker values are `df, dfm2, dfm3, dfm4`; `dfm1` is not
+probed by that log line.
+
+Post-run evidence from a KernelSU root shell:
+
+```text
+uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0
+getenforce=Permissive
+/sys/fs/selinux/enforce=0
+
+/dev/df   present
+/dev/dfm2 present
+/dev/dfm3 present
+/dev/dfm1 absent
+/dev/dfm4 absent
+```
+
+The kernel log showed active KernelSU control/root handling (`sys_execve su
+found`, Samsung KDP task-scoped credential install, and ksu fd installation).
+
+Still in that same boot, manual restoration was executed:
+
+```sh
+su -c '/system/bin/setenforce 1'
+```
+
+and independently verified:
+
+```text
+getenforce=Enforcing
+/sys/fs/selinux/enforce=1
+uid=0(root) ... context=u:r:ksu:s0
+```
+
+KernelSU remained operational after the transition back to Enforcing. Therefore
+the hardware has now demonstrated the complete root mechanism and the viability
+of the final SELinux restoration. What remains is making that restoration and
+its verification part of the automatic completion protocol.
+
+### What the missing dfm1 means
+
+`stage1.S` currently attempts to create `/dev/dfm1` before
+`finit_module()`, while SELinux is still enforcing, and the `create_mark`
+macro ignores the `openat()` result. A denied marker creation is therefore
+silent. Later markers are attempted after the helper has set SELinux permissive,
+which explains why `dfm2` and `dfm3` can exist while `dfm1` does not.
+
+That is a telemetry defect, not evidence that stage2 was skipped: `dfm2` and
+`dfm3` are reached later in the same stage2 path, and KernelSU was physically
+functional.
+
+The next implementation should move the positive `dfm1` milestone to after the
+expected helper return and check the marker syscall result.
+
+## Gate matrix (never auto-promoted to global compatibility)
+
+"Physical PASS" below means observed on SM-S938B / `S938BXXUCZZIC`, not
+inferred from a nearby firmware.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| A — Target identity | **physical PASS** | all twelve fields matched; `TARGET_PROFILE=S25U_ZZIC`, exact identity PASS |
+| B — Kernel identity | **physical PASS** | kernel release/version/arch/page-size all PASS |
+| B — `crash_dump64` identity | **physical PASS / pinned** | direct runtime hash matched `9249d664…` |
+| B — vendor ELF provenance | **physical PASS_AVB** | exact green/locked/enforcing AVB chain and pinned vbmeta digest matched |
+| B — `libc` / `libc++` identity | **physical PASS** | both stage-scoped runtime identity gates passed immediately before their writes in v2.0.4 |
+| C — Java/system-server compat | **physical PASS** | Android 17 `scheduleReceiver/12`, `mProcessNames` fallback and `mOnewayThread` all observed working |
+| D — NetworkStack identity | **physical PASS** | remote component reached as uid 1073 / `u:r:network_stack:s0`, pinned CapEff matched, `LIBEXP_LOADED=PASS` |
+| E — Native packaging | **PASS** | signed release packaging audit |
+| F — Userspace ELF audit | **PASS** | exact four target ELFs / symbols / hashes audited |
+| G1 — Module loader/import ABI | **physical PASS** | exact helper was hash-bound and the same-boot downstream helper effect occurred; offline acceptance remains `COMPLETE (5/5)` / `COMPATIBLE` |
+| G2 — Runtime symbol discovery | **physical PASS** | helper reached the success path that requires the sprint_symbol anchor, kallsyms lookup and `selinux_state` resolution |
+| G3 — `selinux_state` layout | **physical PASS** | exact BTF predicted offset 0 and the hardware write produced the expected global enforcing state change |
+| G4 — Write safety | **physical PASS** | system remained operational after `enforcing=0`, KernelSU late-load completed and root worked |
+| H — Installer / packages.xml | **physical PASS** | injected key survived framework restart; write-path fixes regression-tested |
+| I — Automatic safe end state | **PENDING IMPLEMENTATION** | root is physically proven, and manual return to Enforcing is physically proven, but v2.0.4 reports success at `dfm3` before automatically proving KernelSU control + restoring/read-back of SELinux |
+
+**Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
+remaining blocker to calling the automated flow complete is the post-root
+closeout: KernelSU control-channel proof, automatic `setenforce 1`, read-back
+of `/sys/fs/selinux/enforce == 1`, post-restore KernelSU re-check, and a
+same-boot `POST_ROOT_COMPLETE` state.
+
+The implementation plan for that work is now in `docs/HANDOFF.md`.
+
+## Historical hardware collection procedure (before v2.0.4)
+
+The commands below are retained as provenance for how the earlier unknowns were
+closed. They are **not** the current work queue. The current remaining work is
+the automatic post-root closeout described in `docs/HANDOFF.md`.
+
 
 ```sh
 # Identity, provenance and Gate G inputs — one read-only pass
@@ -913,7 +993,7 @@ adb shell su -c 'CLASSPATH=/data/local/tmp/df_installer.apk app_process /system/
     com.polygraphene.df.installer.InjectMain --diag-zzic'
 ```
 
-## What is still needed to make the ZZIC path executable
+## Historical Gate-G bring-up record
 
 One blocker remains. The two that `v2.0.2-zzic` stopped at are closed.
 
@@ -936,7 +1016,7 @@ Redesigned as `ZZIC_VENDOR_PROVENANCE`; see "Vendor ELF: why the direct hash was
 the wrong proof" above. Still fail-closed, still refuses on any divergence, but
 the proof no longer requires a read the architecture itself avoids.
 
-### 1. A Gate-G validated kernel module — the remaining blocker
+### Closed — a Gate-G validated kernel module
 
 The device confirms `CONFIG_MODVERSIONS=y`. The bundled
 `dirtyfrag-android15-6.6.ko` shares the ZZIC kernel's GKI base (`6.6.127`) and
@@ -1036,10 +1116,10 @@ own answer.
 
 | Sub-gate | Question | State |
 |---|---|---|
-| **G1** loader / import ABI | does the exact ZZIC `dirtyfrag.ko` load? | **CLOSED (offline)** — the module exists and audits `COMPATIBLE`, `COMPLETE (5/5)`; see below |
-| **G2** symbol discovery | will the runtime `sprint_symbol` scan find `kallsyms_lookup_name` and `selinux_state`? | evidenced statically, `RUNTIME UNVERIFIED` |
-| **G3** `selinux_state` layout | is `enforcing` the first field? | the exact ZZIC BTF (`e13df32a…`) describes one `selinux_state`, 128 bytes, 9 fields, `enforcing` at bit offset 0 → **layout supported** |
-| **G4** write safety | is writing 0 there safe on this running kernel? | `UNVERIFIED`, and nothing above establishes it |
+| **G1** loader / import ABI | does the exact ZZIC `dirtyfrag.ko` load? | **physical PASS**; before hardware execution the exact module already audited `COMPATIBLE`, `COMPLETE (5/5)` |
+| **G2** symbol discovery | does the runtime `sprint_symbol` scan find `kallsyms_lookup_name` and `selinux_state`? | **physical PASS**; the helper reached the success path and changed the observed enforcing state |
+| **G3** `selinux_state` layout | is `enforcing` the first field used by the helper? | **physical PASS**, consistent with the exact ZZIC BTF prediction (128-byte struct, `enforcing` at bit offset 0) |
+| **G4** write safety | is writing 0 there viable on this running kernel? | **physical PASS**; the phone remained operational, KernelSU late-load completed and root worked |
 
 #### G1 — what closed it, and what it cost to find out
 
@@ -1133,7 +1213,12 @@ deliberately. That is the intended trade-off, and reversing it is a policy
 decision for the repository owner, made in the open, not a patch an agent applies
 on its own.
 
-### 2. Runtime evidence that no static check can supply
+### Runtime evidence captured on hardware
+
+The v2.0.4 run supplied the downstream runtime evidence that was missing when
+this section was originally written. Keep the table below as a map from evidence
+to boundary; current gate states are authoritative in the matrix above.
+
 
 Everything else in the gate matrix needs a logcat capture from the device, and
 each item names the boundary that produces it:
