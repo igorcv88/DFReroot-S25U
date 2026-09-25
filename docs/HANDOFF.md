@@ -123,11 +123,9 @@ the three `ko_*` profile fields. The module imports only `sprint_symbol`,
 `selinux_state` at runtime rather than importing them, so those two need
 existence evidence, not export evidence.
 
-Until a validated module exists, `touch /data/local/tmp/dfr_allow_unverified_ko`
-is an owner-only, at-own-risk opt-in that logs
-`[DFR][MODULE] WARN ... kernel-crash risk accepted` and proceeds. It exists so
-the chain can be exercised before a validated module does. Removing it is a
-defensible policy choice and belongs to the repository owner, not to an agent.
+Until a positively validated module is cryptographically bound to the ZZIC
+profile, Gate G remains fail-closed. There is no runtime marker or operator
+override that converts `UNVERIFIED` into permission to proceed.
 
 ### 3. `scheduleReceiver` overload shape — the one runtime unknown
 
