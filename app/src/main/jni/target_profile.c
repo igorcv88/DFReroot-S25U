@@ -103,7 +103,6 @@ dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
     m.model_ok          = dfr_streq(obs->model, p->model);
     m.device_ok         = dfr_streq(obs->device, p->device);
     m.sdk_ok            = (obs->sdk == p->sdk);
-    m.android_release_ok= (obs->android_release == p->android_release);
     m.display_ok        = dfr_streq(obs->display, p->display);
     m.fingerprint_ok    = dfr_streq(obs->fingerprint, p->fingerprint);
     m.kernel_release_ok = dfr_streq(obs->kernel_release, p->kernel_release);
@@ -113,7 +112,7 @@ dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
     m.abi_ok            = dfr_streq(obs->abi, p->abi);
 
     m.all_ok = m.manufacturer_ok && m.model_ok && m.device_ok && m.sdk_ok &&
-               m.android_release_ok && m.display_ok && m.fingerprint_ok && m.kernel_release_ok &&
+               m.display_ok && m.fingerprint_ok && m.kernel_release_ok &&
                m.kernel_version_ok && m.kernel_arch_ok &&
                m.page_size_ok && m.abi_ok;
 
