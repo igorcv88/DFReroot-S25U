@@ -38,6 +38,10 @@ collects `[DFR][*]` diagnostics and writes nothing to the page cache.
 each item. Every device that is not that exact firmware takes the unchanged
 upstream path.
 
+Contributing, by hand or with an agent: read **`AGENTS.md`** first (symlinked as
+`CLAUDE.md`). It holds the fail-closed rules the gates rest on and the offline
+checks that must pass — none of which need a device.
+
 ## Background
 
 Exploits of `ghostlock` vulnerability are somewhat unstable on Android. It's frustrating to get temporary root for each reboots while scared of kernel crashes. This exploit achives comfortable second-stage root by Dirty Frag.
