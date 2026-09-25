@@ -1,0 +1,23 @@
+name: ZZIC profile safety checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - claude/dfreroot-s25u-zzic-support-dgw8fi
+
+permissions:
+  contents: read
+
+jobs:
+  host-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Target profile tests
+        run: ./tools/tests/run_tests.sh
+      - name: Python syntax checks
+        run: python3 -m py_compile tools/*.py
+      - name: Audit bundled generic module metadata
+        run: python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko
