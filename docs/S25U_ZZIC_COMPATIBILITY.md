@@ -792,8 +792,8 @@ SM-S938B / `S938BXXUCZZIC`, not inferred.
 | C — Java/system-server compat | **physical PASS** | `scheduleReceiver/12` observed on Android 17; `getProcessRecordLocked` absent, `mProcessNames` fallback resolved the ProcessRecord; `mOnewayThread` was the correct field |
 | D — NetworkStack identity | **physical PASS** | `scheduleReceiver sent` → `networkstack CONTROLLER binder received`, which only happens after `System.loadLibrary("exp")` inside `u:r:network_stack:s0`. Remote evidence is now reported back to the UI, not logcat-only |
 | E — Native packaging | **PASS** | real `./build.sh`; `libexp.so` AArch64, all JNI symbols, hashes recorded (apk_audit) |
-| F — Userspace ELF audit | **BLOCKED** | tool implemented + host-verified; awaits pulled ZZIC ELFs |
-| G — Module ABI compatibility | **UNVERIFIED** (runtime-enforced) | the device confirms `CONFIG_MODVERSIONS=y`; the bundled `dirtyfrag-android15-6.6.ko` has an **empty `__versions`** table (`MODVERSION_COVERAGE=EMPTY`), so no symbol-CRC agreement exists — and a *partial* table would not do either: the audit requires an entry for every non-weak import before it will report `COMPATIBLE`. Every page-cache stage refuses; there is no override, and `ko_zzic_verified=1` is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
+| F — Userspace ELF audit | **PASS** | `GATE_F=PASS (4 of 4 artefacts present)` against the ELFs pulled from the target: `crash_dump64` `9249d664…` (567,912 B), `libstagefrighthw.so` `308b254a…` (51,632 B), `libc.so` `88fba68b…` (1,330,432 B), `libc++.so` `cb118e98…` (1,152,760 B) — all four `identity: MATCH`, all ELF64/AArch64, `__libc_init` FOUND at `0x6e8ac`, `_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_` FOUND at `0xb8ae4`. The bytes are not committed (vendor binaries); the profile pins their digests and `elf_audit.py --map` re-runs against operator-supplied copies |
+| G — Module ABI compatibility | **UNVERIFIED** — evidence now present, module not yet built | the four ZZIC CRCs are derived and committed (`evidence/zzic/gate-g/`): `__stack_chk_fail 0xf0fdf6cb`, `_printk 0x92997ed8`, `memset 0xdcb764ad`, `sprint_symbol 0x661601de`, each read out of `/vendor_dlkm/lib/modules/qca_cld3_kiwi_v2.ko` (`bc659527…`, vermagic exactly the ZZIC release, 588 `__versions` entries). What remains is **building** the helper against them: the bundled `dirtyfrag-android15-6.6.ko` still has an empty `__versions` (`MODVERSION_COVERAGE=EMPTY`), so no symbol-CRC agreement exists for it — and a *partial* table would not do either: the audit requires an entry for every non-weak import before it will report `COMPATIBLE`. Every page-cache stage refuses; there is no override, and `ko_zzic_verified=1` is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
 | H — Installer format compatibility | **physical PASS** | `ABX → TEXT → ABX` accepted by PMS; injection survived the soft reboot; the two write-path defects the run exposed are fixed and regression-tested |
 | I — Full hardware compatibility | **BLOCKED by Gate G** | the chain cannot be exercised end to end while the module is `UNVERIFIED`. `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is independent, not proof |
 
@@ -964,6 +964,35 @@ pinned while the flag is 0. The module imports only `sprint_symbol`, `_printk`,
 `memset`, `__stack_chk_fail`; it resolves `kallsyms_lookup_name` and
 `selinux_state` at runtime rather than importing them, so those two need
 existence evidence, not export evidence.
+
+### Gate G is four boundaries, not one
+
+Collapsing them hides which risk is still open. Each has its own evidence and its
+own answer.
+
+| Sub-gate | Question | State |
+|---|---|---|
+| **G1** loader / import ABI | does the exact ZZIC `dirtyfrag.ko` load? | `UNVERIFIED` — the CRCs exist now; the module does not |
+| **G2** symbol discovery | will the runtime `sprint_symbol` scan find `kallsyms_lookup_name` and `selinux_state`? | evidenced statically, `RUNTIME UNVERIFIED` |
+| **G3** `selinux_state` layout | is `enforcing` the first field? | the exact ZZIC BTF (`e13df32a…`) describes one `selinux_state`, 128 bytes, 9 fields, `enforcing` at bit offset 0 → **layout supported** |
+| **G4** write safety | is writing 0 there safe on this running kernel? | `UNVERIFIED`, and nothing above establishes it |
+
+Two consequences worth stating plainly.
+
+**`CONFIG_MODVERSIONS` protects G1, not G4.** A CRC agreement says the loader will
+accept the imports. It says nothing about whether the module's own logic — finding
+an address by name and writing to it — is safe. Those are different claims and
+must never share a verdict.
+
+**An `insmod` test of the real helper is not a clean G1 experiment.** The helper
+writes `selinux_state.enforcing = 0` in its init path, so a successful `insmod`
+performs G4's risky write as a side effect: you cannot separate "the loader
+accepted it" from "the write happened". To close G1, G2 and G3 with no write risk,
+build a **probe variant** from the same source with the write compiled out, which
+resolves the symbol and reports the address and the layout it sees. A load failure
+there is a clean loader/ABI answer (`disagrees about version of symbol` is the
+expected shape of a CRC mismatch), and a success plus a reported address closes
+G2 and G3 empirically — leaving G4 as the single remaining question, isolated.
 
 ### Strict Gate-G policy
 

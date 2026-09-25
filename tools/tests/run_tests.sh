@@ -24,3 +24,7 @@ python3 tools/tests/test_ko_audit.py
 # AVB provenance gate: every element's negative case, on scratch copies of the
 # committed evidence. Nothing here touches the device.
 python3 tools/tests/test_verify_zzic_avb.py
+
+# Gate G derived-symvers route: the derivation rules and ko_audit's demand for a
+# provenance record. Synthetic witness modules; no firmware binary needed.
+python3 tools/tests/test_derive_symvers.py

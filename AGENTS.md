@@ -174,8 +174,44 @@ reported `UNDECIDED` and refused under `--require-modversion-coverage` - never
 assumed exempt. The acceptance run for a newly built module must pass
 `--require-modversion-coverage`.
 
+### What may supply the target's CRCs
+
 `Module.symvers` is a kernel *build* artefact. It does not exist on a running
-Android filesystem, so "search the device for it" is not a valid plan.
+Android filesystem, so "search the device for it" is not a valid plan. For a
+while that read as "Gate G needs the Samsung build tree", and this file said so
+while `docs/HANDOFF.md` already allowed "another verifiable source of that
+kernel's symbol CRCs". Those two cannot both stand. The rule is now stated once,
+here:
+
+**Either** the `Module.symvers` from the exact kernel build, **or** a table
+derived from the `__versions` sections of stock modules of the exact firmware —
+and the derived route only counts when all of this holds:
+
+- every CRC is **read out of module bytes**; a typed-in number is not evidence,
+  which is why `tools/derive_zzic_symvers.py` is the only way to produce one;
+- every witness module's `vermagic` release is **exactly** the pinned
+  `kernel_release`; a module from another kernel is a different kernel's answer,
+  not a witness;
+- every strong import of the LKM has at least one witness;
+- witnesses that disagree about a symbol are a **hard failure**, never a majority
+  vote: one kernel's CRCs are self-consistent, so a conflict means an input is
+  not from that kernel;
+- each witness is bound to `path` + `SHA-256` + `vermagic` in a provenance
+  record, and the derived table carries the generator's marker so `ko_audit.py`
+  **requires** that record and refuses without it;
+- the final LKM has a `__versions` entry for 100% of its required imports and
+  every CRC agrees with the derived table;
+- `ko_audit.py --require-modversion-coverage` passes.
+
+The derived table is **not** named `Module.symvers`, because it is not the
+Samsung artefact and must not be mistaken for it. It lives in
+`evidence/zzic/gate-g/` with its provenance beside it.
+
+A witness that the kernel **actually loads** is stronger than a witness count.
+Under `CONFIG_MODVERSIONS` a disagreeing CRC fails the load, so a stock driver
+running on the target has had its whole table ratified by the kernel itself.
+Record that fact (`lsmod`) where it is available; it is better evidence than
+"many modules agreed".
 
 **And it names no kernel.** A `Module.symvers` contains no release string, so
 nothing in the file says which kernel produced it. That is a live trap, not a

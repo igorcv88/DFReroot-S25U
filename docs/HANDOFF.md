@@ -133,9 +133,13 @@ the kernel.
 Android filesystem, so searching the device for it is not a valid route. One of
 these is needed:
 
-- the `Module.symvers` from the exact ZZIC kernel build;
-- a module rebuilt from the matching source, config and toolchain;
-- another verifiable source of that kernel's symbol CRCs.
+- the `Module.symvers` from the exact ZZIC kernel build; **or**
+- a table derived from the `__versions` sections of stock modules of the exact
+  firmware, under the conditions AGENTS.md §3.5 now states — produced only by
+  `tools/derive_zzic_symvers.py`, never typed.
+
+The second route is the one that is actually available, and the evidence for it
+is committed: `evidence/zzic/gate-g/`.
 
 The resulting module must carry a `__versions` table consistent with
 `CONFIG_MODVERSIONS=y`. Matching the GKI base (`6.6.127`) and the 4k page tag is
