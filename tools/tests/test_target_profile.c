@@ -290,6 +290,254 @@ static void test_module_policy(void) {
           "ZZIC with a NULL profile -> refused (%s)", dfr_module_policy_name(v));
 }
 
+/* ---- [V] vendor-ELF provenance (Gate B redesign) ---- */
+
+/* The observation the ZZIC device actually produces: every AVB element agrees,
+ * and the direct read is denied with EACCES from this SELinux domain. */
+static struct VendorObservation zzic_vendor_observed(void) {
+    struct VendorObservation o;
+    memset(&o, 0, sizeof(o));
+    o.verified_boot_state = "green";
+    o.vbmeta_device_state = "locked";
+    o.flash_locked        = "1";
+    o.verity_mode         = "enforcing";
+    o.vbmeta_digest       =
+        "23a0e0b0a5b421d5a75b62de40edb37489a4e6d441d54e58ee6f930c1a9a3f62";
+    o.vbmeta_avb_version  = "1.2";
+    o.vbmeta_hash_alg     = "sha256";
+    o.vendor_fstype       = "erofs";
+    o.vendor_ro           = 1;
+    o.direct_sha256       = NULL;      /* open(2) denied */
+    o.direct_errno        = DFR_EACCES;
+    o.size                = -1;        /* getattr denied too */
+    o.context             = NULL;
+    return o;
+}
+
+static void test_vendor_provenance(void) {
+    printf("[V] vendor-ELF provenance\n");
+    struct VendorProvMatch m;
+    struct TargetProfile p;
+    struct VendorObservation o;
+    dfr_vendor_prov v;
+
+    /* An unrelated device never reaches this gate. */
+    o = zzic_vendor_observed();
+    v = dfr_vendor_provenance_eval(DFR_TARGET_UPSTREAM_GENERIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_NOT_APPLICABLE && dfr_vendor_prov_permits(v),
+          "upstream generic -> NOT_APPLICABLE (%s)", dfr_vendor_prov_name(v));
+
+    /* THE case the v2.0.2 physical run hit: EACCES + a complete AVB chain.
+     * This must PASS, or the ZZIC path is unrunnable by construction. */
+    o = zzic_vendor_observed();
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_PASS_AVB && dfr_vendor_prov_permits(v) && m.chain_ok,
+          "EACCES + complete AVB chain -> PASS_AVB (%s)", dfr_vendor_prov_name(v));
+
+    /* A domain that CAN read it still gets the strongest proof, not a downgrade. */
+    o = zzic_vendor_observed();
+    o.direct_sha256 = DFR_PROFILE_ZZIC.vendor_target_sha256;
+    o.direct_errno = 0;
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_PASS_DIRECT && dfr_vendor_prov_permits(v),
+          "readable + matching digest -> PASS_DIRECT (%s)", dfr_vendor_prov_name(v));
+
+    /* Readable and WRONG is the one thing no provenance can excuse. */
+    o = zzic_vendor_observed();
+    o.direct_sha256 = "00112233445566778899aabbccddeeff"
+                      "00112233445566778899aabbccddeeff";
+    o.direct_errno = 0;
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_FAIL_DIRECT_MISMATCH && !dfr_vendor_prov_permits(v),
+          "readable + wrong digest -> FAIL_DIRECT_MISMATCH (%s)", dfr_vendor_prov_name(v));
+
+    /* Unreadable for any OTHER reason is a fault, not the documented policy. */
+    o = zzic_vendor_observed();
+    o.direct_errno = 2; /* ENOENT */
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_FAIL_UNREADABLE && !dfr_vendor_prov_permits(v),
+          "unreadable with ENOENT -> FAIL_UNREADABLE (%s)", dfr_vendor_prov_name(v));
+
+    /* --- every chain element, one at a time --- */
+    {
+        int i;
+        struct VendorObservation t;
+        const char *names[] = {
+            "verifiedbootstate!=green", "device_state!=locked",
+            "flash.locked!=1", "veritymode!=enforcing",
+            "vbmeta.digest differs", "avb_version differs",
+            "hash_alg differs", "/vendor not erofs",
+        };
+        const char *bads[] = {
+            "orange", "unlocked", "0", "logging",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "1.1", "sha512", "ext4",
+        };
+        for (i = 0; i < 8; i++) {
+            t = zzic_vendor_observed();
+            switch (i) {
+                case 0: t.verified_boot_state = bads[i]; break;
+                case 1: t.vbmeta_device_state = bads[i]; break;
+                case 2: t.flash_locked = bads[i]; break;
+                case 3: t.verity_mode = bads[i]; break;
+                case 4: t.vbmeta_digest = bads[i]; break;
+                case 5: t.vbmeta_avb_version = bads[i]; break;
+                case 6: t.vbmeta_hash_alg = bads[i]; break;
+                case 7: t.vendor_fstype = bads[i]; break;
+            }
+            v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &t, &m);
+            CHECK(v == DFR_VENDOR_PROV_FAIL_CHAIN && !dfr_vendor_prov_permits(v),
+                  "%s -> FAIL_CHAIN (%s)", names[i], dfr_vendor_prov_name(v));
+        }
+    }
+
+    /* /vendor mounted rw, and /vendor whose mount could not be determined. */
+    o = zzic_vendor_observed();
+    o.vendor_ro = 0;
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_FAIL_CHAIN, "/vendor mounted rw -> FAIL_CHAIN (%s)",
+          dfr_vendor_prov_name(v));
+    o = zzic_vendor_observed();
+    o.vendor_ro = -1;
+    o.vendor_fstype = NULL;
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_FAIL_CHAIN, "/vendor mount unknown -> FAIL_CHAIN (%s)",
+          dfr_vendor_prov_name(v));
+
+    /* An absent property is never "equal to the pinned value". */
+    o = zzic_vendor_observed();
+    o.vbmeta_digest = NULL;
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_FAIL_CHAIN, "unset vbmeta.digest -> FAIL_CHAIN (%s)",
+          dfr_vendor_prov_name(v));
+
+    /* Observational anchors: unavailable is SKIP, available-and-wrong is FAIL. */
+    o = zzic_vendor_observed();
+    o.size = DFR_PROFILE_ZZIC.vendor_target_size;
+    o.context = DFR_PROFILE_ZZIC.vendor_target_context;
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_PASS_AVB && m.size_checked && m.context_checked,
+          "size+label available and matching -> PASS_AVB, both checked (%s)",
+          dfr_vendor_prov_name(v));
+    o.size = 1;
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_FAIL_CHAIN, "wrong vendor size -> FAIL_CHAIN (%s)",
+          dfr_vendor_prov_name(v));
+    o = zzic_vendor_observed();
+    o.context = "u:object_r:system_file:s0";
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_FAIL_CHAIN, "wrong vendor label -> FAIL_CHAIN (%s)",
+          dfr_vendor_prov_name(v));
+    o = zzic_vendor_observed();
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(!m.size_checked && !m.context_checked && m.size_ok && m.context_ok,
+          "size/label denied -> not checked, and absence is not agreement");
+
+    /* A half-pinned profile refuses rather than validating the half it has. */
+    p = DFR_PROFILE_ZZIC;
+    p.vbmeta_digest = NULL;
+    o = zzic_vendor_observed();
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &p, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_FAIL_NO_PIN && !dfr_vendor_prov_permits(v),
+          "profile with no vbmeta_digest -> FAIL_NO_PIN (%s)", dfr_vendor_prov_name(v));
+    p = DFR_PROFILE_ZZIC;
+    p.verity_mode = "";
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &p, &o, &m);
+    CHECK(v == DFR_VENDOR_PROV_FAIL_NO_PIN,
+          "empty verity_mode is unpinned, not pinned-to-empty (%s)",
+          dfr_vendor_prov_name(v));
+
+    /* Nothing to consult is a refusal. */
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, NULL, &m);
+    CHECK(!dfr_vendor_prov_permits(v), "NULL observation -> refused (%s)",
+          dfr_vendor_prov_name(v));
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, NULL, &o, &m);
+    CHECK(!dfr_vendor_prov_permits(v), "NULL profile -> refused (%s)",
+          dfr_vendor_prov_name(v));
+
+    /* The shipped profile must pin the whole chain: the ZZIC target is
+     * otherwise refused at this gate no matter what the device reports. */
+    o = zzic_vendor_observed();
+    v = dfr_vendor_provenance_eval(DFR_TARGET_S25U_ZZIC, &DFR_PROFILE_ZZIC, &o, &m);
+    CHECK(v != DFR_VENDOR_PROV_FAIL_NO_PIN,
+          "shipped profile pins every provenance anchor (%s)", dfr_vendor_prov_name(v));
+}
+
+/* ---- [P] shipped-profile invariants ---- */
+
+static int is_lower_hex64(const char *s) {
+    int i;
+    if (s == NULL) return 0;
+    for (i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return s[64] == 0;
+}
+
+static void test_profile_invariants(void) {
+    const struct TargetProfile *p = &DFR_PROFILE_ZZIC;
+    printf("[P] shipped-profile invariants\n");
+
+    /*
+     * crash_dump64 is patch #1's target and IS readable from the chain's
+     * domain, so it stays a direct runtime hash - which means it must be
+     * pinned, or gate_hash() refuses the whole chain before patch #1.
+     * Value captured from the ZZIC device during the v2.0.2-zzic run.
+     */
+    CHECK(is_lower_hex64(p->crashdump_sha256),
+          "crashdump_sha256 is pinned as 64 lowercase hex chars (%s)",
+          p->crashdump_sha256 ? p->crashdump_sha256 : "<null>");
+    CHECK(dfr_streq(p->crashdump_sha256,
+                    "9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f"),
+          "crashdump_sha256 is the value captured on ZZIC hardware");
+    CHECK(is_lower_hex64(p->vendor_target_sha256) &&
+          is_lower_hex64(p->libc_sha256) && is_lower_hex64(p->libcxx_sha256),
+          "every written artefact's digest is pinned as 64 lowercase hex chars");
+    CHECK(is_lower_hex64(p->vbmeta_digest),
+          "vbmeta_digest is pinned as 64 lowercase hex chars");
+
+    /* Gate G stays UNVERIFIED until a module is positively validated, and the
+     * three fields move together or not at all. */
+    CHECK(p->ko_zzic_verified == 0 && p->ko_filename == NULL && p->ko_sha256 == NULL,
+          "Gate G still UNVERIFIED: ko_zzic_verified=%d, no filename, no digest",
+          p->ko_zzic_verified);
+}
+
+/* ---- [M] /proc/self/mountinfo parsing ---- */
+static void test_mountinfo(void) {
+    printf("[M] mountinfo parsing\n");
+    char fs[64];
+    int ro;
+    /* Real ZZIC shape, optional fields present, "-" separator not at a fixed index. */
+    const char *mi =
+        "24 23 0:22 / /dev rw,nosuid,relatime - tmpfs tmpfs rw,seclabel,mode=755\n"
+        "77 23 254:17 / /vendor ro,seclabel,relatime,ro shared:12 master:3 - erofs "
+        "/dev/block/dm-17 ro,user_xattr\n"
+        "78 23 254:18 / /system ro,seclabel,relatime - erofs /dev/block/dm-16 ro\n";
+    CHECK(dfr_mountinfo_lookup(mi, "/vendor", fs, sizeof(fs), &ro) == 1 &&
+          strcmp(fs, "erofs") == 0 && ro == 1,
+          "/vendor -> erofs, ro=1 (got fs=%s ro=%d)", fs, ro);
+    CHECK(dfr_mountinfo_lookup(mi, "/dev", fs, sizeof(fs), &ro) == 1 &&
+          strcmp(fs, "tmpfs") == 0 && ro == 0,
+          "/dev -> tmpfs, ro=0 (got fs=%s ro=%d)", fs, ro);
+    CHECK(dfr_mountinfo_lookup(mi, "/product", fs, sizeof(fs), &ro) == 0 && ro == -1,
+          "absent mountpoint -> not found, ro=-1 (ro=%d)", ro);
+    /* A later mount over the same point is the effective one. */
+    const char *shadow =
+        "77 23 254:17 / /vendor ro,seclabel - erofs /dev/block/dm-17 ro\n"
+        "99 23 0:44 / /vendor rw,seclabel - overlay overlay rw\n";
+    CHECK(dfr_mountinfo_lookup(shadow, "/vendor", fs, sizeof(fs), &ro) == 1 &&
+          strcmp(fs, "overlay") == 0 && ro == 0,
+          "last mount wins: /vendor -> overlay, ro=0 (got fs=%s ro=%d)", fs, ro);
+    /* A mountpoint that only PREFIXES the query must not match. */
+    const char *prefix = "77 23 254:17 / /vendor_dlkm ro,seclabel - erofs /dev/x ro\n";
+    CHECK(dfr_mountinfo_lookup(prefix, "/vendor", fs, sizeof(fs), &ro) == 0,
+          "/vendor_dlkm does not answer for /vendor");
+    CHECK(dfr_mountinfo_lookup(NULL, "/vendor", fs, sizeof(fs), &ro) == 0,
+          "NULL mountinfo -> not found");
+}
+
 int main(void) {
     printf("DFReroot target-profile test suite\n\n");
     test_target_detection();
@@ -297,6 +545,12 @@ int main(void) {
     test_regression_generic();
     printf("\n");
     test_module_policy();
+    printf("\n");
+    test_vendor_provenance();
+    printf("\n");
+    test_profile_invariants();
+    printf("\n");
+    test_mountinfo();
     printf("\n");
     test_sha256();
     printf("\n%d/%d checks passed, %d failed\n", g_total - g_fail, g_total, g_fail);

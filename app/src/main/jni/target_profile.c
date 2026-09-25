@@ -38,15 +38,32 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
         "470d40df59320e01b1449f8dbe962e0d44d735c817b99293dc6da286175ffcf3",
     .btf_sha256 =
         "e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c",
-    /* Unknown: dossier section 26, the immediate Gate B blocker. Keep NULL so
-     * the ZZIC path refuses instead of patching an unvalidated crash_dump64. */
-    .crashdump_sha256 = NULL,
+    /* Captured from the ZZIC device itself during the v2.0.2-zzic physical run
+     * (dossier section 26 is closed). crash_dump64 IS readable from the domain
+     * the chain runs in, so this one stays a direct runtime SHA-256 check. */
+    .crashdump_sha256 =
+        "9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f",
     .vendor_target_sha256 =
         "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
     .libc_sha256 =
         "88fba68b3d1fded4bfd25197f6de24f5b8794d3253de860ee261a4272be9e861",
     .libcxx_sha256 =
         "cb118e98c74d3454858921123b9b51ba13df9cad7dfa141dd892c453661a4d78",
+
+    /* Vendor-ELF provenance anchors, all observed on the ZZIC device in the
+     * same boot the vendor_target_sha256 above was captured in. */
+    .vbmeta_digest =
+        "23a0e0b0a5b421d5a75b62de40edb37489a4e6d441d54e58ee6f930c1a9a3f62",
+    .vbmeta_avb_version   = "1.2",
+    .vbmeta_hash_alg      = "sha256",
+    .verified_boot_state  = "green",
+    .vbmeta_device_state  = "locked",
+    .flash_locked         = "1",
+    .verity_mode          = "enforcing",
+    .vendor_fstype        = "erofs",
+    .vendor_mount_ro      = 1,
+    .vendor_target_size   = 51632,
+    .vendor_target_context = "u:object_r:vendor_file:s0",
 
     .network_stack_process = "com.android.networkstack.process",
     .network_stack_uid     = 1073,
@@ -98,6 +115,188 @@ const char *dfr_module_policy_name(dfr_module_policy v) {
 
 int dfr_module_policy_permits(dfr_module_policy v) {
     return v == DFR_MODULE_POLICY_NOT_APPLICABLE || v == DFR_MODULE_POLICY_ALLOW;
+}
+
+/* -------- Gate B: vendor-ELF provenance -------- */
+
+/* A pinned anchor is a non-NULL, non-empty string. */
+static int pinned(const char *v) { return v != NULL && v[0] != 0; }
+
+int dfr_mountinfo_lookup(const char *mountinfo, const char *mountpoint,
+                         char *fstype_out, size_t fstype_len, int *ro_out) {
+    const char *line = mountinfo;
+    int found = 0;
+    if (fstype_out && fstype_len) fstype_out[0] = 0;
+    if (ro_out) *ro_out = -1;
+    if (mountinfo == NULL || mountpoint == NULL) return 0;
+
+    while (*line) {
+        const char *eol = strchr(line, '\n');
+        size_t linelen = eol ? (size_t)(eol - line) : strlen(line);
+        /*
+         * mountinfo: id parent major:minor root MOUNTPOINT OPTIONS ... - FSTYPE
+         * source super-options. Fields are space-separated; the optional fields
+         * between OPTIONS and the "-" separator are what make a fixed index
+         * wrong, so the separator is located explicitly.
+         */
+        const char *f = line;
+        const char *end = line + linelen;
+        const char *mp = NULL, *opts = NULL;
+        int idx = 0;
+        while (f < end) {
+            const char *sp = f;
+            while (sp < end && *sp != ' ') sp++;
+            if (idx == 4) mp = f;
+            if (idx == 5) opts = f;
+            idx++;
+            f = (sp < end) ? sp + 1 : end;
+            if (idx > 5 && mp && opts) break;
+        }
+        if (mp && opts) {
+            size_t mplen = 0;
+            while (mp + mplen < end && mp[mplen] != ' ') mplen++;
+            if (mplen == strlen(mountpoint) && strncmp(mp, mountpoint, mplen) == 0) {
+                /* find " - " separator, then the fstype right after it */
+                const char *sep = mp;
+                const char *fstype = NULL;
+                while (sep + 2 < end) {
+                    if (sep[0] == ' ' && sep[1] == '-' && sep[2] == ' ') {
+                        fstype = sep + 3;
+                        break;
+                    }
+                    sep++;
+                }
+                if (fstype) {
+                    size_t n = 0;
+                    while (fstype + n < end && fstype[n] != ' ') n++;
+                    if (fstype_out && fstype_len) {
+                        size_t copy = n < fstype_len - 1 ? n : fstype_len - 1;
+                        memcpy(fstype_out, fstype, copy);
+                        fstype_out[copy] = 0;
+                    }
+                }
+                if (ro_out) {
+                    /* the per-mount options field: "ro,..." or "rw,..." */
+                    if (end - opts >= 2 && opts[0] == 'r' && opts[1] == 'o' &&
+                        (end - opts == 2 || opts[2] == ',' || opts[2] == ' '))
+                        *ro_out = 1;
+                    else if (end - opts >= 2 && opts[0] == 'r' && opts[1] == 'w' &&
+                             (end - opts == 2 || opts[2] == ',' || opts[2] == ' '))
+                        *ro_out = 0;
+                    else
+                        *ro_out = -1;
+                }
+                found = 1; /* keep going: the LAST match is the effective mount */
+            }
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+    return found;
+}
+
+dfr_vendor_prov dfr_vendor_provenance_eval(dfr_target_class cls,
+                                           const struct TargetProfile *p,
+                                           const struct VendorObservation *o,
+                                           struct VendorProvMatch *out) {
+    struct VendorProvMatch m;
+    memset(&m, 0, sizeof(m));
+    m.verdict = DFR_VENDOR_PROV_FAIL_NO_PIN;
+
+    if (cls != DFR_TARGET_S25U_ZZIC) {
+        m.verdict = DFR_VENDOR_PROV_NOT_APPLICABLE;
+        if (out) *out = m;
+        return m.verdict;
+    }
+    /* Nothing to compare against is a refusal, never a pass. */
+    if (p == NULL || o == NULL) {
+        if (out) *out = m;
+        return m.verdict;
+    }
+    /*
+     * Every anchor must be pinned BEFORE anything is compared. A half-pinned
+     * profile would otherwise "pass" the elements it happens to declare and
+     * silently skip the rest - which is precisely the shape of proof this gate
+     * exists to reject.
+     */
+    if (!pinned(p->vendor_target_sha256) ||
+        !pinned(p->vbmeta_digest) ||
+        !pinned(p->vbmeta_avb_version) ||
+        !pinned(p->vbmeta_hash_alg) ||
+        !pinned(p->verified_boot_state) ||
+        !pinned(p->vbmeta_device_state) ||
+        !pinned(p->flash_locked) ||
+        !pinned(p->verity_mode) ||
+        !pinned(p->vendor_fstype) ||
+        p->vendor_mount_ro < 0) {
+        if (out) *out = m;
+        return m.verdict;
+    }
+
+    m.verified_boot_state_ok = dfr_streq(o->verified_boot_state, p->verified_boot_state);
+    m.vbmeta_device_state_ok = dfr_streq(o->vbmeta_device_state, p->vbmeta_device_state);
+    m.flash_locked_ok        = dfr_streq(o->flash_locked, p->flash_locked);
+    m.verity_mode_ok         = dfr_streq(o->verity_mode, p->verity_mode);
+    m.vbmeta_digest_ok       = dfr_streq(o->vbmeta_digest, p->vbmeta_digest);
+    m.vbmeta_avb_version_ok  = dfr_streq(o->vbmeta_avb_version, p->vbmeta_avb_version);
+    m.vbmeta_hash_alg_ok     = dfr_streq(o->vbmeta_hash_alg, p->vbmeta_hash_alg);
+    m.vendor_fstype_ok       = dfr_streq(o->vendor_fstype, p->vendor_fstype);
+    m.vendor_ro_ok           = (o->vendor_ro == p->vendor_mount_ro);
+
+    /*
+     * Observational anchors. Unavailable (size < 0 / context NULL) is recorded
+     * as "not checked" rather than as agreement; available-and-divergent is a
+     * hard failure, because a vendor file of a different size or label than the
+     * one the digest was captured from is not the pinned artefact.
+     */
+    m.size_checked = (p->vendor_target_size > 0 && o->size >= 0);
+    m.size_ok = !m.size_checked || (o->size == p->vendor_target_size);
+    m.context_checked = (pinned(p->vendor_target_context) && o->context != NULL);
+    m.context_ok = !m.context_checked || dfr_streq(o->context, p->vendor_target_context);
+
+    m.chain_ok = m.verified_boot_state_ok && m.vbmeta_device_state_ok &&
+                 m.flash_locked_ok && m.verity_mode_ok && m.vbmeta_digest_ok &&
+                 m.vbmeta_avb_version_ok && m.vbmeta_hash_alg_ok &&
+                 m.vendor_fstype_ok && m.vendor_ro_ok &&
+                 m.size_ok && m.context_ok;
+
+    m.direct_available = pinned(o->direct_sha256);
+    m.direct_ok = m.direct_available &&
+                  dfr_streq(o->direct_sha256, p->vendor_target_sha256);
+
+    if (m.direct_available && !m.direct_ok)
+        m.verdict = DFR_VENDOR_PROV_FAIL_DIRECT_MISMATCH;
+    else if (!m.chain_ok)
+        m.verdict = DFR_VENDOR_PROV_FAIL_CHAIN;
+    else if (m.direct_available)
+        m.verdict = DFR_VENDOR_PROV_PASS_DIRECT;
+    else if (o->direct_errno == DFR_EACCES)
+        m.verdict = DFR_VENDOR_PROV_PASS_AVB;
+    else
+        m.verdict = DFR_VENDOR_PROV_FAIL_UNREADABLE;
+
+    if (out) *out = m;
+    return m.verdict;
+}
+
+const char *dfr_vendor_prov_name(dfr_vendor_prov v) {
+    switch (v) {
+        case DFR_VENDOR_PROV_NOT_APPLICABLE:       return "NOT_APPLICABLE";
+        case DFR_VENDOR_PROV_PASS_DIRECT:          return "PASS_DIRECT";
+        case DFR_VENDOR_PROV_PASS_AVB:             return "PASS_AVB";
+        case DFR_VENDOR_PROV_FAIL_NO_PIN:          return "FAIL_NO_PIN";
+        case DFR_VENDOR_PROV_FAIL_DIRECT_MISMATCH: return "FAIL_DIRECT_MISMATCH";
+        case DFR_VENDOR_PROV_FAIL_UNREADABLE:      return "FAIL_UNREADABLE";
+        case DFR_VENDOR_PROV_FAIL_CHAIN:           return "FAIL_CHAIN";
+    }
+    /* An unnamed verdict is not a known-good one; report it as such. */
+    return "FAIL_UNKNOWN_VERDICT";
+}
+
+int dfr_vendor_prov_permits(dfr_vendor_prov v) {
+    return v == DFR_VENDOR_PROV_NOT_APPLICABLE ||
+           v == DFR_VENDOR_PROV_PASS_DIRECT ||
+           v == DFR_VENDOR_PROV_PASS_AVB;
 }
 
 int dfr_parse_kernel_versions(const char *release,

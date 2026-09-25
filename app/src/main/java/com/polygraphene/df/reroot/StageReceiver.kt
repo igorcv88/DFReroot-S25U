@@ -24,16 +24,30 @@ import org.lsposed.lspromise.DirtyFrag
 class StageReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Log.i(TAG, "in network_stack, stage 2")
-        Diagnostics.processIdentity(context, "network_stack")  // Gate D
+        /*
+         * Everything this side of the boundary observes goes into `diag` and
+         * travels back with the broadcast. In v2.0.2-zzic it only reached
+         * logcat, so closing Gate D needed a second capture from a different
+         * process - and the UI could show "CONTROLLER received" while saying
+         * nothing about WHERE it came from. The remote boundary now reports
+         * itself to the same log the operator is already reading.
+         */
+        val diag = StringBuilder()
+        Diagnostics.processIdentity(context, "network_stack", diag)  // Gate D
         try {
-            stage2(context)
+            stage2(context, diag)
         } catch (t: Throwable) {
             Log.e(TAG, "stage2 failed", t)
+            diag.appendLine("[DFR][PROCESS] STAGE2=FAIL $t")
+            // The controller was never sent, so send the evidence on its own:
+            // a hop that reached network_stack and then failed is a different
+            // diagnosis from a hop that never arrived, and silence conflates them.
+            sendBack(context, diag, null)
         }
         Log.i(TAG, StageHop.cleanupLoadedApk(context))
     }
 
-    private fun stage2(context: Context) {
+    private fun stage2(context: Context, diag: StringBuilder) {
         /*
          * LIBEXP_LOADED is reported as its own boundary (dossier section 23):
          * discoverability of the .so on disk and an actual successful dlopen in
@@ -43,8 +57,11 @@ class StageReceiver : BroadcastReceiver() {
         try {
             System.loadLibrary("exp")
             Log.i(TAG, "[DFR][PROCESS] LIBEXP_LOADED=PASS")
+            diag.appendLine("[DFR][PROCESS] LIBEXP_LOADED=PASS")
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "[DFR][PROCESS] LIBEXP_LOADED=FAIL (arm64-only lib, or SELinux/exec denial?): $e")
+            diag.appendLine("[DFR][PROCESS] LIBEXP_LOADED=FAIL $e")
+            sendBack(context, diag, null)
             return
         }
         val controller = object : Binder() {
@@ -89,17 +106,36 @@ class StageReceiver : BroadcastReceiver() {
             }
         }
 
-        val i = Intent().apply {
-            setPackage(StageHop.PKG)
-            action = EVIL_ACTION
-            putExtras(Bundle().apply { putBinder("CONTROLLER", controller) })
-        }
-        context.sendBroadcast(i)
+        sendBack(context, diag, controller)
         Log.i(TAG, "controller sent")
+    }
+
+    /**
+     * Ship the remote-side evidence (and the controller, when there is one)
+     * back across the boundary. `controller` is null when stage 2 could not
+     * produce one; the diagnostics still travel, because knowing the hop landed
+     * in network_stack and then failed is exactly what the operator needs.
+     */
+    private fun sendBack(context: Context, diag: StringBuilder, controller: Binder?) {
+        try {
+            val i = Intent().apply {
+                setPackage(StageHop.PKG)
+                action = EVIL_ACTION
+                putExtras(Bundle().apply {
+                    if (controller != null) putBinder("CONTROLLER", controller)
+                    putString(EXTRA_DIAG, diag.toString())
+                })
+            }
+            context.sendBroadcast(i)
+        } catch (t: Throwable) {
+            Log.e(TAG, "sendBack failed", t)
+        }
     }
 
     companion object {
         const val TAG = "DFReroot"
         const val EVIL_ACTION = "com.polygraphene.df.reroot.EVIL"
+        /** Remote-boundary diagnostics carried back with the EVIL broadcast. */
+        const val EXTRA_DIAG = "DIAG"
     }
 }

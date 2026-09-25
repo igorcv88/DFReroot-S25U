@@ -1,6 +1,7 @@
 /* sha256.c - see sha256.h. Compact, portable SHA-256. */
 #include "sha256.h"
 #include <fcntl.h>
+#include <errno.h>
 #include <unistd.h>
 #include <string.h>
 
@@ -97,8 +98,14 @@ int dfr_sha256_file_hex(const char *path, char hexout[65]) {
     ssize_t n;
     while ((n = read(fd, buf, sizeof(buf))) > 0)
         dfr_sha256_update(&c, buf, (size_t)n);
-    close(fd);
-    if (n < 0) return -1;
+    /* close(2) can succeed and still overwrite errno; callers of this function
+     * classify the failure BY errno (EACCES is a policy denial, anything else
+     * is a fault), so preserve the read's errno across the close. */
+    {
+        int saved = errno;
+        close(fd);
+        if (n < 0) { errno = saved; return -1; }
+    }
     uint8_t digest[32];
     dfr_sha256_final(&c, digest);
     dfr_sha256_hex(digest, hexout);

@@ -37,6 +37,12 @@ jobs:
       - name: Gate A - target profile unit + regression tests
         run: sh tools/tests/run_tests.sh
 
+      # The packages.xml write path, driven against an in-memory filesystem so
+      # the EPERM-then-rename branch that lost the file's metadata on hardware
+      # is covered by a test rather than by the next field run.
+      - name: Gate H - installer SafeWrite regression suite
+        run: sh tools/tests/run_installer_tests.sh
+
       - name: Release tag resolution tests (stubbed gh, no network)
         run: sh tools/tests/test_resolve_release_tag.sh
 
@@ -88,6 +94,8 @@ jobs:
           for s in build.sh build-splice.sh create-keystore.sh \
                    tools/ci_build_audit.sh tools/repro_report.sh \
                    tools/tests/run_tests.sh tools/zzic_collect.sh \
+                   tools/tests/run_installer_tests.sh \
+                   tools/tests/exp_syntax_check.sh \
                    tools/resolve_release_tag.sh \
                    tools/tests/test_resolve_release_tag.sh \
                    dirtyfrag-lkm/build.sh; do

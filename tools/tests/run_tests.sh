@@ -12,3 +12,7 @@ trap 'rm -rf "$OUT"' EXIT
     "$JNI/target_profile.c" \
     "$JNI/sha256.c"
 "$OUT/test_tp"
+
+# The JNI payload holds every fail-closed gate; syntax-check it here too so a
+# typo in one costs a second on any host instead of a whole signed NDK build.
+sh tools/tests/exp_syntax_check.sh

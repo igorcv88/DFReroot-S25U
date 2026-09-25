@@ -60,8 +60,30 @@ class MainActivity : Activity() {
         evilReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 try {
-                    controller = intent.extras?.getBinder("CONTROLLER")
-                    append("networkstack CONTROLLER binder received\n")
+                    /*
+                     * Gate D evidence from the far side of the hop. It used to
+                     * exist only in logcat, which meant closing Gate D needed a
+                     * second capture; now the remote process reports its own
+                     * uid / process name / SELinux context / LIBEXP_LOADED into
+                     * the same log the operator is already reading.
+                     */
+                    val diag = intent.extras?.getString(StageReceiver.EXTRA_DIAG)
+                    if (!diag.isNullOrBlank()) {
+                        append("--- remote boundary (network_stack) ---\n")
+                        append(diag.trimEnd())
+                        append("--- end remote boundary ---\n")
+                    }
+                    val b = intent.extras?.getBinder("CONTROLLER")
+                    if (b != null) {
+                        controller = b
+                        append("networkstack CONTROLLER binder received\n")
+                    } else {
+                        // Diagnostics arrived without a controller: the hop
+                        // landed but stage 2 could not arm. Say which, rather
+                        // than timing out with no explanation 30s later.
+                        append("[x] remote stage reported in WITHOUT a controller;" +
+                            " see the boundary block above\n")
+                    }
                 } catch (t: Throwable) {
                     append("[x] resolve binder: $t\n")
                 } finally {

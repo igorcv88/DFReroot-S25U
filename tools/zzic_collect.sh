@@ -44,13 +44,14 @@ echo "field most likely to differ after any firmware rebuild, and a difference i
 echo "MISMATCH, not a near miss."
 echo
 
-# -------------------------------------------------------------- Gate B blocker
-# The pristine SHA-256 of crash_dump64. This is THE immediate blocker: the profile
-# pins it as NULL, and a required artefact with no pinned hash is a FAIL, so the
-# chain refuses here before any page-cache write. Capture it BEFORE ever running
-# the chain - once a run has patched the page cache the value is no longer
-# pristine, and a hash taken then would pin corruption as the expected state.
-echo "--- crash_dump64 (Gate B: the currently pinned value is NULL = refuse) ---"
+# ------------------------------------------------------- Gate B: crash_dump64
+# The pristine SHA-256 of crash_dump64. It IS pinned as of v2.0.3-zzic
+# (9249d664...), captured on this device; this section re-checks it. Capture it
+# BEFORE ever running the chain - once a run has patched the page cache the value
+# is no longer pristine, and a hash taken then would pin corruption as the
+# expected state. A value here that differs from the pinned one means the
+# firmware changed, and the chain must refuse until the profile is re-derived.
+echo "--- crash_dump64 (Gate B: must equal the pinned crashdump_sha256) ---"
 CD=/apex/com.android.runtime/bin/crash_dump64
 if [ -r "$CD" ]; then
     echo "path   = $CD"
@@ -72,6 +73,42 @@ else
     echo "sha256 = UNREADABLE (not present, or denied to this uid)"
     echo "  Retry under temp root: su -c \"sha256sum $CD\""
 fi
+echo
+
+# ------------------------------------------------- Gate B: vendor provenance
+# /vendor/lib64/libstagefrighthw.so is NOT openable from the domain DFReroot runs
+# in (EACCES from u:r:system_server:s0 and u:r:network_stack:s0, observed in the
+# v2.0.2-zzic physical run), so its identity is established through the AVB chain
+# the pinned digest was captured under instead of a direct runtime hash. Every
+# value below is part of that chain and every one of them is compared.
+echo "--- vendor provenance (Gate B: ZZIC_VENDOR_PROVENANCE inputs) ---"
+for p in \
+    ro.boot.verifiedbootstate \
+    ro.boot.vbmeta.device_state \
+    ro.boot.flash.locked \
+    ro.boot.veritymode \
+    ro.boot.vbmeta.digest \
+    ro.boot.vbmeta.avb_version \
+    ro.boot.vbmeta.hash_alg
+do
+    printf '%-32s = %s\n' "$p" "$(getprop "$p")"
+done
+printf '%-32s = %s\n' "/vendor mount" \
+    "$(grep -m1 ' /vendor ' /proc/self/mountinfo 2>/dev/null || echo UNKNOWN)"
+VF=/vendor/lib64/libstagefrighthw.so
+printf '%-32s = %s\n' "vendor elf" "$VF"
+if [ -r "$VF" ]; then
+    printf '%-32s = %s\n' "  readable as uid $(id -u)" "yes"
+    printf '%-32s = %s\n' "  size" "$(wc -c < "$VF" 2>/dev/null | tr -d ' ')"
+    printf '%-32s = %s\n' "  sha256" "$(sha256sum "$VF" 2>/dev/null | cut -d' ' -f1)"
+else
+    printf '%-32s = %s\n' "  readable as uid $(id -u)" "NO (expected outside u:r:ksu:s0)"
+    echo "  Capture it from a root shell: su -c \"sha256sum $VF\""
+fi
+echo
+echo "The seven ro.boot.* values plus the /vendor fstype (erofs) and ro flag are"
+echo "ALL compared. Any single divergence is ZZIC_VENDOR_PROVENANCE=FAIL_CHAIN and"
+echo "the chain refuses before any page-cache write."
 echo
 
 # ----------------------------------------------------------- per-boot anchoring

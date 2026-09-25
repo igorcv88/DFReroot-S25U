@@ -2,11 +2,18 @@
 
 Fail-closed compatibility profile and diagnostics for the exact firmware
 `S938BXXUCZZIC`. This document records what was implemented, what was verified
-in the build environment, and — explicitly — what remains `BLOCKED` on physical
-hardware. **No gate is auto-promoted to global compatibility.** The `SUPPORTED`
-state is intentionally *not* granted: only Gates A and E are `PASS` in this
-environment; every gate that needs the ZZIC device or its pulled artefacts is
-left `BLOCKED`/`UNKNOWN` with the exact command that closes it.
+in the build environment, and — explicitly — what remains blocked.
+
+> **This document is post-physical-test.** The state below reflects the first
+> hardware execution of the chain, `v2.0.2-zzic` (versionCode 5) on
+> SM-S938B / `S938BXXUCZZIC`. Gates A, B (kernel), C, D and H are no longer
+> predictions; they were observed. Anything still written as a prediction is
+> marked as such.
+
+**No gate is auto-promoted to global compatibility.** `SUPPORTED` is still
+intentionally *not* granted: Gate G (`CONFIG_MODVERSIONS` symbol-CRC agreement
+for the kernel module) is `UNVERIFIED`, and Gate I (a full end-to-end run)
+therefore cannot be attempted at all.
 
 ## Baseline
 
@@ -14,10 +21,266 @@ left `BLOCKED`/`UNKNOWN` with the exact command that closes it.
 |---|---|
 | Upstream | `polygraphene/DFReroot` |
 | Working fork | `igorcv88/DFReroot-S25U` |
-| Reference version | upstream `v2.0.1`; this fork builds as `2.0.2-zzic` |
+| Reference version | upstream `v2.0.1`; this fork builds as `2.0.3-zzic` |
 | Base commit | `9f1d6cd592d898b42d2e0c2d25ee1577e2aabe77` |
 | Branch | `claude/dfreroot-s25u-zzic-support-dgw8fi` |
 | Architecture preserved | build system, packages, module table, exploit flow unchanged |
+
+## Physical run — `v2.0.2-zzic`, first hardware execution
+
+Everything in this section was **observed on the device**, not inferred. It is
+the evidence the rest of this document now rests on.
+
+### The chain that executed
+
+```
+DFInstaller (app_process as root)
+  -> /data/system/packages.xml, our cert into android.uid.system pastSigs
+    -> soft reboot (framework restart; boot_id unchanged)
+      -> DFReroot installed as package:com.polygraphene.df.reroot uid:1000
+         sharedUser=android.uid.system/1000
+        -> runs as uid=1000(system) gid=1000 context=u:r:system_server:s0
+          -> ActivityManagerService
+            -> getProcessRecordLocked ABSENT -> mProcessNames fallback
+              -> ProcessRecord{...:com.android.networkstack.process/1073}
+                -> mOnewayThread (android.app.IApplicationThread)
+                  -> scheduleReceiver/12
+                    -> StageReceiver in network_stack
+                      -> System.loadLibrary("exp")
+                        -> CONTROLLER binder back to the UI
+                          -> runAll -> Gate A PASS -> Gate B ...
+```
+
+`boot_id` was `0643a5e2-9a44-4bb9-b7a4-31a3b255e3ac` across the soft reboot,
+confirming the framework restart did not change the boot.
+
+### Gate A — exact identity: **physical PASS**
+
+All twelve compared fields matched. Reported by the device:
+
+```
+manufacturer=samsung   model=SM-S938B   device=pa3q
+sdk=37   android=17
+display=CP2A.260605.016.S938BXXUCZZIC
+fingerprint=samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCZZIC_OXMCZZIC:user/release-keys
+kernel_release=6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k
+kernel_version=#1 SMP PREEMPT Wed Sep 16 14:21:43 UTC 2026
+page_size=4096   abi=arm64-v8a   arch=aarch64
+-> TARGET_PROFILE=S25U_ZZIC, PASS exact identity
+```
+
+### Gate B — kernel: **physical PASS**
+
+```
+ZZIC_KERNEL_IDENTITY=PASS
+ZZIC_KERNEL_VERSION=PASS
+ZZIC_KERNEL_ARCH=PASS (aarch64)
+ZZIC_PAGE_SIZE=PASS (4096)
+```
+
+### Gate C — Android 17 AMS shapes: **physical PASS**
+
+The concrete class is `com.android.server.am.ActivityManagerService`.
+`getProcessRecordLocked` **does not exist on this build** — the enumeration
+returned an empty overload list. The `mProcessNames` fallback resolved the
+ProcessRecord, and `mOnewayThread` (`android.app.IApplicationThread`) was the
+correct thread field; `mThread` is a
+`com.android.server.am.ApplicationThreadDeferred`.
+
+The `scheduleReceiver` overload on Android 17 / One UI 9 is **no longer
+unknown**. Observed exactly:
+
+```
+scheduleReceiver/12 params=[
+    android.content.Intent,
+    android.content.pm.ActivityInfo,
+    android.content.res.CompatibilityInfo,
+    int,
+    java.lang.String,
+    android.os.Bundle,
+    boolean,
+    boolean,
+    int,
+    int,
+    int,
+    java.lang.String
+]
+```
+
+which is the shape `StageHop` already invokes. `scheduleReceiver sent` and
+`networkstack CONTROLLER binder received` both followed.
+
+**Change made in `2.0.3-zzic`:** the absent primary lookup used to log a bare
+`getProcessRecordLocked UNKNOWN (no overload found)` with no verdict afterwards,
+which reads like a blocker when the fallback has already succeeded. The gate now
+ends on an explicit conclusion:
+
+```
+[DFR][AMS] PROCESS_LOOKUP_PRIMARY=UNAVAILABLE (no getProcessRecordLocked on this build)
+[DFR][AMS] PROCESS_LOOKUP_FALLBACK=mProcessNames
+[DFR][AMS] PROCESS_LOOKUP_METHOD=ProcessList.mProcessNames.get/2
+[DFR][AMS] PROCESS_LOOKUP=PASS
+```
+
+### Gate D — remote boundary: **physical PASS**
+
+The CONTROLLER binder is created by `StageReceiver.stage2()` only *after*
+`System.loadLibrary("exp")` succeeds, so receiving it is itself proof that
+`libexp.so` was loaded inside `u:r:network_stack:s0`.
+
+**Change made in `2.0.3-zzic`:** that proof was previously only in logcat, so
+closing Gate D needed a second capture from a different process. `StageReceiver`
+now carries its own `Diagnostics.processIdentity()` output and `LIBEXP_LOADED`
+back in the `EVIL` broadcast (`DIAG` extra), and the UI prints them under a
+`--- remote boundary (network_stack) ---` block. A stage that lands but cannot
+arm now also reports in, instead of leaving the UI to time out silently.
+
+### Gate H — installer / `packages.xml`: **physical PASS, with two defects found**
+
+`packages.xml` on this device is:
+
+```
+uid=1000 gid=1000 mode=0660 u:object_r:system_data_file:s0 format=ABX
+```
+
+The `ABX -> TEXT -> ABX` cycle is accepted by this firmware's PackageManager:
+DFInstaller wrote plain-text XML, PMS re-read it and reserialised to ABX on the
+next `writeSettings`, and the injection survived:
+
+```
+[check] android.uid.system injected=true
+[check] all_injected=true
+```
+
+Two real defects surfaced in the same run and are fixed in `2.0.3-zzic`
+(see "Installer write path" below).
+
+## Vendor ELF: why the direct hash was the wrong proof
+
+The `v2.0.2-zzic` Gate B hashed `/vendor/lib64/libstagefrighthw.so` directly and
+refused when it could not:
+
+```
+[DFR][USERSPACE] ZZIC_VENDOR_ELF FAIL cannot read
+/vendor/lib64/libstagefrighthw.so (errno=13)
+```
+
+`errno=13` is `EACCES`. The measurements that explain it:
+
+| Domain | `open`/hash of the vendor ELF |
+|---|---|
+| `u:r:ksu:s0` | OK — `308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049` |
+| `u:r:system_server:s0` (uid 1000) | `Permission denied` |
+| `u:r:network_stack:s0` (uid 1073) | `Permission denied` |
+
+This is **not** a missing file, a missing mount, or KernelSU "Unmount modules".
+The file is present and identical inside both namespaces
+(`/proc/<system_server>/root/...` and `/proc/<network_stack>/root/...`:
+`-rw-r--r-- root root u:object_r:vendor_file:s0`, 51632 bytes), the mount
+namespaces differ (`mnt:[4026535926]` vs `mnt:[4026535863]`) but both resolve
+it, and `/vendor` is mounted `/dev/block/dm-17 ... erofs ro,seclabel`. The
+absence of an `avc: denied` line in `dmesg`/`logcat` is not evidence of
+permission either — the policy may `dontaudit` it. The functional evidence is
+`open()` returning `EACCES`.
+
+The decisive point is that **the upstream exploit already knows this.**
+`patch_file()` only calls `open(path, O_RDONLY)` when `use_helper == 0`, and
+`patch_ko()` writes the vendor target with `use_helper = 1`, which goes through
+`execl(kCrashDump, "crashdump64", offset, target_lib_path, NULL)` and never
+opens the file from this process. The v2.0.2 gate demanded a read the
+architecture is deliberately built to avoid.
+
+### What replaced it
+
+The requirement for proof does not go away; the *form* of the proof changes. The
+pinned digest `308b25…` was captured on this exact firmware while dm-verity was
+enforcing, verified boot was green, the bootloader was locked, and vbmeta
+reported a specific digest. Under AVB those facts are what authenticate the bytes
+on `/vendor`: the same vbmeta digest with verity enforcing on a green/locked
+device means the `/vendor` tree is the one that digest covers. So the runtime
+re-establishes that chain instead, and every element of it is compared:
+
+```
+ro.boot.verifiedbootstate    = green
+ro.boot.vbmeta.device_state  = locked
+ro.boot.flash.locked         = 1
+ro.boot.veritymode           = enforcing
+ro.boot.vbmeta.digest        = 23a0e0b0a5b421d5a75b62de40edb37489a4e6d441d54e58ee6f930c1a9a3f62
+ro.boot.vbmeta.avb_version   = 1.2
+ro.boot.vbmeta.hash_alg      = sha256
+/vendor                      = erofs, mounted read-only
+```
+
+The runtime now logs, on the exact ZZIC target:
+
+```
+[DFR][USERSPACE] ZZIC_VENDOR_DIRECT_HASH=UNAVAILABLE_EACCES
+[DFR][USERSPACE] ZZIC_VENDOR_PROVENANCE=PASS_AVB
+```
+
+The verdicts, all fail-closed, are in `dfr_vendor_provenance_eval()`
+(`target_profile.c`, host-tested):
+
+| Verdict | Meaning |
+|---|---|
+| `PASS_DIRECT` | the file *was* readable and its digest is the pinned one — the chain is still required and intact |
+| `PASS_AVB` | the read was denied with `EACCES` and every AVB/mount element matched |
+| `FAIL_DIRECT_MISMATCH` | readable and **not** the pinned bytes — no provenance excuses this |
+| `FAIL_CHAIN` | any AVB or mount element absent or divergent, or an available size/label that diverges |
+| `FAIL_UNREADABLE` | unreadable for any errno other than `EACCES` |
+| `FAIL_NO_PIN` | the profile does not pin the full chain |
+
+There is **no verdict that turns `EACCES` into a pass on its own.** `EACCES`
+only changes *which* proof is required, never *whether* one is required.
+
+Two anchors are observational rather than required: the file's `st_size` and its
+SELinux label. A domain denied `open(2)` may also be denied `getattr`, so these
+are compared **when available** (available-and-divergent is a hard `FAIL_CHAIN`)
+and recorded as `SKIP` when not. They are never counted as agreement.
+
+**Limitation, stated plainly.** The pinned vendor digest's provenance anchor is
+"read under an enforcing, green, locked AVB state with vbmeta digest `23a0e0b0…`",
+not "extracted from the signed ZZIC `vendor.img` offline". Extracting it from the
+OTA payload and re-verifying the AVB chain of the image itself is strictly
+stronger and remains worth doing; it would not change the runtime gate, only the
+strength of the value the gate compares against.
+
+## Installer write path — two field defects fixed
+
+Both were produced by the `v2.0.2-zzic` run and are now covered by
+`tools/tests/SafeWriteTest.java` (49 checks, in-memory filesystem, no device).
+
+### 1. Metadata was inferred from the wrong file
+
+The old `writeBack()` created the backup with `File.copyTo` and then read the
+target uid/gid/mode out of **the backup it had just created**. A file created by
+a root-run `app_process` is `root:root 0644`, so those were the values reapplied
+to the final `packages.xml`. Before the inject the file was `1000:1000 0660`;
+after the rename swap it was `0:0 0644`.
+
+Fixed: the original is `stat`'d (plus its SELinux label and a SHA-256 of its
+contents) **before anything is written**, and that stat is the only source of
+truth for the backup, the staged replacement and the final file. After the
+rename the metadata is re-read and compared; a divergence rolls the file back
+and refuses, rather than asking for a framework restart on a mis-owned
+`packages.xml`. `0600` is no longer hardcoded as a universal default.
+
+### 2. The backup could exist and be empty
+
+The run left `/data/system/packages.xml.bak-df-installer` at **0 bytes**, and the
+old code's only check was `bak.exists()` followed by
+`"backup already exists, keeping"`. That is worse than no backup: it looks like a
+rollback path and restores nothing. (The pristine image — 1,205,358 bytes,
+`559dde0e57f29cb7b68905ad7b25b27f8ea92901c14dcaef26d6b60d504a49a1` — was
+recovered by hand.)
+
+Fixed: backup creation is transactional — staged under a temporary name, read
+back and compared by size **and** SHA-256, given the original's metadata,
+`fsync`ed, then `rename(2)`d into place. An existing backup is still never
+overwritten (it is the pristine pre-injection image), but it is now validated,
+and one that is empty, truncated or unparsable is a hard failure with an
+actionable message. `InjectMain --diag-zzic` reports `BACKUP_PRESENT` /
+`BACKUP_VALID` read-only, so the state is visible before anyone relies on it.
 
 ## Target identity (pinned profile)
 
@@ -160,7 +423,14 @@ the policy, or if any DFReroot runtime source regains a `/data/local/tmp` marker
 
 ## Unit tests (target detection) + regression tests
 
-`tools/tests/run_tests.sh` (host `cc`, no Android). **36/36 pass.**
+`tools/tests/run_tests.sh` (host `cc`, no Android). **72/72 pass**, and it also
+syntax-checks `exp.c` against the stub NDK headers in `tools/tests/ndkstub/`, so
+a typo in a gate costs a second on any host instead of a whole signed NDK build.
+
+`tools/tests/run_installer_tests.sh` (host `javac`/`java`, no Android).
+**49/49 pass** — the DFInstaller write path driven against an in-memory
+filesystem, including the EPERM-then-rename branch that lost the file's metadata
+on hardware, and every invalid-backup case.
 
 Target detection: exact ZZIC → `S25U_ZZIC`; and all required negatives → not
 ZZIC: `SM-S938B+ZZI4` (MISMATCH), `SM-S938U`, `SM-S938N`, `pa3q+other display`
@@ -237,7 +507,13 @@ application-thread type; `scheduleReceiver` overloads + parameter count/types
 (Gate C). Gate D: pid/uid/gid, process name, SELinux context, ABI, classloader,
 `nativeLibraryDir`, and the separate signals `NETWORKSTACK_PROCESS_FOUND`,
 `REMOTE_COMPONENT_REACHED`, `NATIVE_LIBRARY_DISCOVERABLE` (never collapsed).
-Execution requires the device (logcat capture) → **BLOCKED** here.
+
+Both gates are **physical PASS** as of the `v2.0.2-zzic` run; see "Physical run"
+above for the observed Android 17 shapes. Two observability changes shipped in
+`2.0.3-zzic`: Gate C ends on an explicit `PROCESS_LOOKUP=PASS|FAIL` instead of
+leaving a bare `UNKNOWN` after a successful fallback, and Gate D's remote-side
+evidence travels back to the UI in the `EVIL` broadcast rather than existing only
+in logcat.
 
 ## Userspace ELF audit (Gate F) and Installer (Gate H)
 
@@ -253,8 +529,12 @@ a pulled tree.
 `tools/installer_audit.py` + `InjectMain --diag-zzic` produce `PACKAGES_FORMAT`,
 `PACKAGES_PARSE`, `ANDROID_UID_SYSTEM_FOUND`, `CERT_TABLE_PARSE`,
 `ROUND_TRIP_VALID`, `METADATA_CAPTURED`. The offline tool was verified on a
-synthetic text `packages.xml` (round-trip valid, cert table resolved). ABX and
-real device metadata need the device → **BLOCKED**.
+synthetic text `packages.xml` (round-trip valid, cert table resolved), and the
+on-device path is **physical PASS** as of `v2.0.2-zzic`: real ABX input, real
+`1000:1000 0660 u:object_r:system_data_file:s0` metadata, and an
+`ABX → TEXT → ABX` cycle the firmware's PMS accepted. `--diag-zzic` now also
+reports `BACKUP_PRESENT` / `BACKUP_VALID`, read-only, after the run left a
+zero-byte backup behind.
 
 ## Reproducibility
 
@@ -443,33 +723,65 @@ Four review findings were verified and fixed:
 
 ## Gate matrix (never auto-promoted to global compatibility)
 
+Updated after the `v2.0.2-zzic` physical run. "physical PASS" means observed on
+SM-S938B / `S938BXXUCZZIC`, not inferred.
+
 | Gate | Result | Evidence |
 |---|---|---|
-| A — Target identity | **PASS** | fail-closed classifier implemented; 36/36 host tests incl. exact ZZIC, all required negatives, and the Gate-G policy verdicts |
-| B — Kernel/userspace identity | **BLOCKED** | validation code + pinned hashes implemented; runtime SHA-256/symlink/page-size checks need the ZZIC device |
-| C — Java/system-server compat | **BLOCKED** | `[DFR][AMS]` deterministic dumps implemented; needs on-device logcat to compare Android 17 shapes |
-| D — NetworkStack identity | **BLOCKED** (process facts already observed on HW) | `[DFR][PROCESS]` instrumentation implemented; runtime capture pending |
+| A — Target identity | **physical PASS** | all twelve fields matched on hardware; `TARGET_PROFILE=S25U_ZZIC`, `PASS exact identity`. 72/72 host checks incl. every required negative |
+| B — Kernel identity | **physical PASS** | `ZZIC_KERNEL_IDENTITY/VERSION/ARCH/PAGE_SIZE` all `PASS` on hardware |
+| B — `crash_dump64` identity | **PASS (pinned)** | `9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f`, captured from the device; readable from this domain, so it remains a direct runtime SHA-256 check |
+| B — vendor ELF provenance | **PASS_AVB** | direct read is `EACCES` in `system_server` and `network_stack`; identity rests on the AVB chain the digest was captured under (vbmeta digest, green, locked, verity enforcing, `/vendor` erofs ro). See "Vendor ELF" above |
+| B — `libc` / `libc++` identity | **BLOCKED** | pinned and checked at runtime, but the run refused at Gate G before `patch_libc`/`patch_cxx` were reached |
+| C — Java/system-server compat | **physical PASS** | `scheduleReceiver/12` observed on Android 17; `getProcessRecordLocked` absent, `mProcessNames` fallback resolved the ProcessRecord; `mOnewayThread` was the correct field |
+| D — NetworkStack identity | **physical PASS** | `scheduleReceiver sent` → `networkstack CONTROLLER binder received`, which only happens after `System.loadLibrary("exp")` inside `u:r:network_stack:s0`. Remote evidence is now reported back to the UI, not logcat-only |
 | E — Native packaging | **PASS** | real `./build.sh`; `libexp.so` AArch64, all JNI symbols, hashes recorded (apk_audit) |
 | F — Userspace ELF audit | **BLOCKED** | tool implemented + host-verified; awaits pulled ZZIC ELFs |
-| G — Module ABI compatibility | **UNKNOWN / UNVERIFIED** (runtime-enforced) | ko_audit ran on the real generic `.ko`; empty `__versions`, verdict UNVERIFIED without ZZIC `Module.symvers`. On ZZIC **every** page-cache stage (`patch_ko`, `patch_libc`, `patch_cxx`) refuses while the module is unverified — there is no override — and a `ko_zzic_verified=1` claim is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
-| H — Installer format compatibility | **BLOCKED** | `--diag-zzic` + offline tool implemented; offline round-trip verified on synthetic XML; needs device packages.xml |
-| I — Full hardware compatibility | **BLOCKED** | requires end-to-end on-device run; `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is independent, not proof |
+| G — Module ABI compatibility | **UNVERIFIED** (runtime-enforced) | the device confirms `CONFIG_MODVERSIONS=y`; the bundled `dirtyfrag-android15-6.6.ko` has an **empty `__versions`** table, so no symbol-CRC agreement exists. Every page-cache stage refuses; there is no override, and `ko_zzic_verified=1` is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
+| H — Installer format compatibility | **physical PASS** | `ABX → TEXT → ABX` accepted by PMS; injection survived the soft reboot; the two write-path defects the run exposed are fixed and regression-tested |
+| I — Full hardware compatibility | **BLOCKED by Gate G** | the chain cannot be exercised end to end while the module is `UNVERIFIED`. `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is independent, not proof |
 
-**Conclusion:** `SUPPORTED` is **not** granted. In this environment only Gate A
-(logic + tests) and Gate E (real build) are `PASS`; Gate G is `UNVERIFIED`; all
-remaining gates are `BLOCKED` pending the ZZIC device and its pulled artefacts.
-Each blocked gate above names the exact command/artefact that closes it.
+**Conclusion:** `SUPPORTED` is **not** granted. The adaptation to Android 17 /
+One UI 9 is demonstrated working up to Gate G; Gate G is the single remaining
+structural blocker, and it needs a kernel **build** artefact, not a device
+capture.
+
+### Expected result of a `2.0.3-zzic` run
+
+While Gate G is `UNVERIFIED`, a correct run ends like this — and that is the
+test *passing*:
+
+```
+TARGET_PROFILE=S25U_ZZIC          PASS exact identity
+ZZIC_KERNEL_IDENTITY=PASS
+ZZIC_KERNEL_VERSION=PASS
+ZZIC_KERNEL_ARCH=PASS
+ZZIC_PAGE_SIZE=PASS
+ZZIC_CRASHDUMP_IDENTITY PASS
+ZZIC_VENDOR_DIRECT_HASH=UNAVAILABLE_EACCES
+ZZIC_VENDOR_PROVENANCE=PASS_AVB
+[DFR][AMS] PROCESS_LOOKUP=PASS
+[DFR][PROCESS] REMOTE_COMPONENT_REACHED=PASS
+[DFR][PROCESS] LIBEXP_LOADED=PASS
+[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED
+[DFR][MODULE] ZZIC_MODULE_POLICY=REFUSE_UNVERIFIED
+runAll done res=3
+```
+
+with **no** `patch #1`, no `patched bytes` and no page-cache write. Anything
+that does reach `patch #1` while Gate G is `UNVERIFIED` is a defect.
 
 ## How to close the blocked gates on hardware
 
 ```sh
-# Gate B/C/D — run on device, capture logcat tagged DFReroot / [DFR]
-#   (Run DirtyFrag from the app; gate_target() aborts fail-closed unless the
-#    exact ZZIC identity + userspace hashes validate.)
-adb logcat -s DFReroot | grep '\[DFR\]'
+# Identity, provenance and Gate G inputs — one read-only pass
+sh tools/zzic_collect.sh > zzic-identity.txt 2>&1
 
-# Gate F — pull the four artefacts and audit against the pinned hashes
-adb pull /vendor/lib64/libstagefrighthw.so /system/lib64/libc++.so ./pulled/
+# Gate B/C/D — run DFReroot, capture logcat tagged DFReroot / [DFR]
+adb logcat -s DFReroot DirtyFrag | grep '\[DFR\]'
+
+# Gate F — pull the artefacts and audit against the pinned hashes
+adb pull /system/lib64/libc++.so ./pulled/
 python3 tools/elf_audit.py --root ./pulled
 
 # Gate G — resolve UNVERIFIED with the ZZIC kernel symbol table
@@ -483,58 +795,68 @@ adb shell su -c 'CLASSPATH=/data/local/tmp/df_installer.apk app_process /system/
 
 ## What is still needed to make the ZZIC path executable
 
-The code is complete and builds; what remains is **evidence**, and the gates are
-deliberately wired so that missing evidence refuses rather than assumes. Two
-values are hard blockers, in this order.
+One blocker remains. The two that `v2.0.2-zzic` stopped at are closed.
 
-### 1. `crash_dump64` SHA-256 — blocks Gate B, one command
+### Closed — `crash_dump64` SHA-256
 
-```sh
-adb shell sha256sum /apex/com.android.runtime/bin/crash_dump64
-# and, for the full section 26 record:
-adb pull /apex/com.android.runtime/bin/crash_dump64 ./pulled/apex/com.android.runtime/bin/
-python3 tools/elf_audit.py --root ./pulled
+Captured from the device and pinned in both places (the CI drift check enforces
+that they agree, and now also that the top-level field and the `targets[]` entry
+in `tools/zzic_profile.json` agree with each other):
+
+```
+9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f
 ```
 
-Then set the value in **both** places (the CI drift check enforces that they
-agree):
+It is a direct runtime SHA-256 check, because — unlike the vendor ELF —
+`crash_dump64` **is** readable from the domain the chain runs in.
 
-- `app/src/main/jni/target_profile.c` → `.crashdump_sha256 = "<hex>"`
-- `tools/zzic_profile.json` → `"crashdump_sha256": "<hex>"`
+### Closed — vendor ELF identity
 
-Until then every ZZIC run stops at
-`[DFR][USERSPACE] ZZIC_CRASHDUMP_IDENTITY FAIL required hash is not pinned`.
+Redesigned as `ZZIC_VENDOR_PROVENANCE`; see "Vendor ELF: why the direct hash was
+the wrong proof" above. Still fail-closed, still refuses on any divergence, but
+the proof no longer requires a read the architecture itself avoids.
 
-### 2. A Gate-G validated kernel module — blocks the module load
+### 1. A Gate-G validated kernel module — the remaining blocker
 
-The bundled `dirtyfrag-android15-6.6.ko` shares the ZZIC kernel's GKI base
-(`6.6.127`) and page tag (`4k`), but ships an **empty `__versions` table** while
-the ZZIC kernel has `CONFIG_MODVERSIONS=y`, so no symbol-CRC agreement can be
-established offline. It is `UNVERIFIED`, and an ABI-mismatched module can fault
-the kernel. Resolve with the ZZIC kernel's symbol table:
+The device confirms `CONFIG_MODVERSIONS=y`. The bundled
+`dirtyfrag-android15-6.6.ko` shares the ZZIC kernel's GKI base (`6.6.127`) and
+page tag (`4k`) but ships an **empty `__versions` table**, so no symbol-CRC
+agreement can be demonstrated. It is `UNVERIFIED`, and an ABI-mismatched module
+can fault the kernel.
+
+Matching the base version and the page size is **not sufficient** with
+`CONFIG_MODVERSIONS=y`, and must never be treated as if it were.
+
+`Module.symvers` is a kernel **build** artefact. It is not present on a running
+Android filesystem, so searching the device for it is not a valid route. One of
+these is needed:
+
+- the `Module.symvers` from the exact ZZIC kernel build;
+- a module rebuilt from the matching source, config and toolchain;
+- another verifiable source of that kernel's symbol CRCs.
+
+Then:
 
 ```sh
-python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko \
-    --symvers Module.symvers --kallsyms kallsyms.txt
+python3 tools/ko_audit.py <new-module.ko> \
+    --symvers <exact-Module.symvers> --kallsyms <captured-kallsyms.txt>
 ```
 
-`MODULE_VS_ZZIC_KERNEL = COMPATIBLE` is the only result that justifies flipping
-the flag, and the flag alone is not enough — all three fields go together:
+`MODULE_VS_ZZIC_KERNEL = COMPATIBLE` is the only result that justifies setting
+the three profile fields, and they move together or not at all:
 
 ```c
 .ko_zzic_verified = 1,
-.ko_filename      = "dirtyfrag-zzic-6.6.127.ko",
+.ko_filename      = "<exact filename>",
 .ko_sha256        = "<sha256 of exactly those bundled bytes>",
 ```
 
 `tools/profile_binding_audit.py` fails the build if the flag is set without a
 digest, if the digest does not match the bundled file, or if a digest is left
-pinned while the flag is 0.
-
-Without a positively validated module, the ZZIC path remains blocked at Gate G —
-at **all three** page-cache stages, not just the module write. There is no runtime
-escape hatch for an `UNVERIFIED` module; compatibility must be established by
-evidence and bound to the exact bundled bytes.
+pinned while the flag is 0. The module imports only `sprint_symbol`, `_printk`,
+`memset`, `__stack_chk_fail`; it resolves `kallsyms_lookup_name` and
+`selinux_state` at runtime rather than importing them, so those two need
+existence evidence, not export evidence.
 
 ### Strict Gate-G policy
 
@@ -548,7 +870,7 @@ deliberately. That is the intended trade-off, and reversing it is a policy
 decision for the repository owner, made in the open, not a patch an agent applies
 on its own.
 
-### 3. Runtime evidence that no static check can supply
+### 2. Runtime evidence that no static check can supply
 
 Everything else in the gate matrix needs a logcat capture from the device, and
 each item names the boundary that produces it:
@@ -566,12 +888,12 @@ adb logcat -c && adb logcat -s DFReroot DirtyFrag | tee zzic-run.log
 grep '\[DFR\]' zzic-run.log
 ```
 
-`scheduleReceiver` is the one runtime unknown the code cannot work around: the
-hop invokes the **12-parameter** overload, and if Android 17 changed that shape
-the hop fails with the observed overloads logged. It is deliberately not guessed
-at — invoking an unknown overload with fabricated arguments runs inside
-`system_server`. Send the `[DFR][AMS] scheduleReceiver/<n> params=[...]` line and
-the correct shape can be wired precisely.
+`scheduleReceiver` is **no longer an unknown**: the 12-parameter overload the
+hop invokes was observed on Android 17 / One UI 9 and worked (see "Gate C"
+above). The rule that produced that outcome still stands for the next firmware —
+never guess a fallback overload, because invoking an unknown shape with
+fabricated arguments runs inside `system_server`. Wire a new shape only from an
+observed `[DFR][AMS] scheduleReceiver/<n> params=[...]` line.
 
 Record `/proc/sys/kernel/random/boot_id` with any capture: per dossier section 45,
 states from different boots must never be combined into one successful chain.

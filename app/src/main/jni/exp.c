@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,7 @@
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/system_properties.h>
+#include <sys/xattr.h>
 #include "logging.h"
 #include "target_profile.h"
 #include "sha256.h"
@@ -819,6 +821,171 @@ static int gate_hash(struct Reporter *reporter, const char *tag,
 }
 
 /*
+ * The provenance gate compares against DFR_EACCES (target_profile.h keeps
+ * itself free of <errno.h> so the host tests compile it unchanged). Prove the
+ * two agree here, where the real errno.h is in scope.
+ */
+_Static_assert(EACCES == DFR_EACCES, "DFR_EACCES must equal the platform EACCES");
+
+/*
+ * Collect everything dfr_vendor_provenance_eval() needs. Every field is read
+ * best-effort: a value that cannot be read stays NULL/-1, and the pure
+ * evaluator - not this collector - decides what that means.
+ */
+struct VendorObsBuf {
+    char vbs[PROP_VALUE_MAX], vds[PROP_VALUE_MAX], fl[PROP_VALUE_MAX];
+    char vm[PROP_VALUE_MAX], dig[PROP_VALUE_MAX], avb[PROP_VALUE_MAX];
+    char alg[PROP_VALUE_MAX];
+    char fstype[64];
+    char direct_hex[65];
+    char context[256];
+};
+
+static void collect_vendor_observation(const char *path,
+                                       struct VendorObsBuf *buf,
+                                       struct VendorObservation *o) {
+    memset(o, 0, sizeof(*o));
+    o->vendor_ro = -1;
+    o->size = -1;
+
+    prop_get("ro.boot.verifiedbootstate",   buf->vbs, sizeof(buf->vbs), "");
+    prop_get("ro.boot.vbmeta.device_state", buf->vds, sizeof(buf->vds), "");
+    prop_get("ro.boot.flash.locked",        buf->fl,  sizeof(buf->fl),  "");
+    prop_get("ro.boot.veritymode",          buf->vm,  sizeof(buf->vm),  "");
+    prop_get("ro.boot.vbmeta.digest",       buf->dig, sizeof(buf->dig), "");
+    prop_get("ro.boot.vbmeta.avb_version",  buf->avb, sizeof(buf->avb), "");
+    prop_get("ro.boot.vbmeta.hash_alg",     buf->alg, sizeof(buf->alg), "");
+    /* An unset property is "unreadable", not "empty and therefore equal". */
+    o->verified_boot_state = buf->vbs[0] ? buf->vbs : NULL;
+    o->vbmeta_device_state = buf->vds[0] ? buf->vds : NULL;
+    o->flash_locked        = buf->fl[0]  ? buf->fl  : NULL;
+    o->verity_mode         = buf->vm[0]  ? buf->vm  : NULL;
+    o->vbmeta_digest       = buf->dig[0] ? buf->dig : NULL;
+    o->vbmeta_avb_version  = buf->avb[0] ? buf->avb : NULL;
+    o->vbmeta_hash_alg     = buf->alg[0] ? buf->alg : NULL;
+
+    buf->fstype[0] = 0;
+    {
+        /* /proc/self/mountinfo is readable from every domain we run in. */
+        int fd = open("/proc/self/mountinfo", O_RDONLY);
+        if (fd >= 0) {
+            static char mi[65536];
+            size_t off = 0;
+            ssize_t n;
+            while (off + 1 < sizeof(mi) &&
+                   (n = read(fd, mi + off, sizeof(mi) - 1 - off)) > 0)
+                off += (size_t)n;
+            mi[off] = 0;
+            close(fd);
+            if (dfr_mountinfo_lookup(mi, "/vendor", buf->fstype,
+                                     sizeof(buf->fstype), &o->vendor_ro))
+                o->vendor_fstype = buf->fstype[0] ? buf->fstype : NULL;
+        }
+    }
+
+    /* Observational getattr: may itself be denied when open(2) is denied. */
+    {
+        struct stat st;
+        if (stat(path, &st) == 0)
+            o->size = (long) st.st_size;
+    }
+    buf->context[0] = 0;
+    {
+        ssize_t n = getxattr(path, "security.selinux", buf->context,
+                             sizeof(buf->context) - 1);
+        if (n > 0) {
+            buf->context[n] = 0;
+            /* the label is stored NUL-terminated; trim a trailing NUL */
+            if (n > 0 && buf->context[n - 1] == 0) buf->context[n - 1] = 0;
+            o->context = buf->context;
+        }
+    }
+
+    /* The direct read the v2.0.2 gate demanded. Keep trying it: when the
+     * domain IS allowed, a direct digest is the strongest proof available. */
+    errno = 0;
+    if (dfr_sha256_file_hex(path, buf->direct_hex) == 0) {
+        o->direct_sha256 = buf->direct_hex;
+        o->direct_errno = 0;
+    } else {
+        o->direct_sha256 = NULL;
+        o->direct_errno = errno;
+    }
+}
+
+/*
+ * Gate B, vendor ELF. Replaces the v2.0.2 direct-hash-only check, which was
+ * unsatisfiable by construction: the domain DFReroot runs in cannot open the
+ * file (EACCES), which is exactly why patch_ko() writes it through the
+ * crash_dump64 helper instead of opening it. See target_profile.h.
+ */
+static int gate_vendor_provenance(struct Reporter *reporter,
+                                  dfr_target_class cls,
+                                  const struct TargetProfile *p) {
+    struct VendorObsBuf buf;
+    struct VendorObservation o;
+    struct VendorProvMatch m;
+    collect_vendor_observation(target_lib_path, &buf, &o);
+    dfr_vendor_prov v = dfr_vendor_provenance_eval(cls, p, &o, &m);
+    if (v == DFR_VENDOR_PROV_NOT_APPLICABLE)
+        return 0;
+
+    if (m.direct_available) {
+        REPORTLN("[DFR][USERSPACE] ZZIC_VENDOR_DIRECT_HASH=%s (%s)",
+                 m.direct_ok ? "PASS" : "MISMATCH", o.direct_sha256);
+    } else if (o.direct_errno == DFR_EACCES) {
+        REPORTLN("[DFR][USERSPACE] ZZIC_VENDOR_DIRECT_HASH=UNAVAILABLE_EACCES"
+                 " (%s not openable from this SELinux domain; expected on ZZIC)",
+                 target_lib_path);
+    } else {
+        REPORTLN("[DFR][USERSPACE] ZZIC_VENDOR_DIRECT_HASH=UNAVAILABLE errno=%d",
+                 o.direct_errno);
+    }
+
+    REPORTLN("[DFR][USERSPACE] VENDOR_PROV verifiedbootstate=%s (%s)",
+             o.verified_boot_state ? o.verified_boot_state : "<unset>",
+             m.verified_boot_state_ok ? "ok" : "MISMATCH");
+    REPORTLN("[DFR][USERSPACE] VENDOR_PROV vbmeta.device_state=%s (%s)",
+             o.vbmeta_device_state ? o.vbmeta_device_state : "<unset>",
+             m.vbmeta_device_state_ok ? "ok" : "MISMATCH");
+    REPORTLN("[DFR][USERSPACE] VENDOR_PROV flash.locked=%s (%s)",
+             o.flash_locked ? o.flash_locked : "<unset>",
+             m.flash_locked_ok ? "ok" : "MISMATCH");
+    REPORTLN("[DFR][USERSPACE] VENDOR_PROV veritymode=%s (%s)",
+             o.verity_mode ? o.verity_mode : "<unset>",
+             m.verity_mode_ok ? "ok" : "MISMATCH");
+    REPORTLN("[DFR][USERSPACE] VENDOR_PROV vbmeta.digest=%s (%s)",
+             o.vbmeta_digest ? o.vbmeta_digest : "<unset>",
+             m.vbmeta_digest_ok ? "ok" : "MISMATCH");
+    REPORTLN("[DFR][USERSPACE] VENDOR_PROV vbmeta.avb_version=%s hash_alg=%s (%s/%s)",
+             o.vbmeta_avb_version ? o.vbmeta_avb_version : "<unset>",
+             o.vbmeta_hash_alg ? o.vbmeta_hash_alg : "<unset>",
+             m.vbmeta_avb_version_ok ? "ok" : "MISMATCH",
+             m.vbmeta_hash_alg_ok ? "ok" : "MISMATCH");
+    REPORTLN("[DFR][USERSPACE] VENDOR_PROV /vendor fstype=%s ro=%d (%s/%s)",
+             o.vendor_fstype ? o.vendor_fstype : "<unknown>", o.vendor_ro,
+             m.vendor_fstype_ok ? "ok" : "MISMATCH",
+             m.vendor_ro_ok ? "ok" : "MISMATCH");
+    if (m.size_checked)
+        REPORTLN("[DFR][USERSPACE] VENDOR_PROV size=%ld (%s)", o.size,
+                 m.size_ok ? "ok" : "MISMATCH");
+    else
+        REPORTLN("[DFR][USERSPACE] VENDOR_PROV size=SKIP (getattr unavailable)");
+    if (m.context_checked)
+        REPORTLN("[DFR][USERSPACE] VENDOR_PROV context=%s (%s)", o.context,
+                 m.context_ok ? "ok" : "MISMATCH");
+    else
+        REPORTLN("[DFR][USERSPACE] VENDOR_PROV context=SKIP (getxattr unavailable)");
+
+    REPORTLN("[DFR][USERSPACE] ZZIC_VENDOR_PROVENANCE=%s", dfr_vendor_prov_name(v));
+    if (dfr_vendor_prov_permits(v))
+        return 0;
+    REPORTLN("[DFR][USERSPACE] ZZIC_VENDOR_ELF FAIL the pinned vendor artefact's"
+             " provenance could not be established. Refusing before any patch.");
+    return -1;
+}
+
+/*
  * Gate A (target detection) + Gate B (kernel/userspace validation).
  * Returns:
  *   0  -> proceed (exact ZZIC validated, or an unrelated upstream device)
@@ -943,9 +1110,9 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
         REPORTLN("[DFR][USERSPACE] ZZIC_CRASHDUMP_IDENTITY SKIP (not this stage's artefact)");
     }
     if (artefacts & DFR_ART_VENDOR) {
-        if (gate_hash(reporter, "ZZIC_VENDOR_ELF", target_lib_path, p->vendor_target_sha256, 1)) rc = -1;
+        if (gate_vendor_provenance(reporter, cls, p)) rc = -1;
     } else {
-        REPORTLN("[DFR][USERSPACE] ZZIC_VENDOR_ELF SKIP (not this stage's artefact)");
+        REPORTLN("[DFR][USERSPACE] ZZIC_VENDOR_PROVENANCE SKIP (not this stage's artefact)");
     }
     if (artefacts & DFR_ART_LIBC) {
         if (gate_hash(reporter, "ZZIC_LIBC_IDENTITY", "/system/lib64/libc.so", p->libc_sha256, 1)) rc = -1;

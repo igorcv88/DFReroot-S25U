@@ -33,7 +33,19 @@ object Diagnostics {
         try {
             val overloads = amsClass.declaredMethods.filter { it.name == "getProcessRecordLocked" }
             if (overloads.isEmpty()) {
-                emit(sb, "[DFR][AMS] getProcessRecordLocked UNKNOWN (no overload found)")
+                /*
+                 * Android 17 / One UI 9 (S938BXXUCZZIC) has no
+                 * getProcessRecordLocked at all - observed physically on
+                 * v2.0.2-zzic. That is not a blocker and must not read like
+                 * one: StageHop falls back to the mProcessNames map, whose
+                 * ProcessMap.get(String,int) API is far older and stable, and
+                 * that fallback is what actually found network_stack's
+                 * ProcessRecord on this firmware. The conclusion is emitted by
+                 * StageHop.findProcessRecord() as PROCESS_LOOKUP=PASS/FAIL once
+                 * the lookup has actually been attempted.
+                 */
+                emit(sb, "[DFR][AMS] PROCESS_LOOKUP_PRIMARY=UNAVAILABLE " +
+                    "(getProcessRecordLocked absent on this build; expected on Android 17)")
             } else {
                 for (m in overloads) {
                     emit(
@@ -42,10 +54,11 @@ object Diagnostics {
                             "params=${m.parameterTypes.map { it.name }} -> ${m.returnType.name}"
                     )
                 }
-                emit(sb, "[DFR][AMS] getProcessRecordLocked PASS (${overloads.size} overload(s))")
+                emit(sb, "[DFR][AMS] PROCESS_LOOKUP_PRIMARY=AVAILABLE " +
+                    "(getProcessRecordLocked, ${overloads.size} overload(s))")
             }
         } catch (e: Throwable) {
-            emit(sb, "[DFR][AMS] getProcessRecordLocked FAIL enumeration: $e")
+            emit(sb, "[DFR][AMS] PROCESS_LOOKUP_PRIMARY=FAIL enumeration: $e")
         }
     }
 
