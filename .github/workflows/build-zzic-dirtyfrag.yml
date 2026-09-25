@@ -1,0 +1,235 @@
+name: Build ZZIC DirtyFrag LKM
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_RELEASE: 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k
+  DDK_IMAGE: ghcr.io/ylarod/ddk-min:android15-6.6-20260828
+  OUT_NAME: dirtyfrag-android15-6.6-S938BXXUCZZIC.ko
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build exact ZZIC DirtyFrag module
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/dirtyfrag-out"
+
+          docker pull "$DDK_IMAGE"
+
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TEMP/dirtyfrag-out:/out" \
+            -e TARGET_RELEASE="$TARGET_RELEASE" \
+            -e OUT_NAME="$OUT_NAME" \
+            "$DDK_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+
+              export PATH="$(ls -d /opt/ddk/clang/*/bin | head -1):$PATH"
+              export ARCH=arm64
+              export LLVM=1
+              export LLVM_IAS=1
+
+              test -n "${KDIR:-}"
+              test -d "$KDIR"
+              test -f "$KDIR/Module.symvers"
+
+              EXACT=/work/evidence/zzic/gate-g/ZZIC-derived-minimal.symvers
+
+              test -f "$EXACT"
+
+              echo "=== TARGET ==="
+              echo "$TARGET_RELEASE"
+
+              echo "=== EXACT ZZIC SYMVERS ==="
+              cat "$EXACT"
+
+              #
+              # Force the external-module build to carry the exact Samsung
+              # release string rather than the generic DDK release.
+              #
+              mkdir -p \
+                "$KDIR/include/config" \
+                "$KDIR/include/generated"
+
+              printf "%s\n" "$TARGET_RELEASE" \
+                > "$KDIR/include/config/kernel.release"
+
+              printf "#define UTS_RELEASE \"%s\"\n" "$TARGET_RELEASE" \
+                > "$KDIR/include/generated/utsrelease.h"
+
+              #
+              # The DDK is the build/toolchain environment, not the CRC
+              # authority. Replace ONLY the four imports used by DirtyFrag
+              # with the values derived from the exact ZZIC stock module.
+              #
+              python3 - "$KDIR/Module.symvers" "$EXACT" <<'"'"'PY'"'"'
+          import sys
+          from pathlib import Path
+
+          dst = Path(sys.argv[1])
+          exact_path = Path(sys.argv[2])
+
+          required = {
+              "__stack_chk_fail",
+              "_printk",
+              "memset",
+              "sprint_symbol",
+          }
+
+          exact = {}
+
+          for line in exact_path.read_text().splitlines():
+              p = line.split()
+              if len(p) < 2:
+                  continue
+
+              try:
+                  int(p[0], 16)
+              except ValueError:
+                  continue
+
+              if p[1] in required:
+                  exact[p[1]] = line
+
+          if set(exact) != required:
+              raise SystemExit(
+                  "exact symvers does not contain exactly the required "
+                  f"symbols: got {sorted(exact)}"
+              )
+
+          original = dst.read_text().splitlines()
+
+          patched = []
+
+          for line in original:
+              p = line.split()
+
+              if len(p) >= 2 and p[1] in required:
+                  continue
+
+              patched.append(line)
+
+          for symbol in sorted(required):
+              patched.append(exact[symbol])
+
+          dst.write_text("\n".join(patched) + "\n")
+
+          print("Injected exact ZZIC CRC entries:")
+          for symbol in sorted(required):
+              print(exact[symbol])
+          PY
+
+              echo
+              echo "=== EFFECTIVE KDIR ENTRIES ==="
+
+              grep -E \
+                "[[:space:]](__stack_chk_fail|_printk|memset|sprint_symbol)[[:space:]]" \
+                "$KDIR/Module.symvers"
+
+              #
+              # Build.
+              #
+              cd /work/dirtyfrag-lkm
+
+              make -C "$KDIR" \
+                M="$PWD" \
+                src="$PWD" \
+                ARCH=arm64 \
+                LLVM=1 \
+                clean || true
+
+              make -C "$KDIR" \
+                M="$PWD" \
+                src="$PWD" \
+                ARCH=arm64 \
+                LLVM=1 \
+                LLVM_IAS=1 \
+                modules \
+                -j"$(nproc)"
+
+              test -s dirtyfrag.ko
+
+              echo
+              echo "=== PRE-STRIP ELF ==="
+
+              readelf -h dirtyfrag.ko | grep -F "AArch64"
+              readelf -SW dirtyfrag.ko | grep -F "__versions"
+              strings dirtyfrag.ko | grep -F "$TARGET_RELEASE"
+
+              #
+              # Same size diet already used by the upstream project.
+              #
+              llvm-objcopy \
+                --strip-unneeded \
+                -R .comment \
+                -R .note.gnu.build-id \
+                -R .note.gnu.property \
+                -R .note.Linux \
+                -R .note.GNU-stack \
+                -R .BTF \
+                -R .BTF.base \
+                -R .llvm_addrsig \
+                -R .hyp.text \
+                -R .hyp.bss \
+                -R .hyp.rodata \
+                -R .hyp.event_ids \
+                -R .hyp.patchable_function_entries \
+                -R .hyp.data \
+                dirtyfrag.ko \
+                "/out/$OUT_NAME"
+
+              test -s "/out/$OUT_NAME"
+
+              echo
+              echo "=== FINAL MODULE ==="
+
+              readelf -h "/out/$OUT_NAME" | grep -F "AArch64"
+              readelf -SW "/out/$OUT_NAME" | grep -F "__versions"
+              strings "/out/$OUT_NAME" | grep -F "$TARGET_RELEASE"
+
+              sha256sum "/out/$OUT_NAME"
+            '
+
+      - name: Gate G strict audit
+        run: |
+          set -euo pipefail
+
+          KO="$RUNNER_TEMP/dirtyfrag-out/$OUT_NAME"
+
+          python3 tools/ko_audit.py "$KO" \
+            --symvers evidence/zzic/gate-g/ZZIC-derived-minimal.symvers \
+            --symvers-provenance evidence/zzic/gate-g/ZZIC-modversion-provenance.json \
+            --require-modversion-coverage
+
+      - name: Record artifact identity
+        run: |
+          set -euo pipefail
+
+          cd "$RUNNER_TEMP/dirtyfrag-out"
+
+          sha256sum "$OUT_NAME" | tee "$OUT_NAME.sha256"
+
+          stat -c \
+            "filename=%n%nsize=%s bytes" \
+            "$OUT_NAME"
+
+      - name: Upload module
+        uses: actions/upload-artifact@v4
+        with:
+          name: zzic-dirtyfrag-lkm
+          path: |
+            ${{ runner.temp }}/dirtyfrag-out/${{ env.OUT_NAME }}
+            ${{ runner.temp }}/dirtyfrag-out/${{ env.OUT_NAME }}.sha256
+          if-no-files-found: error
