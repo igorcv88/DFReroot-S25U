@@ -28,3 +28,7 @@ python3 tools/tests/test_verify_zzic_avb.py
 # Gate G derived-symvers route: the derivation rules and ko_audit's demand for a
 # provenance record. Synthetic witness modules; no firmware binary needed.
 python3 tools/tests/test_derive_symvers.py
+
+# Assembly/native/UI ordering cannot run on the host, so guard the exact
+# branch/order shape that keeps finit_module errors and dfm3 fail-closed.
+python3 tools/tests/test_post_root_contract.py

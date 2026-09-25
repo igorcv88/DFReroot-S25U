@@ -133,10 +133,11 @@ SHARED_STRINGS = [
     "vbmeta_digest", "vbmeta_avb_version", "vbmeta_hash_alg",
     "verified_boot_state", "vbmeta_device_state", "flash_locked",
     "verity_mode", "vendor_fstype", "vendor_target_context",
-    "network_stack_process", "network_stack_context",
+    "network_stack_process", "network_stack_context", "post_root_record",
 ]
 SHARED_INTS = ["sdk", "android_release", "page_size", "network_stack_uid",
-               "vendor_mount_ro", "vendor_target_size"]
+               "vendor_mount_ro", "vendor_target_size", "kernelsu_version",
+               "kernelsu_uapi_version", "post_root_selinux"]
 
 # Artefact hashes that appear TWICE in zzic_profile.json: once as a top-level
 # field mirrored from the C profile, and once keyed by the path it belongs to
@@ -403,6 +404,17 @@ def audit():
                 fail("the bundled ksud still stages from the world-writable "
                      "/data/local/tmp/.ksud-stage; that is the contract AGENTS.md "
                      "3.6 exists to keep out of this app")
+            for signal in (
+                    b"/data/system/dfreroot-post-root",
+                    b"/sys/fs/selinux/enforce",
+                    b"/system/bin/setenforce",
+                    b"POST_ROOT_KSU_CONTROL=PASS",
+                    b"POST_ROOT_KSU_CONTROL_AFTER_RESTORE=PASS",
+                    b"SELINUX_RESTORE=PASS",
+                    b"POST_ROOT_COMPLETE=PASS"):
+                if signal not in blob:
+                    fail("the bundled ksud lacks the DFR post-root contract "
+                         "signal %r" % signal.decode("ascii"))
     elif ksud_size_c:
         fail("ksud_size is pinned (%s) while ksud_sha256 is not; a size alone is "
              "not identity" % ksud_size_c)
@@ -453,6 +465,62 @@ def audit():
             or "libksud.so" in code_only(main_src_holder[0]):
         fail("the manager-app libksud.so fallback is back; it stages unpinned "
              "bytes from a third-party package into a uid-0 handoff")
+
+    # --- DFR-only same-boot post-root contract ----------------------------
+    post_status = os.path.join(ROOT, "app", "src", "main", "java", "com",
+                               "polygraphene", "df", "reroot",
+                               "PostRootStatus.java")
+    try:
+        with open(post_status, encoding="utf-8") as f:
+            post_src = f.read()
+    except OSError as ex:
+        fail("cannot read PostRootStatus.java: %s" % ex)
+        post_src = ""
+
+    path_match = re.search(r'PATH\s*=\s*"([^"]+)"', post_src)
+    ksu_match = re.search(r'EXPECTED_KSU_VERSION\s*=\s*(\d+)', post_src)
+    uapi_match = re.search(r'EXPECTED_UAPI_VERSION\s*=\s*(\d+)', post_src)
+    java_contract = {
+        "post_root_record": path_match.group(1) if path_match else None,
+        "kernelsu_version": int(ksu_match.group(1)) if ksu_match else None,
+        "kernelsu_uapi_version": int(uapi_match.group(1)) if uapi_match else None,
+    }
+    for field, value in java_contract.items():
+        if value != c.get(field) or value != j.get(field):
+            fail("post-root contract drift for %s: Java=%r C=%r json=%r"
+                 % (field, value, c.get(field), j.get(field)))
+    if c.get("post_root_selinux") != 1:
+        fail("post_root_selinux is %r; final success requires exact read-back 1"
+             % c.get("post_root_selinux"))
+    if "liveSelinux != 1" not in post_src or "stale boot_id" not in post_src:
+        fail("PostRootStatus no longer refuses stale boots or live SELinux != 1")
+    main_src = main_src_holder[0]
+    for signal in (
+            "val success = runResult == 0 && postRootComplete",
+            "PostRootStatus.evaluate(record, bootId, liveSelinux)",
+            "ROOT_RESULT=SUCCESS"):
+        if signal not in main_src:
+            fail("MainActivity post-root fail-closed signal missing: %r" % signal)
+    r["checks"]["post_root_contract"] = java_contract
+
+    # stage1 must branch on the helper's intentional -E2BIG before creating the
+    # positive marker or touching the namespace. An isolated dfm3 can never be
+    # accepted by runAll.
+    try:
+        finit = s1_src.index("mov x8, #SYS_finit_module")
+        expected = s1_src.index("cmn x26, #E2BIG", finit)
+        helper = s1_src.index("create_mark mark_stage2", expected)
+        namespace = s1_src.index("movl x0, (CLONE_NEWNS)", helper)
+        if not finit < expected < helper < namespace:
+            fail("stage1 finit_module/-E2BIG/HELPER_SUCCESS/namespace ordering drifted")
+    except ValueError as ex:
+        fail("stage1 post-root ordering token missing: %s" % ex)
+    if "b.ne finit_unexpected" not in s1_src or "cmn x26, #ENODEV" not in s1_src:
+        fail("stage1 no longer refuses unexpected finit_module results distinctly")
+    if "mark1 == 1 && mark2 == 1 && mark3 == 1" not in exp_src_holder[0]:
+        fail("runAll no longer requires helper+namespace+bind for bootstrap PASS")
+    if "dfm3 is never final success" not in exp_src_holder[0]:
+        fail("runAll no longer labels isolated dfm3 as incomplete")
 
     # --- the Kotlin copies of the Gate-D pins ------------------------------
     # The network_stack identity is COMPARED in Kotlin (Diagnostics/StageHop),

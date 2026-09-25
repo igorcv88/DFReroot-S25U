@@ -148,6 +148,7 @@ class MainActivity : Activity() {
         dlg.show()
         runBg {
             var runResult = -1
+            var postRootComplete = false
             try {
                 append(StageHop.hopToNetworkStack(this))
                 val c = awaitController(timeoutMs = 30_000) ?: run {
@@ -174,6 +175,12 @@ class MainActivity : Activity() {
                     if (c.transact(5, p, r, 0)) {
                         runResult = r.readInt()
                         append("\nrunAll done res=$runResult\n")
+                        if (runResult == 0) {
+                            append("[DFR][POST_ROOT] WAIT_POST_ROOT: native bootstrap complete;" +
+                                " final success is still pending\n")
+                            runOnUiThread { setRunWaitingPostRoot() }
+                            postRootComplete = awaitPostRootComplete(POST_ROOT_TIMEOUT_MS)
+                        }
                     } else append("runAll failed: transact returned false\n")
                 } catch (t: Throwable) {
                     append("runAll failed: ${t.message}\n")
@@ -183,7 +190,7 @@ class MainActivity : Activity() {
                 }
             } finally {
                 running.set(false)
-                val success = runResult == 0
+                val success = runResult == 0 && postRootComplete
                 runOnUiThread {
                     setRunResult(active = false, success = success)
                     btnRunAll.isEnabled = true
@@ -192,6 +199,69 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun setRunWaitingPostRoot() {
+        runDialogSpinner?.visibility = View.VISIBLE
+        runDialogStatus?.apply {
+            text = getString(R.string.run_waiting_post_root)
+            setTextColor(Color.DKGRAY)
+        }
+    }
+
+    private fun awaitPostRootComplete(timeoutMs: Long): Boolean {
+        val bootId = try {
+            java.io.File("/proc/sys/kernel/random/boot_id").readText().trim()
+        } catch (t: Throwable) {
+            append("[DFR][POST_ROOT] FAIL current boot_id unreadable: ${t.message}\n")
+            return false
+        }
+        if (bootId.isBlank()) {
+            append("[DFR][POST_ROOT] FAIL current boot_id is empty\n")
+            return false
+        }
+
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        var lastReason = ""
+        while (SystemClock.uptimeMillis() < deadline) {
+            val record = try {
+                java.io.File(PostRootStatus.PATH).readText()
+            } catch (_: Throwable) {
+                null
+            }
+            val liveSelinux = try {
+                when (java.io.File("/sys/fs/selinux/enforce").readText().trim()) {
+                    "1" -> 1
+                    "0" -> 0
+                    else -> -1
+                }
+            } catch (_: Throwable) {
+                -1
+            }
+            val verdict = PostRootStatus.evaluate(record, bootId, liveSelinux)
+            if (verdict.complete) {
+                append("[DFR][POST_ROOT] POST_ROOT_COMPLETE=PASS boot_id=$bootId" +
+                    " ksu_version=${PostRootStatus.EXPECTED_KSU_VERSION}" +
+                    " uapi_version=${PostRootStatus.EXPECTED_UAPI_VERSION}" +
+                    " runtime_mode=late-load selinux=1\n")
+                append("[DFR][POST_ROOT] ROOT_RESULT=SUCCESS\n")
+                return true
+            }
+            if (verdict.reason != lastReason) {
+                lastReason = verdict.reason
+                append("[DFR][POST_ROOT] pending: $lastReason\n")
+            }
+            try {
+                Thread.sleep(500)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                append("[DFR][POST_ROOT] FAIL wait interrupted: $lastReason\n")
+                return false
+            }
+        }
+        append("[DFR][POST_ROOT] FAIL timeout after ${timeoutMs / 1000}s: $lastReason\n")
+        append("[DFR][POST_ROOT] ROOT_RESULT=FAIL; hard reboot is the recovery boundary\n")
+        return false
     }
 
     private fun setRunResult(active: Boolean, success: Boolean) {
@@ -296,5 +366,6 @@ class MainActivity : Activity() {
 
     companion object {
         const val TAG = "DFReroot"
+        const val POST_ROOT_TIMEOUT_MS = 120_000L
     }
 }

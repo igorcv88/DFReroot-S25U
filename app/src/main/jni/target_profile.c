@@ -80,6 +80,10 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
     .ksud_sha256 =
         "b82c194db398ace90fa777bed4d8419c70041eb99d7bbe2915caa900100de75f",
     .ksud_size        = 6664728,
+    .post_root_record = "/data/system/dfreroot-post-root",
+    .kernelsu_version = 32601,
+    .kernelsu_uapi_version = 2,
+    .post_root_selinux = 1,
 
     /* The three fields move together or not at all (see the header's
      * invariant): the flag alone grants nothing without the pinned digest of

