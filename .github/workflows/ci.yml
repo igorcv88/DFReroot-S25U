@@ -71,7 +71,8 @@ jobs:
           # the step green. Run the check as a bare command.
           for s in build.sh build-splice.sh create-keystore.sh \
                    tools/ci_build_audit.sh tools/repro_report.sh \
-                   tools/tests/run_tests.sh dirtyfrag-lkm/build.sh; do
+                   tools/tests/run_tests.sh tools/zzic_collect.sh \
+                   dirtyfrag-lkm/build.sh; do
             sh -n "$s"
             echo "ok  $s"
           done

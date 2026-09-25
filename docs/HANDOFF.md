@@ -94,6 +94,28 @@ gate tests pass, and the offline audits pass. What remains is evidence only.
 
 ## Pending work, in order
 
+### 0. Collect everything the device can supply, in one read-only pass
+
+```sh
+# in Termux, or: adb shell sh /data/local/tmp/zzic_collect.sh
+sh tools/zzic_collect.sh > zzic-identity.txt 2>&1
+```
+
+Writes nothing; no root needed except for the `/proc/kallsyms` section. It prints
+every field `dfr_classify_target()` compares, the `crash_dump64` hash, `boot_id`
+and the network_stack process state, and says which of the remaining blockers a
+device capture cannot close.
+
+**Check the identity block first.** All twelve fields are compared exactly and
+case-sensitively; one difference classifies the real device `MISMATCH` and refuses
+the whole chain. `kernel_version` is a build timestamp
+(`#1 SMP PREEMPT Wed Sep 16 14:21:43 UTC 2026`) and is the field most likely to
+have moved. If the device disagrees with the profile, **the profile is wrong** —
+correct it from the observed values, never the reverse.
+
+`tools/profile_binding_audit.py` fails CI if the collector stops printing a field
+the runtime gate compares.
+
 ### 1. `crash_dump64` SHA-256 — unblocks Gate B
 
 ```sh
@@ -203,6 +225,7 @@ signed with a throwaway key.
 ## Verification commands
 
 ```sh
+sh tools/zzic_collect.sh                 # on-device, read-only evidence pass
 sh tools/tests/run_tests.sh              # 36/36 expected
 python3 tools/profile_binding_audit.py   # §39 invariant + C/JSON drift
 python3 tools/ko_audit.py <ko>           # Gate G; exits 1 on INCOMPATIBLE

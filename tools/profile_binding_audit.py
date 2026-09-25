@@ -59,6 +59,17 @@ TMP_PATH_RE = re.compile(r"/data/local/tmp[\w./-]*")
 # Every page-cache corruption stage in exp.c, each independently reachable.
 PATCH_STAGES = ["patch_ko", "patch_libc", "patch_cxx"]
 
+# The on-device collector, and every field the runtime identity gate compares. A
+# field missing from the collector is a MISMATCH nobody can explain.
+COLLECT_SH = os.path.join(HERE, "zzic_collect.sh")
+COLLECTED_PROPS = [
+    "ro.product.manufacturer", "ro.product.model", "ro.product.device",
+    "ro.build.version.sdk", "ro.build.version.release", "ro.build.display.id",
+    "ro.build.fingerprint", "ro.product.cpu.abi",
+    "uname -r", "uname -v", "uname -m", "PAGESIZE",
+    "/apex/com.android.runtime/bin/crash_dump64", "boot_id",
+]
+
 
 def rel(path):
     """Repo-relative path, so a violation message names a file a reader can open."""
@@ -261,6 +272,27 @@ def audit():
         else "MISSING in %s" % ", ".join(unguarded)
     )
 
+    # --- the device collector must cover every compared field ---------------
+    #
+    # tools/zzic_collect.sh is what an operator actually runs on the device, and a
+    # field it forgets to print is a field nobody checks until the app refuses with
+    # a MISMATCH and no explanation. Require every property the runtime gate
+    # compares to appear in the collector.
+    try:
+        with open(COLLECT_SH, encoding="utf-8") as f:
+            collect_src = f.read()
+    except OSError as ex:
+        fail("cannot read %s: %s" % (rel(COLLECT_SH), ex))
+        collect_src = ""
+    missing = [k for k in COLLECTED_PROPS if k not in collect_src]
+    for k in missing:
+        fail("%s does not collect %s, a field dfr_classify_target() compares"
+             % (rel(COLLECT_SH), k))
+    r["checks"]["device_collector"] = (
+        "covers all %d compared fields" % len(COLLECTED_PROPS) if not missing
+        else "MISSING %s" % ", ".join(missing)
+    )
+
     r["status"] = "PASS" if not r["violations"] else "FAIL"
     return r
 
@@ -279,6 +311,7 @@ def human(r):
              % ck.get("runtime_sources_scanned"))
     L.append("Gate-G override     : %s" % ck.get("unverified_module_override"))
     L.append("policy call sites   : %s" % ck.get("module_policy_call_sites"))
+    L.append("device collector    : %s" % ck.get("device_collector"))
     L.append("")
     for v in r["violations"]:
         L.append("  [x] %s" % v)
