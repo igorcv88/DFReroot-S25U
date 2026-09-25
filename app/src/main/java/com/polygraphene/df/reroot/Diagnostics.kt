@@ -18,6 +18,7 @@ import java.io.File
  */
 object Diagnostics {
     private const val TAG = "DFReroot"
+    private const val NETWORK_STACK_CONTEXT = "u:r:network_stack:s0"
 
     private fun emit(sb: StringBuilder?, line: String) {
         Log.i(TAG, line)
@@ -104,7 +105,20 @@ object Diagnostics {
         val procName = readProcName()
         emit(sb, "[DFR][PROCESS] pid=$pid uid=$uid (status uid=${readStatusId("Uid")}) gid=$gid")
         emit(sb, "[DFR][PROCESS] process_name=$procName")
-        emit(sb, "[DFR][PROCESS] selinux_context=${readSelinux()}")
+        val selinux = readSelinux()
+        emit(sb, "[DFR][PROCESS] selinux_context=$selinux")
+        /*
+         * Full capability/hardening set, per dossier sections 17 and 44: a
+         * compatibility record needs each field separately, not just the CapEff
+         * bit the profile happens to pin, so a denial can be attributed to the
+         * right mechanism (bounding set vs. effective set vs. seccomp).
+         */
+        for (k in listOf("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb",
+                         "NoNewPrivs", "Seccomp", "Seccomp_filters")) {
+            emit(sb, "[DFR][PROCESS] $k=${readStatusField(k)}")
+        }
+        // Dossier section 45: states from different boots must never be combined.
+        emit(sb, "[DFR][PROCESS] boot_id=${readBootId()}")
         emit(sb, "[DFR][PROCESS] abi=${supportedAbi()}")
         emit(sb, "[DFR][PROCESS] classloader=${javaClass.classLoader}")
         val nld = try { context.applicationInfo.nativeLibraryDir } catch (e: Throwable) { "UNKNOWN($e)" }
@@ -121,12 +135,16 @@ object Diagnostics {
          * A hop that lands somewhere unexpected therefore reads FAIL, with the
          * observed identity next to it, instead of silently claiming success.
          */
+        val identityMatches = isNet &&
+            procName == StageHop.NETWORK_STACK_PROCESS &&
+            selinux == NETWORK_STACK_CONTEXT
         val reached = when {
             where != "network_stack" -> "SKIP (not the remote boundary)"
-            isNet && procName == StageHop.NETWORK_STACK_PROCESS -> "PASS"
-            else -> "FAIL (observed uid=$uid process_name=$procName, " +
+            identityMatches -> "PASS"
+            else -> "FAIL (observed uid=$uid process_name=$procName context=$selinux, " +
                 "expected uid=${StageHop.NETWORK_STACK_UID} " +
-                "process_name=${StageHop.NETWORK_STACK_PROCESS})"
+                "process_name=${StageHop.NETWORK_STACK_PROCESS} " +
+                "context=$NETWORK_STACK_CONTEXT)"
         }
         emit(sb, "[DFR][PROCESS] REMOTE_COMPONENT_REACHED=$reached")
 
@@ -137,10 +155,18 @@ object Diagnostics {
     }
 
     /** Real uid/gid from /proc/self/status ("Uid:\treal\teff\tsaved\tfs"). */
-    private fun readStatusId(key: String): String = try {
+    private fun readStatusId(key: String): String =
+        readStatusField(key).split(Regex("\\s+")).firstOrNull() ?: "UNKNOWN"
+
+    /** One raw field from /proc/self/status, whitespace-trimmed, value as-is. */
+    private fun readStatusField(key: String): String = try {
         File("/proc/self/status").readLines()
             .firstOrNull { it.startsWith("$key:") }
-            ?.split(Regex("\\s+"))?.getOrNull(1) ?: "UNKNOWN"
+            ?.substringAfter(':')?.trim() ?: "UNKNOWN"
+    } catch (e: Throwable) { "UNKNOWN($e)" }
+
+    private fun readBootId(): String = try {
+        File("/proc/sys/kernel/random/boot_id").readText().trim()
     } catch (e: Throwable) { "UNKNOWN($e)" }
 
     private fun readProcName(): String = try {

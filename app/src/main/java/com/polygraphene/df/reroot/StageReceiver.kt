@@ -34,10 +34,17 @@ class StageReceiver : BroadcastReceiver() {
     }
 
     private fun stage2(context: Context) {
+        /*
+         * LIBEXP_LOADED is reported as its own boundary (dossier section 23):
+         * discoverability of the .so on disk and an actual successful dlopen in
+         * the network_stack domain are different facts and must never collapse
+         * into one signal.
+         */
         try {
             System.loadLibrary("exp")
+            Log.i(TAG, "[DFR][PROCESS] LIBEXP_LOADED=PASS")
         } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "loadLibrary(exp) failed (arm64-only lib?): $e")
+            Log.e(TAG, "[DFR][PROCESS] LIBEXP_LOADED=FAIL (arm64-only lib, or SELinux/exec denial?): $e")
             return
         }
         val controller = object : Binder() {

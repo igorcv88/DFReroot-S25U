@@ -522,3 +522,25 @@ the correct shape can be wired precisely.
 
 Record `/proc/sys/kernel/random/boot_id` with any capture: per dossier section 45,
 states from different boots must never be combined into one successful chain.
+
+## Runtime evidence fields added in this pass
+
+`Diagnostics.processIdentity()` now records, at every boundary it is called from:
+
+- the full capability/hardening set as separate fields — `CapInh`, `CapPrm`,
+  `CapEff`, `CapBnd`, `CapAmb`, `NoNewPrivs`, `Seccomp`, `Seccomp_filters`
+  (dossier §17 and §44), so a denial can be attributed to the right mechanism
+  rather than to "the CapEff bit the profile happens to pin";
+- `boot_id` from `/proc/sys/kernel/random/boot_id` (§45), so states captured
+  across different boots cannot be combined into one apparently successful chain;
+- `REMOTE_COMPONENT_REACHED`, requiring observed uid **and** process name **and**
+  SELinux context to agree with the profile.
+
+`NETWORKSTACK_PROCESS_FOUND` and `REMOTE_COMPONENT_REACHED` remain **separate**
+signals with separate values (§22, §48): one says a network_stack-uid process was
+observed, the other says our component actually executed inside it. They are not
+collapsed into a single indicator.
+
+`StageReceiver` reports `LIBEXP_LOADED=PASS|FAIL` as its own boundary (§23),
+distinct from `NATIVE_LIBRARY_DISCOVERABLE`: the library existing on disk and a
+successful `dlopen` inside the network_stack domain are different facts.
