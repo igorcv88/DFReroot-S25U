@@ -218,10 +218,14 @@ expensive:
 - **Both APKs must be signed with the same key.** DFInstaller writes DFReroot's
   certificate into `packages.xml`; a mismatch makes the injected key useless.
   The release workflow compares the certificate digests and fails if they differ.
-- **`.github/workflows/ci.yml` is manual dispatch only** and is currently
-  *disabled* at the repository level. `release.yml` runs the same offline gate
-  set before it spends a signed build, which is the path this repo is set up
-  for. Do not re-enable a workflow the owner disabled.
+- **Runner minutes are billed to the owner.** `ci.yml` is manual-dispatch only
+  and is disabled at the repository level; `release.yml` runs the same offline
+  gate set before it spends a signed build, so there is no second run to
+  schedule. Run the checks below locally instead, and dispatch a workflow only
+  when a release is actually wanted (`AGENTS.md` §6.1).
+- **Every change goes through a PR** unless the owner says otherwise
+  (`AGENTS.md` §6.2), and releases are published as stable/latest, with the
+  compatibility state carried by the generated notes (`AGENTS.md` §6.3).
 
 Expected counts, so a drop is noticeable:
 
