@@ -134,7 +134,19 @@ def parse_versions(sec, en):
 
 
 def load_symvers(path):
-    """Module.symvers: 'CRC\\tsymbol\\tmodule\\texport-type' per line."""
+    """Module.symvers: 'CRC\\tsymbol\\tmodule\\texport-type' per line.
+
+    A Module.symvers carries NO kernel release string, so nothing in the file
+    says which kernel produced it. That matters: a module built against a GKI
+    DDK tree with kernel.release forced to the target's string, and modpost
+    warnings downgraded, yields a populated __versions table full of DDK CRCs.
+    Audited against that same DDK symvers it reads COMPATIBLE - a true statement
+    about the wrong kernel.
+
+    The audit therefore records the symvers' own digest and path, so a verdict
+    always names the evidence it rests on. Only the EXACT target kernel's
+    Module.symvers may promote Gate G.
+    """
     crc = {}
     exported = set()
     with open(path, "r", errors="replace") as f:
@@ -213,8 +225,19 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False):
     if not r["signed"]:
         r["signed"] = MOD_SIG_MAGIC in raw[-1024:]
 
-    # symbol-of-interest breakdown (four independent properties)
+    # symbol-of-interest breakdown (the independent properties)
     symvers_crc, exported = (load_symvers(symvers) if symvers else ({}, set()))
+    # Name the evidence, not just the verdict: "COMPATIBLE" is meaningless
+    # without saying which kernel's symbol table it was decided against.
+    if symvers:
+        with open(symvers, "rb") as f:
+            r["symvers_path"] = symvers
+            r["symvers_sha256"] = hashlib.sha256(f.read()).hexdigest()
+            r["symvers_symbols"] = len(symvers_crc)
+    else:
+        r["symvers_path"] = None
+        r["symvers_sha256"] = None
+        r["symvers_symbols"] = 0
     kall = load_kallsyms(kallsyms) if kallsyms else set()
     soi = {}
     for name in SYMBOLS_OF_INTEREST:
@@ -353,6 +376,14 @@ def human(r):
     for v in r["versions"]:
         L.append("    crc %s  %s" % (v["crc"], v["symbol"]))
     L.append("MODVERSION_COVERAGE = %s" % r["MODVERSION_COVERAGE"])
+    if r.get("symvers_path"):
+        L.append("symvers        : %s" % r["symvers_path"])
+        L.append("  sha256       : %s  (%d symbols)"
+                 % (r["symvers_sha256"], r["symvers_symbols"]))
+        L.append("  NOTE         : a Module.symvers names no kernel; this digest "
+                 "is the record of WHICH one decided the verdict")
+    else:
+        L.append("symvers        : <none supplied; no CRC can be decided>")
     for s in r["modversion_missing_entries"]:
         L.append("    NO VERSION ENTRY  %s" % s)
     for s in (r.get("modversion_unresolvable_imports") or []):

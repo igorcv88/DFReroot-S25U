@@ -302,6 +302,31 @@ def main():
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     check(rc == 1, "--require-modversion-coverage exits non-zero (got %d)" % rc)
 
+    # --- the verdict must name the symvers that decided it ------------------
+    # A Module.symvers carries no kernel release, so a DDK-built module audited
+    # against that same DDK symvers reads COMPATIBLE - true about the wrong
+    # kernel. The digest is the only record of which table was used.
+    ko = build_ko(os.path.join(td, "record.ko"), imports=FOUR_IMPORTS,
+                  versions=KERNEL_CRCS)
+    r = ko_audit.audit(ko, symvers=symvers)
+    import hashlib
+    want = hashlib.sha256(open(symvers, "rb").read()).hexdigest()
+    check(r["symvers_sha256"] == want,
+          "a COMPATIBLE verdict records the symvers digest it rests on")
+    check(r["symvers_path"] == symvers and r["symvers_symbols"] == len(KERNEL_CRCS),
+          "the symvers path and symbol count are recorded")
+    r = ko_audit.audit(ko)
+    check(r["symvers_sha256"] is None and r["symvers_symbols"] == 0,
+          "with no symvers the record says so rather than leaving it implied")
+
+    # Two symvers that disagree must not yield the same verdict silently.
+    other = write_symvers(os.path.join(td, "Other.symvers"),
+                          [(n, c ^ 0xFFFF) for n, c in KERNEL_CRCS])
+    r2 = ko_audit.audit(ko, symvers=other)
+    check(r2["MODULE_VS_ZZIC_KERNEL"] == "INCOMPATIBLE"
+          and r2["symvers_sha256"] != want,
+          "a different symvers gives a different verdict and a different digest")
+
     # --- the module actually shipped in the tree ----------------------------
     bundled = os.path.join(os.path.dirname(TOOLS),
                            "app/src/main/jni/dirtyfrag-android15-6.6.ko")

@@ -170,6 +170,17 @@ to leave unresolved. The acceptance run for a newly built module must pass
 `Module.symvers` is a kernel *build* artefact. It does not exist on a running
 Android filesystem, so "search the device for it" is not a valid plan.
 
+**And it names no kernel.** A `Module.symvers` contains no release string, so
+nothing in the file says which kernel produced it. That is a live trap, not a
+theoretical one: build a module against a GKI DDK tree with `kernel.release`
+forced to the target's string and `KBUILD_MODPOST_WARN=1` downgrading modpost's
+complaints, and you get a populated `__versions` table full of **DDK** CRCs.
+Audit that against the same DDK symvers and it reads `COMPATIBLE` — a true
+statement about the wrong kernel. `ko_audit.py` therefore records the symvers'
+path, digest and symbol count alongside every verdict, so the verdict names the
+evidence it rests on. Only the **exact target kernel's** `Module.symvers` may
+promote Gate G; a DDK tree is a toolchain, not an authority.
+
 ### 3.6 No execution override, under any name
 
 The marker that once let the owner accept the kernel-crash risk was removed, not

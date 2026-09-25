@@ -157,6 +157,14 @@ built module. A `__versions` table that covers only *some* imports cannot load
 Weak undefined symbols are exempt; an import absent from `Module.symvers`
 altogether is reported separately, as the harder `Unknown symbol` failure.
 
+The audit also records the symvers' digest, because a `Module.symvers` names no
+kernel. A module built against a GKI DDK with `kernel.release` forced to the
+target string and `KBUILD_MODPOST_WARN=1` gets a full `__versions` table of DDK
+CRCs, and audited against that same DDK symvers it reads `COMPATIBLE` about the
+wrong kernel. RMGLabs-Payloads builds its `insmod`-loadable DEFEX helper exactly
+that way — which is evidence the approach produces a *loadable* module on this
+kernel family, and is **not** a substitute for the target's own symbol table.
+
 `MODULE_VS_ZZIC_KERNEL = COMPATIBLE` is the only result that justifies setting
 the three `ko_*` profile fields. The module imports only `sprint_symbol`,
 `_printk`, `memset`, `__stack_chk_fail`; it resolves `kallsyms_lookup_name` and
