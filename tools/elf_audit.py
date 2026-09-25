@@ -38,6 +38,22 @@ with open(os.path.join(HERE, "zzic_profile.json")) as f:
 TARGETS = list(PROFILE["targets"].keys())
 
 
+def resolve_under_root(root, logical):
+    """Resolve a device path within a pulled `root`, rebasing ABSOLUTE symlink
+    targets (e.g. libc.so -> /apex/.../libc.so) against `root` instead of the
+    host filesystem. Follows a bounded chain of links."""
+    real = os.path.join(root, logical.lstrip("/"))
+    for _ in range(40):  # cycle/hop guard
+        if not os.path.islink(real):
+            return real
+        target = os.readlink(real)
+        if os.path.isabs(target):
+            real = os.path.join(root, target.lstrip("/"))
+        else:
+            real = os.path.normpath(os.path.join(os.path.dirname(real), target))
+    return real
+
+
 def find_symbol(e, name):
     for s in e.dynsyms():
         if s.name == name:
@@ -179,10 +195,8 @@ def main():
             if logical in overrides:
                 real = overrides[logical]
             elif a.root:
-                real = os.path.join(a.root, logical.lstrip("/"))
-                # resolve libc.so symlink within the pulled tree, best-effort
-                if os.path.islink(real):
-                    real = os.path.realpath(real)
+                # resolve within the pulled tree, rebasing absolute symlinks
+                real = resolve_under_root(a.root, logical)
             else:
                 real = None
             results[logical] = audit_file(logical, real)

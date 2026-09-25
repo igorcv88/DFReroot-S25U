@@ -105,6 +105,14 @@ struct TargetProfile {
     int         network_stack_uid;
     const char *network_stack_context;
     long        network_stack_cap_eff; /* CapEff bitmask, e.g. 0x800003c00 */
+
+    /*
+     * Whether a kernel module positively validated for THIS firmware is bundled
+     * (Gate G COMPATIBLE against the ZZIC Module.symvers). 0 = only the generic
+     * android15-6.6 module is available and it is Gate-G UNVERIFIED, so loading
+     * it on ZZIC is fail-closed-refused unless the operator opts in explicitly.
+     */
+    int         ko_zzic_verified;
 };
 
 extern const struct TargetProfile DFR_PROFILE_ZZIC;
@@ -124,6 +132,8 @@ struct ObservedTarget {
     const char *display;
     const char *fingerprint;
     const char *kernel_release;
+    const char *kernel_version; /* uname -v */
+    const char *kernel_arch;    /* uname -m */
     long        page_size;
     const char *abi;
 };
@@ -138,6 +148,8 @@ struct TargetMatch {
     int display_ok;
     int fingerprint_ok;
     int kernel_release_ok;
+    int kernel_version_ok;
+    int kernel_arch_ok;
     int page_size_ok;
     int abi_ok;
     int anchor_hit;   /* set if this device asserts the ZZIC model/codename */

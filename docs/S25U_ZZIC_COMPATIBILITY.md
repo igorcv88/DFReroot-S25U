@@ -122,14 +122,32 @@ The ZZIC profile currently references the **generic** `android15-6.6` module
 produced it gets its own profile reference. The uname string parses to
 `android15/6.6` — that is **kernel-family** selection, not identity.
 
+Exact identity compares **all** of: manufacturer, model, device, sdk, display,
+fingerprint, `uname -r`, `uname -v` (kernel_version), `uname -m` (kernel_arch),
+page size and abi. A rebuilt kernel that keeps `uname -r` but changes `uname -v`
+or `uname -m` is therefore a `MISMATCH`, not an "exact" target.
+
+**Every** page-cache corruption entry point runs the gate, not just `patch_ko()`:
+`patchMod`/`patch_ko`, `patchLibc`/`patch_libc` and `patchCxx`/`patch_cxx` each
+re-validate before touching a file (the JNI methods are exposed independently by
+`StageReceiver` transactions 1–3).
+
+On the exact ZZIC target the generic module is Gate-G `UNVERIFIED`, so
+`patch_ko()` **refuses** to load it (`[DFR][MODULE] FAIL`) unless a
+ZZIC-validated module is bundled (`profile.ko_zzic_verified`) or the device
+owner explicitly accepts the kernel-crash risk with
+`touch /data/local/tmp/dfr_allow_unverified_ko`.
+
 ## Unit tests (target detection) + regression tests
 
-`tools/tests/run_tests.sh` (host `cc`, no Android). **22/22 pass.**
+`tools/tests/run_tests.sh` (host `cc`, no Android). **24/24 pass.**
 
 Target detection: exact ZZIC → `S25U_ZZIC`; and all required negatives → not
 ZZIC: `SM-S938B+ZZI4` (MISMATCH), `SM-S938U`, `SM-S938N`, `pa3q+other display`
 (MISMATCH), `ZZIC display+different kernel` (MISMATCH), `same kernel+different
-fingerprint` (MISMATCH), unrelated Samsung 6.6 (UPSTREAM_GENERIC).
+fingerprint` (MISMATCH), `same kernel_release+different kernel_version`
+(MISMATCH), `different kernel_arch` (MISMATCH), unrelated Samsung 6.6
+(UPSTREAM_GENERIC).
 
 Regression: every upstream table combination (`android12/5.10 … android17/6.18`)
 selects its own module unchanged; fallback and unknown-kernel behaviour preserved;
@@ -173,16 +191,16 @@ Full `./build.sh` ran here (Android SDK/NDK installed on the fly; see
 Reproducibility). `python3 tools/apk_audit.py df_reroot.apk`:
 
 ```
-df_reroot.apk    sha256 6f60996288a00298eeba292e677ea9b31853062ce3cf46c6a313a9f1af5bced8  (8,231,450 B)
+df_reroot.apk    sha256 72063006e074bab482221cd5fc4fe3b8e1ddb0e7916d93e5afe430d455a5e74c  (8,233,082 B)
 native libs      lib/arm64-v8a/libexp.so
 assets           assets/dexopt/baseline.prof, assets/dexopt/baseline.profm, assets/ksud
-libexp.so        sha256 88c05e9a18d905e01f5428629462caf95f618d372780d4ba490981a7d4e133bd  (96,400 B)
+libexp.so        sha256 5bfe5cd2b5954cccfb207a5fb05070e4e4b2cd7a720429a740d6e629dda5f776  (98,032 B)
   elf            ELFCLASS64 / little-endian / ET_DYN   machine AArch64 (OK)
-  build id       8ce5a20de58dde342fe2bb826cc6dc53a996649b
+  build id       5ce74e68e30bac3034c3c47f1b39c842764527d2
   DT_NEEDED      liblog.so, libm.so, libdl.so, libc.so
   JNI symbols    JNI_OnLoad, patchMod, patchLibc, patchCxx, createOrphanProcess, runAll  → all OK
 status           PASS
-df_installer.apk sha256 47f8aeace3d3b13719073efe01e054cdad0ea73910985a49bc870e06eef86fcf  (9,679,362 B)
+df_installer.apk sha256 6f0cf97e37169bb0031631aa9b30d38d83334c2993282d2d9779c3a4e21978d8  (9,680,038 B)
   bundles assets/df_reroot.apk = True; ships no native lib of its own (by design — app_process, not JNI)
 ```
 
@@ -207,7 +225,10 @@ Execution requires the device (logcat capture) → **BLOCKED** here.
 libc++.so pulled from the device: real path, SHA-256, ELF class/machine/build-id,
 program & section headers, dynamic symbols, `LIBC_SYMBOL___libc_init` and
 `LIBCXX_UPSTREAM_SYMBOL` lookups, and identity vs the pinned hashes. Verified to
-run against host ELFs; **awaits pulled ZZIC artefacts** → `BLOCKED`.
+run against host ELFs; **awaits pulled ZZIC artefacts** → `BLOCKED`. `--root`
+rebases **absolute** symlink targets (e.g. `libc.so → /apex/.../libc.so`) under
+the pulled root instead of the host filesystem, so libc resolves correctly from
+a pulled tree.
 
 `tools/installer_audit.py` + `InjectMain --diag-zzic` produce `PACKAGES_FORMAT`,
 `PACKAGES_PARSE`, `ANDROID_UID_SYSTEM_FOUND`, `CERT_TABLE_PARSE`,
@@ -230,9 +251,9 @@ real device metadata need the device → **BLOCKED**.
 | build-tools | 36.0.0 |
 | NDK | 27.0.12077973 (r27) |
 | CMake | 3.22.1 |
-| df_reroot.apk | `6f609962…` (8,231,450 B) |
-| df_installer.apk | `47f8aeac…` (9,679,362 B) |
-| libexp.so | `88c05e9a…` (96,400 B), build-id `8ce5a20d…` |
+| df_reroot.apk | `72063006…` (8,233,082 B) |
+| df_installer.apk | `6f0cf97e…` (9,680,038 B) |
+| libexp.so | `5bfe5cd2…` (98,032 B), build-id `5ce74e68…` |
 | ksud asset | `7bba5a9b…` |
 | profile | `S25U_ZZIC` (fail-closed) |
 
@@ -242,17 +263,33 @@ real device metadata need the device → **BLOCKED**.
 > not expected to match across differently-keyed builds; `libexp.so` and the
 > compiled-in `.ko`/asset hashes are the signing-independent identity.
 
+## Post-review hardening (Codex automated review of `9645c09`)
+
+Four review findings were verified and fixed:
+- **P1 — gate every corruption entry point.** `patchLibc`/`patchCxx` (StageReceiver
+  transactions 2/3) called `patch_libc`/`patch_cxx` directly, bypassing the
+  `patch_ko()` gate. Both now re-run the fail-closed gate at entry.
+- **P1 — refuse the unverified module on ZZIC.** `patch_ko()` no longer proceeds
+  to corrupt the vendor file with the Gate-G `UNVERIFIED` generic module on the
+  ZZIC target; it refuses unless `ko_zzic_verified` or the operator override
+  marker is present.
+- **P2 — compare `kernel_version` + `kernel_arch`.** Both are now in
+  `ObservedTarget` and the fail-closed identity check; a rebuilt kernel with a
+  matching `uname -r` but different `uname -v`/`-m` is a `MISMATCH`.
+- **P2 — `elf_audit.py --root` absolute-symlink rebasing.** Absolute link targets
+  now resolve under the pulled root, so Gate F can be closed from a pulled tree.
+
 ## Gate matrix (never auto-promoted to global compatibility)
 
 | Gate | Result | Evidence |
 |---|---|---|
-| A — Target identity | **PASS** | fail-closed classifier implemented; 22/22 host tests incl. exact ZZIC + all required negatives |
+| A — Target identity | **PASS** | fail-closed classifier implemented; 24/24 host tests incl. exact ZZIC + all required negatives |
 | B — Kernel/userspace identity | **BLOCKED** | validation code + pinned hashes implemented; runtime SHA-256/symlink/page-size checks need the ZZIC device |
 | C — Java/system-server compat | **BLOCKED** | `[DFR][AMS]` deterministic dumps implemented; needs on-device logcat to compare Android 17 shapes |
 | D — NetworkStack identity | **BLOCKED** (process facts already observed on HW) | `[DFR][PROCESS]` instrumentation implemented; runtime capture pending |
 | E — Native packaging | **PASS** | real `./build.sh`; `libexp.so` AArch64, all JNI symbols, hashes recorded (apk_audit) |
 | F — Userspace ELF audit | **BLOCKED** | tool implemented + host-verified; awaits pulled ZZIC ELFs |
-| G — Module ABI compatibility | **UNKNOWN / UNVERIFIED** | ko_audit ran on the real generic `.ko`; empty `__versions`, verdict UNVERIFIED without ZZIC `Module.symvers` |
+| G — Module ABI compatibility | **UNKNOWN / UNVERIFIED** (runtime-enforced) | ko_audit ran on the real generic `.ko`; empty `__versions`, verdict UNVERIFIED without ZZIC `Module.symvers`. Runtime now **refuses** to load it on ZZIC unless verified/overridden |
 | H — Installer format compatibility | **BLOCKED** | `--diag-zzic` + offline tool implemented; offline round-trip verified on synthetic XML; needs device packages.xml |
 | I — Full hardware compatibility | **BLOCKED** | requires end-to-end on-device run; `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is independent, not proof |
 

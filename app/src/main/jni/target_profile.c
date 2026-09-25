@@ -45,6 +45,10 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
     .network_stack_uid     = 1073,
     .network_stack_context = "u:r:network_stack:s0",
     .network_stack_cap_eff = 0x800003c00L,
+
+    /* No ZZIC-validated module is bundled: only the generic Gate-G UNVERIFIED
+     * android15-6.6 .ko exists. Keep fail-closed until one is proven. */
+    .ko_zzic_verified = 0,
 };
 
 int dfr_streq(const char *a, const char *b) {
@@ -98,11 +102,14 @@ dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
     m.display_ok        = dfr_streq(obs->display, p->display);
     m.fingerprint_ok    = dfr_streq(obs->fingerprint, p->fingerprint);
     m.kernel_release_ok = dfr_streq(obs->kernel_release, p->kernel_release);
+    m.kernel_version_ok = dfr_streq(obs->kernel_version, p->kernel_version);
+    m.kernel_arch_ok    = dfr_streq(obs->kernel_arch, p->kernel_arch);
     m.page_size_ok      = (obs->page_size == p->page_size);
     m.abi_ok            = dfr_streq(obs->abi, p->abi);
 
     m.all_ok = m.manufacturer_ok && m.model_ok && m.device_ok && m.sdk_ok &&
                m.display_ok && m.fingerprint_ok && m.kernel_release_ok &&
+               m.kernel_version_ok && m.kernel_arch_ok &&
                m.page_size_ok && m.abi_ok;
 
     /*

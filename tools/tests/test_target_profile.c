@@ -41,6 +41,8 @@ static struct ObservedTarget zzic_observed(void) {
     o.fingerprint   = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
                       "S938BXXUCZZIC_OXMCZZIC:user/release-keys";
     o.kernel_release = "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k";
+    o.kernel_version = "#1 SMP PREEMPT Wed Sep 16 14:21:43 UTC 2026";
+    o.kernel_arch   = "aarch64";
     o.page_size     = 4096;
     o.abi           = "arm64-v8a";
     return o;
@@ -105,6 +107,18 @@ static void test_target_detection(void) {
     o.fingerprint = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/OTHER:user/release-keys";
     c = dfr_classify_target(&o, &m);
     CHECK(c == DFR_TARGET_MISMATCH, "same kernel + different fingerprint -> %s (must be MISMATCH)", cls_name(c));
+
+    /* same kernel_release but a rebuilt kernel (different uname -v) -> MISMATCH */
+    o = zzic_observed();
+    o.kernel_version = "#2 SMP PREEMPT Fri Oct 10 00:00:00 UTC 2026";
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_MISMATCH, "same kernel_release + different kernel_version -> %s (must be MISMATCH)", cls_name(c));
+
+    /* different kernel arch -> MISMATCH (model anchor present) */
+    o = zzic_observed();
+    o.kernel_arch = "armv8l";
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_MISMATCH, "different kernel_arch -> %s (must be MISMATCH)", cls_name(c));
 
     /* unrelated Samsung 6.6 device -> UPSTREAM_GENERIC (upstream path preserved) */
     o = zzic_observed();

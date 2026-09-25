@@ -86,6 +86,10 @@ static const char *target_lib_path = "/vendor/lib64/libstagefrighthw.so";
 #define REPLAY_SEQ       100
 #define PAYLOAD_LEN      128
 
+/* Fail-closed target gate (defined below); every page-cache corruption entry
+ * point must pass it before touching a file. */
+static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls);
+
 static void put_attr(struct nlmsghdr *nlh, int type, const void *data, size_t len) {
     struct rtattr *rta = (struct rtattr *) ((char *) nlh + NLMSG_ALIGN(nlh->nlmsg_len));
     rta->rta_type = type;
@@ -486,6 +490,12 @@ extern char stage2_first_inst_copy[];
 int find_hook_target(const char *libcxx, const char* symname, uint64_t *hook_target, uint64_t *payload_target, uint32_t* first_instruction);
 
 int patch_libc(struct Reporter *reporter) {
+    /* Independent JNI entry point: re-run the fail-closed gate so patchLibc()
+     * cannot corrupt libc on a mismatched device without patch_ko() having run. */
+    if (gate_target(reporter, NULL) != 0) {
+        REPORTLN("[DFR][TARGET] aborting patch_libc: target gate refused");
+        return 1;
+    }
     uint64_t hook_offset, shellcode_offset;
     uint32_t first_insn;
     int ret;
@@ -550,6 +560,12 @@ int patch_libc(struct Reporter *reporter) {
 }
 
 int patch_cxx(int run_index, struct Reporter *reporter) {
+    /* Independent JNI entry point: re-run the fail-closed gate so patchCxx()
+     * cannot corrupt libc++ on a mismatched device without patch_ko() first. */
+    if (gate_target(reporter, NULL) != 0) {
+        REPORTLN("[DFR][TARGET] aborting patch_cxx: target gate refused");
+        return 1;
+    }
     uint64_t hook_offset, shellcode_offset;
     uint32_t first_insn;
     int ret;
@@ -763,9 +779,10 @@ static int gate_hash(struct Reporter *reporter, const char *tag,
  * FAIL-CLOSED: on the ZZIC target every Gate B boundary must PASS or the whole
  * chain aborts before a single page-cache write happens.
  */
-static int gate_target(struct Reporter *reporter) {
+static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls) {
     char manufacturer[128], model[128], device[128], display[192], fingerprint[256];
     char abi[64], sdkstr[32];
+    if (out_cls) *out_cls = DFR_TARGET_UPSTREAM_GENERIC;
     prop_get("ro.product.manufacturer", manufacturer, sizeof(manufacturer), "");
     prop_get("ro.product.model", model, sizeof(model), "");
     prop_get("ro.product.device", device, sizeof(device), "");
@@ -782,7 +799,8 @@ static int gate_target(struct Reporter *reporter) {
     struct ObservedTarget obs = {
         .manufacturer = manufacturer, .model = model, .device = device,
         .sdk = atoi(sdkstr), .display = display, .fingerprint = fingerprint,
-        .kernel_release = u.release, .page_size = page_size, .abi = abi,
+        .kernel_release = u.release, .kernel_version = u.version,
+        .kernel_arch = u.machine, .page_size = page_size, .abi = abi,
     };
 
     REPORTLN("[DFR][TARGET] ENTER");
@@ -800,6 +818,7 @@ static int gate_target(struct Reporter *reporter) {
     struct TargetMatch m;
     dfr_target_class cls = dfr_classify_target(&obs, &m);
     const struct TargetProfile *p = &DFR_PROFILE_ZZIC;
+    if (out_cls) *out_cls = cls;
 
     if (cls == DFR_TARGET_UPSTREAM_GENERIC) {
         REPORTLN("[DFR][TARGET] TARGET_PROFILE=UPSTREAM_GENERIC");
@@ -815,6 +834,8 @@ static int gate_target(struct Reporter *reporter) {
     if (!m.display_ok)      REPORTLN("[DFR][TARGET] MISMATCH display: got=%s want=%s", display, p->display);
     if (!m.fingerprint_ok)  REPORTLN("[DFR][TARGET] MISMATCH fingerprint: got=%s want=%s", fingerprint, p->fingerprint);
     if (!m.kernel_release_ok) REPORTLN("[DFR][TARGET] MISMATCH kernel_release: got=%s want=%s", u.release, p->kernel_release);
+    if (!m.kernel_version_ok) REPORTLN("[DFR][TARGET] MISMATCH kernel_version: got=%s want=%s", u.version, p->kernel_version);
+    if (!m.kernel_arch_ok)  REPORTLN("[DFR][TARGET] MISMATCH kernel_arch: got=%s want=%s", u.machine, p->kernel_arch);
     if (!m.page_size_ok)    REPORTLN("[DFR][TARGET] MISMATCH page_size: got=%ld want=%ld", page_size, p->page_size);
     if (!m.abi_ok)          REPORTLN("[DFR][TARGET] MISMATCH abi: got=%s want=%s", abi, p->abi);
 
@@ -834,6 +855,14 @@ static int gate_target(struct Reporter *reporter) {
     if (dfr_streq(u.release, p->kernel_release))
         REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_IDENTITY=PASS");
     else { REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_IDENTITY=FAIL got=%s want=%s", u.release, p->kernel_release); rc = -1; }
+
+    if (dfr_streq(u.version, p->kernel_version))
+        REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_VERSION=PASS");
+    else { REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_VERSION=FAIL got=%s want=%s", u.version, p->kernel_version); rc = -1; }
+
+    if (dfr_streq(u.machine, p->kernel_arch))
+        REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_ARCH=PASS (%s)", u.machine);
+    else { REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_ARCH=FAIL got=%s want=%s", u.machine, p->kernel_arch); rc = -1; }
 
     if (page_size == p->page_size)
         REPORTLN("[DFR][KERNEL] ZZIC_PAGE_SIZE=PASS (%ld)", page_size);
@@ -871,7 +900,8 @@ int patch_ko(struct Reporter *reporter) {
      * exact ZZIC target is validated (or the device is proven unrelated and
      * takes the upstream generic path). A partial ZZIC match aborts here.
      */
-    if (gate_target(reporter) != 0) {
+    dfr_target_class cls = DFR_TARGET_UPSTREAM_GENERIC;
+    if (gate_target(reporter, &cls) != 0) {
         REPORTLN("[DFR][TARGET] aborting: target gate refused");
         return 1;
     }
@@ -905,6 +935,29 @@ int patch_ko(struct Reporter *reporter) {
         return 1;
     }
     REPORTLN("* ko android%d-%d.%d (%d bytes)", ko->android_release, ko->kver_major, ko->kver_minor, (int)(ko->end - ko->start));
+
+    /*
+     * Fail-closed module policy: on the exact ZZIC target the only bundled
+     * module is the GENERIC android15-6.6 image, which Gate G reports as
+     * UNVERIFIED (empty __versions; no ZZIC Module.symvers to prove symbol-CRC
+     * agreement). Loading an ABI-mismatched module can crash/corrupt the
+     * kernel, so refuse unless either a ZZIC-validated module is bundled
+     * (profile.ko_zzic_verified) or the device operator has explicitly accepted
+     * the risk by creating the override marker.
+     */
+    if (cls == DFR_TARGET_S25U_ZZIC && !DFR_PROFILE_ZZIC.ko_zzic_verified) {
+        REPORTLN("[DFR][MODULE] ENTER");
+        REPORTLN("[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED (no ZZIC-validated .ko bundled)");
+        if (access("/data/local/tmp/dfr_allow_unverified_ko", F_OK) == 0) {
+            REPORTLN("[DFR][MODULE] WARN proceeding: operator override marker present"
+                     " (/data/local/tmp/dfr_allow_unverified_ko); kernel-crash risk accepted");
+        } else {
+            REPORTLN("[DFR][MODULE] FAIL fail-closed: refusing to load an unverified module on ZZIC.");
+            REPORTLN("[DFR][MODULE]   bundle a Gate-G COMPATIBLE module, or (owner, at own risk)"
+                     " `touch /data/local/tmp/dfr_allow_unverified_ko` to override.");
+            return 1;
+        }
+    }
 
     len = ko->end - ko->start;
 
