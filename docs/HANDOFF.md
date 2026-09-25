@@ -243,6 +243,7 @@ sh tools/tests/run_tests.sh              # 72/72, the exp.c syntax pass,
                                          # then 38/38 (ko_audit modversion rules)
 sh tools/tests/run_installer_tests.sh    # 49/49 (SafeWrite)
 sh tools/tests/test_resolve_release_tag.sh   # 8/8
+python3 tools/verify_zzic_avb.py          # AVB provenance, reproducible
 ```
 
 The one command that is specific to this handoff rather than to the repo:

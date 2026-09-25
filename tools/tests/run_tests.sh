@@ -20,3 +20,7 @@ sh tools/tests/exp_syntax_check.sh
 # Gate G rule tests: the modversion coverage requirement, on synthetic .ko files.
 # Pure host Python - no kernel, no NDK, no device.
 python3 tools/tests/test_ko_audit.py
+
+# AVB provenance gate: every element's negative case, on scratch copies of the
+# committed evidence. Nothing here touches the device.
+python3 tools/tests/test_verify_zzic_avb.py

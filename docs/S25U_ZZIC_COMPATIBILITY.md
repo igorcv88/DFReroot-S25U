@@ -242,12 +242,52 @@ SELinux label. A domain denied `open(2)` may also be denied `getattr`, so these
 are compared **when available** (available-and-divergent is a hard `FAIL_CHAIN`)
 and recorded as `SKIP` when not. They are never counted as agreement.
 
-**Limitation, stated plainly.** The pinned vendor digest's provenance anchor is
-"read under an enforcing, green, locked AVB state with vbmeta digest `23a0e0b0…`",
-not "extracted from the signed ZZIC `vendor.img` offline". Extracting it from the
-OTA payload and re-verifying the AVB chain of the image itself is strictly
-stronger and remains worth doing; it would not change the runtime gate, only the
-strength of the value the gate compares against.
+### The anchor is now reproducible, not merely observed
+
+Until the AVB evidence landed, the pinned `vbmeta_digest` was a number somebody
+had seen on a device once. That is the kind of evidence this repository does not
+accept anywhere else, and it was recorded here as a limitation.
+
+It no longer is. `evidence/zzic/avb/` holds the four vbmeta images from the
+official ZZIC OTA, and `tools/verify_zzic_avb.py` re-derives the digest from
+them:
+
+```text
+chain order       : dtbo -> optics -> prism
+digest reproduced : 23a0e0b0a5b421d5a75b62de40edb37489a4e6d441d54e58ee6f930c1a9a3f62
+digest pinned     : 23a0e0b0a5b421d5a75b62de40edb37489a4e6d441d54e58ee6f930c1a9a3f62
+VBMETA_DIGEST_REPRODUCIBLE = PASS
+```
+
+`ro.boot.vbmeta.digest` is SHA-256 over the top-level vbmeta blob followed by
+each chained vbmeta in descriptor order, so `vbmeta.img` alone reproduces
+nothing — the three children are load-bearing, and a missing one is a refusal
+rather than a shorter walk. The digest commits the auxiliary block, which
+carries the signed hashtree descriptor for `vendor`; that descriptor's root
+digest, salt and geometry are verified against the profile in the same run. The
+tool parses AVB itself (`tools/avb.py`), so CI and any reviewer with `python3`
+can redo the derivation with no AOSP checkout and no `avbtool`.
+
+What remains observational, and is stated as such:
+
+- The ELF bytes were read from the verified `/vendor` mount rather than
+  extracted from a 3.5 GB `vendor.img`. Under `veritymode=enforcing` with a root
+  digest matching a signed descriptor, those are equivalent — reconstructing the
+  image would be redundant forensics, not a missing link.
+- The **live** dm-verity table is corroboration, not a requirement. The DM ioctl
+  succeeds from `u:r:ksu:s0` and fails from `u:r:untrusted_app_27:s0`, and has
+  never been measured from `u:r:network_stack:s0`. Requiring it at runtime would
+  rebuild the 2.0.2 trap — a gate the chain's own domain cannot satisfy. Drop a
+  raw `dmsetup table vendor-verity` capture into `evidence/zzic/avb/` and the
+  offline verifier compares it automatically; while it is absent the tool reports
+  `LIVE_DM_VERITY_TABLE = SKIP (artefact absent)`, never implicit agreement.
+
+The descriptor's geometry is pinned in `tools/zzic_profile.json` under
+`vendor_avb` and **not** in `target_profile.c`: block counts are canonical, byte
+offsets are derived and compared, and `data_blocks + tree_blocks ==
+fec_offset_blocks` is asserted. These are offline-only values, because a pinned
+field the runtime never compares is dead weight advertising a check nobody
+performs.
 
 ## Installer write path — two field defects fixed
 
@@ -747,13 +787,13 @@ SM-S938B / `S938BXXUCZZIC`, not inferred.
 | A — Target identity | **physical PASS** | all twelve fields matched on hardware; `TARGET_PROFILE=S25U_ZZIC`, `PASS exact identity`. 72/72 host checks incl. every required negative |
 | B — Kernel identity | **physical PASS** | `ZZIC_KERNEL_IDENTITY/VERSION/ARCH/PAGE_SIZE` all `PASS` on hardware |
 | B — `crash_dump64` identity | **PASS (pinned)** | `9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f`, captured from the device; readable from this domain, so it remains a direct runtime SHA-256 check |
-| B — vendor ELF provenance | **PASS_AVB** | direct read is `EACCES` in `system_server` and `network_stack`; identity rests on the AVB chain the digest was captured under (vbmeta digest, green, locked, verity enforcing, `/vendor` erofs ro). See "Vendor ELF" above |
+| B — vendor ELF provenance | **PASS_AVB, now reproducible** | direct read is `EACCES` in `system_server` and `network_stack`; identity rests on the AVB chain the digest was captured under (vbmeta digest, green, locked, verity enforcing, `/vendor` erofs ro). The pinned `vbmeta_digest` is no longer merely observed: `tools/verify_zzic_avb.py` re-derives `23a0e0b0…` from the four vbmeta blobs in `evidence/zzic/avb/` and checks the signed `vendor` hashtree descriptor (root `794944fa…`, salt `336ad2aa…`, 860461+6777=867238 blocks). Runtime gate unchanged. See "Vendor ELF" above |
 | B — `libc` / `libc++` identity | **BLOCKED** | pinned and checked at runtime, but the run refused at Gate G before `patch_libc`/`patch_cxx` were reached |
 | C — Java/system-server compat | **physical PASS** | `scheduleReceiver/12` observed on Android 17; `getProcessRecordLocked` absent, `mProcessNames` fallback resolved the ProcessRecord; `mOnewayThread` was the correct field |
 | D — NetworkStack identity | **physical PASS** | `scheduleReceiver sent` → `networkstack CONTROLLER binder received`, which only happens after `System.loadLibrary("exp")` inside `u:r:network_stack:s0`. Remote evidence is now reported back to the UI, not logcat-only |
 | E — Native packaging | **PASS** | real `./build.sh`; `libexp.so` AArch64, all JNI symbols, hashes recorded (apk_audit) |
 | F — Userspace ELF audit | **BLOCKED** | tool implemented + host-verified; awaits pulled ZZIC ELFs |
-| G — Module ABI compatibility | **UNVERIFIED** (runtime-enforced) | the device confirms `CONFIG_MODVERSIONS=y`; the bundled `dirtyfrag-android15-6.6.ko` has an **empty `__versions`** table, so no symbol-CRC agreement exists. Every page-cache stage refuses; there is no override, and `ko_zzic_verified=1` is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
+| G — Module ABI compatibility | **UNVERIFIED** (runtime-enforced) | the device confirms `CONFIG_MODVERSIONS=y`; the bundled `dirtyfrag-android15-6.6.ko` has an **empty `__versions`** table (`MODVERSION_COVERAGE=EMPTY`), so no symbol-CRC agreement exists — and a *partial* table would not do either: the audit requires an entry for every non-weak import before it will report `COMPATIBLE`. Every page-cache stage refuses; there is no override, and `ko_zzic_verified=1` is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
 | H — Installer format compatibility | **physical PASS** | `ABX → TEXT → ABX` accepted by PMS; injection survived the soft reboot; the two write-path defects the run exposed are fixed and regression-tested |
 | I — Full hardware compatibility | **BLOCKED by Gate G** | the chain cannot be exercised end to end while the module is `UNVERIFIED`. `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is independent, not proof |
 

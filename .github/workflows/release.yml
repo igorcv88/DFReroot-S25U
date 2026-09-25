@@ -109,6 +109,12 @@ jobs:
       - name: Gate F - userspace ELF audit tool (no artefacts, expect UNVERIFIED)
         run: python3 tools/elf_audit.py
 
+      # Re-derives ro.boot.vbmeta.digest from the committed vbmeta blobs and
+      # compares it to the value both profiles pin. Costs no extra runner: it
+      # runs inside the offline gate set that already precedes the signed build.
+      - name: Gate B - /vendor AVB provenance, reproduced from committed blobs
+        run: python3 tools/verify_zzic_avb.py
+
       - name: Gate H - installer round-trip on a synthetic packages.xml
         run: |
           cat > "$RUNNER_TEMP/packages.xml" <<'XML'

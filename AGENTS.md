@@ -274,6 +274,7 @@ sh    tools/tests/run_installer_tests.sh  # SafeWrite against an in-memory fs
 sh    tools/tests/test_resolve_release_tag.sh
 python3 tools/profile_binding_audit.py    # profile invariants + drift + no override
 python3 tools/elf_audit.py                # Gate F
+python3 tools/verify_zzic_avb.py          # /vendor AVB provenance, offline
 python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko   # Gate G
 python3 tools/release_notes.py            # the notes still generate
 python3 -m compileall -q tools
