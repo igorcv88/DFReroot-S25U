@@ -130,7 +130,12 @@ def main():
     a = ap.parse_args()
     r = audit(a.apk)
     print(json.dumps(r, indent=2) if a.json else human(r))
-    return 0 if r.get("status") in ("PASS", "APK_MISSING") else 1
+    # APK_MISSING used to exit 0. It cannot: this is the documented standalone
+    # Gate E command, and an audit that "passes" because the artefact it was asked
+    # to inspect is not there fails open - a mistyped path reads as a green gate.
+    # tools/ci_build_audit.sh already reports a missing APK itself before calling
+    # this, so nothing legitimate depended on the old exit code.
+    return 0 if r.get("status") == "PASS" else 1
 
 
 if __name__ == "__main__":

@@ -72,9 +72,21 @@ def audit_file(logical_path, real_path):
     r["sha256"] = hashlib.sha256(raw).hexdigest()
     try:
         e = ELF64(real_path)
+        inspect_elf(e, r, raw, logical_path)
     except Exception as ex:  # noqa: BLE001
-        r["status"] = "NOT_ELF64: %s" % ex
+        # Constructing ELF64 is not the only thing that can throw: a header that
+        # parses but describes a truncated or inconsistent file (e_shstrndx past the
+        # end of a zero-section table, for one) throws while being inspected. A gate
+        # tool must return a verdict, not a traceback, so report the artefact as
+        # unusable and let verdict() count it as a defect.
+        r["status"] = "NOT_ELF64: %s: %s" % (type(ex).__name__, ex)
         return r
+    return r
+
+
+def inspect_elf(e, r, raw, logical_path):
+    """Fill `r` from a parsed ELF64. Raises on a malformed file; audit_file()
+    turns that into a NOT_ELF64 verdict rather than letting it escape."""
     r["status"] = "OK"
     r["elf_class"] = e.class_name
     r["elf_data"] = e.data_name
@@ -128,7 +140,6 @@ def audit_file(logical_path, real_path):
         r["identity"] = "MATCH"
     else:
         r["identity"] = "MISMATCH expected=%s actual=%s" % (expected, r["sha256"])
-    return r
 
 
 def summarize_named(logical_path, r):
@@ -142,6 +153,36 @@ def summarize_named(logical_path, r):
         found = r.get("symbol_checks", {}).get(sym, {}).get("found")
         lines.append("LIBCXX_UPSTREAM_SYMBOL=%s" % ("FOUND" if found else "MISSING"))
     return lines
+
+
+def verdict(results):
+    """Gate F pass/fail, plus the reasons.
+
+    Fails only on a positive defect: an artefact that is present but is not the
+    pinned one, is not a valid AArch64 ELF64, or is missing a symbol the chain
+    requires. An artefact that is simply absent (no --root/--map, or a partial
+    pull) is absent evidence, which this project treats as UNVERIFIED rather than
+    as a defect - the same rule ko_audit.py applies to UNVERIFIED and N/A. An
+    UNPINNED hash is likewise not a defect: crashdump_sha256 is legitimately
+    unpinned until it is captured from the device.
+    """
+    reasons = []
+    for logical, r in results.items():
+        st = r.get("status")
+        if st == "MISSING_FILE":
+            continue
+        if st != "OK":
+            reasons.append("%s: %s" % (logical, st))
+            continue
+        if not r.get("machine_ok"):
+            reasons.append("%s: wrong architecture (%s)" % (logical, r.get("machine")))
+        identity = r.get("identity", "")
+        if identity.startswith("MISMATCH"):
+            reasons.append("%s: identity %s" % (logical, identity))
+        for name, d in r.get("symbol_checks", {}).items():
+            if not d.get("found"):
+                reasons.append("%s: required symbol %s MISSING" % (logical, name))
+    return reasons
 
 
 def human(results):
@@ -201,11 +242,38 @@ def main():
                 real = None
             results[logical] = audit_file(logical, real)
 
+    reasons = verdict(results)
+    audited = [k for k, v in results.items() if v.get("status") != "MISSING_FILE"]
+    absent = [k for k, v in results.items() if v.get("status") == "MISSING_FILE"]
+    if reasons:
+        status = "FAIL"
+    elif absent:
+        # A partial pull that happens to contain no defect is absent evidence, not
+        # a pass. Auditing one valid artefact must never read as "Gate F closed"
+        # while three pinned artefacts were never looked at - that is the same
+        # fail-open this tool was just fixed for, one level up.
+        status = "UNVERIFIED"
+    else:
+        status = "PASS"
     if a.json:
-        print(json.dumps(results, indent=2))
+        print(json.dumps({"artefacts": results, "status": status,
+                          "failures": reasons, "not_audited": absent}, indent=2))
     else:
         print(human(results))
-    return 0
+        print("")
+        print("GATE_F=%s (%d of %d artefacts present)"
+              % (status, len(audited), len(results)))
+        for why in reasons:
+            print("  [x] %s" % why)
+        for k in absent:
+            print("  [ ] not audited: %s" % k)
+        if status == "UNVERIFIED":
+            print("  Gate F stays UNVERIFIED until all %d artefacts are present;"
+                  " pass --root or --map" % len(results))
+    # Gate F used to return 0 unconditionally, so a MISMATCHed or wrong-arch
+    # artefact only changed printed text. A real defect now exits 1; absent
+    # evidence (UNVERIFIED) stays successful on purpose.
+    return 1 if reasons else 0
 
 
 if __name__ == "__main__":

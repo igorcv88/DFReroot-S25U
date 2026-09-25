@@ -67,6 +67,39 @@ int dfr_streq(const char *a, const char *b) {
     return strcmp(a, b) == 0;
 }
 
+dfr_module_policy dfr_module_policy_eval(dfr_target_class cls,
+                                         const struct TargetProfile *p) {
+    if (cls != DFR_TARGET_S25U_ZZIC)
+        return DFR_MODULE_POLICY_NOT_APPLICABLE;
+    /* A ZZIC classification with no profile to consult cannot be evaluated, and
+     * "cannot evaluate" is a refusal, never a pass. */
+    if (p == NULL)
+        return DFR_MODULE_POLICY_REFUSE_UNVERIFIED;
+    if (!p->ko_zzic_verified)
+        return DFR_MODULE_POLICY_REFUSE_UNVERIFIED;
+    if (p->ko_sha256 == NULL || p->ko_sha256[0] == 0)
+        return DFR_MODULE_POLICY_REFUSE_NO_DIGEST;
+    if (p->ko_filename == NULL || p->ko_filename[0] == 0)
+        return DFR_MODULE_POLICY_REFUSE_NO_FILENAME;
+    return DFR_MODULE_POLICY_ALLOW;
+}
+
+const char *dfr_module_policy_name(dfr_module_policy v) {
+    switch (v) {
+        case DFR_MODULE_POLICY_NOT_APPLICABLE:     return "NOT_APPLICABLE";
+        case DFR_MODULE_POLICY_ALLOW:              return "ALLOW";
+        case DFR_MODULE_POLICY_REFUSE_UNVERIFIED:  return "REFUSE_UNVERIFIED";
+        case DFR_MODULE_POLICY_REFUSE_NO_DIGEST:   return "REFUSE_NO_DIGEST";
+        case DFR_MODULE_POLICY_REFUSE_NO_FILENAME: return "REFUSE_NO_FILENAME";
+    }
+    /* An unnamed verdict is not a known-good one; report it as such. */
+    return "REFUSE_UNKNOWN_VERDICT";
+}
+
+int dfr_module_policy_permits(dfr_module_policy v) {
+    return v == DFR_MODULE_POLICY_NOT_APPLICABLE || v == DFR_MODULE_POLICY_ALLOW;
+}
+
 int dfr_parse_kernel_versions(const char *release,
                               int *android_release, int *kver_major, int *kver_minor) {
     const char *marker;

@@ -106,6 +106,14 @@ static const char *target_lib_path = "/vendor/lib64/libstagefrighthw.so";
 static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
                        int artefacts);
 
+/*
+ * Gate G chokepoint. Every stage that writes to the page cache calls this, not
+ * just the one that writes the module: on ZZIC the earlier writes exist only to
+ * make the kernel load the module, so a load that can never be permitted makes
+ * the whole chain pointless risk. Returns 0 to proceed, -1 to refuse.
+ */
+static int gate_module_policy(struct Reporter *reporter, dfr_target_class cls);
+
 static void put_attr(struct nlmsghdr *nlh, int type, const void *data, size_t len) {
     struct rtattr *rta = (struct rtattr *) ((char *) nlh + NLMSG_ALIGN(nlh->nlmsg_len));
     rta->rta_type = type;
@@ -506,10 +514,17 @@ extern char stage2_first_inst_copy[];
 int find_hook_target(const char *libcxx, const char* symname, uint64_t *hook_target, uint64_t *payload_target, uint32_t* first_instruction);
 
 int patch_libc(struct Reporter *reporter) {
-    /* Independent JNI entry point: re-run the fail-closed gate so patchLibc()
-     * cannot corrupt libc on a mismatched device without patch_ko() having run. */
-    if (gate_target(reporter, NULL, DFR_ART_LIBC) != 0) {
+    /* Independent JNI entry point (StageReceiver transaction 2): re-run BOTH
+     * fail-closed gates so patchLibc() cannot corrupt libc on a mismatched
+     * device, nor on the ZZIC target while Gate G is unproven, without
+     * patch_ko() having run first. */
+    dfr_target_class cls = DFR_TARGET_UPSTREAM_GENERIC;
+    if (gate_target(reporter, &cls, DFR_ART_LIBC) != 0) {
         REPORTLN("[DFR][TARGET] aborting patch_libc: target gate refused");
+        return 1;
+    }
+    if (gate_module_policy(reporter, cls) != 0) {
+        REPORTLN("[DFR][TARGET] aborting patch_libc: module policy refused");
         return 1;
     }
     uint64_t hook_offset, shellcode_offset;
@@ -576,10 +591,17 @@ int patch_libc(struct Reporter *reporter) {
 }
 
 int patch_cxx(int run_index, struct Reporter *reporter) {
-    /* Independent JNI entry point: re-run the fail-closed gate so patchCxx()
-     * cannot corrupt libc++ on a mismatched device without patch_ko() first. */
-    if (gate_target(reporter, NULL, DFR_ART_LIBCXX) != 0) {
+    /* Independent JNI entry point (StageReceiver transaction 3): re-run BOTH
+     * fail-closed gates so patchCxx() cannot corrupt libc++ on a mismatched
+     * device, nor on the ZZIC target while Gate G is unproven, without
+     * patch_ko() first. */
+    dfr_target_class cls = DFR_TARGET_UPSTREAM_GENERIC;
+    if (gate_target(reporter, &cls, DFR_ART_LIBCXX) != 0) {
         REPORTLN("[DFR][TARGET] aborting patch_cxx: target gate refused");
+        return 1;
+    }
+    if (gate_module_policy(reporter, cls) != 0) {
+        REPORTLN("[DFR][TARGET] aborting patch_cxx: module policy refused");
         return 1;
     }
     uint64_t hook_offset, shellcode_offset;
@@ -947,6 +969,43 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
     return rc;
 }
 
+/*
+ * Gate G, evaluated identically by every stage that writes to the page cache.
+ * The decision itself lives in target_profile.c so the host tests exercise the
+ * same logic the device runs; this wrapper only logs the boundary.
+ */
+static int gate_module_policy(struct Reporter *reporter, dfr_target_class cls) {
+    dfr_module_policy v = dfr_module_policy_eval(cls, &DFR_PROFILE_ZZIC);
+    if (v == DFR_MODULE_POLICY_NOT_APPLICABLE) {
+        /* Unrelated device: upstream generic behaviour, unchanged. No Gate G. */
+        return 0;
+    }
+    REPORTLN("[DFR][MODULE] ENTER");
+    REPORTLN("[DFR][MODULE] ZZIC_MODULE_POLICY=%s", dfr_module_policy_name(v));
+    switch (v) {
+        case DFR_MODULE_POLICY_ALLOW:
+            return 0;
+        case DFR_MODULE_POLICY_REFUSE_UNVERIFIED:
+            REPORTLN("[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED"
+                     " (no ZZIC-validated .ko bundled)");
+            break;
+        case DFR_MODULE_POLICY_REFUSE_NO_DIGEST:
+            REPORTLN("[DFR][MODULE] ko_zzic_verified=1 but no ko_sha256 is pinned;"
+                     " the flag alone is not evidence.");
+            break;
+        case DFR_MODULE_POLICY_REFUSE_NO_FILENAME:
+            REPORTLN("[DFR][MODULE] ko_zzic_verified=1 but ko_filename is not set;"
+                     " all three ko_* fields go together.");
+            break;
+        default:
+            REPORTLN("[DFR][MODULE] unrecognised policy verdict; treating as a refusal.");
+            break;
+    }
+    REPORTLN("[DFR][MODULE] FAIL fail-closed: refusing an unverified module on ZZIC."
+             " No page-cache write happens on this target while Gate G is unproven.");
+    return -1;
+}
+
 int patch_ko(struct Reporter *reporter) {
     /*
      * Fail-closed Gate A/B chokepoint: no page-cache corruption runs until the
@@ -983,48 +1042,40 @@ int patch_ko(struct Reporter *reporter) {
     REPORTLN("* ko android%d-%d.%d (%d bytes)", ko->android_release, ko->kver_major, ko->kver_minor, (int)(ko->end - ko->start));
 
     /*
-     * Fail-closed module policy: on the exact ZZIC target the generic
-     * android15-6.6 image remains UNVERIFIED.  Missing evidence is never an
-     * execution override: the exact target may proceed only when a module has
-     * been positively validated and cryptographically bound to this profile.
+     * Fail-closed module policy, shared with patch_libc()/patch_cxx() so the
+     * refusal is identical at every page-cache entry point: on the exact ZZIC
+     * target the generic android15-6.6 image remains UNVERIFIED, and missing
+     * evidence is never an execution override.
      */
+    if (gate_module_policy(reporter, cls) != 0)
+        return 1;
+
     if (cls == DFR_TARGET_S25U_ZZIC) {
-        REPORTLN("[DFR][MODULE] ENTER");
-        if (!DFR_PROFILE_ZZIC.ko_zzic_verified) {
-            REPORTLN("[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED (no ZZIC-validated .ko bundled)");
-            REPORTLN("[DFR][MODULE] FAIL fail-closed: refusing an unverified module on ZZIC.");
+        /*
+         * The policy above proved the three ko_* fields are present; it
+         * deliberately did not look at the payload, because only this stage
+         * selects it. Bind the flag to the actual bytes here: a digest that does
+         * not match the selected payload is a refusal, never an assumption
+         * (dossier section 39).
+         */
+        const char *want = DFR_PROFILE_ZZIC.ko_sha256;
+        dfr_sha256_ctx sc;
+        uint8_t digest[32];
+        char hex[65];
+        dfr_sha256_init(&sc);
+        dfr_sha256_update(&sc, ko->start, (size_t)(ko->end - ko->start));
+        dfr_sha256_final(&sc, digest);
+        dfr_sha256_hex(digest, hex);
+        REPORTLN("[DFR][MODULE] ko_filename=%s",
+                 DFR_PROFILE_ZZIC.ko_filename ? DFR_PROFILE_ZZIC.ko_filename : "<unnamed>");
+        REPORTLN("[DFR][MODULE] ko_sha256_actual=%s", hex);
+        if (strcmp(hex, want) != 0) {
+            REPORTLN("[DFR][MODULE] FAIL module digest does not match the profile.");
+            REPORTLN("[DFR][MODULE]   expected=%s", want);
+            REPORTLN("[DFR][MODULE] refusing: the bundled module is not the validated one.");
             return 1;
-        } else {
-            /*
-             * ko_zzic_verified=1 is only honoured when the bytes about to be
-             * written are provably the ones that were validated. A flag without
-             * a pinned digest, or a digest that does not match the selected
-             * payload, is a refusal - never an assumption (dossier section 39).
-             */
-            const char *want = DFR_PROFILE_ZZIC.ko_sha256;
-            if (want == NULL || want[0] == 0) {
-                REPORTLN("[DFR][MODULE] FAIL ko_zzic_verified=1 but no ko_sha256 is pinned;"
-                         " the flag alone is not evidence. Refusing.");
-                return 1;
-            }
-            dfr_sha256_ctx sc;
-            uint8_t digest[32];
-            char hex[65];
-            dfr_sha256_init(&sc);
-            dfr_sha256_update(&sc, ko->start, (size_t)(ko->end - ko->start));
-            dfr_sha256_final(&sc, digest);
-            dfr_sha256_hex(digest, hex);
-            REPORTLN("[DFR][MODULE] ko_filename=%s",
-                     DFR_PROFILE_ZZIC.ko_filename ? DFR_PROFILE_ZZIC.ko_filename : "<unnamed>");
-            REPORTLN("[DFR][MODULE] ko_sha256_actual=%s", hex);
-            if (strcmp(hex, want) != 0) {
-                REPORTLN("[DFR][MODULE] FAIL module digest does not match the profile.");
-                REPORTLN("[DFR][MODULE]   expected=%s", want);
-                REPORTLN("[DFR][MODULE] refusing: the bundled module is not the validated one.");
-                return 1;
-            }
-            REPORTLN("[DFR][MODULE] ZZIC_MODULE_BINDING=PASS (bundled bytes match pinned digest)");
         }
+        REPORTLN("[DFR][MODULE] ZZIC_MODULE_BINDING=PASS (bundled bytes match pinned digest)");
     }
 
     //char buf[] = {1,2,3,4};
@@ -1154,13 +1205,28 @@ Java_org_lsposed_lspromise_DirtyFrag_createOrphanProcess(JNIEnv *env, jclass cla
     return createOrphanProcess();
 }
 
-static int has_mutex() {
-    return access("/dev/df", F_OK) == 0 || errno != ENOENT;
+/*
+ * Marker probe. access() failing for a reason other than ENOENT (an SELinux
+ * denial on /dev, most likely) means the marker's state could not be determined,
+ * which is a different fact from "the marker is present" - signals are never
+ * collapsed (dossier section 46). errno is cleared first so a stale value left
+ * by an earlier call can never decide the verdict.
+ *
+ * Returns 1 present, 0 absent, -1 undeterminable.
+ */
+static int probe_marker(const char *path) {
+    errno = 0;
+    if (access(path, F_OK) == 0) return 1;
+    if (errno == ENOENT) return 0;
+    return -1;
+}
+static int has_mutex(void) {
+    return probe_marker("/dev/df");
 }
 static int has_mark(int num) {
-    char buf[100];
-    sprintf(buf, "/dev/dfm%d", num);
-    return access(buf, F_OK) == 0 || errno != ENOENT;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "/dev/dfm%d", num);
+    return probe_marker(buf);
 }
 
 JNIEXPORT jint JNICALL
@@ -1187,12 +1253,20 @@ Java_org_lsposed_lspromise_DirtyFrag_runAll(JNIEnv *env, jobject thiz) {
         int mark2 = has_mark(2);
         int mark3 = has_mark(3);
         int mark4 = has_mark(4);
-        REPORTLN("mark: %d %d %d %d", mark, mark2, mark3, mark4);
-        if (mark4) {
+        REPORTLN("mark: %d %d %d %d (1=present 0=absent -1=undeterminable)",
+                 mark, mark2, mark3, mark4);
+        if (mark < 0 || mark2 < 0 || mark3 < 0 || mark4 < 0) {
+            /* Undeterminable is neither success nor failure: say so and keep
+             * retrying rather than reporting a verdict the markers do not support. */
+            REPORTLN("[DFR][MARKER] UNKNOWN df=%d dfm2=%d dfm3=%d dfm4=%d could not be"
+                     " read (not ENOENT); not treating it as either outcome",
+                     mark, mark2, mark3, mark4);
+        }
+        if (mark4 == 1) {
             REPORTLN("Failed (failure marker set). See logcat for details.\n");
             return 1;
         }
-        if (mark3) {
+        if (mark3 == 1) {
             REPORTLN("Done. Check KSU Manager.\n");
             return 0;
         }

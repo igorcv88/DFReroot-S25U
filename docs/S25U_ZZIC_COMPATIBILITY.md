@@ -14,7 +14,7 @@ left `BLOCKED`/`UNKNOWN` with the exact command that closes it.
 |---|---|
 | Upstream | `polygraphene/DFReroot` |
 | Working fork | `igorcv88/DFReroot-S25U` |
-| Reference version | `v2.0.1` |
+| Reference version | upstream `v2.0.1`; this fork builds as `2.0.2-zzic` |
 | Base commit | `9f1d6cd592d898b42d2e0c2d25ee1577e2aabe77` |
 | Branch | `claude/dfreroot-s25u-zzic-support-dgw8fi` |
 | Architecture preserved | build system, packages, module table, exploit flow unchanged |
@@ -138,13 +138,29 @@ or `uname -m` is therefore a `MISMATCH`, not an "exact" target.
 re-validate before touching a file (the JNI methods are exposed independently by
 `StageReceiver` transactions 1–3).
 
-On the exact ZZIC target the generic module is Gate-G `UNVERIFIED`, so
-`patch_ko()` **refuses** to load it (`[DFR][MODULE] FAIL`) unless a ZZIC-validated module is bundled and cryptographically bound to the
-profile.
+On the exact ZZIC target the generic module is Gate-G `UNVERIFIED`. The same
+chokepoint applies at **every** one of those three stages, not only at
+`patch_ko()`: `gate_module_policy()` refuses (`[DFR][MODULE] FAIL`) unless a
+ZZIC-validated module is bundled and cryptographically bound to the profile.
+
+The reason the policy is not confined to the stage that writes the module: on
+ZZIC the earlier writes (`crash_dump64`, the vendor file, `libc`, `libc++`) exist
+for one purpose — to make the kernel load that module. If the load can never be
+permitted, corrupting those files is risk with no reachable outcome, and
+`patchLibc`/`patchCxx` are independently invokable (`StageReceiver` transactions
+2 and 3), so a policy enforced only in `patch_ko()` is not enforced at all.
+
+The decision itself is `dfr_module_policy_eval()` in `target_profile.c` — pure
+logic, no I/O — so the host tests exercise the same verdicts the device produces.
+`exp.c` only logs the boundary and, in `patch_ko()` alone, binds the verdict to
+`SHA-256(selected payload)`: that stage is the only holder of the module bytes, so
+the byte binding stays where it can be proven instead of being assumed earlier.
+`tools/profile_binding_audit.py` fails CI if any of the three stages stops calling
+the policy, or if any DFReroot runtime source regains a `/data/local/tmp` marker.
 
 ## Unit tests (target detection) + regression tests
 
-`tools/tests/run_tests.sh` (host `cc`, no Android). **28/28 pass.**
+`tools/tests/run_tests.sh` (host `cc`, no Android). **36/36 pass.**
 
 Target detection: exact ZZIC → `S25U_ZZIC`; and all required negatives → not
 ZZIC: `SM-S938B+ZZI4` (MISMATCH), `SM-S938U`, `SM-S938N`, `pa3q+other display`
@@ -415,8 +431,10 @@ Four review findings were verified and fixed:
   `patch_ko()` gate. Both now re-run the fail-closed gate at entry.
 - **P1 — refuse the unverified module on ZZIC.** `patch_ko()` no longer proceeds
   to corrupt the vendor file with the Gate-G `UNVERIFIED` generic module on the
-  ZZIC target; it refuses unless `ko_zzic_verified` or the operator override
-  marker is present.
+  ZZIC target. It refused unless `ko_zzic_verified` was set or an operator
+  override marker was present; the marker was later removed outright (see
+  *Strict Gate-G policy* below), so `ko_zzic_verified` bound to the module digest
+  is now the only way through.
 - **P2 — compare `kernel_version` + `kernel_arch`.** Both are now in
   `ObservedTarget` and the fail-closed identity check; a rebuilt kernel with a
   matching `uname -r` but different `uname -v`/`-m` is a `MISMATCH`.
@@ -427,13 +445,13 @@ Four review findings were verified and fixed:
 
 | Gate | Result | Evidence |
 |---|---|---|
-| A — Target identity | **PASS** | fail-closed classifier implemented; 28/28 host tests incl. exact ZZIC + all required negatives |
+| A — Target identity | **PASS** | fail-closed classifier implemented; 36/36 host tests incl. exact ZZIC, all required negatives, and the Gate-G policy verdicts |
 | B — Kernel/userspace identity | **BLOCKED** | validation code + pinned hashes implemented; runtime SHA-256/symlink/page-size checks need the ZZIC device |
 | C — Java/system-server compat | **BLOCKED** | `[DFR][AMS]` deterministic dumps implemented; needs on-device logcat to compare Android 17 shapes |
 | D — NetworkStack identity | **BLOCKED** (process facts already observed on HW) | `[DFR][PROCESS]` instrumentation implemented; runtime capture pending |
 | E — Native packaging | **PASS** | real `./build.sh`; `libexp.so` AArch64, all JNI symbols, hashes recorded (apk_audit) |
 | F — Userspace ELF audit | **BLOCKED** | tool implemented + host-verified; awaits pulled ZZIC ELFs |
-| G — Module ABI compatibility | **UNKNOWN / UNVERIFIED** (runtime-enforced) | ko_audit ran on the real generic `.ko`; empty `__versions`, verdict UNVERIFIED without ZZIC `Module.symvers`. Runtime **refuses** to load it on ZZIC unless verified/overridden, and a `ko_zzic_verified=1` claim is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
+| G — Module ABI compatibility | **UNKNOWN / UNVERIFIED** (runtime-enforced) | ko_audit ran on the real generic `.ko`; empty `__versions`, verdict UNVERIFIED without ZZIC `Module.symvers`. On ZZIC **every** page-cache stage (`patch_ko`, `patch_libc`, `patch_cxx`) refuses while the module is unverified — there is no override — and a `ko_zzic_verified=1` claim is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
 | H — Installer format compatibility | **BLOCKED** | `--diag-zzic` + offline tool implemented; offline round-trip verified on synthetic XML; needs device packages.xml |
 | I — Full hardware compatibility | **BLOCKED** | requires end-to-end on-device run; `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is independent, not proof |
 
@@ -513,9 +531,22 @@ the flag, and the flag alone is not enough — all three fields go together:
 digest, if the digest does not match the bundled file, or if a digest is left
 pinned while the flag is 0.
 
-Without a positively validated module, the ZZIC path remains blocked at Gate G.
-There is no runtime escape hatch for an `UNVERIFIED` module; compatibility must
-be established by evidence and bound to the exact bundled bytes.
+Without a positively validated module, the ZZIC path remains blocked at Gate G —
+at **all three** page-cache stages, not just the module write. There is no runtime
+escape hatch for an `UNVERIFIED` module; compatibility must be established by
+evidence and bound to the exact bundled bytes.
+
+### Strict Gate-G policy
+
+The override marker that once let the owner accept the kernel-crash risk was
+removed rather than kept, and CI now rejects its reintroduction under any name
+(`tools/profile_binding_audit.py` scans every DFReroot runtime source for a
+`/data/local/tmp` reference, not just the one historical token). The practical
+consequence is worth stating plainly: until a Gate-G `COMPATIBLE` module exists,
+the chain cannot be exercised end to end on this firmware at all — not even
+deliberately. That is the intended trade-off, and reversing it is a policy
+decision for the repository owner, made in the open, not a patch an agent applies
+on its own.
 
 ### 3. Runtime evidence that no static check can supply
 
