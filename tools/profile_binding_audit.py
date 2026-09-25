@@ -304,6 +304,103 @@ def audit():
              "has nothing to guard")
     r["checks"]["modversion_coverage"] = cov_reports
 
+    # --- the Kotlin copies of the Gate-D pins ------------------------------
+    # The network_stack identity is COMPARED in Kotlin (Diagnostics/StageHop),
+    # because that is where the observation exists - but the values are PINNED in
+    # both profiles. Three copies of one fact drift silently, and Kotlin that
+    # needs an Android runtime cannot be unit-tested here, so the guard is
+    # static, per AGENTS.md 5.
+    #
+    # This also closes the older defect these fields had: they were pinned in both
+    # profiles and read nowhere, so the profile advertised a boundary nothing
+    # enforced. Now each is compared at run time AND tied to the pin here.
+    KOTLIN_PINS = [
+        ("network_stack_process", "StageHop.kt",
+         r'NETWORK_STACK_PROCESS\s*=\s*"([^"]+)"'),
+        ("network_stack_uid", "StageHop.kt",
+         r'NETWORK_STACK_UID\s*=\s*(\d+)'),
+        ("network_stack_context", "Diagnostics.kt",
+         r'NETWORK_STACK_CONTEXT\s*=\s*"([^"]+)"'),
+        ("network_stack_cap_eff", "Diagnostics.kt",
+         r'NETWORK_STACK_CAP_EFF\s*=\s*"([^"]+)"'),
+    ]
+    KOTLIN_DIR = os.path.join(ROOT, "app", "src", "main", "java",
+                              "com", "polygraphene", "df", "reroot")
+
+    def same_value(a, b):
+        if a is None or b is None:
+            return False
+        try:
+            return int(str(a), 0) == int(str(b), 0)
+        except ValueError:
+            return str(a) == str(b)
+
+    kotlin_pins = {}
+    for field, fname, pattern in KOTLIN_PINS:
+        path = os.path.join(KOTLIN_DIR, fname)
+        try:
+            with open(path, encoding="utf-8") as f:
+                src = f.read()
+        except OSError as ex:
+            fail("cannot read %s: %s" % (fname, ex))
+            continue
+        m = re.search(pattern, src)
+        if not m:
+            fail("%s no longer declares the constant mirroring %s; the profile "
+                 "would pin a value nothing compares" % (fname, field))
+            continue
+        got = m.group(1)
+        kotlin_pins[field] = got
+        if not same_value(got, c.get(field)):
+            fail("%s: Kotlin has %r but target_profile.c pins %r"
+                 % (field, got, c.get(field)))
+        if not same_value(got, j.get(field)):
+            fail("%s: Kotlin has %r but zzic_profile.json pins %r"
+                 % (field, got, j.get(field)))
+    r["checks"]["kotlin_gate_d_pins"] = kotlin_pins
+
+    # A pin tied to a constant nobody reads is the same dead weight in a new
+    # place, so the signals that compare them must still be emitted.
+    try:
+        with open(os.path.join(KOTLIN_DIR, "Diagnostics.kt"), encoding="utf-8") as f:
+            diag_src = f.read()
+    except OSError as ex:
+        fail("cannot read Diagnostics.kt: %s" % ex)
+        diag_src = ""
+    for signal in ("NETWORK_STACK_CAP_EFF=", "NATIVE_PAYLOAD_PACKAGED=",
+                   "NATIVE_PAYLOAD_EXTRACTED="):
+        if signal not in diag_src:
+            fail("Diagnostics.kt no longer emits %s" % signal)
+    if "NATIVE_LIBRARY_DISCOVERABLE=" in diag_src:
+        fail("NATIVE_LIBRARY_DISCOVERABLE is back in Diagnostics.kt; with "
+             "extractNativeLibs=false it has no reachable PASS, so it measures "
+             "nothing - use NATIVE_PAYLOAD_PACKAGED / _EXTRACTED")
+
+    # The run trace must reach logcat, or every "wait for X in logcat"
+    # instruction in the docs is impossible to follow.
+    try:
+        with open(os.path.join(KOTLIN_DIR, "MainActivity.kt"), encoding="utf-8") as f:
+            main_src = f.read()
+    except OSError as ex:
+        fail("cannot read MainActivity.kt: %s" % ex)
+        main_src = ""
+    m = re.search(r"private fun append\(s: String\) \{(.{0,900}?)\n    \}",
+                  main_src, flags=re.S)
+    if not m:
+        fail("MainActivity.append() not found; the logcat mirror cannot be checked")
+    # Strip comments first: `// Log.i(...)` still contains the text, so a
+    # commented-out mirror passed a naive substring check. Found by sabotaging
+    # this very guard.
+    body = ""
+    if m:
+        body = re.sub(r"/\*.*?\*/", "", m.group(1), flags=re.S)
+        body = re.sub(r"//[^\n]*", "", body)
+    mirrored = bool(m and "Log.i(" in body)
+    if m and not mirrored:
+        fail("MainActivity.append() no longer mirrors to logcat; the run trace "
+             "would exist only on screen")
+    r["checks"]["append_mirrors_to_logcat"] = mirrored
+
     # --- C profile vs JSON profile agreement -------------------------------
     drift = []
     for k in SHARED_STRINGS:
@@ -519,6 +616,9 @@ def human(r):
     L.append("vendor provenance   : %s" % ck.get("vendor_provenance_anchors"))
     L.append("vendor gate         : %s" % ck.get("vendor_gate"))
     L.append("gate C/D signals    : %s" % ck.get("gate_cd_signals"))
+    L.append("Kotlin Gate-D pins  : %d tied to both profiles"
+             % len(ck.get("kotlin_gate_d_pins") or {}))
+    L.append("append -> logcat    : %s" % ck.get("append_mirrors_to_logcat"))
     L.append("")
     for v in r["violations"]:
         L.append("  [x] %s" % v)

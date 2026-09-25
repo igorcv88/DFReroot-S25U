@@ -233,7 +233,37 @@ SELinux domain and its exec transition, the seccomp filter's verdict on the
 syscalls the native flow needs, mount-namespace behaviour, and any Samsung
 DEFEX-style restriction.
 
-### 5. Dead pins: the four `network_stack_*` fields
+### 5. ~~Dead pins: the four `network_stack_*` fields~~ — CLOSED
+
+All four are now compared at run time and tied to the pins statically.
+`network_stack_process`, `network_stack_uid` and `network_stack_context` were
+already compared in `Diagnostics.kt`/`StageHop.kt` — but against Kotlin constants,
+not against the profiles, so the pins themselves were dead and a third copy of
+each value could drift unnoticed. `network_stack_cap_eff` was compared nowhere at
+all; it now emits `NETWORK_STACK_CAP_EFF=PASS/FAIL/SKIP/UNKNOWN`, with an
+unreadable `CapEff` reported `UNKNOWN` rather than counted as agreement.
+
+`tools/profile_binding_audit.py` ties each Kotlin constant to both profiles and
+fails on drift, on a removed constant, and on a removed emit — the static-guard
+pattern AGENTS.md §5 prescribes for Kotlin that needs an Android runtime. Each of
+those was verified by sabotage.
+
+Two more signals were fixed in the same pass:
+
+- `NATIVE_LIBRARY_DISCOVERABLE` is gone. It could never read PASS on any device:
+  the APK ships `lib/arm64-v8a/libexp.so` Stored with
+  `android:extractNativeLibs="false"`, so nothing is written to
+  `nativeLibraryDir`. It was observed `UNKNOWN` next to `LIBEXP_LOADED=PASS` in
+  the same process. Replaced by `NATIVE_PAYLOAD_PACKAGED` (the APK zip entry,
+  which can actually pass) and `NATIVE_PAYLOAD_EXTRACTED` (the fact, with `NO`
+  stated as expected). `LIBEXP_LOADED` remains the only proof `dlopen` succeeded.
+  The audit fails if the old signal comes back.
+- `MainActivity.append()` now mirrors every line to logcat before touching the
+  UI. Until now `runAll done res=`, the remote-boundary block and the CONTROLLER
+  binder receipt existed only on screen, which made every "wait for X in logcat"
+  instruction in these docs impossible to follow.
+
+#### Original note
 
 `network_stack_process`, `network_stack_uid` (1073), `network_stack_context` and
 `network_stack_cap_eff` (`0x800003c00`) are declared in `target_profile.h`, pinned
