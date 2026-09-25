@@ -35,6 +35,7 @@ object InjectMain {
         var dump = false
         var check = false
         var uninstall = false
+        var diag = false
         var i = 0
         while (i < args.size) {
             when (args[i]) {
@@ -46,12 +47,13 @@ object InjectMain {
                     .split(",").map { it.trim() }.filter { it.isNotEmpty() }.also { i += 2 }
                 "--dry-run" -> { dryRun = true; i++ }
                 "--dump" -> { dump = true; i++ }
+                "--diag-zzic" -> { diag = true; i++ }
                 "--check" -> { check = true; i++ }
                 "--uninstall" -> { uninstall = true; i++ }
                 else -> i++
             }
         }
-        if (!dump && keyHexArg.isEmpty() && apk.isEmpty() && pkg.isEmpty()) {
+        if (!dump && !diag && keyHexArg.isEmpty() && apk.isEmpty() && pkg.isEmpty()) {
             System.out.println("usage: InjectMain [--keyhex <hex> | --apk <apk> | --pkg <installed>] [--xml ...] [--targets a,b] [--dry-run|--dump|--check|--uninstall]")
             kotlin.system.exitProcess(2)
         }
@@ -61,6 +63,11 @@ object InjectMain {
             val raw = java.io.File(xml).readBytes()
             if (dump) {
                 log.append(Abx.summarize(raw))
+                System.out.println(log.toString())
+                return
+            }
+            if (diag) {
+                PackagesXml.diagnose(raw, xml, targets, log)
                 System.out.println(log.toString())
                 return
             }

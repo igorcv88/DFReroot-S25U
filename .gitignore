@@ -32,3 +32,6 @@ app/src/main/jni/splicehelper
 logtestexe/logtest
 
 app/keystore.jks
+
+__pycache__/
+*.pyc
