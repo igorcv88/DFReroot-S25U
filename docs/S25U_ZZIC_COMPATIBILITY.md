@@ -25,7 +25,7 @@ Source of truth: `app/src/main/jni/target_profile.c` (`DFR_PROFILE_ZZIC`) and
 `tools/zzic_profile.json` (Python tools). Values:
 
 ```
-manufacturer      = Samsung
+manufacturer      = samsung
 model             = SM-S938B
 device            = pa3q
 sdk               = 37
@@ -38,6 +38,12 @@ page_size         = 4096
 abi               = arm64-v8a
 kernel_arch       = aarch64
 ```
+
+`manufacturer` is lowercase. `ro.product.manufacturer` reports `samsung` (the
+same casing the fingerprint prefix uses) and the comparison is case-sensitive,
+so pinning `Samsung` would classify the real device as `MISMATCH` and refuse the
+whole chain. `tools/tests/test_target_profile.c` asserts both directions, and
+`tools/profile_binding_audit.py` re-checks it in CI.
 
 ## Kernel identity / Image / BTF (from hardware captures, pinned into the profile)
 
@@ -122,9 +128,9 @@ The ZZIC profile currently references the **generic** `android15-6.6` module
 produced it gets its own profile reference. The uname string parses to
 `android15/6.6` — that is **kernel-family** selection, not identity.
 
-Exact identity compares **all** of: manufacturer, model, device, sdk, display,
-fingerprint, `uname -r`, `uname -v` (kernel_version), `uname -m` (kernel_arch),
-page size and abi. A rebuilt kernel that keeps `uname -r` but changes `uname -v`
+Exact identity compares **all** of: manufacturer, model, device, sdk,
+android_release (`ro.build.version.release`), display, fingerprint, `uname -r`,
+`uname -v` (kernel_version), `uname -m` (kernel_arch), page size and abi. A rebuilt kernel that keeps `uname -r` but changes `uname -v`
 or `uname -m` is therefore a `MISMATCH`, not an "exact" target.
 
 **Every** page-cache corruption entry point runs the gate, not just `patch_ko()`:
@@ -140,7 +146,7 @@ owner explicitly accepts the kernel-crash risk with
 
 ## Unit tests (target detection) + regression tests
 
-`tools/tests/run_tests.sh` (host `cc`, no Android). **24/24 pass.**
+`tools/tests/run_tests.sh` (host `cc`, no Android). **28/28 pass.**
 
 Target detection: exact ZZIC → `S25U_ZZIC`; and all required negatives → not
 ZZIC: `SM-S938B+ZZI4` (MISMATCH), `SM-S938U`, `SM-S938N`, `pa3q+other display`
@@ -263,6 +269,108 @@ real device metadata need the device → **BLOCKED**.
 > not expected to match across differently-keyed builds; `libexp.so` and the
 > compiled-in `.ko`/asset hashes are the signing-independent identity.
 
+## Second review pass — defects found and fixed
+
+A full re-read of the merged implementation found two defects that would each
+have made the port non-functional on the real device, plus three gaps between
+what the dossier demands and what the code enforced.
+
+**P0 — the profile could never match the target.** `DFR_PROFILE_ZZIC.manufacturer`
+was `"Samsung"`, but `ro.product.manufacturer` on this firmware is `"samsung"`
+and `dfr_streq()` is case-sensitive. On the real SM-S938B the model/codename
+anchor hits, so the single failed field made `dfr_classify_target()` return
+`DFR_TARGET_MISMATCH` — the fail-closed path — and **every** entry point
+(`patchMod`, `patchLibc`, `patchCxx`, `runAll`) refused before doing anything.
+The device it was written for was the one device it rejected. The host test
+suite did not catch it because the test vector carried the same wrong casing as
+the profile, so the bug was asserted rather than detected. Both are fixed, and
+the suite now asserts the profile's casing directly *and* that a capitalised
+value is a `MISMATCH`.
+
+**P0 — the artefact gate aborted the chain on the chain's own writes.** Gate B
+hashed the vendor file, libc and libc++ on *every* gate run, and every entry
+point runs the gate. But this chain rewrites exactly those three files in the
+page cache: after `patch_ko()` patched the vendor file, `patch_libc()`'s gate
+re-hashed it, saw content that no longer matched the pinned pristine digest, and
+refused — so `runAll` could never get past its second stage on a validated ZZIC
+device. Each stage now passes only the artefact **it** is about to write
+(`DFR_ART_VENDOR` / `DFR_ART_LIBC` / `DFR_ART_LIBCXX`); the artefacts it does not
+own are logged `SKIP` so no reader mistakes an unhashed artefact for a validated
+one. Every pinned artefact is still validated exactly once, while pristine,
+immediately before it is written, and a mismatch is still a hard refusal — the
+check was scoped, not relaxed.
+
+**Ordering — a refusal no longer leaves a corrupted file behind.** `patch_ko()`
+patched `crash_dump64` (patch #1) *before* selecting the module and applying the
+Gate-G module policy, so a fail-closed module refusal happened after the first
+page-cache write. Module selection and the policy decision are pure lookups and
+now run before any write.
+
+**Section 39 — `ko_zzic_verified` is no longer a bare boolean.** Nothing bound
+the flag to the bytes it vouched for: flipping it to 1 would have loaded
+whatever module was bundled. The profile gained `ko_filename` + `ko_sha256`, and
+the invariant
+
+```
+ko_zzic_verified == 1  IMPLIES  ko_sha256 pinned
+                       AND      SHA-256(selected module bytes) == ko_sha256
+```
+
+is enforced at run time in `patch_ko()` (`ZZIC_MODULE_BINDING=PASS`, refusal
+otherwise) and in CI by `tools/profile_binding_audit.py`, which also refuses a
+stale digest left pinned while the flag is 0, and checks that the C profile and
+`tools/zzic_profile.json` have not drifted apart.
+
+**Section 57 — `android_release` is now compared, not just stored.** It was
+pinned in the profile and in the JSON, but absent from `ObservedTarget`, so it
+was advertised as identity and never checked. It is read from
+`ro.build.version.release`, logged as `TARGET_ANDROID_RELEASE`, and included in
+the exact-match set; an unreadable value (0) is a `MISMATCH`, never an assumption.
+
+**Section 22 — `REMOTE_COMPONENT_REACHED` now rests on an observation.** It was
+`PASS` whenever the caller passed the string `"network_stack"`. It now requires
+the observed uid **and** `/proc/self/cmdline` process name to agree with the
+profile, and reports `FAIL` with the observed identity otherwise.
+
+**`ko_audit.py` verdict label.** Auditing a module from another kernel family
+(e.g. `dirtyfrag-android17-6.18.ko`) printed
+`GENERIC_ANDROID15_6_6_MODULE = INCOMPATIBLE`, which reads as "evaluated and
+rejected" when the module was simply never a ZZIC candidate. The key is now
+`MODULE_VS_ZZIC_KERNEL` and reports `N/A` with the reason for other families.
+
+## Release / CI automation
+
+`.github/workflows/release.yml` (tag `v*` or manual dispatch) builds both signed
+APKs and publishes them as **GitHub Release assets only** — no workflow
+artifacts are uploaded. It runs the offline gates first, then signs, then
+verifies. Repository secrets:
+
+| Secret | Purpose |
+|---|---|
+| `KEYSTORE_BASE64` | `base64 -w0` of the keystore; decoded to `$RUNNER_TEMP`, never into the working tree |
+| `KEYSTORE_PASSWORD` | keystore password |
+| `KEY_ALIAS` | key alias |
+| `KEY_PASSWORD` | key password |
+
+Both `build.gradle.kts` files resolve signing from `KEYSTORE_FILE` /
+`KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD`, falling back to the
+`create-keystore.sh` development defaults so local `./build.sh` is unchanged.
+**Both APKs must be signed with the same key** — DFInstaller injects DFReroot's
+certificate into `packages.xml` — so the workflow compares the two certificate
+digests and fails the release if they differ.
+
+Release assets: `df_reroot_<version>.apk`, `df_installer_<version>.apk`,
+`build-provenance.txt` (toolchain, commit, payload hashes) and `SHA256SUMS.txt`.
+
+`.github/workflows/ci.yml` runs on every branch and PR: the host gate tests, the
+binding invariant, Python/shell syntax, the Gate G module audit, a Gate H
+round-trip on a synthetic `packages.xml`, and a full build + Gate E packaging
+audit signed with a throwaway key (those APKs are build checks, not releases).
+
+`build-splice.sh` now accepts `ANDROID_NDK`, `ANDROID_NDK_HOME` or
+`ANDROID_NDK_ROOT`, falling back to the newest `$ANDROID_HOME/ndk/*`; it
+previously required `ANDROID_NDK` specifically, which most CI setups do not set.
+
 ## Post-review hardening (Codex automated review of `9645c09`)
 
 Four review findings were verified and fixed:
@@ -283,13 +391,13 @@ Four review findings were verified and fixed:
 
 | Gate | Result | Evidence |
 |---|---|---|
-| A — Target identity | **PASS** | fail-closed classifier implemented; 24/24 host tests incl. exact ZZIC + all required negatives |
+| A — Target identity | **PASS** | fail-closed classifier implemented; 28/28 host tests incl. exact ZZIC + all required negatives |
 | B — Kernel/userspace identity | **BLOCKED** | validation code + pinned hashes implemented; runtime SHA-256/symlink/page-size checks need the ZZIC device |
 | C — Java/system-server compat | **BLOCKED** | `[DFR][AMS]` deterministic dumps implemented; needs on-device logcat to compare Android 17 shapes |
 | D — NetworkStack identity | **BLOCKED** (process facts already observed on HW) | `[DFR][PROCESS]` instrumentation implemented; runtime capture pending |
 | E — Native packaging | **PASS** | real `./build.sh`; `libexp.so` AArch64, all JNI symbols, hashes recorded (apk_audit) |
 | F — Userspace ELF audit | **BLOCKED** | tool implemented + host-verified; awaits pulled ZZIC ELFs |
-| G — Module ABI compatibility | **UNKNOWN / UNVERIFIED** (runtime-enforced) | ko_audit ran on the real generic `.ko`; empty `__versions`, verdict UNVERIFIED without ZZIC `Module.symvers`. Runtime now **refuses** to load it on ZZIC unless verified/overridden |
+| G — Module ABI compatibility | **UNKNOWN / UNVERIFIED** (runtime-enforced) | ko_audit ran on the real generic `.ko`; empty `__versions`, verdict UNVERIFIED without ZZIC `Module.symvers`. Runtime **refuses** to load it on ZZIC unless verified/overridden, and a `ko_zzic_verified=1` claim is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
 | H — Installer format compatibility | **BLOCKED** | `--diag-zzic` + offline tool implemented; offline round-trip verified on synthetic XML; needs device packages.xml |
 | I — Full hardware compatibility | **BLOCKED** | requires end-to-end on-device run; `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is independent, not proof |
 

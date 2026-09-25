@@ -3,6 +3,15 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+/* Same resolution as :app - see the comment there. Both APKs must share one key. */
+val dfrKeystore: File = System.getenv("KEYSTORE_FILE")
+    ?.takeIf { it.isNotBlank() }
+    ?.let { File(it) }
+    ?: rootProject.file("app/keystore.jks")
+val dfrStorePassword: String = System.getenv("KEYSTORE_PASSWORD") ?: "dfreroot"
+val dfrKeyAlias: String = System.getenv("KEY_ALIAS") ?: "dfreroot"
+val dfrKeyPassword: String = System.getenv("KEY_PASSWORD") ?: "dfreroot"
+
 android {
     namespace = "com.polygraphene.df.installer"
     compileSdk = 36
@@ -22,10 +31,10 @@ android {
         // Must use the same signing key as DFReroot: the key inserted into
         // packages.xml has to match the DFReroot APK signature.
         create("keystore") {
-            storeFile = rootProject.file("app/keystore.jks")
-            storePassword = "dfreroot"
-            keyAlias = "dfreroot"
-            keyPassword = "dfreroot"
+            storeFile = dfrKeystore
+            storePassword = dfrStorePassword
+            keyAlias = dfrKeyAlias
+            keyPassword = dfrKeyPassword
         }
     }
     buildTypes {

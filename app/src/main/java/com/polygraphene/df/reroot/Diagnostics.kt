@@ -101,8 +101,9 @@ object Diagnostics {
         val pid = Process.myPid()
         val uid = Process.myUid()
         val gid = readStatusId("Gid")
+        val procName = readProcName()
         emit(sb, "[DFR][PROCESS] pid=$pid uid=$uid (status uid=${readStatusId("Uid")}) gid=$gid")
-        emit(sb, "[DFR][PROCESS] process_name=${readProcName()}")
+        emit(sb, "[DFR][PROCESS] process_name=$procName")
         emit(sb, "[DFR][PROCESS] selinux_context=${readSelinux()}")
         emit(sb, "[DFR][PROCESS] abi=${supportedAbi()}")
         emit(sb, "[DFR][PROCESS] classloader=${javaClass.classLoader}")
@@ -112,8 +113,22 @@ object Diagnostics {
         // network_stack observation, kept separate from "reached" (see below).
         val isNet = uid == StageHop.NETWORK_STACK_UID
         emit(sb, "[DFR][PROCESS] NETWORKSTACK_PROCESS_FOUND=${if (isNet) "PASS" else "SKIP"} (uid=$uid)")
-        emit(sb, "[DFR][PROCESS] REMOTE_COMPONENT_REACHED=" +
-            if (where == "network_stack") "PASS" else "SKIP")
+        /*
+         * `where` is only the caller's claim about which boundary this is.
+         * REMOTE_COMPONENT_REACHED must rest on what the process actually
+         * reports about ITSELF, so the label alone never promotes it to PASS:
+         * the observed uid AND process name have to agree with the profile.
+         * A hop that lands somewhere unexpected therefore reads FAIL, with the
+         * observed identity next to it, instead of silently claiming success.
+         */
+        val reached = when {
+            where != "network_stack" -> "SKIP (not the remote boundary)"
+            isNet && procName == StageHop.NETWORK_STACK_PROCESS -> "PASS"
+            else -> "FAIL (observed uid=$uid process_name=$procName, " +
+                "expected uid=${StageHop.NETWORK_STACK_UID} " +
+                "process_name=${StageHop.NETWORK_STACK_PROCESS})"
+        }
+        emit(sb, "[DFR][PROCESS] REMOTE_COMPONENT_REACHED=$reached")
 
         val libexp = File(nld, "libexp.so")
         val discoverable = try { libexp.exists() } catch (_: Throwable) { false }

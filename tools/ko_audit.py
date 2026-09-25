@@ -187,6 +187,18 @@ def audit(path, symvers=None, kallsyms=None):
     if not (r["vermagic_base_ok"] and r["vermagic_page_ok"] and r["machine_ok"]):
         verdict = "INCOMPATIBLE"
 
+    # The verdict is about THIS module against the ZZIC kernel. A module built
+    # for another kernel family (e.g. the android17-6.18 image) is not a ZZIC
+    # candidate at all, so report N/A rather than INCOMPATIBLE: the latter would
+    # read as "this module was evaluated and rejected for its own kernel".
+    if not vermagic.startswith(EXPECTED_GENERIC_VERMAGIC_PREFIX):
+        verdict = ("N/A (vermagic base %s: built for another kernel family than "
+                   "the ZZIC target %s)"
+                   % (vermagic.split()[0] if vermagic else "<unknown>",
+                      EXPECTED_GENERIC_VERMAGIC_PREFIX))
+
+    r["MODULE_VS_ZZIC_KERNEL"] = verdict
+    # Historical key, kept so existing docs/scripts keep resolving.
     r["GENERIC_ANDROID15_6_6_MODULE"] = verdict
     return r
 
@@ -226,7 +238,7 @@ def human(r):
                   "SYMBOL_EXPORTED", "MODVERSION_MATCH"):
             L.append("        %-26s = %s" % (k, d[k]))
     L.append("")
-    L.append("GENERIC_ANDROID15_6_6_MODULE = %s" % r["GENERIC_ANDROID15_6_6_MODULE"])
+    L.append("MODULE_VS_ZZIC_KERNEL = %s" % r["MODULE_VS_ZZIC_KERNEL"])
     return "\n".join(L)
 
 
