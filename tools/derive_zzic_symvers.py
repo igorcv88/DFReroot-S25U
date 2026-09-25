@@ -60,7 +60,23 @@ DERIVED_MARKER = "DFR-DERIVED-SYMVERS v1"
 
 # The imports of the DirtyFrag helper. Every one needs a witness before the
 # derived table can be used to build it.
-DEFAULT_REQUIRED = ["sprint_symbol", "_printk", "memset", "__stack_chk_fail"]
+#
+# `module_layout` is in this list even though the helper's source never names
+# it. Under CONFIG_MODVERSIONS every module imports it, and it is the FIRST
+# version the kernel checks: check_modstruct_version() resolves "module_layout"
+# in vmlinux and compares its CRC to the module's `__versions` entry before any
+# other symbol is looked at. A table that covers the four code symbols and
+# carries some other kernel's module_layout CRC therefore fails the load
+# outright - and it fails inside the kernel, at insmod, which is precisely the
+# risk this gate exists to keep off the device. Omitting it would leave the
+# CRC that actually decides the load as the one CRC nobody derived.
+DEFAULT_REQUIRED = [
+    "sprint_symbol",
+    "_printk",
+    "memset",
+    "__stack_chk_fail",
+    "module_layout",
+]
 
 # `__versions` records a CRC and a name. It does NOT record which module exports
 # the symbol, nor whether the export is GPL-only, so neither can be observed

@@ -35,9 +35,16 @@ ZZIC_RELEASE = ZZIC.split()[0]
 OTHER = ("6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZI4-4k SMP preempt "
          "mod_unload modversions aarch64")
 
-REQUIRED = ["sprint_symbol", "_printk", "memset", "__stack_chk_fail"]
+# The four the helper imports, plus module_layout: the loader version-checks
+# that one before resolving any symbol, and the DDK the module is built in ships
+# a different CRC for it, so deriving the four and letting the DDK supply the
+# fifth would ship a module the target refuses at insmod. See DEFAULT_REQUIRED in
+# tools/derive_zzic_symvers.py.
+REQUIRED = ["sprint_symbol", "_printk", "memset", "__stack_chk_fail",
+            "module_layout"]
 TRUE_CRCS = [("sprint_symbol", 0x661601de), ("_printk", 0x92997ed8),
-             ("memset", 0xdcb764ad), ("__stack_chk_fail", 0xf0fdf6cb)]
+             ("memset", 0xdcb764ad), ("__stack_chk_fail", 0xf0fdf6cb),
+             ("module_layout", 0x81972209)]
 
 failures = []
 checks = [0]
@@ -66,12 +73,12 @@ def main():
     w1 = stock(td, "witness_a.ko", TRUE_CRCS)
     r = dz.derive([w1], REQUIRED, ZZIC_RELEASE)
     check(r["CONSENSUS"] == "COMPLETE" and not r["violations"],
-          "one witness carrying all four symbols derives COMPLETE (%s)"
+          "one witness carrying every required symbol derives COMPLETE (%s)"
           % r["violations"])
     check(all(r["symbols"][n]["crc"] == "0x%08x" % c for n, c in TRUE_CRCS),
           "every derived CRC equals the witness' own entry")
     check(r["singletons"] == sorted(REQUIRED),
-          "all four are reported as single-witness (got %s)" % r["singletons"])
+          "each is reported as single-witness (got %s)" % r["singletons"])
     check(r["witnesses"][0]["sha256"] and r["witnesses"][0]["vermagic"] == ZZIC,
           "the witness is bound to a digest and its vermagic")
 
@@ -81,7 +88,7 @@ def main():
     check(r["symbols"]["sprint_symbol"]["witness_count"] == 2
           and r["symbols"]["memset"]["witness_count"] == 1,
           "witness counts are per symbol, not per run")
-    check(r["singletons"] == ["__stack_chk_fail", "memset"],
+    check(r["singletons"] == ["__stack_chk_fail", "memset", "module_layout"],
           "only the genuinely single-witness symbols are flagged (got %s)"
           % r["singletons"])
 
@@ -107,9 +114,10 @@ def main():
           "with its only input rejected, every required symbol is missing")
 
     # --- a required symbol with no witness ----------------------------------
-    r = dz.derive([w2], REQUIRED, ZZIC_RELEASE)   # only two of the four
+    r = dz.derive([w2], REQUIRED, ZZIC_RELEASE)   # only two of the five
     check(r["CONSENSUS"] == "INCOMPLETE"
-          and sorted(r["missing_required"]) == ["__stack_chk_fail", "memset"],
+          and sorted(r["missing_required"]) == ["__stack_chk_fail", "memset",
+                                                "module_layout"],
           "a required symbol with no witness is a refusal (got %s)"
           % r["missing_required"])
 
@@ -328,7 +336,7 @@ def main():
               % a.get("provenance_violations"))
         crcs, _ = ko_audit.load_symvers(sv)
         check(crcs == {n: c for n, c in TRUE_CRCS},
-              "the committed table holds exactly the four ZZIC CRCs (got %s)"
+              "the committed table holds exactly the five ZZIC CRCs (got %s)"
               % {k: hex(v) for k, v in crcs.items()})
         with open(pv) as f:
             committed = json.load(f)
@@ -356,6 +364,7 @@ def main():
         ("0x22222222", "_printk", "", "vmlinux", "EXPORT_SYMBOL"),
         ("0x33333333", "memset", "", "vmlinux", "EXPORT_SYMBOL"),
         ("0x44444444", "sprint_symbol", "", "vmlinux", "EXPORT_SYMBOL_GPL"),
+        ("0x4e276f37", "module_layout", "", "vmlinux", "EXPORT_SYMBOL"),
         ("0x55555555", "kmalloc", "", "vmlinux", "EXPORT_SYMBOL"),
     ])
     lines, found = psv.patch(five, {n: c for n, c in TRUE_CRCS})
@@ -366,7 +375,10 @@ def main():
     check(lines[0].split("\t")[0] == "0xf0fdf6cb",
           "the CRC field carries the derived value (got %s)"
           % lines[0].split("\t")[0])
-    check(lines[4].split("\t")[0] == "0x55555555",
+    check(lines[4].split("\t")[0] == "0x81972209",
+          "the DDK module_layout CRC is replaced by the target one (got %s)"
+          % lines[4].split("\t")[0])
+    check(lines[5].split("\t")[0] == "0x55555555",
           "an unrelated symbol is left untouched")
 
     four = base_table("four.symvers", [
@@ -374,6 +386,7 @@ def main():
         ("0x2", "_printk", "vmlinux", "EXPORT_SYMBOL"),
         ("0x3", "memset", "vmlinux", "EXPORT_SYMBOL"),
         ("0x4", "sprint_symbol", "vmlinux", "EXPORT_SYMBOL_GPL"),
+        ("0x5", "module_layout", "vmlinux", "EXPORT_SYMBOL"),
     ])
     lines, found = psv.patch(four, {n: c for n, c in TRUE_CRCS})
     check(all(len(l.split("\t")) == 4 for l in lines if l.strip()),

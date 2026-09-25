@@ -11,7 +11,7 @@ carries a `__versions` table of the CRCs *its* build recorded. That is a witness
 
 | File | What it is |
 |---|---|
-| `ZZIC-derived-minimal.symvers` | the four CRCs the DirtyFrag helper needs, read out of witness bytes |
+| `ZZIC-derived-minimal.symvers` | the five CRCs the build needs, read out of witness bytes |
 | `ZZIC-modversion-provenance.json` | every witness bound to `device_path` + `SHA-256` + `vermagic`, per symbol |
 
 ```text
@@ -19,7 +19,16 @@ __stack_chk_fail   0xf0fdf6cb
 _printk            0x92997ed8
 memset             0xdcb764ad
 sprint_symbol      0x661601de
+module_layout      0x81972209
 ```
+
+The first four are what the helper calls. `module_layout` is the one the helper
+never mentions and the kernel checks **first**: `check_modstruct_version()`
+version-checks it before resolving any symbol, and the DDK that compiles this
+module ships a different CRC for it (`0x4e276f37`). Derive four and let the
+toolchain supply the fifth and the result passes every offline check, then is
+refused by the target at `insmod`. See AGENTS.md, "`module_layout` is required,
+and it is not an import".
 
 Regenerate, never hand-edit:
 
@@ -47,11 +56,11 @@ redistributing it here buys nothing the digest above does not already provide: t
 provenance binds each CRC to those exact bytes, and anyone who pulls the file from
 the same firmware can re-derive and get the same table or a hard failure.
 
-## All four rest on one witness, and that is stated rather than averaged
+## All five rest on one witness, and that is stated rather than averaged
 
 Earlier analysis reported witness counts of 374 / 319 / 138 / 1 across many stock
 modules. Only `qca_cld3_kiwi_v2.ko` was supplied here, so the committed
-provenance records **one witness for each of the four** — `witness_count: 1`
+provenance records **one witness for each of them** — `witness_count: 1`
 throughout. That is the honest number for this evidence set, and
 `tools/derive_zzic_symvers.py` prints it as `<- single witness` rather than
 letting a reader assume redundancy that is not in the record.
@@ -77,8 +86,9 @@ cfg80211             1142784  3 qca_cld3_kiwi_v2,wonder,mac80211
 …
 ```
 
-So all four CRCs rest on one witness **whose 588 entries the target kernel
-accepted at load time**. That is stronger than 374 unratified agreements: the
+So all five CRCs rest on one witness **whose 588 entries the target kernel
+accepted at load time** — `module_layout` among them, which means the kernel
+has already compared that exact value and agreed. That is stronger than 374 unratified agreements: the
 kernel is the authority these CRCs are supposed to match, and it already voted.
 
 The evidence is still one module. If a future capture adds witnesses, any that

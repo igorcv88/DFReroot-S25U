@@ -156,23 +156,84 @@ kernel's `Module.symvers`, is the **only** result that justifies setting them.
 Matching the GKI base version and the page size is **not sufficient** when the
 kernel has `CONFIG_MODVERSIONS=y`, and must never be treated as if it were.
 
-Nor is agreement among the `__versions` entries that happen to exist. Under
-`CONFIG_MODVERSIONS` the kernel refuses a load when the table exists but names no
-version for a symbol it is resolving, and `CONFIG_MODULE_FORCE_LOAD` is not set
-on this kernel — so a table covering three of four imports is unloadable while an
-entries-only diff reads `COMPATIBLE`. `ko_audit.py` therefore requires
+Nor is agreement among the `__versions` entries that happen to exist. This file
+used to justify that with "the kernel refuses a load when the table exists but
+names no version for the symbol it is resolving". **That is wrong**, and it was
+corrected by reading `kernel/module/version.c` of the target's own kernel source
+rather than trusting the claim. `check_version()` has three outcomes:
+
+| what the table says about a symbol being resolved | what the kernel does |
+|---|---|
+| no `__versions` section at all | `try_to_force_load()` — refused, since `CONFIG_MODULE_FORCE_LOAD` is not set |
+| an entry whose CRC disagrees | refused: `disagrees about version of symbol` |
+| **no entry for that symbol** | `pr_warn_once("no symbol version for %s")` and **the load proceeds** |
+
+The third row is why coverage is still required, and it is the *worse* of the two
+failure shapes for this repository. A hole does not stop the module; it stops the
+**checking**. The module loads with nothing verified about that symbol, which is
+exactly the silent-ABI-mismatch-then-oops that this gate exists to keep off the
+device. So a hole is refused because nothing proved it right — not because the
+kernel would have caught it. It would not have.
+
+`ko_audit.py` therefore requires
 `imports_requiring_modversion - __versions entries == {}`, reports a hole as a
 hole (never as a CRC mismatch), reports an import absent from `Module.symvers`
 separately again, and exempts a weak undefined symbol only when the supplied `Module.symvers`
-does not export it. That exemption is narrower than `STB_WEAK`: `resolve_symbol()`
-runs `check_version()` whenever it *finds* the symbol and returns
-`ERR_PTR(-EINVAL)` on failure, and an error pointer is not NULL, so
-`simplify_symbols()`' `!ksym && STB_WEAK` escape hatch never applies to an
-exported symbol. An exported weak import with no entry fails the load exactly
-like a strong one. With no `Module.symvers` the question is undecidable, so it is
+does not export it. That exemption is narrower than `STB_WEAK`, and its
+conclusion survives the correction above unchanged: a weak symbol the kernel
+**does** export is resolved, so a missing entry leaves a real exported symbol
+version-unchecked — unverified, therefore refused — while one the kernel does not
+export at all stays unresolved at zero and has no version to check. In
+`simplify_symbols()` the `!ksym && STB_WEAK` escape hatch is reached only when
+the lookup found nothing, so it never covers an exported symbol.
+With no `Module.symvers` the question is undecidable, so it is
 reported `UNDECIDED` and refused under `--require-modversion-coverage` - never
 assumed exempt. The acceptance run for a newly built module must pass
 `--require-modversion-coverage`.
+
+### `module_layout` is required, and it is not an import
+
+The CRC the loader checks **first** belongs to a symbol the module never
+references. `check_modstruct_version()` looks `module_layout` up in vmlinux and
+version-checks it before any symbol is resolved; its CRC summarises `struct
+module`, `struct modversion_info`, `struct kernel_param`, `struct kernel_symbol`
+and `struct tracepoint` — the layouts the loader itself walks. It appears in the
+module only as a *name inside* `__versions`, never as an undefined symbol, so a
+coverage rule driven by imports cannot see it.
+
+This is a live trap, not a theoretical one. The DDK that builds this module ships
+its **own** `module_layout` CRC, different from the target's, and modpost fills
+the entry from whatever `Module.symvers` it was given. Derive the four symbols the
+helper calls, leave the fifth to the DDK, and the result is a module that passes
+every offline check and is refused by the target kernel at `insmod` — the
+disagreeing row above, in the kernel, on the device.
+
+So `module_layout` is in `DEFAULT_REQUIRED` of `tools/derive_zzic_symvers.py`
+(its CRC comes out of witness bytes like every other), in the derived table, and
+in `ko_audit.py`'s required set via `KERNEL_CHECKED_WITHOUT_IMPORT`. It is
+deliberately **not** reported as an unexported import when a table cannot speak
+for it: the module does not link against it, so that case is missing evidence
+(`UNVERIFIED`), not an `Unknown symbol` failure. Adding a future symbol to that
+set is the same exercise: the loader checks it, nobody imports it, so nothing but
+an explicit rule will require it.
+
+### The toolchain may have been taught to skip this
+
+`ghcr.io/ylarod/ddk-min` ships a `modpost` with two lines commented out:
+`s->module = exp->module;` in `check_exports()`, and the `check_exports(mod)`
+call itself. The effect is that **no** import is ever matched to an export, so
+`add_versions()` emits an empty `____versions[]` — and, because the call that
+would have complained is the one removed, it does so with no warning, no
+diagnostic and a successful exit. A module built that way loads (`versindex`
+is non-zero, the table is merely empty, so every check takes the warn-once path)
+while proving nothing at all.
+
+That is convenient for a DDK whose modules must load on many kernels, and it is
+the exact opposite of what this repository needs. The build workflow restores both
+lines, rebuilds `modpost` from the restored source, and fails if the restore did
+not change the binary. **Do not treat an empty `__versions` as a flag problem.**
+It was a patched toolchain, found by reading the generated `dirtyfrag.mod.c` and
+the modpost source — not by trying compiler options.
 
 ### What may supply the target's CRCs
 

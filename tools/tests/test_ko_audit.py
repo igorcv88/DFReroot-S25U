@@ -144,17 +144,25 @@ FOUR_IMPORTS = [("sprint_symbol", STB_GLOBAL, STT_FUNC),
 KERNEL_CRCS = [("sprint_symbol", 0x11111111), ("_printk", 0x22222222),
                ("memset", 0x33333333), ("__stack_chk_fail", 0x44444444)]
 
+# module_layout is not an import - the module never references it - but
+# check_modstruct_version() version-checks it before any symbol is resolved, so
+# a real modversions module always carries an entry for it and the audit
+# requires one. Every case below therefore carries it, exactly as a module built
+# by modpost would; the cases that drop or corrupt it are the negative ones.
+LAYOUT_CRC = ("module_layout", 0x5A5A5A5A)
+WITH_LAYOUT = KERNEL_CRCS + [LAYOUT_CRC]
+
 
 def main():
     td = tempfile.mkdtemp(prefix="ko_audit_test.")
-    symvers = write_symvers(os.path.join(td, "Module.symvers"), KERNEL_CRCS)
+    symvers = write_symvers(os.path.join(td, "Module.symvers"), WITH_LAYOUT)
 
     def verdict(ko, **kw):
         return ko_audit.audit(ko, **kw)["MODULE_VS_ZZIC_KERNEL"]
 
     # --- the sanity baseline: everything covered and agreeing --------------
     ko = build_ko(os.path.join(td, "full.ko"), imports=FOUR_IMPORTS,
-                  versions=KERNEL_CRCS)
+                  versions=WITH_LAYOUT)
     r = ko_audit.audit(ko, symvers=symvers)
     check(r["MODULE_VS_ZZIC_KERNEL"] == "COMPATIBLE",
           "complete coverage + matching CRCs -> COMPATIBLE (got %s)"
@@ -170,7 +178,7 @@ def main():
     # Before the coverage rule this read COMPATIBLE: the diff only looked at the
     # entries that happened to exist.
     ko = build_ko(os.path.join(td, "partial.ko"), imports=FOUR_IMPORTS,
-                  versions=KERNEL_CRCS[:3])
+                  versions=KERNEL_CRCS[:3] + [LAYOUT_CRC])
     r = ko_audit.audit(ko, symvers=symvers)
     check(r["MODULE_VS_ZZIC_KERNEL"] == "INCOMPATIBLE",
           "partial __versions with all present entries agreeing -> INCOMPATIBLE "
@@ -207,7 +215,7 @@ def main():
           "--require-modversion-coverage makes the hole fatal without symvers")
 
     # --- a CRC that disagrees ----------------------------------------------
-    bad = list(KERNEL_CRCS)
+    bad = list(WITH_LAYOUT)
     bad[1] = ("_printk", 0xDEADBEEF)
     ko = build_ko(os.path.join(td, "badcrc.ko"), imports=FOUR_IMPORTS, versions=bad)
     r = ko_audit.audit(ko, symvers=symvers)
@@ -223,7 +231,7 @@ def main():
     # check, so it must not be folded into the CRC diff.
     imports = FOUR_IMPORTS + [("dfr_not_exported", STB_GLOBAL, STT_FUNC)]
     ko = build_ko(os.path.join(td, "unexported.ko"), imports=imports,
-                  versions=KERNEL_CRCS)
+                  versions=WITH_LAYOUT)
     r = ko_audit.audit(ko, symvers=symvers)
     check(r["MODULE_VS_ZZIC_KERNEL"] == "INCOMPATIBLE",
           "an import absent from Module.symvers -> INCOMPATIBLE (got %s)"
@@ -239,7 +247,7 @@ def main():
     # failing the load, so counting it as a hole would invent a refusal.
     imports = FOUR_IMPORTS + [("dfr_weak_hook", STB_WEAK, STT_NOTYPE)]
     ko = build_ko(os.path.join(td, "weak.ko"), imports=imports,
-                  versions=KERNEL_CRCS)
+                  versions=WITH_LAYOUT)
     r = ko_audit.audit(ko, symvers=symvers)
     check(r["MODULE_VS_ZZIC_KERNEL"] == "COMPATIBLE",
           "a weak import with no entry stays COMPATIBLE (got %s)"
@@ -257,10 +265,10 @@ def main():
     # the load exactly like a strong one. Exempting every weak import was
     # fail-open.
     imports = FOUR_IMPORTS + [("dfr_weak_exported", STB_WEAK, STT_FUNC)]
-    exported_weak = KERNEL_CRCS + [("dfr_weak_exported", 0x66666666)]
+    exported_weak = WITH_LAYOUT + [("dfr_weak_exported", 0x66666666)]
     sv_weak = write_symvers(os.path.join(td, "WeakExported.symvers"), exported_weak)
     ko = build_ko(os.path.join(td, "weak_exported.ko"), imports=imports,
-                  versions=KERNEL_CRCS)          # no entry for the weak import
+                  versions=WITH_LAYOUT)          # no entry for the weak import
     r = ko_audit.audit(ko, symvers=sv_weak)
     check(r["MODULE_VS_ZZIC_KERNEL"] == "INCOMPATIBLE",
           "an EXPORTED weak import with no entry -> INCOMPATIBLE (got %s)"
@@ -282,7 +290,7 @@ def main():
 
     # An UNEXPORTED weak import stays exempt: the loader leaves it at zero.
     ko = build_ko(os.path.join(td, "weak_unexported.ko"), imports=imports,
-                  versions=KERNEL_CRCS)
+                  versions=WITH_LAYOUT)
     r = ko_audit.audit(ko, symvers=symvers)      # symvers WITHOUT the weak sym
     check(r["MODULE_VS_ZZIC_KERNEL"] == "COMPATIBLE",
           "an UNEXPORTED weak import with no entry stays COMPATIBLE (got %s)"
@@ -307,8 +315,61 @@ def main():
     check(verdict(ko, require_coverage=True) == "INCOMPATIBLE",
           "--require-modversion-coverage refuses an undecidable weak import")
 
+    # --- module_layout: checked by the loader, imported by nobody -----------
+    # The CRC that decides the load first, and the one an import-driven coverage
+    # rule cannot see: it is not an undefined symbol of the .ko, only a name
+    # inside __versions. The DDK that builds this module ships a DIFFERENT
+    # module_layout CRC from the target kernel, so this is the live trap, not a
+    # theoretical one.
+    ko = build_ko(os.path.join(td, "layout_missing.ko"), imports=FOUR_IMPORTS,
+                  versions=KERNEL_CRCS)          # all four imports, no layout
+    r = ko_audit.audit(ko, symvers=symvers)
+    check(r["MODULE_VS_ZZIC_KERNEL"] == "INCOMPATIBLE",
+          "a table covering every import but not module_layout -> INCOMPATIBLE "
+          "(got %s)" % r["MODULE_VS_ZZIC_KERNEL"])
+    check(r["modversion_missing_entries"] == ["module_layout"],
+          "module_layout is named as the hole (got %s)"
+          % r["modversion_missing_entries"])
+    check(r["modversion_mismatches"] == [],
+          "a missing module_layout entry is a hole, not a CRC mismatch")
+    check(r["imports_kernel_checked"] == ["module_layout"],
+          "module_layout is recorded as loader-checked rather than imported")
+    check("module_layout" not in r["imported_symbols"],
+          "module_layout is NOT claimed to be an import (got %s)"
+          % r["imported_symbols"])
+
+    # The DDK CRC left in place: a hard mismatch, which the kernel would also
+    # catch ("disagrees about version of symbol module_layout").
+    wrong_layout = KERNEL_CRCS + [("module_layout", 0xDEADC0DE)]
+    ko = build_ko(os.path.join(td, "layout_wrong.ko"), imports=FOUR_IMPORTS,
+                  versions=wrong_layout)
+    r = ko_audit.audit(ko, symvers=symvers)
+    check(r["MODULE_VS_ZZIC_KERNEL"] == "INCOMPATIBLE",
+          "another kernel's module_layout CRC -> INCOMPATIBLE (got %s)"
+          % r["MODULE_VS_ZZIC_KERNEL"])
+    check(r["modversion_mismatches"] == ["module_layout"],
+          "the disagreeing module_layout is named (got %s)"
+          % r["modversion_mismatches"])
+
+    # A symvers that cannot speak for module_layout is missing evidence, not a
+    # defect in the module, and above all not an "Unknown symbol" failure: the
+    # module never links against it. AGENTS.md 3.7 - separate facts, separate
+    # values.
+    sv_nolayout = write_symvers(os.path.join(td, "NoLayout.symvers"), KERNEL_CRCS)
+    ko = build_ko(os.path.join(td, "layout_unknown.ko"), imports=FOUR_IMPORTS,
+                  versions=WITH_LAYOUT)
+    r = ko_audit.audit(ko, symvers=sv_nolayout)
+    check(r["MODULE_VS_ZZIC_KERNEL"] == "UNVERIFIED",
+          "a symvers with no module_layout row -> UNVERIFIED (got %s)"
+          % r["MODULE_VS_ZZIC_KERNEL"])
+    check(r["modversion_missing_in_symvers"] == ["module_layout"],
+          "the unknown row is named (got %s)"
+          % r["modversion_missing_in_symvers"])
+    check(r["modversion_unresolvable_imports"] == [],
+          "module_layout is never reported as an unexported IMPORT")
+
     # --- a table entry the supplied symvers does not know -------------------
-    stale = KERNEL_CRCS + [("dfr_stale_entry", 0x55555555)]
+    stale = WITH_LAYOUT + [("dfr_stale_entry", 0x55555555)]
     ko = build_ko(os.path.join(td, "stale.ko"), imports=FOUR_IMPORTS,
                   versions=stale)
     r = ko_audit.audit(ko, symvers=symvers)
@@ -329,23 +390,27 @@ def main():
     # It still cannot load on a MODVERSIONS kernel; --require-… must say so.
     check(verdict(ko, require_coverage=True) == "INCOMPATIBLE",
           "a non-modversions build is still refused when coverage is required")
+    check(r["imports_kernel_checked"] == [],
+          "with no __versions section at all the loader takes the force-load "
+          "path, so module_layout is not reported as a second hole (got %s)"
+          % r["imports_kernel_checked"])
 
     # --- identity elements unchanged by this work ---------------------------
     ko = build_ko(os.path.join(td, "x86.ko"), machine=0x3E, imports=FOUR_IMPORTS,
-                  versions=KERNEL_CRCS)
+                  versions=WITH_LAYOUT)
     check(verdict(ko, symvers=symvers) == "INCOMPATIBLE",
           "the wrong machine is still INCOMPATIBLE")
 
     ko = build_ko(os.path.join(td, "family.ko"),
                   vermagic="6.18.0-android17-1-4k SMP preempt mod_unload "
                            "modversions aarch64",
-                  imports=FOUR_IMPORTS, versions=KERNEL_CRCS)
+                  imports=FOUR_IMPORTS, versions=WITH_LAYOUT)
     check(verdict(ko, symvers=symvers).startswith("N/A"),
           "another kernel family is still N/A, not INCOMPATIBLE")
 
     # --- the exit status carries the verdict --------------------------------
     ko = build_ko(os.path.join(td, "exit_partial.ko"), imports=FOUR_IMPORTS,
-                  versions=KERNEL_CRCS[:3])
+                  versions=KERNEL_CRCS[:3] + [LAYOUT_CRC])
     rc = subprocess.call([sys.executable, os.path.join(TOOLS, "ko_audit.py"),
                           ko, "--symvers", symvers],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -365,13 +430,13 @@ def main():
     # against that same DDK symvers reads COMPATIBLE - true about the wrong
     # kernel. The digest is the only record of which table was used.
     ko = build_ko(os.path.join(td, "record.ko"), imports=FOUR_IMPORTS,
-                  versions=KERNEL_CRCS)
+                  versions=WITH_LAYOUT)
     r = ko_audit.audit(ko, symvers=symvers)
     import hashlib
     want = hashlib.sha256(open(symvers, "rb").read()).hexdigest()
     check(r["symvers_sha256"] == want,
           "a COMPATIBLE verdict records the symvers digest it rests on")
-    check(r["symvers_path"] == symvers and r["symvers_symbols"] == len(KERNEL_CRCS),
+    check(r["symvers_path"] == symvers and r["symvers_symbols"] == len(WITH_LAYOUT),
           "the symvers path and symbol count are recorded")
     r = ko_audit.audit(ko)
     check(r["symvers_sha256"] is None and r["symvers_symbols"] == 0,

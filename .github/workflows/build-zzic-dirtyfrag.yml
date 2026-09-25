@@ -46,11 +46,17 @@ jobs:
 
           path = Path("evidence/zzic/gate-g/ZZIC-derived-minimal.symvers")
 
+          # module_layout is here for the same reason it is in the derived
+          # table: the loader version-checks it first, the module imports it
+          # from nobody, and the DDK ships a different CRC for it. Leaving it
+          # out of this consistency gate would let the committed evidence go
+          # back to four symbols without anything noticing.
           required = {
               "__stack_chk_fail": 0xf0fdf6cb,
               "_printk":          0x92997ed8,
               "memset":           0xdcb764ad,
               "sprint_symbol":    0x661601de,
+              "module_layout":    0x81972209,
           }
 
           got = {}
@@ -214,6 +220,7 @@ jobs:
               "_printk":          0x92997ed8,
               "memset":           0xdcb764ad,
               "sprint_symbol":    0x661601de,
+              "module_layout":    0x81972209,
           }
 
           got = {}
@@ -267,6 +274,111 @@ jobs:
                 /opt/ddk/src/android15-6.6/scripts/Makefile.modpost \
                 /opt/ddk/src/android15-6.6/scripts/mod 2>/dev/null \
                 | head -100 || true
+
+              echo
+              echo "=== MODPOST INTEGRITY ==="
+
+              #
+              # The reason the earlier runs produced an EMPTY __versions with no
+              # warning at all: this DDK image ships a PATCHED modpost. Two lines
+              # are commented out in scripts/mod/modpost.c -
+              #
+              #     //  s->module = exp->module;   in check_exports()
+              #     //  check_exports(mod);        its only call site
+              #
+              # so no import is ever matched to an export. add_versions() then
+              # skips every symbol on its `if (!s->module) continue;` and writes
+              # an empty table, and the function that would have complained is
+              # the one that was removed - hence a silent, successful build.
+              #
+              # For a DDK whose modules must load on many kernels that is a
+              # feature. Here it is the whole gate: an empty table still LOADS
+              # (check_version takes the warn-once path) while proving nothing
+              # about the kernel it was built for. Restore both lines and rebuild
+              # modpost from the restored source.
+              #
+              MODPOST_SRC=/opt/ddk/src/android15-6.6/scripts/mod/modpost.c
+
+              cp "$MODPOST_SRC" "$MODPOST_SRC.ddk.bak"
+
+              sed -i \
+                -e "s|^//\([[:space:]]*\)\(s->module = exp->module;\)|\1\2|" \
+                -e "s|^//\([[:space:]]*\)\(check_exports(mod);\)|\1\2|" \
+                "$MODPOST_SRC"
+
+              echo "restored lines:"
+              grep -n \
+                -E "^[[:space:]]+(s->module = exp->module|check_exports\(mod\));" \
+                "$MODPOST_SRC"
+
+              #
+              # Fail closed on the commented forms still being there, so a future
+              # image that comments them differently is a refusal rather than
+              # another silent empty table.
+              #
+              if grep -q \
+                   -E "^//[[:space:]]*(s->module = exp->module|check_exports\(mod\));" \
+                   "$MODPOST_SRC"; then
+                echo "::error::modpost.c still carries a commented-out export"
+                echo "::error::resolution line - the restore pattern no longer"
+                echo "::error::matches this image. Refusing to build."
+                exit 1
+              fi
+
+              test "$(grep -c \
+                -E "^[[:space:]]+s->module = exp->module;" "$MODPOST_SRC")" = 1
+              test "$(grep -c \
+                -E "^[[:space:]]+check_exports\(mod\);" "$MODPOST_SRC")" = 1
+
+              #
+              # Any OTHER line commented out at column 0 in this file is the same
+              # class of edit and this build has no way to know what it disabled.
+              # Name it and refuse.
+              #
+              if grep -n "^//" "$MODPOST_SRC"; then
+                echo "::error::modpost.c has further column-0 commented-out"
+                echo "::error::lines, printed above. This DDK image disables"
+                echo "::error::something else in modpost; audit it before"
+                echo "::error::trusting a __versions table it produces."
+                exit 1
+              fi
+
+              #
+              # Rebuild with the recorded commands of the image itself rather than a
+              # second copy of the flags, which would drift the moment the image
+              # changes how it builds its host tools.
+              #
+              cd "$KDIR"
+
+              test -s scripts/mod/.modpost.o.cmd
+              test -s scripts/mod/.modpost.cmd
+
+              cp scripts/mod/modpost scripts/mod/modpost.ddk.bak
+
+              eval "$(sed -n \
+                "s|^savedcmd_scripts/mod/modpost\.o := ||p" \
+                scripts/mod/.modpost.o.cmd)"
+
+              eval "$(sed -n \
+                "s|^savedcmd_scripts/mod/modpost := ||p" \
+                scripts/mod/.modpost.cmd)"
+
+              #
+              # The source changed, so the binary must too. Identical here means
+              # the rebuild silently did not happen and the next step would be
+              # auditing a table the old modpost wrote.
+              #
+              if cmp -s scripts/mod/modpost scripts/mod/modpost.ddk.bak; then
+                echo "::error::rebuilt modpost is byte-identical to the one the"
+                echo "::error::image shipped, although its source changed. The"
+                echo "::error::rebuild did not take effect."
+                exit 1
+              fi
+
+              echo "modpost rebuilt from restored source:"
+              sha256sum \
+                scripts/mod/modpost \
+                scripts/mod/modpost.ddk.bak
 
               #
               # Clean only the external DirtyFrag module tree.
@@ -374,14 +486,20 @@ jobs:
               echo "__versions size = $VERS_SIZE bytes (-1 = section absent)"
 
               if [ "$VERS_SIZE" -le 0 ]; then
-                echo "::error::modpost produced an EMPTY __versions table. The"
-                echo "::error::module cannot load on a CONFIG_MODVERSIONS kernel:"
-                echo "::error::check_version() refuses when the table exists but"
-                echo "::error::names no version for a symbol it is resolving, and"
-                echo "::error::CONFIG_MODULE_FORCE_LOAD is not set on ZZIC."
-                echo "::error::The modpost command line is above under V=1, and"
-                echo "::error::the generated dirtyfrag.mod.c array is printed"
-                echo "::error::just above - read those two before changing flags."
+                echo "::error::modpost produced an EMPTY __versions table."
+                echo "::error::Read kernel/module/version.c before concluding"
+                echo "::error::this is unloadable: it is not. versindex is"
+                echo "::error::non-zero, the table is merely empty, so every"
+                echo "::error::check_version() call takes the warn-once path and"
+                echo "::error::the module LOADS with nothing verified about any"
+                echo "::error::symbol. That is worse than a refusal, and it is"
+                echo "::error::why this build refuses instead."
+                echo "::error::The MODPOST INTEGRITY step above restores the two"
+                echo "::error::lines this DDK comments out of check_exports and"
+                echo "::error::rebuilds modpost; if the table is still empty,"
+                echo "::error::read the V=1 modpost command line and the"
+                echo "::error::generated dirtyfrag.mod.c array printed just"
+                echo "::error::above. Do not reach for compiler flags."
                 exit 1
               fi
 
