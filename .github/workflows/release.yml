@@ -56,12 +56,32 @@ jobs:
           [ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"
           test -n "$TAG" || { echo "::error::no tag to publish"; exit 1; }
 
-          REF_JSON=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>/dev/null || true)
-          if [ -n "$REF_JSON" ]; then
-            TAG_SHA=$(printf '%s' "$REF_JSON" | jq -r '.object.sha')
+          # Emptiness of stdout cannot decide whether the tag exists: `gh api`
+          # writes its error BODY to stdout, so a 404 left REF_JSON holding
+          # {"message":"Not Found",...}, took the tag-exists branch, and jq read
+          # .object.sha as the string "null" - which never equals GITHUB_SHA. The
+          # effect was that publishing a NEW tag was impossible; only re-running
+          # from an already-existing tag worked.
+          #
+          # Use the exit status instead, and distinguish "absent" from "could not
+          # tell". A transport or auth failure must not be read as "absent": that
+          # would create a tag over one that already exists, which is exactly what
+          # this check was written to prevent.
+          set +e
+          REF_JSON=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>/dev/null)
+          REF_RC=$?
+          set -e
+
+          if [ "$REF_RC" -eq 0 ]; then
+            TAG_SHA=$(printf '%s' "$REF_JSON" | jq -r '.object.sha // empty')
             # An annotated tag points at a tag object; dereference to the commit.
-            if [ "$(printf '%s' "$REF_JSON" | jq -r '.object.type')" = "tag" ]; then
+            if [ "$(printf '%s' "$REF_JSON" | jq -r '.object.type // empty')" = "tag" ]; then
               TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_SHA" --jq '.object.sha')
+            fi
+            if [ -z "$TAG_SHA" ]; then
+              echo "::error::$TAG resolved, but no commit sha could be read from it."
+              printf '%s\n' "$REF_JSON"
+              exit 1
             fi
             if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
               echo "::error::tag $TAG points at $TAG_SHA but this run built $GITHUB_SHA."
@@ -70,9 +90,15 @@ jobs:
             fi
             echo "tag $TAG already exists and matches this commit; the release will be updated"
             echo "TAG_EXISTS=1" >> "$GITHUB_ENV"
-          else
+          elif printf '%s' "$REF_JSON" | jq -e '.status == "404" or .message == "Not Found"' >/dev/null 2>&1; then
             echo "tag $TAG does not exist yet; it will be created at $GITHUB_SHA"
             echo "TAG_EXISTS=0" >> "$GITHUB_ENV"
+          else
+            echo "::error::cannot determine whether tag $TAG exists (gh api rc=$REF_RC)."
+            echo "::error::Refusing rather than guessing: creating a tag that already"
+            echo "::error::exists elsewhere would attach these artifacts to another commit."
+            printf '%s\n' "$REF_JSON"
+            exit 1
           fi
           echo "VER=$VER" >> "$GITHUB_ENV"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
