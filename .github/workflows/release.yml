@@ -156,10 +156,26 @@ jobs:
 
       - name: Gate G - bundled kernel module ABI audit
         run: |
+          set -euo pipefail
+
+          ZZIC_KO="app/src/main/jni/dirtyfrag-android15-6.6-S938BXXUCZZIC.ko"
+
+          test -s "$ZZIC_KO"
+
+          # Generic family modules keep their normal structural audit. The exact
+          # ZZIC image is deliberately excluded here and audited below against
+          # the provenance-bound target CRC table with mandatory full coverage.
           for ko in app/src/main/jni/dirtyfrag-android*.ko; do
+            [ "$ko" = "$ZZIC_KO" ] && continue
             echo "### $ko"
             python3 tools/ko_audit.py "$ko"
           done
+
+          echo "### $ZZIC_KO (strict ZZIC acceptance)"
+          python3 tools/ko_audit.py "$ZZIC_KO" \
+            --symvers evidence/zzic/gate-g/ZZIC-derived-minimal.symvers \
+            --symvers-provenance evidence/zzic/gate-g/ZZIC-modversion-provenance.json \
+            --require-modversion-coverage
 
       - name: Decode signing keystore
         env:

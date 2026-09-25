@@ -10,9 +10,11 @@ stale, so trust it least and re-derive from the audits when in doubt.
   evidence record. If this file and that one disagree about what is *proven*,
   that one wins.
 
-**State is POST-PHYSICAL-TEST.** It reflects the first hardware execution of the
-chain — `v2.0.2-zzic` (versionCode 5) on SM-S938B / `S938BXXUCZZIC` — and the
-fixes that run produced, which ship as `2.0.3-zzic` (versionCode 6, PR #8).
+**State is POST-G1-BUILD / PRE-SECOND-PHYSICAL-TEST.** It reflects the first
+hardware execution of the chain (`v2.0.2-zzic`) plus the exact ZZIC helper and
+ksud integration that follow it. The next signed build is `2.0.4-zzic`
+(versionCode 7): G1 is closed offline, while G2/G4 and the downstream chain still
+need one same-boot hardware run.
 
 Three things this file used to say are no longer true and must not be
 reintroduced: the `scheduleReceiver` overload shape is **not** unknown,
@@ -66,23 +68,28 @@ substitute for reading it:
 
 ## Current state
 
-The chain was demonstrated on hardware up to Gate G. It now **refuses by design**
-at exactly one boundary:
+The old Gate-G refusal is gone for the exact ZZIC target. The bundled
+`dirtyfrag-android15-6.6-S938BXXUCZZIC.ko` is selected only after exact target
+classification, is re-hashed before the first write, and is bound in the profile
+to SHA-256
+`b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017`.
+Its strict audit is `MODVERSION_COVERAGE = COMPLETE (5/5)` and
+`MODULE_VS_ZZIC_KERNEL = COMPATIBLE`; this closes G1 offline.
 
-```
-[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED
-[DFR][MODULE] ZZIC_MODULE_POLICY=REFUSE_UNVERIFIED
-```
+Everything before that boundary remains proven from the first physical run:
+Gate A, Gate B (kernel / `crash_dump64` / vendor provenance), Gate C
+(`scheduleReceiver/12`), Gate D (`network_stack` + `libexp.so`) and Gate H.
+Gate F is also PASS offline.
 
-Everything before it is proven: Gate A (exact identity), Gate B (kernel,
-`crash_dump64`, vendor provenance), Gate C (`scheduleReceiver/12` on Android 17),
-Gate D (`network_stack` boundary, `libexp.so` loaded) and Gate H (packages.xml
-injection surviving a soft reboot). A `2.0.3-zzic` run is expected to end
-`runAll done res=3` with **no** `patch #1` and no page-cache write; that is the
-test passing.
+What is *not* promoted by G1: G2 runtime symbol discovery, G4 write safety, the
+downstream libc/libc++ stages, the stage2/ksud handoff, and full Gate I. Exact
+ZZIC BTF supports G3's layout assumption (`enforcing` at offset 0), but runtime
+confirmation remains pending. Automatic restoration of SELinux to `Enforcing`
+after KernelSU readiness is still open and must not be assumed.
 
-Off-device: 72/72 host gate checks, 49/49 installer write-path checks, and the
-offline audits pass. Both APKs build and are signed with one key.
+The next run is therefore a real hardware experiment rather than a fail-closed
+evidence-only refusal. If it passes the module policy it may reach `patch #1`
+and, if the helper executes, may set SELinux permissive.
 
 ## Pending work, in order
 
@@ -121,90 +128,42 @@ CI now fails if those two disagree with each other, not just if C and JSON do):
 `crash_dump64` IS readable from the domain the chain runs in, so it stays a
 direct runtime SHA-256 check. The vendor ELF is not — see invariant 3b.
 
-### 2. A Gate-G validated kernel module — unblocks the module load
+### 2. ~~A Gate-G validated kernel module~~ — G1 CLOSED
 
-**The CRCs are no longer the blocker; the build is.** The four ZZIC symbol
-versions are derived, committed and bound to witness bytes in
-`evidence/zzic/gate-g/`, and the witness is kernel-loaded. What remains is
-compiling the helper against them, which needs a Docker-capable Linux host — not
-the phone, not a cloud session without a Docker daemon. The full recipe,
-acceptance criteria and the one code change it requires are in
-[`docs/GATE_G_LKM_BUILD.md`](GATE_G_LKM_BUILD.md).
+The exact helper is now bundled separately from the generic android15/6.6 image:
 
-One finding from that write-up belongs here too, because it is easy to get wrong:
-`ko_filename` is a **label**. `select_ko_image()` chooses by kernel family and
-`patch_ko()` hashes the bytes it selected, so dropping the ZZIC module in as
-`dirtyfrag-android15-6.6.ko` would work for ZZIC and silently regress every other
-android15/6.6 device. It needs its own `.incbin` entry and a ZZIC-only selection
-branch, landing in the same commit as the module.
-
-#### Original note
-
-The bundled `dirtyfrag-android15-6.6.ko` shares the ZZIC kernel's GKI base
-(`6.6.127`) and page tag (`4k`) but ships an **empty `__versions` table** while
-the kernel has `CONFIG_MODVERSIONS=y`, so no symbol-CRC agreement can be
-established offline. Verdict is `UNVERIFIED`; an ABI-mismatched module can fault
-the kernel.
-
-`Module.symvers` is a kernel **build** artefact and is not present on a running
-Android filesystem, so searching the device for it is not a valid route. One of
-these is needed:
-
-- the `Module.symvers` from the exact ZZIC kernel build; **or**
-- a table derived from the `__versions` sections of stock modules of the exact
-  firmware, under the conditions AGENTS.md §3.5 now states — produced only by
-  `tools/derive_zzic_symvers.py`, never typed.
-
-The second route is the one that is actually available, and the evidence for it
-is committed: `evidence/zzic/gate-g/`.
-
-The resulting module must carry a `__versions` table consistent with
-`CONFIG_MODVERSIONS=y`. Matching the GKI base (`6.6.127`) and the 4k page tag is
-**not** sufficient and must never be treated as if it were. A captured
-`/proc/kallsyms` supplies existence evidence for the two runtime-resolved
-symbols.
-
-```sh
-python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko \
-    --require-modversion-coverage \
-    --symvers Module.symvers --kallsyms kallsyms.txt
+```text
+app/src/main/jni/dirtyfrag-android15-6.6-S938BXXUCZZIC.ko
+sha256  b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017
+size    6592 bytes
+vermagic 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k SMP preempt mod_unload modversions aarch64
+MODVERSION_COVERAGE = COMPLETE (5/5)
+MODULE_VS_ZZIC_KERNEL = COMPATIBLE
 ```
 
-`--require-modversion-coverage` is mandatory on the acceptance run for a newly
-built module. A `__versions` table that covers only *some* imports cannot load
-(`check_version()` refuses with `no symbol version for %s`, and
-`CONFIG_MODULE_FORCE_LOAD` is not set), so the audit requires
-`imports_requiring_modversion - __versions entries == {}` and names every hole.
-A weak undefined symbol is exempt only when the `Module.symvers` does not export
-it — `check_version()` still runs on an exported weak symbol, so one with no
-entry fails the load like a strong one; with no symvers it is `UNDECIDED` and
-refused under the strict flag. An import absent from `Module.symvers` altogether
-is reported separately, as the harder `Unknown symbol` failure.
+The five required entries are `module_layout`, `__stack_chk_fail`, `_printk`,
+`memset` and `sprint_symbol`. Their CRCs come from the provenance-bound
+stock-module witness in `evidence/zzic/gate-g/`. The build workflow repairs the
+DDK's intentionally disabled modpost export matching before building; do not
+replace that with a hand-built four-entry table, because `module_layout` is
+checked by the kernel even though it is not an undefined import.
 
-The audit also records the symvers' digest, because a `Module.symvers` names no
-kernel. A module built against a GKI DDK with `kernel.release` forced to the
-target string and `KBUILD_MODPOST_WARN=1` gets a full `__versions` table of DDK
-CRCs, and audited against that same DDK symvers it reads `COMPATIBLE` about the
-wrong kernel. RMGLabs-Payloads builds its `insmod`-loadable DEFEX helper exactly
-that way — which is evidence the approach produces a *loadable* module on this
-kernel family, and is **not** a substitute for the target's own symbol table.
+The ZZIC image is deliberately absent from `ko_images[]`. A generic
+android15/6.6 device still gets the untouched generic module; only
+`DFR_TARGET_S25U_ZZIC` may select the exact image. The binding audit guards that
+separation and verifies the bundled bytes and CRC table.
 
-`MODULE_VS_ZZIC_KERNEL = COMPATIBLE` is the only result that justifies setting
-the three `ko_*` profile fields. The module imports only `sprint_symbol`,
-`_printk`, `memset`, `__stack_chk_fail`; it resolves `kallsyms_lookup_name` and
-`selinux_state` at runtime rather than importing them, so those two need
-existence evidence, not export evidence.
+Remaining Gate-G boundaries:
 
-Until a positively validated module is cryptographically bound to the ZZIC
-profile, Gate G remains fail-closed at **every** page-cache stage
-(`patch_ko`, `patch_libc`, `patch_cxx`), not just the module write. There is no
-runtime marker or operator override that converts `UNVERIFIED` into permission to
-proceed, and CI rejects the reintroduction of one under any name.
+- G2 — runtime discovery of `kallsyms_lookup_name` and `selinux_state`:
+  **RUNTIME UNVERIFIED**.
+- G3 — layout: exact BTF supports `enforcing` at offset 0; runtime confirmation
+  pending.
+- G4 — the write itself: **UNVERIFIED**.
 
-Read the consequence plainly: the chain cannot be exercised end to end on this
-firmware today, deliberately or otherwise. Restoring an at-own-risk opt-in is a
-policy decision for the repository owner; it is not something to reinstate quietly
-because a run is inconvenient.
+A real helper load is not a clean G1 probe because its init path performs G4.
+The next signed run intentionally collects that hardware evidence; treat it as a
+single-run experiment, not as a retry loop.
 
 ### 3. ~~`scheduleReceiver` overload shape~~ — CLOSED
 
@@ -244,11 +203,11 @@ adb shell cat /proc/sys/kernel/random/boot_id
 | vendor provenance chain | `[DFR][USERSPACE] VENDOR_PROV *` | new in 2.0.3, needs one run |
 | SELinux / seccomp viability for XFRM and native load | `[DFR][PROCESS]` capability + seccomp fields, plus denials in `dmesg`/`logcat` | partial |
 
-Still entirely unknown and needing device evidence, all of it downstream of
-Gate G and therefore unreachable until Gate G is closed: the `vendor_modprobe`
-SELinux domain and its exec transition, the seccomp filter's verdict on the
-syscalls the native flow needs, mount-namespace behaviour, and any Samsung
-DEFEX-style restriction.
+Still needing device evidence downstream of G1: the `vendor_modprobe` SELinux
+domain and its exec transition, the seccomp verdict on the native syscalls,
+mount-namespace behaviour, the staged-ksud rename from `/data/system`, any
+Samsung DEFEX-style restriction, KernelSU readiness, and restoration of SELinux
+to `Enforcing`.
 
 ### 5. ~~Dead pins: the four `network_stack_*` fields~~ — CLOSED
 
@@ -349,6 +308,7 @@ independent fact and not proof of anything; and a run that refuses at a gate and
 writes nothing is the tool working.
 
 Gate promotion still needs independent evidence for every boundary, recorded in
-`docs/S25U_ZZIC_COMPATIBILITY.md`. Today: Gates A, B (kernel / `crash_dump64` /
-vendor provenance), C, D, E and H are `PASS` — A/B/C/D/H from the physical run;
-Gate G is `UNVERIFIED`; Gates F and I remain `BLOCKED`.
+`docs/S25U_ZZIC_COMPATIBILITY.md`. Today: A, B, C, D, E, F, H and G1 are PASS
+(G1 offline; A/B/C/D/H include physical evidence). G2 and G4 are unverified, G3
+is supported offline but awaits runtime confirmation, and Gate I is pending the
+next same-boot physical run.
