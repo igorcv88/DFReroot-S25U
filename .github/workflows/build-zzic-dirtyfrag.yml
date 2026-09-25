@@ -167,13 +167,13 @@ jobs:
                 "$KDIR/Module.symvers" || true
 
               #
-              # Patch the DDK table with the derived ZZIC CRCs using the repo's
-              # own tool, not a second copy of the same logic inline here.
+              # Patch the DDK table with the derived ZZIC CRCs using the tool this
+              # repo already has, not a second copy of the same logic inline here.
               #
               # tools/patch_symvers_crcs.py is unit-tested (row shape preserved
               # for 4- and 5-field tables, refusals for a missing symbol, a
               # duplicate, a non-record line) and - the reason it matters - it
-              # DEMANDS the derived table's provenance record, exactly as
+              # DEMANDS the provenance record for the derived table, exactly as
               # ko_audit.py does. An inline reimplementation is a second door
               # into those CRCs with no gate on it.
               #
@@ -298,9 +298,10 @@ jobs:
               #
               #   CONFIG_BASIC_MODVERSIONS / CONFIG_EXTENDED_MODVERSIONS do not
               #   exist in 6.6: the MODPOST MODE SUPPORT probe above found no
-              #   reference to either in this tree's scripts. They were noise.
+              #   reference to either in the scripts of this tree. They were
+              #   noise.
               #
-              #   LLVM_IAS=1 is the default on 6.6 and the repo Makefile does
+              #   LLVM_IAS=1 is the default on 6.6 and dirtyfrag-lkm/Makefile does
               #   not pass it.
               #
               # V=1 makes the actual modpost invocation visible, so if
@@ -358,8 +359,9 @@ jobs:
               sed -n "/__versions/,/};/p" dirtyfrag.mod.c || true
 
               #
-              # Read the section size with the repo's own ELF parser, not awk over
-              # readelf: readelf prints a single-digit section index as "[ 8]",
+              # Read the section size with the ELF parser this repo already has,
+              # not awk over readelf, which prints a single-digit section index
+              # as "[ 8]",
               # which splits into two fields and shifts every column, and the size
               # is column 6 rather than 7. Getting that wrong would report a
               # populated table as empty, or worse, the reverse.
