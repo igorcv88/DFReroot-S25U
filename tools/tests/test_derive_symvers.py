@@ -138,6 +138,12 @@ def main():
           "the derived table is not named Module.symvers")
 
     # === ko_audit's side: provenance is mandatory for a derived table ========
+    # Mirror what main() records: a real on-device path per witness and the
+    # digest of the table the record was written for.
+    for w in r["witnesses"]:
+        w["device_path"] = "/vendor_dlkm/lib/modules/%s" % os.path.basename(
+            w["local_path_at_derivation"])
+    r["symvers_sha256"] = dz.write_symvers(out, r, REQUIRED)
     prov = os.path.join(td, "ZZIC-modversion-provenance.json")
     with open(prov, "w") as f:
         json.dump(r, f)
@@ -203,6 +209,100 @@ def main():
               "a table symbol with no witness in the provenance", "no witness")
     with_prov(lambda d: d["symbols"]["memset"].update(witness_sha256=[]),
               "a provenance entry with no witness digest", "no witness digest")
+
+    # --- Codex review of 0d9df7a: three fail-open holes ---------------------
+
+    # (1) The table and the record must agree on the NUMBERS. Editing a CRC in
+    # the table, or leaving a stale sidecar beside a regenerated one, previously
+    # passed: the check only asked that witness_sha256 was non-empty.
+    edited = os.path.join(td, "edited.symvers")
+    with open(out) as f:
+        text = f.read()
+    with open(edited, "w") as f:
+        f.write(text.replace("0x%08x" % 0x661601de, "0xdeadbeef"))
+    a = ko_audit.audit(ko, symvers=edited, require_coverage=True, provenance=prov)
+    viol = a.get("provenance_violations") or []
+    check(a["MODULE_VS_ZZIC_KERNEL"] != "COMPATIBLE"
+          and any("not read from the witness bytes" in v for v in viol),
+          "a CRC edited in the table is caught against the provenance (%s)" % viol)
+
+    # A stale sidecar: the record was written for a different table.
+    stale = json.loads(json.dumps(r))
+    stale["symvers_sha256"] = "0" * 64
+    stale_path = os.path.join(td, "stale_prov.json")
+    with open(stale_path, "w") as f:
+        json.dump(stale, f)
+    a = ko_audit.audit(ko, symvers=out, require_coverage=True,
+                       provenance=stale_path)
+    viol = a.get("provenance_violations") or []
+    check(a["MODULE_VS_ZZIC_KERNEL"] != "COMPATIBLE"
+          and any("written for a different table" in v for v in viol),
+          "a provenance whose symvers digest does not match is refused (%s)" % viol)
+
+    no_digest = json.loads(json.dumps(r))
+    no_digest.pop("symvers_sha256", None)
+    nd_path = os.path.join(td, "nodigest_prov.json")
+    with open(nd_path, "w") as f:
+        json.dump(no_digest, f)
+    a = ko_audit.audit(ko, symvers=out, require_coverage=True, provenance=nd_path)
+    check(any("records no symvers_sha256" in v
+              for v in a.get("provenance_violations") or []),
+          "a provenance with no symvers digest cannot be tied to a table")
+
+    # (2) The release comes from the PINNED profile, not from the candidate. A
+    # ZZI4 module audited against a ZZI4-derived table agrees with itself, and
+    # both pass the generic 6.6.127/4k checks - that is not ZZIC.
+    w_other = stock(td, "witness_other.ko", TRUE_CRCS, vermagic=OTHER)
+    r_other = dz.derive([w_other], REQUIRED, OTHER.split()[0])
+    for wrec in r_other["witnesses"]:
+        wrec["device_path"] = "/vendor_dlkm/lib/modules/other.ko"
+    out_other = os.path.join(td, "other.symvers")
+    r_other["symvers_sha256"] = dz.write_symvers(out_other, r_other, REQUIRED)
+    prov_other = os.path.join(td, "other_prov.json")
+    with open(prov_other, "w") as f:
+        json.dump(r_other, f)
+    ko_other = tk.build_ko(os.path.join(td, "dirtyfrag_other.ko"), vermagic=OTHER,
+                           imports=[(n, tk.STB_GLOBAL, tk.STT_FUNC)
+                                    for n, _ in TRUE_CRCS],
+                           versions=TRUE_CRCS)
+    a = ko_audit.audit(ko_other, symvers=out_other, require_coverage=True,
+                       provenance=prov_other)
+    viol = a.get("provenance_violations") or []
+    check(a["MODULE_VS_ZZIC_KERNEL"] != "COMPATIBLE"
+          and any("not the pinned" in v for v in viol),
+          "a self-consistent NON-ZZIC candidate+table pair is refused (%s, %s)"
+          % (a["MODULE_VS_ZZIC_KERNEL"], viol))
+    check(any("the module under audit carries release" in v for v in viol),
+          "the candidate's own release is checked against the pin")
+    check(any("witness" in v and "not the pinned" in v for v in viol),
+          "the witnesses are checked against the pin too")
+
+    # (3) A witness with no on-device path is not provenance.
+    unbound = json.loads(json.dumps(r))
+    unbound["witnesses"][0]["device_path"] = "<not recorded>"
+    ub_path = os.path.join(td, "unbound_prov.json")
+    with open(ub_path, "w") as f:
+        json.dump(unbound, f)
+    a = ko_audit.audit(ko, symvers=out, require_coverage=True, provenance=ub_path)
+    check(any("no on-device path recorded" in v
+              for v in a.get("provenance_violations") or []),
+          "a '<not recorded>' witness path is a violation, not a placeholder")
+
+    # ...and the generator refuses to EMIT such a record at all.
+    w_no_origin = stock(td, "witness_no_origin.ko", TRUE_CRCS)
+    rc = subprocess.call([sys.executable,
+                          os.path.join(TOOLS, "derive_zzic_symvers.py"),
+                          w_no_origin,
+                          "--out", os.path.join(td, "refused.symvers"),
+                          "--provenance", os.path.join(td, "refused.json")],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    check(rc == 1 and not os.path.exists(os.path.join(td, "refused.symvers")),
+          "writing evidence without --origin is refused and writes nothing")
+    rc = subprocess.call([sys.executable,
+                          os.path.join(TOOLS, "derive_zzic_symvers.py"),
+                          w_no_origin],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    check(rc == 0, "a plain inspection run without --origin still works (%d)" % rc)
 
     # --- an authoritative table needs no provenance -------------------------
     auth = tk.write_symvers(os.path.join(td, "Module.symvers"), TRUE_CRCS)

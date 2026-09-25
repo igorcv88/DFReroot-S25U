@@ -296,6 +296,22 @@ def main():
     release = a.release or target_release()
     r = derive(a.modules, required, release, origins)
 
+    # Evidence must bind every witness to a firmware path. Without --origin the
+    # record says "<not recorded>", which is not provenance - so refuse to EMIT,
+    # while still allowing a plain inspection run to print its report.
+    if (a.out or a.provenance) and not r["violations"]:
+        unbound = [w for w in r["witnesses"]
+                   if not w.get("device_path") or w["device_path"].startswith("<")]
+        if unbound:
+            r["violations"].append(
+                "refusing to write evidence: %d witness(es) have no --origin "
+                "on-device path (%s); provenance is path + digest + vermagic, "
+                "and two of the three is not enough"
+                % (len(unbound),
+                   ", ".join(os.path.basename(w["local_path_at_derivation"])
+                             for w in unbound)))
+            r["CONSENSUS"] = "INCOMPLETE"
+
     if a.out and not r["violations"]:
         digest = write_symvers(a.out, r, required)
         r["symvers_path"] = a.out
