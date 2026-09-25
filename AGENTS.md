@@ -39,8 +39,12 @@ compares the two certificate digests and fails if they differ.
 
 What this fork adds on top of upstream: a **fail-closed target profile** for one
 exact Samsung firmware, runtime gates that enforce it, boundary-tagged
-`[DFR][*]` diagnostics, and offline audit tools under `tools/`. Every device
-that is not that exact firmware takes the unchanged upstream path.
+`[DFR][*]` diagnostics, and offline audit tools under `tools/`.
+
+An **unrelated** device — one that asserts neither the pinned model nor the
+pinned codename — takes the unchanged upstream path. A device that asserts
+either of them and deviates in any pinned field is `MISMATCH` and refuses
+everything; it does **not** fall through to the generic path. See §3.1.
 
 ### The chain, end to end
 

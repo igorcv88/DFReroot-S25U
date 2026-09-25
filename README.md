@@ -35,8 +35,13 @@ collects `[DFR][*]` diagnostics and writes nothing to the page cache.
 
 `docs/S25U_ZZIC_COMPATIBILITY.md` is the authoritative gate matrix;
 `docs/HANDOFF.md` lists the remaining evidence and the exact command that closes
-each item. Every device that is not that exact firmware takes the unchanged
-upstream path.
+each item.
+
+A device unrelated to that firmware — one that reports neither `SM-S938B` nor
+`pa3q` — takes the unchanged upstream path. An S25 Ultra on *different*
+firmware does not: asserting the model or codename while differing in any
+pinned field classifies `MISMATCH`, and the chain refuses rather than falling
+back to generic behaviour.
 
 Contributing, by hand or with an agent: read **`AGENTS.md`** first (symlinked as
 `CLAUDE.md`). It holds the fail-closed rules the gates rest on and the offline
