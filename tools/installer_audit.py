@@ -109,10 +109,33 @@ def human(r):
               "file_mode", "file_uid", "file_gid", "METADATA_CAPTURED",
               "shared_users", "ANDROID_UID_SYSTEM_FOUND",
               "CERT_TABLE_PARSE", "cert_table_size",
-              "per_target", "round_trip_counts", "ROUND_TRIP_VALID", "note"):
+              "per_target", "round_trip_counts", "ROUND_TRIP_VALID", "note",
+              "status"):
         if k in r:
             L.append("  %-26s : %s" % (k, r[k]))
     return "\n".join(L)
+
+
+# Gate signals whose value decides the exit status. A "SKIP" is not a failure
+# (an ABX input legitimately stops this offline tool), but a FAIL is: a caller
+# that only reads stdout cannot tell a passing gate from a failing one, so a
+# regression in the parser or the round-trip must change the exit code too.
+GATE_FIELDS = ("PACKAGES_PARSE", "ANDROID_UID_SYSTEM_FOUND",
+               "CERT_TABLE_PARSE", "METADATA_CAPTURED", "ROUND_TRIP_VALID")
+
+
+def failed_gates(r):
+    """Gate fields present in `r` whose value is not PASS/SKIP."""
+    bad = []
+    for k in GATE_FIELDS:
+        v = r.get(k)
+        if v is None:
+            continue
+        s = str(v)
+        if s.startswith("PASS") or s.startswith("SKIP"):
+            continue
+        bad.append("%s=%s" % (k, s))
+    return bad
 
 
 def main():
@@ -123,7 +146,12 @@ def main():
     a = ap.parse_args()
     targets = [t.strip() for t in a.targets.split(",") if t.strip()]
     r = audit(a.xml, targets)
+    bad = failed_gates(r)
+    r["status"] = "PASS" if not bad else "FAIL"
     print(json.dumps(r, indent=2) if a.json else human(r))
+    if bad:
+        print("\nGate H FAILED: %s" % ", ".join(bad), file=sys.stderr)
+        return 1
     return 0
 
 

@@ -242,6 +242,20 @@ def human(r):
     return "\n".join(L)
 
 
+def incompatibility_reasons(r):
+    """Why the verdict is INCOMPATIBLE, for the failure message."""
+    why = []
+    if not r.get("machine_ok"):
+        why.append("machine=%s (expected AArch64)" % r.get("machine"))
+    if not r.get("vermagic_base_ok"):
+        why.append("vermagic base != %s" % EXPECTED_GENERIC_VERMAGIC_PREFIX)
+    if not r.get("vermagic_page_ok"):
+        why.append("vermagic lacks the %s page tag" % EXPECTED_PAGE_TAG)
+    if r.get("modversion_mismatches"):
+        why.append("symbol CRC mismatch: %s" % ", ".join(r["modversion_mismatches"]))
+    return why or ["see the report above"]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ko")
@@ -254,6 +268,21 @@ def main():
         print(json.dumps(r, indent=2))
     else:
         print(human(r))
+    # INCOMPATIBLE is a hard rejection - wrong architecture, wrong page tag, or
+    # a symbol-CRC mismatch against the supplied Module.symvers - and must be
+    # visible in the exit status, not only on stdout, or a CI gate that invokes
+    # this tool prints the failure and then proceeds anyway.
+    #
+    # UNVERIFIED and N/A stay successful on purpose: the first means the
+    # evidence needed to decide is absent (no Module.symvers), the second that
+    # this module was never a candidate for the ZZIC kernel. Neither is a defect
+    # in the module, and conflating them with INCOMPATIBLE would make the gate
+    # unusable while the ZZIC symbol table is still missing.
+    verdict = str(r.get("MODULE_VS_ZZIC_KERNEL", ""))
+    if verdict.startswith("INCOMPATIBLE"):
+        print("\nGate G FAILED: %s is INCOMPATIBLE (%s)"
+              % (a.ko, ", ".join(incompatibility_reasons(r))), file=sys.stderr)
+        return 1
     return 0
 
 

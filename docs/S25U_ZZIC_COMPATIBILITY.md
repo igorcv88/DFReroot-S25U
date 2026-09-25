@@ -381,6 +381,34 @@ audit signed with a throwaway key (those APKs are build checks, not releases).
 `ANDROID_NDK_ROOT`, falling back to the newest `$ANDROID_HOME/ndk/*`; it
 previously required `ANDROID_NDK` specifically, which most CI setups do not set.
 
+### CI gates that could not actually fail (Codex review of `5ad3397`)
+
+Four findings, all verified by reproducing the failure first:
+
+- **P1 — a release could attach one commit's artifacts to another commit's tag.**
+  On a manual dispatch naming an existing tag, the checkout sits at the
+  dispatched ref, which need not be the tag's target, and the old release was
+  updated from `GITHUB_SHA` regardless. The tag's commit is now resolved before
+  the build (annotated tags dereferenced) and a mismatch refuses. `--clobber`
+  also only replaces same-named assets, so a version bump left the previous
+  version's APKs in the release; stale `*.apk` assets not being re-uploaded are
+  now removed.
+- **P2 — Gate G could not fail.** `ko_audit.py` always returned 0, so a module
+  with the wrong architecture, page tag or a symbol-CRC mismatch printed
+  `INCOMPATIBLE` and the release proceeded. It now exits 1 on `INCOMPATIBLE`,
+  with the reason. `UNVERIFIED` and `N/A` stay successful deliberately: the
+  first means the deciding evidence is absent, the second that the module was
+  never a ZZIC candidate — conflating either with a hard rejection would make
+  the gate unusable while the ZZIC symbol table is missing.
+- **P2 — Gate H could not fail.** `installer_audit.py` always returned 0,
+  including on `PACKAGES_PARSE=FAIL`, a missing `android.uid.system` or
+  `ROUND_TRIP_VALID=FAIL`. It now exits 1 when any gate field is not
+  `PASS`/`SKIP` (an ABX input still legitimately `SKIP`s).
+- **P2 — a shell syntax error stayed green.** `sh -n "$s" && echo ok` puts the
+  check on the left of `&&`, where `set -e` does not terminate the step, and a
+  loop reports only its last iteration's status. Reproduced: a broken first
+  script gave `rc=0`. Now a bare command, which gives `rc=2`.
+
 ## Post-review hardening (Codex automated review of `9645c09`)
 
 Four review findings were verified and fixed:

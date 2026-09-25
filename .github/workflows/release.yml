@@ -42,6 +42,41 @@ jobs:
         with:
           fetch-depth: 0   # repro_report.sh uses git describe
 
+      # A release must describe the commit that was actually built. On a manual
+      # dispatch the checkout is at the dispatched ref, which need not be the
+      # target of the tag being published, so publishing would attach these
+      # artifacts to a different commit's release. Refuse instead, and do it
+      # before spending a signed build.
+      - name: Resolve and validate the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          TAG="${{ inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"
+          test -n "$TAG" || { echo "::error::no tag to publish"; exit 1; }
+
+          REF_JSON=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>/dev/null || true)
+          if [ -n "$REF_JSON" ]; then
+            TAG_SHA=$(printf '%s' "$REF_JSON" | jq -r '.object.sha')
+            # An annotated tag points at a tag object; dereference to the commit.
+            if [ "$(printf '%s' "$REF_JSON" | jq -r '.object.type')" = "tag" ]; then
+              TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_SHA" --jq '.object.sha')
+            fi
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "::error::tag $TAG points at $TAG_SHA but this run built $GITHUB_SHA."
+              echo "::error::Re-run this workflow from the tag itself, or publish a new tag."
+              exit 1
+            fi
+            echo "tag $TAG already exists and matches this commit; the release will be updated"
+            echo "TAG_EXISTS=1" >> "$GITHUB_ENV"
+          else
+            echo "tag $TAG does not exist yet; it will be created at $GITHUB_SHA"
+            echo "TAG_EXISTS=0" >> "$GITHUB_ENV"
+          fi
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -121,11 +156,6 @@ jobs:
 
       - name: Name and checksum the release assets
         run: |
-          VER=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
-          TAG="${{ inputs.tag }}"
-          [ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"
-          echo "VER=$VER" >> "$GITHUB_ENV"
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
           mkdir -p release
           cp df_reroot.apk        "release/df_reroot_${VER}.apk"
           cp df_installer.apk     "release/df_installer_${VER}.apk"
@@ -162,6 +192,19 @@ jobs:
           } > release-notes.md
 
           if gh release view "$TAG" >/dev/null 2>&1; then
+            # --clobber only replaces assets of the SAME name, so a version bump
+            # would otherwise leave the previous version's APKs sitting in the
+            # release next to the new ones. Drop any APK we are not re-uploading.
+            for old in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
+              case "$old" in
+                *.apk)
+                  if [ ! -f "release/$old" ]; then
+                    echo "removing stale asset $old"
+                    gh release delete-asset "$TAG" "$old" -y
+                  fi
+                  ;;
+              esac
+            done
             gh release upload "$TAG" release/* --clobber
             gh release edit "$TAG" --notes-file release-notes.md
           else

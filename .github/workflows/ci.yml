@@ -32,10 +32,15 @@ jobs:
 
       - name: Shell script syntax
         run: |
+          # `sh -n "$s" && echo ...` would swallow a failure: on the left of &&
+          # the runner's `set -e` does not terminate the step, and the loop's
+          # status is that of its LAST iteration, so an early syntax error left
+          # the step green. Run the check as a bare command.
           for s in build.sh build-splice.sh create-keystore.sh \
                    tools/ci_build_audit.sh tools/repro_report.sh \
                    tools/tests/run_tests.sh dirtyfrag-lkm/build.sh; do
-            sh -n "$s" && echo "ok  $s"
+            sh -n "$s"
+            echo "ok  $s"
           done
 
       - name: Gate G - bundled kernel module ABI audit
