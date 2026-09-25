@@ -1,10 +1,18 @@
 # DFReroot S25U / ZZIC — handoff
 
-**State is POST-PHYSICAL-TEST.** It reflects the first hardware execution of
-the chain — `v2.0.2-zzic` (versionCode 5) on SM-S938B / `S938BXXUCZZIC` — and
-the fixes that run produced, which ship as `2.0.3-zzic` (versionCode 6). Read it
-with `docs/S25U_ZZIC_COMPATIBILITY.md`, which is the authoritative gate matrix
-and evidence record; this file is only the "where to pick up" summary.
+**Where to pick up.** This file is the moving part: current state, what is
+blocked, what closes it. It is the only one of the three that is expected to go
+stale, so trust it least and re-derive from the audits when in doubt.
+
+- **`AGENTS.md`** (symlinked as `CLAUDE.md`) — the standing rules. Read it
+  first, before changing anything. It holds nothing version-specific.
+- **`docs/S25U_ZZIC_COMPATIBILITY.md`** — the authoritative gate matrix and
+  evidence record. If this file and that one disagree about what is *proven*,
+  that one wins.
+
+**State is POST-PHYSICAL-TEST.** It reflects the first hardware execution of the
+chain — `v2.0.2-zzic` (versionCode 5) on SM-S938B / `S938BXXUCZZIC` — and the
+fixes that run produced, which ship as `2.0.3-zzic` (versionCode 6, PR #8).
 
 Three things this file used to say are no longer true and must not be
 reintroduced: the `scheduleReceiver` overload shape is **not** unknown,
@@ -36,73 +44,25 @@ Added for this target: a fail-closed profile (`app/src/main/jni/target_profile.{
 `DFR_PROFILE_ZZIC`) plus gates in `app/src/main/jni/exp.c`, boundary-tagged
 `[DFR][*]` diagnostics, and offline audit tools under `tools/`.
 
-## Invariants the gates rest on — do not break these
+## The rules
 
-1. **Identity comparison is case-sensitive and exact.** `ro.product.manufacturer`
-   is lowercase `samsung` on this firmware. A capitalised value makes the real
-   device classify `MISMATCH` and refuses the entire chain. Two host tests guard
-   this; `tools/profile_binding_audit.py` guards it again in CI.
+They moved to **`AGENTS.md`** so they stop being restated (and drifting) once
+per handoff. Do not edit them here; edit them there. In short, and not as a
+substitute for reading it:
 
-1b. **A gate is only as strong as its weakest entry point.** `patch_ko()`,
-   `patch_libc()` and `patch_cxx()` are each independently reachable (JNI natives
-   plus `StageReceiver` transactions 1–3), so both the identity gate
-   (`gate_target`) and the Gate-G module policy (`gate_module_policy`) run in all
-   three. Enforcing either in only one stage is the same as not enforcing it.
-   `tools/profile_binding_audit.py` fails CI if a stage drops the policy call.
-
-2. **Artefact hashes are scoped to the stage that writes them.** The chain
-   rewrites the vendor file, `libc` and `libc++` in the page cache, so a stage
-   that re-hashes an artefact an earlier stage already patched compares against
-   the pristine pinned digest and aborts the chain on its own writes.
-   `patch_ko()` owns `DFR_ART_CRASHDUMP | DFR_ART_VENDOR` (it writes both),
-   `patch_libc()` owns `DFR_ART_LIBC`, `patch_cxx()` owns `DFR_ART_LIBCXX`.
-   Artefacts a stage does not own log `SKIP`. **Never widen a stage's mask to
-   "check everything"** — that is self-blocking. Each artefact is still validated
-   exactly once, while pristine, immediately before it is written, and a
-   mismatch is still a hard refusal.
-
-3. **A required artefact with no pinned hash is a FAIL, not an UNKNOWN.** "We
-   never captured the hash" is not evidence of a match.
-
-3b. **An unreadable artefact is not an excuse to skip the proof — only to change
-   its form.** `/vendor/lib64/libstagefrighthw.so` cannot be `open`ed from
-   `system_server` or `network_stack` on this firmware (`EACCES`), which is why
-   `patch_ko()` writes it through the `crash_dump64` helper instead. The gate
-   therefore proves the AVB chain the pinned digest was captured under (vbmeta
-   digest, `verifiedbootstate=green`, `device_state=locked`, `flash.locked=1`,
-   `veritymode=enforcing`, `/vendor` erofs read-only) and refuses on any
-   divergence. `EACCES` never becomes a PASS by itself, and a file that IS
-   readable but hashes differently is always a hard refusal.
-
-3c. **DFInstaller's metadata source of truth is the ORIGINAL file, stat'd before
-   any write.** Never the backup, never a hardcoded `0600`. The device's
-   `packages.xml` is `1000:1000 0660 u:object_r:system_data_file:s0`, and a
-   freshly created file in a root-run `app_process` is `root:root 0644` — that
-   mismatch is exactly the v2.0.2 defect. A backup is created transactionally
-   and verified by size and digest; an existing backup that is empty, truncated
-   or unparsable is a hard failure, not a log line.
-
-4. **No validation happens after a write.** All identity checks, module
-   selection and the Gate-G policy run before the first page-cache write, so a
-   refusal never leaves a corrupted file behind.
-
-5. **`ko_zzic_verified=1` is bound to the bytes.** The invariant is
-   `ko_zzic_verified == 1 IMPLIES ko_sha256 pinned AND SHA-256(selected module
-   bytes) == ko_sha256`, enforced in `patch_ko()` and in
-   `tools/profile_binding_audit.py`. All three fields (`ko_zzic_verified`,
-   `ko_filename`, `ko_sha256`) are set together or none are.
-
-6. **Signals are never collapsed.** `NETWORKSTACK_PROCESS_FOUND` (a
-   network_stack-uid process was observed) and `REMOTE_COMPONENT_REACHED` (our
-   code actually executed inside it) are separate values, as are
-   `NATIVE_LIBRARY_DISCOVERABLE` and `LIBEXP_LOADED`. No single `/dev/df*` marker
-   means end-to-end compatibility.
-
-7. **Evidence is per-boot.** `boot_id` is logged at every boundary; states from
-   different boots must never be combined into one successful chain.
-
-8. **The C profile and `tools/zzic_profile.json` must agree.** The CI drift check
-   fails if they diverge — any pinned value goes in both.
+1. Fail-closed. Missing evidence is a refusal, never a pass.
+2. Identity comparison is exact and case-sensitive; a partial match is a hard
+   `MISMATCH`.
+3. Every page-cache stage runs both gates — a gate enforced in one of three
+   entry points is not enforced.
+4. Proof may change form when an artefact is unreadable; it may not be skipped.
+5. Artefact hashes are scoped to the stage that writes them. Never widen a mask.
+6. A boolean is not evidence: `ko_zzic_verified` is bound to the bundled bytes.
+7. No execution override, under any name.
+8. DFInstaller's metadata source of truth is the original file, stat'd before
+   any write; backups are transactional and a bad one is fatal.
+9. The C profile and `tools/zzic_profile.json` must agree, and the JSON must
+   agree with itself.
 
 ## Current state
 
@@ -249,66 +209,51 @@ SELinux domain and its exec transition, the seccomp filter's verdict on the
 syscalls the native flow needs, mount-namespace behaviour, and any Samsung
 DEFEX-style restriction.
 
-## Build and release
+## Build, release and verification
+
+The commands, the toolchain versions and the release conventions are in
+`AGENTS.md` §5 and §6. Two things worth repeating because getting them wrong is
+expensive:
+
+- **Both APKs must be signed with the same key.** DFInstaller writes DFReroot's
+  certificate into `packages.xml`; a mismatch makes the injected key useless.
+  The release workflow compares the certificate digests and fails if they differ.
+- **Runner minutes are billed to the owner.** `ci.yml` is manual-dispatch only
+  and is disabled at the repository level; `release.yml` runs the same offline
+  gate set before it spends a signed build, so there is no second run to
+  schedule. Run the checks below locally instead, and dispatch a workflow only
+  when a release is actually wanted (`AGENTS.md` §6.1).
+- **Every change goes through a PR** unless the owner says otherwise
+  (`AGENTS.md` §6.2), and releases are published as stable/latest, with the
+  compatibility state carried by the generated notes (`AGENTS.md` §6.3).
+
+Expected counts, so a drop is noticeable:
 
 ```sh
-# local, uses the create-keystore.sh defaults
-ANDROID_HOME=<sdk> ANDROID_NDK_HOME=<ndk> ./build.sh
-
-# with explicit signing material
-KEYSTORE_FILE=<path> KEYSTORE_PASSWORD=... KEY_ALIAS=... KEY_PASSWORD=... ./build.sh
+sh tools/tests/run_tests.sh              # 72/72, then the exp.c syntax pass
+sh tools/tests/run_installer_tests.sh    # 49/49 (SafeWrite)
+sh tools/tests/test_resolve_release_tag.sh   # 8/8
 ```
 
-Toolchain that is known to work: JDK 21, Gradle 9.7.1 (wrapper), AGP 8.7.3,
-Kotlin 2.0.21, SDK platform 36, build-tools 36.0.0, NDK 27.0.12077973,
-CMake 3.22.1.
-
-DFReroot and DFInstaller **must** be signed with the same key: DFInstaller writes
-DFReroot's certificate into `packages.xml`, so a mismatch makes the injected key
-useless. The release workflow verifies this and fails if the two certificate
-digests differ.
-
-`.github/workflows/release.yml` — push a `v*` tag or dispatch manually. Publishes
-to GitHub Releases only, no workflow artifacts. Secrets: `KEYSTORE_BASE64`,
-`KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`.
-
-`.github/workflows/ci.yml` — offline gates on every branch/PR, plus a full build
-signed with a throwaway key.
-
-## Verification commands
+The one command that is specific to this handoff rather than to the repo:
 
 ```sh
-sh tools/zzic_collect.sh                 # on-device, read-only evidence pass
-sh tools/tests/run_tests.sh              # 72/72 expected, + exp.c syntax pass
-sh tools/tests/run_installer_tests.sh    # 49/49 expected (SafeWrite)
-python3 tools/profile_binding_audit.py   # §39 invariant + C/JSON drift
-python3 tools/ko_audit.py <ko>           # Gate G; exits 1 on INCOMPATIBLE
-python3 tools/apk_audit.py df_reroot.apk  # Gate E
-python3 tools/elf_audit.py --root ./pulled   # Gate F
-python3 tools/installer_audit.py <packages.xml>  # Gate H; exits 1 on a failed gate
-./tools/ci_build_audit.sh                # post-build packaging audit
-./tools/repro_report.sh                  # toolchain + artefact hashes
+sh tools/zzic_collect.sh > zzic-identity.txt 2>&1   # on-device, read-only
 ```
 
-All audit tools exit non-zero on a failed gate; `UNVERIFIED` and `N/A` are
-successful on purpose (evidence absent, or not a candidate — neither is a defect).
+It writes nothing, needs root only for its `/proc/kallsyms` section, and prints
+every field the identity gate compares plus the whole vendor-provenance chain.
 
 ## Things that must not be quietly "fixed"
 
-- The JNI package name `org.lsposed.lspromise.DirtyFrag` is load-bearing:
-  `exp.c` registers `Java_org_lsposed_lspromise_DirtyFrag_*` and `JNI_OnLoad`
-  looks it up. Renaming either side breaks linkage.
-- `libexp.so` is arm64-only by design; a load failure on x86_64 is expected and
-  non-fatal, so the Java hop stays testable on an emulator.
-- `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is an independent static fact. It is
-  not proof of exploitability and must not be used to promote any gate.
-- No gate may be promoted to `SUPPORTED` without independent evidence for every
-  boundary. Today: Gates A, B (kernel/crash_dump64/vendor provenance), C, D, E
-  and H are `PASS` — A/B/C/D/H from the physical run; Gate G is `UNVERIFIED`;
-  Gates F and I remain `BLOCKED`.
-- `ZZIC_VENDOR_PROVENANCE` must not be "simplified" back into a direct
-  `gate_hash()` of the vendor ELF. That read returns `EACCES` in every domain
-  the chain runs in, so the simplification makes the ZZIC path unrunnable —
-  `tools/profile_binding_audit.py` fails CI if the old call shape reappears.
-- DFInstaller's write path must keep going through `SafeWrite`. Inlining it
-  again is how the metadata source of truth drifts back onto the backup file.
+See `AGENTS.md` §7 ("Things that look like defects and are not") and §3.6
+("No execution override, under any name"). The short list, for orientation:
+the `org.lsposed.lspromise.DirtyFrag` JNI package name is load-bearing;
+`libexp.so` is arm64-only by design; `REFERENCE_DIRTYFRAG_FIX_ABSENT` is an
+independent fact and not proof of anything; and a run that refuses at a gate and
+writes nothing is the tool working.
+
+Gate promotion still needs independent evidence for every boundary, recorded in
+`docs/S25U_ZZIC_COMPATIBILITY.md`. Today: Gates A, B (kernel / `crash_dump64` /
+vendor provenance), C, D, E and H are `PASS` — A/B/C/D/H from the physical run;
+Gate G is `UNVERIFIED`; Gates F and I remain `BLOCKED`.

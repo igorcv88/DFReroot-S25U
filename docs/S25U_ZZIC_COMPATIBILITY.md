@@ -10,6 +10,10 @@ in the build environment, and — explicitly — what remains blocked.
 > predictions; they were observed. Anything still written as a prediction is
 > marked as such.
 
+The rules this evidence is judged against — fail-closed, exact identity, proof
+may change form but never be skipped — are in **`AGENTS.md`** at the repository
+root, not restated here.
+
 **No gate is auto-promoted to global compatibility.** `SUPPORTED` is still
 intentionally *not* granted: Gate G (`CONFIG_MODVERSIONS` symbol-CRC agreement
 for the kernel module) is `UNVERIFIED`, and Gate I (a full end-to-end run)

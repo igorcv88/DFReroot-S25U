@@ -101,8 +101,10 @@ def main():
         add("every boundary before Gate G is proven on hardware and the fail-closed")
         add("refusal still holds. Running it is an evidence-collection step.")
     else:
-        add("Gate G reports a module bound to this kernel. This is still a **pre-release**:")
-        add("the full chain has not been confirmed end to end on hardware for this build.")
+        add("Gate G reports a module bound to this kernel. That is not the same as a")
+        add("confirmed run: the full chain has **not** been exercised end to end on")
+        add("hardware for this build. Treat the first run of it as a test, with a")
+        add("backup of `packages.xml` you have verified you can restore.")
     add("")
     if not binding_ok:
         # Should be unreachable: release.yml runs the audit as a gate first.

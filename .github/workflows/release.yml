@@ -26,9 +26,9 @@ on:
         required: false
         type: string
       prerelease:
-        description: 'Mark the release as a pre-release'
+        description: 'Mark as a pre-release instead of the stable/latest release'
         required: false
-        default: true
+        default: false
         type: boolean
 
 permissions:
@@ -247,11 +247,17 @@ jobs:
 
           # Resolve the prerelease policy ONCE, before the create/update split.
           # `inputs.prerelease` is empty on a tag push (inputs only exist for
-          # workflow_dispatch), and an empty value must mean the DECLARED default,
-          # which is true. Reading it as "false" would publish a full release of a
-          # build whose hardware compatibility is UNVERIFIED.
+          # workflow_dispatch), and an empty value must mean the DECLARED default.
+          #
+          # That default is FALSE by owner policy: releases are published as the
+          # stable/latest release, and the compatibility state is communicated by
+          # the generated notes (tools/release_notes.py), which state every gate
+          # and say plainly when the build will refuse. The flag never carried
+          # that information anyway - the fail-closed gates in the APK do, and
+          # they are unaffected by how GitHub labels the release. Pre-release is
+          # now an explicit, deliberate choice, not the default.
           PRERELEASE="${{ inputs.prerelease }}"
-          [ -n "$PRERELEASE" ] || PRERELEASE=true
+          [ -n "$PRERELEASE" ] || PRERELEASE=false
           echo "publishing $TAG (prerelease=$PRERELEASE)"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
