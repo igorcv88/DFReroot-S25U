@@ -966,6 +966,75 @@ same-boot `POST_ROOT_COMPLETE` state.
 
 The implementation plan for that work is now in `docs/HANDOFF.md`.
 
+## Post-root compatibility — DEFEX / Zygisk Next / LSPosed
+
+This is a separate compatibility axis from Gate I's root-safe-completion state.
+
+The exact ZZIC KernelSU build already includes the permanent narrow
+LSPosed/DEFEX compatibility patch. The isolated exact-port workflow in
+`igorcv88/RMGLabs-Payloads` applies:
+
+```text
+KernelSU-v3.3.0-samsung-kdp-rkp-defex.patch
+apply-v330-staged-daemon-hotfix.py --profile <rmg|dfreroot>
+apply-v330-lsposed-defex-fix.py
+```
+
+before building the exact ZZIC `kernelsu.ko`, and then embeds that module in the
+corresponding ksud. The workflow checks that the compiled module retains the
+`LSPosed app_process64 exception enabled` signature.
+
+The exception is intentionally narrow: root `app_process64` opening the exact
+LSPosed Zygisk library path:
+
+```text
+/data/adb/modules/zygisk_lsposed/zygisk/arm64-v8a.so
+```
+
+It does not globally disable Samsung DEFEX and must not be widened during the
+post-root closeout work.
+
+Current evidence must be kept separate:
+
+| Question | State |
+|---|---|
+| Is the LSPosed/DEFEX patch present in the exact ZZIC KernelSU build? | **PASS (build-time)** |
+| Is that patched exact module embedded in the DFR-specific ZZIC ksud? | **PASS (build-time)** |
+| Did a KernelSU module containing that patch late-load successfully on ZZIC? | **physical PASS** |
+| Does the LSPosed-specific exception itself work on ZZIC under the final Enforcing state? | **PENDING physical validation** |
+| Was the equivalent narrow exception previously proven on S938BXXUCZZI4? | **physical PASS on ZZI4 only** |
+
+Therefore the next ZZIC release must preserve the patch while rebuilding the
+DFR-specific ksud, but `POST_ROOT_COMPLETE` must not depend on LSPosed being
+installed. After the core safe-completion state is proven, a separate physical
+post-root test should validate Zygisk Next + LSPosed while SELinux is Enforcing.
+
+The strongest ZZIC evidence should include:
+
+```text
+POST_ROOT_COMPLETE=PASS
+getenforce=Enforcing
+/sys/fs/selinux/enforce=1
+expected LSPosed library path present
+new app_process64/app process exercises the compatibility path
+no matching DEFEX Immutable Root violation
+LSPosed active for new processes
+KernelSU root remains functional
+```
+
+If the framework side requires a controlled zygote restart, perform it only
+after the core post-root completion state has been captured, then additionally
+verify `system_server` maps the LSPosed Zygisk library and `LSPosedBridge`
+appears without returning SELinux to permissive.
+
+Track that outcome separately as, for example,
+`POST_ROOT_LSPOSED_COMPAT=PASS|FAIL|SKIP_NOT_INSTALLED`. A failure here is a
+post-root compatibility regression, not evidence that the root chain itself
+failed.
+
+The concrete implementation/test plan is merged into `docs/HANDOFF.md` Phase 3
+and the later test/physical-acceptance phases.
+
 ## Historical hardware collection procedure (before v2.0.4)
 
 The commands below are retained as provenance for how the earlier unknowns were
