@@ -15,9 +15,11 @@ may change form but never be skipped — are in **`AGENTS.md`** at the repositor
 root, not restated here.
 
 **No gate is auto-promoted to global compatibility.** `SUPPORTED` is still
-intentionally *not* granted: Gate G (`CONFIG_MODVERSIONS` symbol-CRC agreement
-for the kernel module) is `UNVERIFIED`, and Gate I (a full end-to-end run)
-therefore cannot be attempted at all.
+intentionally *not* granted. Gate G1 (loader/import ABI) is now closed offline
+with the exact bundled ZZIC module (`COMPLETE (5/5)` / `COMPATIBLE`), while
+G2 remains runtime-unverified, G3 is supported by exact BTF but not yet confirmed
+at runtime, and G4 (the write to `selinux_state.enforcing`) is still unverified.
+Gate I therefore awaits the next physical run rather than being blocked by G1.
 
 ## Baseline
 
@@ -25,7 +27,7 @@ therefore cannot be attempted at all.
 |---|---|
 | Upstream | `polygraphene/DFReroot` |
 | Working fork | `igorcv88/DFReroot-S25U` |
-| Reference version | upstream `v2.0.1`; this fork builds as `2.0.3-zzic` |
+| Reference version | upstream `v2.0.1`; this fork builds as `2.0.4-zzic` (versionCode 7) |
 | Base commit | `9f1d6cd592d898b42d2e0c2d25ee1577e2aabe77` |
 | Branch | `claude/dfreroot-s25u-zzic-support-dgw8fi` |
 | Architecture preserved | build system, packages, module table, exploit flow unchanged |
@@ -844,24 +846,28 @@ SM-S938B / `S938BXXUCZZIC`, not inferred.
 | B — Kernel identity | **physical PASS** | `ZZIC_KERNEL_IDENTITY/VERSION/ARCH/PAGE_SIZE` all `PASS` on hardware |
 | B — `crash_dump64` identity | **PASS (pinned)** | `9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f`, captured from the device; readable from this domain, so it remains a direct runtime SHA-256 check |
 | B — vendor ELF provenance | **PASS_AVB, now reproducible** | direct read is `EACCES` in `system_server` and `network_stack`; identity rests on the AVB chain the digest was captured under (vbmeta digest, green, locked, verity enforcing, `/vendor` erofs ro). The pinned `vbmeta_digest` is no longer merely observed: `tools/verify_zzic_avb.py` re-derives `23a0e0b0…` from the four vbmeta blobs in `evidence/zzic/avb/` and checks the signed `vendor` hashtree descriptor (root `794944fa…`, salt `336ad2aa…`, 860461+6777=867238 blocks). Runtime gate unchanged. See "Vendor ELF" above |
-| B — `libc` / `libc++` identity | **BLOCKED** | pinned and checked at runtime, but the run refused at Gate G before `patch_libc`/`patch_cxx` were reached |
+| B — `libc` / `libc++` identity | **PENDING physical run** | exact target hashes and symbols pass the offline Gate-F audit; the runtime stage-specific checks have not yet been observed after G1 was opened |
 | C — Java/system-server compat | **physical PASS** | `scheduleReceiver/12` observed on Android 17; `getProcessRecordLocked` absent, `mProcessNames` fallback resolved the ProcessRecord; `mOnewayThread` was the correct field |
 | D — NetworkStack identity | **physical PASS** | `scheduleReceiver sent` → `networkstack CONTROLLER binder received`, which only happens after `System.loadLibrary("exp")` inside `u:r:network_stack:s0`. Remote evidence is now reported back to the UI, not logcat-only |
 | E — Native packaging | **PASS** | real `./build.sh`; `libexp.so` AArch64, all JNI symbols, hashes recorded (apk_audit) |
 | F — Userspace ELF audit | **PASS** | `GATE_F=PASS (4 of 4 artefacts present)` against the ELFs pulled from the target: `crash_dump64` `9249d664…` (567,912 B), `libstagefrighthw.so` `308b254a…` (51,632 B), `libc.so` `88fba68b…` (1,330,432 B), `libc++.so` `cb118e98…` (1,152,760 B) — all four `identity: MATCH`, all ELF64/AArch64, `__libc_init` FOUND at `0x6e8ac`, `_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_` FOUND at `0xb8ae4`. The bytes are not committed (vendor binaries); the profile pins their digests and `elf_audit.py --map` re-runs against operator-supplied copies |
-| G — Module ABI compatibility | **UNVERIFIED** — evidence now present, module not yet built | the four ZZIC CRCs are derived and committed (`evidence/zzic/gate-g/`): `__stack_chk_fail 0xf0fdf6cb`, `_printk 0x92997ed8`, `memset 0xdcb764ad`, `sprint_symbol 0x661601de`, each read out of `/vendor_dlkm/lib/modules/qca_cld3_kiwi_v2.ko` (`bc659527…`, vermagic exactly the ZZIC release, 588 `__versions` entries), and `lsmod` on the target shows that module **loaded** — so the kernel itself accepted all 588 of its CRCs, which is stronger evidence than any witness count. What remains is **building** the helper against them: the bundled `dirtyfrag-android15-6.6.ko` still has an empty `__versions` (`MODVERSION_COVERAGE=EMPTY`), so no symbol-CRC agreement exists for it — and a *partial* table would not do either: the audit requires an entry for every non-weak import before it will report `COMPATIBLE`. Every page-cache stage refuses; there is no override, and `ko_zzic_verified=1` is bound to `SHA-256(bundled bytes) == ko_sha256` at run time and in CI |
+| G1 — Module loader/import ABI | **PASS (offline)** | bundled `dirtyfrag-android15-6.6-S938BXXUCZZIC.ko`, SHA-256 `b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017`, exact vermagic, `__versions` 5/5 including target-derived `module_layout`; strict audit is `COMPATIBLE` |
+| G2 — Runtime symbol discovery | **RUNTIME UNVERIFIED** | `sprint_symbol`/scan logic and lookup of `kallsyms_lookup_name` + `selinux_state` have not yet been observed on the target |
+| G3 — `selinux_state` layout | **SUPPORTED OFFLINE** | exact ZZIC BTF describes one 128-byte `selinux_state` with `enforcing` at bit offset 0; runtime confirmation remains pending |
+| G4 — Write safety | **UNVERIFIED** | nothing in G1 proves that writing `selinux_state.enforcing = 0` is safe on the running kernel |
 | H — Installer format compatibility | **physical PASS** | `ABX → TEXT → ABX` accepted by PMS; injection survived the soft reboot; the two write-path defects the run exposed are fixed and regression-tested |
-| I — Full hardware compatibility | **BLOCKED by Gate G** | the chain cannot be exercised end to end while the module is `UNVERIFIED`. `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` is independent, not proof |
+| I — Full hardware compatibility | **PENDING physical run** | no longer blocked by G1. The next run is the evidence step for G2/G4, the downstream libc/libc++ stages, stage2/ksud handoff and post-root state. `REFERENCE_DIRTYFRAG_FIX_ABSENT=CONFIRMED` remains independent, not proof |
 
-**Conclusion:** `SUPPORTED` is **not** granted. The adaptation to Android 17 /
-One UI 9 is demonstrated working up to Gate G; Gate G is the single remaining
-structural blocker, and it needs a kernel **build** artefact, not a device
-capture.
+**Conclusion:** `SUPPORTED` is **not** granted. G1 is closed and the app is now
+allowed to pass the old module-policy boundary, but G2/G4 and the downstream
+runtime chain still require one same-boot physical run. Restoring SELinux to
+`Enforcing` after KernelSU readiness also remains open and must not be assumed.
 
-### Expected result of a `2.0.3-zzic` run
+### Expected checkpoints of the first `2.0.4-zzic` run
 
-While Gate G is `UNVERIFIED`, a correct run ends like this — and that is the
-test *passing*:
+Before any write, the run must still reproduce the exact identity/provenance
+passes. The important new boundary is that the module policy and byte binding now
+pass rather than refuse:
 
 ```
 TARGET_PROFILE=S25U_ZZIC          PASS exact identity
@@ -875,13 +881,15 @@ ZZIC_VENDOR_PROVENANCE=PASS_AVB
 [DFR][AMS] PROCESS_LOOKUP=PASS
 [DFR][PROCESS] REMOTE_COMPONENT_REACHED=PASS
 [DFR][PROCESS] LIBEXP_LOADED=PASS
-[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED
-[DFR][MODULE] ZZIC_MODULE_POLICY=REFUSE_UNVERIFIED
-runAll done res=3
+[DFR][MODULE] ZZIC_MODULE_POLICY=ALLOW
+[DFR][MODULE] ZZIC_MODULE_BINDING=PASS
 ```
 
-with **no** `patch #1`, no `patched bytes` and no page-cache write. Anything
-that does reach `patch #1` while Gate G is `UNVERIFIED` is a defect.
+Everything after that is evidence, not an expected PASS. A successful helper
+load exercises G2/G3/G4 and may leave SELinux permissive if the later KernelSU
+handoff or readiness path fails. Do not combine evidence across boots; do not
+retry after `/dev/df` appears. A hard reboot is the recovery path for a failed
+first run after the helper has executed.
 
 ## How to close the blocked gates on hardware
 
