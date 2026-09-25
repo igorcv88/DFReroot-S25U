@@ -233,6 +233,28 @@ SELinux domain and its exec transition, the seccomp filter's verdict on the
 syscalls the native flow needs, mount-namespace behaviour, and any Samsung
 DEFEX-style restriction.
 
+### 5. Dead pins: the four `network_stack_*` fields
+
+`network_stack_process`, `network_stack_uid` (1073), `network_stack_context` and
+`network_stack_cap_eff` (`0x800003c00`) are declared in `target_profile.h`, pinned
+in `target_profile.c` and in `tools/zzic_profile.json`, and **not one of the four
+is read anywhere**. The device reported `CapEff=0000000800003c00`, matching the
+pin — but a value nobody compares is not a check, it is a profile advertising a
+boundary it never enforces. That is the same defect the code itself calls out for
+`android_release`.
+
+This is not a one-line cleanup either way:
+
+- **To enforce them**, the runtime has to *observe* the real process's uid,
+  SELinux context and `CapEff` at the Gate D boundary and feed them to a
+  `dfr_network_stack_eval()` alongside the pinned values, with a negative case per
+  field — the shape `dfr_vendor_provenance_eval()` already uses.
+- **To remove them**, all four go out of both profiles and out of the header.
+
+Either is a change to the chain's runtime, so it is recorded here rather than
+bundled into unrelated work. Do not pin a fifth field of this kind in the
+meantime.
+
 ## Build, release and verification
 
 The commands, the toolchain versions and the release conventions are in
