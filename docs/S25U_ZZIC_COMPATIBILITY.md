@@ -25,7 +25,7 @@ Source of truth: `app/src/main/jni/target_profile.c` (`DFR_PROFILE_ZZIC`) and
 `tools/zzic_profile.json` (Python tools). Values:
 
 ```
-manufacturer      = Samsung
+manufacturer      = samsung
 model             = SM-S938B
 device            = pa3q
 sdk               = 37
