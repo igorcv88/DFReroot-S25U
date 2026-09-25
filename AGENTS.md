@@ -163,8 +163,15 @@ on this kernel — so a table covering three of four imports is unloadable while
 entries-only diff reads `COMPATIBLE`. `ko_audit.py` therefore requires
 `imports_requiring_modversion - __versions entries == {}`, reports a hole as a
 hole (never as a CRC mismatch), reports an import absent from `Module.symvers`
-separately again, and exempts weak undefined symbols, which the loader is allowed
-to leave unresolved. The acceptance run for a newly built module must pass
+separately again, and exempts a weak undefined symbol only when the supplied `Module.symvers`
+does not export it. That exemption is narrower than `STB_WEAK`: `resolve_symbol()`
+runs `check_version()` whenever it *finds* the symbol and returns
+`ERR_PTR(-EINVAL)` on failure, and an error pointer is not NULL, so
+`simplify_symbols()`' `!ksym && STB_WEAK` escape hatch never applies to an
+exported symbol. An exported weak import with no entry fails the load exactly
+like a strong one. With no `Module.symvers` the question is undecidable, so it is
+reported `UNDECIDED` and refused under `--require-modversion-coverage` - never
+assumed exempt. The acceptance run for a newly built module must pass
 `--require-modversion-coverage`.
 
 `Module.symvers` is a kernel *build* artefact. It does not exist on a running

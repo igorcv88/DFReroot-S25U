@@ -35,9 +35,28 @@ So the audit computes, and requires:
 
     imports_requiring_modversion - __versions entries == empty set
 
-Weak undefined symbols are excluded: the kernel's simplify_symbols() leaves an
-unresolved STB_WEAK import at zero instead of failing, so such an import needs
-no version entry and must not be counted as a hole.
+Weak undefined symbols are excluded ONLY when the kernel does not export them.
+The exemption is narrower than STB_WEAK alone, and getting that wrong is
+fail-open. In simplify_symbols():
+
+    ksym = resolve_symbol_wait(...);
+    if (ksym && !IS_ERR(ksym)) { ...resolved...; break; }
+    if (!ksym && (ELF_ST_BIND(...) == STB_WEAK || ignore_undef_symbol(...)))
+        break;                       /* <- the weak escape hatch */
+    ret = PTR_ERR(ksym) ?: -ENOENT;  /* <- load fails */
+
+resolve_symbol() runs check_version() whenever it FINDS the symbol, and returns
+ERR_PTR(-EINVAL) when the version check fails. An error pointer is not NULL, so
+`!ksym` is false and the weak escape hatch does not apply: an exported weak
+import with no __versions entry fails the load exactly like a strong one. The
+hatch only covers a weak symbol the kernel does not export at all, which stays
+unresolved at zero.
+
+So the audit needs the symbol table to decide, and says so when it does not have
+one: a weak import is exempt when Module.symvers does not export it, required
+when it does, and UNDECIDED when no Module.symvers was supplied. Undecided is
+never silently treated as exempt - under --require-modversion-coverage it is a
+refusal, because that is the fail-closed reading of "we cannot tell".
 
 An import absent from Module.symvers altogether is a separate, harder failure
 (the symbol is not exported, so the load dies on "Unknown symbol" before any
@@ -82,9 +101,10 @@ NON_IMPORT_UNDEFS = frozenset({
 def classify_imports(syms):
     """Split the undefined symbols into the sets the version rules act on.
 
-    Returns (all_imports, requiring_modversion, weak_imports). Only the middle
-    set is subject to the coverage requirement - see the module docstring for
-    why weak imports are exempt.
+    Returns (all_imports, strong_imports, weak_imports). Which of these actually
+    require a __versions entry cannot be decided here: a weak import requires one
+    IF the kernel exports it, and only the supplied Module.symvers knows that.
+    See the module docstring for the loader code that makes this so.
     """
     all_imports, requiring, weak = set(), set(), set()
     for s in syms:
@@ -206,13 +226,10 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False):
     version_map = {n: (c & 0xFFFFFFFF) for n, c in versions}
 
     syms = e.symbols()
-    all_imports, requiring, weak_imports = classify_imports(syms)
+    all_imports, strong_imports, weak_imports = classify_imports(syms)
     imported = sorted(all_imports)
     r["imported_symbols"] = imported
     r["imported_count"] = len(imported)
-    # Kept separate on purpose: "is an import" and "needs a version entry" are
-    # different facts, and the second is what the coverage rule is about.
-    r["imports_requiring_modversion"] = sorted(requiring)
     r["imports_weak"] = sorted(weak_imports)
 
     r["sections"] = [{"name": s.name, "size": s.size, "type": s.type} for s in e.sections() if s.name]
@@ -239,6 +256,24 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False):
         r["symvers_sha256"] = None
         r["symvers_symbols"] = 0
     kall = load_kallsyms(kallsyms) if kallsyms else set()
+    # An exported weak import needs a version entry; an unexported one does not;
+    # with no symbol table we cannot tell, and saying so is the honest answer.
+    if symvers:
+        weak_required = weak_imports & exported
+        weak_exempt = weak_imports - exported
+        weak_undecided = set()
+    else:
+        weak_required = set()
+        weak_exempt = set()
+        weak_undecided = set(weak_imports)
+    requiring = strong_imports | weak_required
+    # Kept separate on purpose: "is an import" and "needs a version entry" are
+    # different facts, and the second is what the coverage rule is about.
+    r["imports_requiring_modversion"] = sorted(requiring)
+    r["imports_weak_required"] = sorted(weak_required)
+    r["imports_weak_exempt"] = sorted(weak_exempt)
+    r["imports_weak_undecided"] = sorted(weak_undecided)
+
     soi = {}
     for name in SYMBOLS_OF_INTEREST:
         has_entry = name in version_map
@@ -246,8 +281,10 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False):
             # The module resolves kallsyms_lookup_name/selinux_state at run time
             # through sprint_symbol, so for those "not imported" is the truth.
             match = "N/A (not imported)"
-        elif name in weak_imports and not has_entry:
-            match = "N/A (weak import, no version required)"
+        elif name in weak_exempt and not has_entry:
+            match = "N/A (weak import the kernel does not export)"
+        elif name in weak_undecided and not has_entry:
+            match = "UNDECIDED (weak import, no Module.symvers to say if exported)"
         elif not has_entry:
             # This used to read "N/A (not imported)" for an imported symbol -
             # a flatly false label on exactly the hole that matters.
@@ -273,6 +310,10 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False):
     # this is checked whether or not a Module.symvers was supplied.
     missing_entries = sorted(requiring - set(version_map))
     r["modversion_missing_entries"] = missing_entries
+    # Separate from a known hole: "no entry and we cannot tell whether one is
+    # needed" is a different fact from "no entry and one is needed".
+    undecided_no_entry = sorted(weak_undecided - set(version_map))
+    r["modversion_undecided_weak"] = undecided_no_entry
     if "modversions" not in vermagic and not version_map:
         coverage = "N/A (module not built with modversions)"
     elif not requiring:
@@ -286,6 +327,9 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False):
                        ", ".join(missing_entries)))
     else:
         coverage = "COMPLETE (%d/%d)" % (len(requiring), len(requiring))
+    if undecided_no_entry and not str(coverage).startswith("N/A"):
+        coverage += ("; %d weak import(s) UNDECIDED without a Module.symvers: %s"
+                     % (len(undecided_no_entry), ", ".join(undecided_no_entry)))
     r["MODVERSION_COVERAGE"] = coverage
     coverage_ok = not missing_entries
 
@@ -319,7 +363,13 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False):
         # the module. Incomplete coverage IS decidable here, and
         # --require-modversion-coverage makes it fatal for callers (the new-LKM
         # acceptance path) that must not accept a structurally unloadable module.
-        verdict = "INCOMPATIBLE" if (require_coverage and not coverage_ok) else "UNVERIFIED"
+        # Fail-closed on undecidable too: with no symbol table we cannot say a
+        # weak import is exempt, and the strict flag exists for the run that must
+        # not accept a module it cannot vouch for.
+        if require_coverage and (not coverage_ok or undecided_no_entry):
+            verdict = "INCOMPATIBLE"
+        else:
+            verdict = "UNVERIFIED"
 
     # vermagic sanity (necessary, not sufficient)
     r["vermagic_base_ok"] = vermagic.startswith(EXPECTED_GENERIC_VERMAGIC_PREFIX)
@@ -363,14 +413,24 @@ def human(r):
     L.append("  4k page tag  : %s" % r["vermagic_page_ok"])
     L.append("  modversions  : %s" % r["vermagic_modversions"])
     L.append("signed         : %s" % r["signed"])
-    L.append("imported syms  : %d  (%d need a version entry, %d weak)"
+    L.append("imported syms  : %d  (%d need a version entry, %d weak: "
+             "%d exported/required, %d exempt, %d undecided)"
              % (r["imported_count"], len(r["imports_requiring_modversion"]),
-                len(r["imports_weak"])))
-    weak = set(r["imports_weak"])
+                len(r["imports_weak"]), len(r.get("imports_weak_required") or []),
+                len(r.get("imports_weak_exempt") or []),
+                len(r.get("imports_weak_undecided") or [])))
     needs = set(r["imports_requiring_modversion"])
+    exempt = set(r.get("imports_weak_exempt") or [])
+    undecided = set(r.get("imports_weak_undecided") or [])
     for s in r["imported_symbols"]:
-        tag = "weak, no version required" if s in weak else (
-            "needs version entry" if s in needs else "not version-checked")
+        if s in needs:
+            tag = "needs version entry"
+        elif s in exempt:
+            tag = "weak, not exported: exempt"
+        elif s in undecided:
+            tag = "weak, UNDECIDED without a symvers"
+        else:
+            tag = "not version-checked"
         L.append("    import  %-28s (%s)" % (s, tag))
     L.append("__versions     : %d entries" % len(r["versions"]))
     for v in r["versions"]:
@@ -420,6 +480,10 @@ def incompatibility_reasons(r):
     if r.get("modversion_missing_entries"):
         why.append("no __versions entry for: %s"
                    % ", ".join(r["modversion_missing_entries"]))
+    if r.get("modversion_undecided_weak"):
+        why.append("weak import(s) with no entry and no Module.symvers to say "
+                   "whether the kernel exports them: %s"
+                   % ", ".join(r["modversion_undecided_weak"]))
     return why or ["see the report above"]
 
 

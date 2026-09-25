@@ -924,9 +924,15 @@ Rules that follow from that:
   different fix.
 - An import absent from `Module.symvers` is a separate, harder failure: the load
   dies on `Unknown symbol` before any version check runs.
-- Weak (`STB_WEAK`) undefined symbols are exempt. `simplify_symbols()` leaves an
-  unresolved weak import at zero instead of failing, so counting one as a hole
-  would invent a refusal.
+- A weak (`STB_WEAK`) undefined symbol is exempt **only when the kernel does not
+  export it**. `resolve_symbol()` runs `check_version()` whenever it finds the
+  symbol and returns `ERR_PTR(-EINVAL)` on failure; an error pointer is not NULL,
+  so `simplify_symbols()`' `!ksym && STB_WEAK` escape hatch does not apply. An
+  *exported* weak import with no entry fails the load like a strong one. The
+  hatch only covers a weak symbol the kernel exports nowhere, which stays
+  unresolved at zero. With no `Module.symvers` this is undecidable: reported
+  `UNDECIDED`, refused under `--require-modversion-coverage`, never assumed
+  exempt.
 - Coverage is decidable from the `.ko` alone, so it is always reported. Without a
   `Module.symvers` the verdict still stays `UNVERIFIED` — absent evidence is not
   a defect in the module — unless `--require-modversion-coverage` is passed, which

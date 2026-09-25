@@ -154,8 +154,11 @@ built module. A `__versions` table that covers only *some* imports cannot load
 (`check_version()` refuses with `no symbol version for %s`, and
 `CONFIG_MODULE_FORCE_LOAD` is not set), so the audit requires
 `imports_requiring_modversion - __versions entries == {}` and names every hole.
-Weak undefined symbols are exempt; an import absent from `Module.symvers`
-altogether is reported separately, as the harder `Unknown symbol` failure.
+A weak undefined symbol is exempt only when the `Module.symvers` does not export
+it — `check_version()` still runs on an exported weak symbol, so one with no
+entry fails the load like a strong one; with no symvers it is `UNDECIDED` and
+refused under the strict flag. An import absent from `Module.symvers` altogether
+is reported separately, as the harder `Unknown symbol` failure.
 
 The audit also records the symvers' digest, because a `Module.symvers` names no
 kernel. A module built against a GKI DDK with `kernel.release` forced to the

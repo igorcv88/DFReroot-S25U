@@ -249,6 +249,64 @@ def main():
     check("dfr_weak_hook" not in r["imports_requiring_modversion"],
           "a weak import is not counted as requiring a version entry")
 
+    # --- THE WEAK EXEMPTION IS NARROWER THAN STB_WEAK -----------------------
+    # Codex review of 30cceba, correct: resolve_symbol() runs check_version()
+    # whenever it FINDS the symbol and returns ERR_PTR(-EINVAL) on failure. An
+    # error pointer is not NULL, so simplify_symbols()' `!ksym && STB_WEAK`
+    # escape hatch does not apply - an EXPORTED weak import with no entry fails
+    # the load exactly like a strong one. Exempting every weak import was
+    # fail-open.
+    imports = FOUR_IMPORTS + [("dfr_weak_exported", STB_WEAK, STT_FUNC)]
+    exported_weak = KERNEL_CRCS + [("dfr_weak_exported", 0x66666666)]
+    sv_weak = write_symvers(os.path.join(td, "WeakExported.symvers"), exported_weak)
+    ko = build_ko(os.path.join(td, "weak_exported.ko"), imports=imports,
+                  versions=KERNEL_CRCS)          # no entry for the weak import
+    r = ko_audit.audit(ko, symvers=sv_weak)
+    check(r["MODULE_VS_ZZIC_KERNEL"] == "INCOMPATIBLE",
+          "an EXPORTED weak import with no entry -> INCOMPATIBLE (got %s)"
+          % r["MODULE_VS_ZZIC_KERNEL"])
+    check(r["modversion_missing_entries"] == ["dfr_weak_exported"],
+          "the exported weak import is named as the hole (got %s)"
+          % r["modversion_missing_entries"])
+    check(r["imports_weak_required"] == ["dfr_weak_exported"]
+          and r["imports_weak_exempt"] == [],
+          "an exported weak import is classified as requiring, not exempt")
+    check(r["symbols_of_interest"].get("sprint_symbol", {}).get("MODVERSION_MATCH")
+          is True, "the other symbols are unaffected")
+
+    # With the entry present and agreeing, the same module is fine.
+    ko = build_ko(os.path.join(td, "weak_exported_ok.ko"), imports=imports,
+                  versions=exported_weak)
+    check(verdict(ko, symvers=sv_weak) == "COMPATIBLE",
+          "an exported weak import WITH a matching entry is COMPATIBLE")
+
+    # An UNEXPORTED weak import stays exempt: the loader leaves it at zero.
+    ko = build_ko(os.path.join(td, "weak_unexported.ko"), imports=imports,
+                  versions=KERNEL_CRCS)
+    r = ko_audit.audit(ko, symvers=symvers)      # symvers WITHOUT the weak sym
+    check(r["MODULE_VS_ZZIC_KERNEL"] == "COMPATIBLE",
+          "an UNEXPORTED weak import with no entry stays COMPATIBLE (got %s)"
+          % r["MODULE_VS_ZZIC_KERNEL"])
+    check(r["imports_weak_exempt"] == ["dfr_weak_exported"],
+          "an unexported weak import is classified exempt")
+    check(r["modversion_unresolvable_imports"] == [],
+          "an unexported WEAK import is not an Unknown-symbol failure")
+
+    # --- undecidable is not exempt ------------------------------------------
+    # Without a symbol table we cannot know whether the kernel exports it.
+    r = ko_audit.audit(ko)
+    check(r["imports_weak_undecided"] == ["dfr_weak_exported"]
+          and r["imports_weak_exempt"] == [],
+          "with no symvers a weak import is UNDECIDED, never assumed exempt")
+    check("UNDECIDED" in r["MODVERSION_COVERAGE"],
+          "coverage says so (got %s)" % r["MODVERSION_COVERAGE"])
+    check(r["symbols_of_interest"]["sprint_symbol"]["MODVERSION_MATCH"]
+          == "UNVERIFIED", "unrelated symbols still read UNVERIFIED")
+    check(verdict(ko) == "UNVERIFIED",
+          "plain verdict without symvers stays UNVERIFIED")
+    check(verdict(ko, require_coverage=True) == "INCOMPATIBLE",
+          "--require-modversion-coverage refuses an undecidable weak import")
+
     # --- a table entry the supplied symvers does not know -------------------
     stale = KERNEL_CRCS + [("dfr_stale_entry", 0x55555555)]
     ko = build_ko(os.path.join(td, "stale.ko"), imports=FOUR_IMPORTS,
