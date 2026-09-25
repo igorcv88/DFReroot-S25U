@@ -96,6 +96,7 @@ struct TargetProfile {
     /* pinned artefact hashes (lowercase hex SHA-256) */
     const char *kernel_image_sha256;
     const char *btf_sha256;
+    const char *crashdump_sha256;     /* /apex/com.android.runtime/bin/crash_dump64 */
     const char *vendor_target_sha256; /* /vendor/lib64/libstagefrighthw.so */
     const char *libc_sha256;          /* resolved /system/lib64/libc.so target */
     const char *libcxx_sha256;        /* /system/lib64/libc++.so */
@@ -109,8 +110,9 @@ struct TargetProfile {
     /*
      * Whether a kernel module positively validated for THIS firmware is bundled
      * (Gate G COMPATIBLE against the ZZIC Module.symvers). 0 = only the generic
-     * android15-6.6 module is available and it is Gate-G UNVERIFIED, so loading
-     * it on ZZIC is fail-closed-refused unless the operator opts in explicitly.
+     * android15-6.6 module is available and it is Gate-G UNVERIFIED, so every
+     * mutating ZZIC entry point remains fail-closed until a validated module is
+     * explicitly bundled and this flag is changed as part of that reviewed port.
      */
     int         ko_zzic_verified;
 };
