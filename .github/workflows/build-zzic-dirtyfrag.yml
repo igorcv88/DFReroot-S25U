@@ -13,19 +13,101 @@ env:
 
 jobs:
   build:
+    name: Build and audit exact ZZIC DirtyFrag LKM
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build exact ZZIC DirtyFrag module
+      - name: Show source revision
         run: |
           set -euo pipefail
 
+          echo "repository=$GITHUB_REPOSITORY"
+          echo "sha=$GITHUB_SHA"
+          git log -1 --oneline
+
+      - name: Validate committed Gate G evidence
+        run: |
+          set -euo pipefail
+
+          test -s evidence/zzic/gate-g/ZZIC-derived-minimal.symvers
+          test -s evidence/zzic/gate-g/ZZIC-modversion-provenance.json
+
+          echo "=== ZZIC DERIVED SYMVERS ==="
+          cat evidence/zzic/gate-g/ZZIC-derived-minimal.symvers
+
+          echo
+          echo "=== REQUIRED CRCs ==="
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("evidence/zzic/gate-g/ZZIC-derived-minimal.symvers")
+
+          required = {
+              "__stack_chk_fail": 0xf0fdf6cb,
+              "_printk":          0x92997ed8,
+              "memset":           0xdcb764ad,
+              "sprint_symbol":    0x661601de,
+          }
+
+          got = {}
+
+          for line in path.read_text().splitlines():
+              fields = line.split()
+              if len(fields) < 2:
+                  continue
+
+              try:
+                  crc = int(fields[0], 16)
+              except ValueError:
+                  continue
+
+              symbol = fields[1]
+
+              if symbol in required:
+                  got[symbol] = crc & 0xffffffff
+
+          if set(got) != set(required):
+              raise SystemExit(
+                  f"Required symbol set mismatch: got={sorted(got)} "
+                  f"expected={sorted(required)}"
+              )
+
+          for symbol in sorted(required):
+              if got[symbol] != required[symbol]:
+                  raise SystemExit(
+                      f"{symbol}: CRC mismatch: "
+                      f"got=0x{got[symbol]:08x} "
+                      f"expected=0x{required[symbol]:08x}"
+                  )
+
+              print(f"{symbol:20s} 0x{got[symbol]:08x}")
+
+          print("Gate G committed CRC evidence: PASS")
+          PY
+
+      - name: Prepare output directory
+        run: |
+          set -euo pipefail
+
+          rm -rf "$RUNNER_TEMP/dirtyfrag-out"
           mkdir -p "$RUNNER_TEMP/dirtyfrag-out"
 
+      - name: Pull exact DDK image
+        run: |
+          set -euo pipefail
+
           docker pull "$DDK_IMAGE"
+
+          docker image inspect "$DDK_IMAGE" \
+            --format 'image={{index .RepoDigests 0}}'
+
+      - name: Build exact ZZIC DirtyFrag module
+        run: |
+          set -euo pipefail
 
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
@@ -41,22 +123,30 @@ jobs:
               export LLVM=1
               export LLVM_IAS=1
 
+              echo "=== BUILD ENVIRONMENT ==="
+              echo "TARGET_RELEASE=$TARGET_RELEASE"
+              echo "KDIR=${KDIR:-<unset>}"
+              echo "clang=$(command -v clang)"
+              clang --version | head -3
+
               test -n "${KDIR:-}"
               test -d "$KDIR"
-              test -f "$KDIR/Module.symvers"
+              test -s "$KDIR/Module.symvers"
 
               EXACT=/work/evidence/zzic/gate-g/ZZIC-derived-minimal.symvers
 
-              test -f "$EXACT"
+              test -s "$EXACT"
 
+              echo
               echo "=== TARGET ==="
               echo "$TARGET_RELEASE"
 
-              echo "=== EXACT ZZIC SYMVERS ==="
+              echo
+              echo "=== EXACT ZZIC CRC EVIDENCE ==="
               cat "$EXACT"
 
               #
-              # Force the external-module build to carry the exact Samsung
+              # Force the external module to carry the exact Samsung ZZIC
               # release string rather than the generic DDK release.
               #
               mkdir -p \
@@ -69,16 +159,34 @@ jobs:
               printf "#define UTS_RELEASE \"%s\"\n" "$TARGET_RELEASE" \
                 > "$KDIR/include/generated/utsrelease.h"
 
+              echo
+              echo "=== ORIGINAL DDK SYMBOL ENTRIES ==="
+
+              grep -E \
+                "[[:space:]](__stack_chk_fail|_printk|memset|sprint_symbol)[[:space:]]" \
+                "$KDIR/Module.symvers" || true
+
               #
-              # The DDK is the build/toolchain environment, not the CRC
-              # authority. Replace ONLY the four imports used by DirtyFrag
-              # with the values derived from the exact ZZIC stock module.
+              # IMPORTANT:
+              #
+              # The derived ZZIC symvers is evidence for CRC + symbol only.
+              # Its owner/export-type fields are deliberately assumptions and
+              # it has no observable namespace.
+              #
+              # Therefore DO NOT copy its whole lines into KDIR/Module.symvers.
+              #
+              # Instead:
+              #   1. read only CRC + symbol from the exact ZZIC evidence;
+              #   2. find the corresponding existing DDK entry;
+              #   3. replace ONLY field 1 (CRC);
+              #   4. preserve all remaining DDK fields exactly, including the
+              #      Linux 6.6 namespace field.
               #
               python3 - "$KDIR/Module.symvers" "$EXACT" <<'"'"'PY'"'"'
           import sys
           from pathlib import Path
 
-          dst = Path(sys.argv[1])
+          ddk_path = Path(sys.argv[1])
           exact_path = Path(sys.argv[2])
 
           required = {
@@ -88,47 +196,74 @@ jobs:
               "sprint_symbol",
           }
 
-          exact = {}
+          exact_crc = {}
 
           for line in exact_path.read_text().splitlines():
-              p = line.split()
-              if len(p) < 2:
+              fields = line.split()
+
+              if len(fields) < 2:
                   continue
 
               try:
-                  int(p[0], 16)
+                  crc = int(fields[0], 16)
               except ValueError:
                   continue
 
-              if p[1] in required:
-                  exact[p[1]] = line
+              symbol = fields[1]
 
-          if set(exact) != required:
+              if symbol in required:
+                  exact_crc[symbol] = crc & 0xffffffff
+
+          if set(exact_crc) != required:
               raise SystemExit(
-                  "exact symvers does not contain exactly the required "
-                  f"symbols: got {sorted(exact)}"
+                  "Derived ZZIC symvers does not contain the exact required "
+                  f"symbol set. got={sorted(exact_crc)} "
+                  f"expected={sorted(required)}"
               )
 
-          original = dst.read_text().splitlines()
+          original_lines = ddk_path.read_text().splitlines()
 
-          patched = []
+          found = set()
+          output = []
 
-          for line in original:
-              p = line.split()
+          for line in original_lines:
+              #
+              # Module.symvers is tab-separated.
+              # Preserve the complete existing DDK entry, including empty
+              # namespace field(s), and change only its CRC.
+              #
+              fields = line.split("\t")
 
-              if len(p) >= 2 and p[1] in required:
-                  continue
+              if len(fields) >= 2 and fields[1] in required:
+                  symbol = fields[1]
 
-              patched.append(line)
+                  if symbol in found:
+                      raise SystemExit(
+                          f"Duplicate DDK Module.symvers entry for {symbol}"
+                      )
 
+                  fields[0] = f"0x{exact_crc[symbol]:08x}"
+                  line = "\t".join(fields)
+                  found.add(symbol)
+
+              output.append(line)
+
+          missing = required - found
+
+          if missing:
+              raise SystemExit(
+                  "Required symbol(s) absent from DDK Module.symvers: "
+                  + ", ".join(sorted(missing))
+              )
+
+          ddk_path.write_text("\n".join(output) + "\n")
+
+          print("Patched exact ZZIC CRCs into DDK Module.symvers:")
           for symbol in sorted(required):
-              patched.append(exact[symbol])
+              print(f"  {symbol:20s} 0x{exact_crc[symbol]:08x}")
 
-          dst.write_text("\n".join(patched) + "\n")
-
-          print("Injected exact ZZIC CRC entries:")
-          for symbol in sorted(required):
-              print(exact[symbol])
+          print()
+          print("All non-CRC Module.symvers fields were preserved.")
           PY
 
               echo
@@ -138,8 +273,61 @@ jobs:
                 "[[:space:]](__stack_chk_fail|_printk|memset|sprint_symbol)[[:space:]]" \
                 "$KDIR/Module.symvers"
 
+              echo
+              echo "=== EFFECTIVE ENTRIES WITH TABS VISIBLE ==="
+
+              grep -E \
+                "[[:space:]](__stack_chk_fail|_printk|memset|sprint_symbol)[[:space:]]" \
+                "$KDIR/Module.symvers" \
+                | cat -A
+
+              echo
+              echo "=== EFFECTIVE CRC SELF-CHECK ==="
+
+              python3 - "$KDIR/Module.symvers" <<'"'"'PY'"'"'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+
+          expected = {
+              "__stack_chk_fail": 0xf0fdf6cb,
+              "_printk":          0x92997ed8,
+              "memset":           0xdcb764ad,
+              "sprint_symbol":    0x661601de,
+          }
+
+          got = {}
+
+          for line in path.read_text().splitlines():
+              fields = line.split()
+
+              if len(fields) < 2:
+                  continue
+
+              if fields[1] not in expected:
+                  continue
+
+              got[fields[1]] = int(fields[0], 16) & 0xffffffff
+
+          if set(got) != set(expected):
+              raise SystemExit(
+                  f"effective symbol set mismatch: {sorted(got)}"
+              )
+
+          for symbol in sorted(expected):
+              if got[symbol] != expected[symbol]:
+                  raise SystemExit(
+                      f"{symbol}: effective CRC is "
+                      f"0x{got[symbol]:08x}, expected "
+                      f"0x{expected[symbol]:08x}"
+                  )
+
+              print(f"{symbol:20s} 0x{got[symbol]:08x} PASS")
+          PY
+
               #
-              # Build.
+              # Clean only the external DirtyFrag module directory.
               #
               cd /work/dirtyfrag-lkm
 
@@ -148,7 +336,11 @@ jobs:
                 src="$PWD" \
                 ARCH=arm64 \
                 LLVM=1 \
+                LLVM_IAS=1 \
                 clean || true
+
+              echo
+              echo "=== BUILD ==="
 
               make -C "$KDIR" \
                 M="$PWD" \
@@ -164,12 +356,34 @@ jobs:
               echo
               echo "=== PRE-STRIP ELF ==="
 
-              readelf -h dirtyfrag.ko | grep -F "AArch64"
-              readelf -SW dirtyfrag.ko | grep -F "__versions"
-              strings dirtyfrag.ko | grep -F "$TARGET_RELEASE"
+              readelf -h dirtyfrag.ko \
+                | grep -F "AArch64"
+
+              readelf -SW dirtyfrag.ko \
+                | grep -F "__versions"
+
+              strings dirtyfrag.ko \
+                | grep -F "$TARGET_RELEASE"
+
+              echo
+              echo "=== PRE-STRIP MODINFO ==="
+
+              modinfo dirtyfrag.ko || true
+
+              echo
+              echo "=== PRE-STRIP SHA256 ==="
+
+              sha256sum dirtyfrag.ko
 
               #
-              # Same size diet already used by the upstream project.
+              # Keep an unstripped copy for diagnosis/provenance.
+              #
+              cp dirtyfrag.ko "/out/${OUT_NAME%.ko}-unstripped.ko"
+
+              #
+              # Same size reduction strategy used by the original project.
+              # The final STRIPPED bytes are the bytes Gate G will audit and
+              # eventually pin into the target profile.
               #
               llvm-objcopy \
                 --strip-unneeded \
@@ -195,11 +409,29 @@ jobs:
               echo
               echo "=== FINAL MODULE ==="
 
-              readelf -h "/out/$OUT_NAME" | grep -F "AArch64"
-              readelf -SW "/out/$OUT_NAME" | grep -F "__versions"
-              strings "/out/$OUT_NAME" | grep -F "$TARGET_RELEASE"
+              readelf -h "/out/$OUT_NAME" \
+                | grep -F "AArch64"
+
+              readelf -SW "/out/$OUT_NAME" \
+                | grep -F "__versions"
+
+              strings "/out/$OUT_NAME" \
+                | grep -F "$TARGET_RELEASE"
+
+              echo
+              echo "=== FINAL MODINFO ==="
+
+              modinfo "/out/$OUT_NAME" || true
+
+              echo
+              echo "=== FINAL SHA256 ==="
 
               sha256sum "/out/$OUT_NAME"
+
+              echo
+              echo "=== FINAL SIZE ==="
+
+              stat -c "%n %s bytes" "/out/$OUT_NAME"
             '
 
       - name: Gate G strict audit
@@ -208,28 +440,65 @@ jobs:
 
           KO="$RUNNER_TEMP/dirtyfrag-out/$OUT_NAME"
 
+          test -s "$KO"
+
           python3 tools/ko_audit.py "$KO" \
             --symvers evidence/zzic/gate-g/ZZIC-derived-minimal.symvers \
             --symvers-provenance evidence/zzic/gate-g/ZZIC-modversion-provenance.json \
             --require-modversion-coverage
 
-      - name: Record artifact identity
+      - name: Gate G JSON audit record
+        run: |
+          set -euo pipefail
+
+          KO="$RUNNER_TEMP/dirtyfrag-out/$OUT_NAME"
+
+          python3 tools/ko_audit.py "$KO" \
+            --symvers evidence/zzic/gate-g/ZZIC-derived-minimal.symvers \
+            --symvers-provenance evidence/zzic/gate-g/ZZIC-modversion-provenance.json \
+            --require-modversion-coverage \
+            --json \
+            > "$RUNNER_TEMP/dirtyfrag-out/$OUT_NAME.audit.json"
+
+          test -s "$RUNNER_TEMP/dirtyfrag-out/$OUT_NAME.audit.json"
+
+      - name: Record final artifact identity
         run: |
           set -euo pipefail
 
           cd "$RUNNER_TEMP/dirtyfrag-out"
 
-          sha256sum "$OUT_NAME" | tee "$OUT_NAME.sha256"
+          sha256sum "$OUT_NAME" \
+            | tee "$OUT_NAME.sha256"
+
+          sha256sum "${OUT_NAME%.ko}-unstripped.ko" \
+            | tee "${OUT_NAME%.ko}-unstripped.ko.sha256"
+
+          echo
+          echo "=== FINAL ARTIFACT ==="
 
           stat -c \
-            "filename=%n%nsize=%s bytes" \
+            "filename=%n size=%s bytes" \
             "$OUT_NAME"
 
-      - name: Upload module
+          echo
+          echo "=== SHA256 ==="
+
+          cat "$OUT_NAME.sha256"
+
+          echo
+          echo "=== EXPECTED TARGET RELEASE ==="
+          echo "$TARGET_RELEASE"
+
+      - name: Upload ZZIC DirtyFrag artifacts
         uses: actions/upload-artifact@v4
         with:
           name: zzic-dirtyfrag-lkm
+          if-no-files-found: error
+          retention-days: 30
           path: |
             ${{ runner.temp }}/dirtyfrag-out/${{ env.OUT_NAME }}
             ${{ runner.temp }}/dirtyfrag-out/${{ env.OUT_NAME }}.sha256
-          if-no-files-found: error
+            ${{ runner.temp }}/dirtyfrag-out/${{ env.OUT_NAME }}.audit.json
+            ${{ runner.temp }}/dirtyfrag-out/dirtyfrag-android15-6.6-S938BXXUCZZIC-unstripped.ko
+            ${{ runner.temp }}/dirtyfrag-out/dirtyfrag-android15-6.6-S938BXXUCZZIC-unstripped.ko.sha256
