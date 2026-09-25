@@ -38,9 +38,9 @@ PROFILE_JSON = os.path.join(HERE, "zzic_profile.json")
 SHARED_STRINGS = [
     "id", "manufacturer", "model", "device", "display", "fingerprint",
     "kernel_release", "kernel_version", "abi", "kernel_arch",
-    "kernel_image_sha256", "btf_sha256", "vendor_target_sha256",
-    "libc_sha256", "libcxx_sha256", "network_stack_process",
-    "network_stack_context",
+    "kernel_image_sha256", "btf_sha256", "crashdump_sha256",
+    "vendor_target_sha256", "libc_sha256", "libcxx_sha256",
+    "network_stack_process", "network_stack_context",
 ]
 SHARED_INTS = ["sdk", "android_release", "page_size", "network_stack_uid"]
 

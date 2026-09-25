@@ -38,6 +38,9 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
         "470d40df59320e01b1449f8dbe962e0d44d735c817b99293dc6da286175ffcf3",
     .btf_sha256 =
         "e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c",
+    /* Unknown: dossier section 26, the immediate Gate B blocker. Keep NULL so
+     * the ZZIC path refuses instead of patching an unvalidated crash_dump64. */
+    .crashdump_sha256 = NULL,
     .vendor_target_sha256 =
         "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
     .libc_sha256 =

@@ -300,6 +300,16 @@ one. Every pinned artefact is still validated exactly once, while pristine,
 immediately before it is written, and a mismatch is still a hard refusal — the
 check was scoped, not relaxed.
 
+**Section 26 — `crash_dump64` is a required boundary.** It is the first file the
+chain writes, and its hash was simply absent from the profile, so `gate_hash()`
+reported `UNKNOWN` and let the write through. `crashdump_sha256` is now a profile
+field, owned by `patch_ko()` (which writes both crash_dump64 and the vendor
+file), and on the ZZIC target an unpinned **required** artefact is a `FAIL`, not
+an `UNKNOWN`: "we never captured the hash" is not evidence of a match. It is
+`NULL` today, so **the ZZIC path refuses until the hash is supplied** — that is
+the intended state, and closing it needs one value from the device (see
+"What is still needed" below).
+
 **Ordering — a refusal no longer leaves a corrupted file behind.** `patch_ko()`
 patched `crash_dump64` (patch #1) *before* selecting the module and applying the
 Gate-G module policy, so a fail-closed module refusal happened after the first
@@ -426,3 +436,89 @@ python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko \
 adb shell su -c 'CLASSPATH=/data/local/tmp/df_installer.apk app_process /system/bin \
     com.polygraphene.df.installer.InjectMain --diag-zzic'
 ```
+
+## What is still needed to make the ZZIC path executable
+
+The code is complete and builds; what remains is **evidence**, and the gates are
+deliberately wired so that missing evidence refuses rather than assumes. Two
+values are hard blockers, in this order.
+
+### 1. `crash_dump64` SHA-256 — blocks Gate B, one command
+
+```sh
+adb shell sha256sum /apex/com.android.runtime/bin/crash_dump64
+# and, for the full section 26 record:
+adb pull /apex/com.android.runtime/bin/crash_dump64 ./pulled/apex/com.android.runtime/bin/
+python3 tools/elf_audit.py --root ./pulled
+```
+
+Then set the value in **both** places (the CI drift check enforces that they
+agree):
+
+- `app/src/main/jni/target_profile.c` → `.crashdump_sha256 = "<hex>"`
+- `tools/zzic_profile.json` → `"crashdump_sha256": "<hex>"`
+
+Until then every ZZIC run stops at
+`[DFR][USERSPACE] ZZIC_CRASHDUMP_IDENTITY FAIL required hash is not pinned`.
+
+### 2. A Gate-G validated kernel module — blocks the module load
+
+The bundled `dirtyfrag-android15-6.6.ko` shares the ZZIC kernel's GKI base
+(`6.6.127`) and page tag (`4k`), but ships an **empty `__versions` table** while
+the ZZIC kernel has `CONFIG_MODVERSIONS=y`, so no symbol-CRC agreement can be
+established offline. It is `UNVERIFIED`, and an ABI-mismatched module can fault
+the kernel. Resolve with the ZZIC kernel's symbol table:
+
+```sh
+python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko \
+    --symvers Module.symvers --kallsyms kallsyms.txt
+```
+
+`MODULE_VS_ZZIC_KERNEL = COMPATIBLE` is the only result that justifies flipping
+the flag, and the flag alone is not enough — all three fields go together:
+
+```c
+.ko_zzic_verified = 1,
+.ko_filename      = "dirtyfrag-zzic-6.6.127.ko",
+.ko_sha256        = "<sha256 of exactly those bundled bytes>",
+```
+
+`tools/profile_binding_audit.py` fails the build if the flag is set without a
+digest, if the digest does not match the bundled file, or if a digest is left
+pinned while the flag is 0.
+
+Without a validated module, `touch /data/local/tmp/dfr_allow_unverified_ko` is
+the owner-only, at-own-risk escape hatch: it logs
+`[DFR][MODULE] WARN ... kernel-crash risk accepted` and proceeds. It exists so
+the chain can be exercised at all before a validated module exists. Removing it
+is a defensible policy choice (PR #2 does exactly that); keeping it is what makes
+the ZZIC path *executable* today. That trade-off is the repository owner's to
+settle, not something this document should decide silently.
+
+### 3. Runtime evidence that no static check can supply
+
+Everything else in the gate matrix needs a logcat capture from the device, and
+each item names the boundary that produces it:
+
+| Needed | Produced by | Log line |
+|---|---|---|
+| AMS / ProcessRecord / IApplicationThread shapes (Gate C) | run DFReroot, capture logcat | `[DFR][AMS] *` |
+| `scheduleReceiver` overload shape | same | `[DFR][AMS] scheduleReceiver/<n>` |
+| network_stack identity (Gate D) | StageReceiver in network_stack | `[DFR][PROCESS] REMOTE_COMPONENT_REACHED` |
+| `libexp.so` actually loaded | StageReceiver | `[DFR][PROCESS] NATIVE_LIBRARY_DISCOVERABLE` + load outcome |
+| packages.xml semantics (Gate H) | `InjectMain --diag-zzic` | `[DFR][INSTALLER] *` |
+
+```sh
+adb logcat -c && adb logcat -s DFReroot DirtyFrag | tee zzic-run.log
+grep '\[DFR\]' zzic-run.log
+```
+
+`scheduleReceiver` is the one runtime unknown the code cannot work around: the
+hop invokes the **12-parameter** overload, and if Android 17 changed that shape
+the hop fails with the observed overloads logged. It is deliberately not guessed
+at — invoking an unknown overload with fabricated arguments runs inside
+`system_server`. Send the `[DFR][AMS] scheduleReceiver/<n> params=[...]` line and
+the correct shape can be wired precisely.
+
+Record `/proc/sys/kernel/random/boot_id` with any capture: per dossier section 45,
+states from different boots must never be combined into one successful chain.

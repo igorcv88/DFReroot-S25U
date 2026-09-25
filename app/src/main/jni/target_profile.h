@@ -96,6 +96,13 @@ struct TargetProfile {
     /* pinned artefact hashes (lowercase hex SHA-256) */
     const char *kernel_image_sha256;
     const char *btf_sha256;
+    /*
+     * First mutation target. NULL until the exact ZZIC file hash is captured
+     * from hardware; on the ZZIC target an unpinned REQUIRED artefact is a FAIL,
+     * not an UNKNOWN, so the chain refuses rather than writing to a file whose
+     * pristine identity was never established (dossier section 26).
+     */
+    const char *crashdump_sha256;     /* /apex/com.android.runtime/bin/crash_dump64 */
     const char *vendor_target_sha256; /* /vendor/lib64/libstagefrighthw.so */
     const char *libc_sha256;          /* resolved /system/lib64/libc.so target */
     const char *libcxx_sha256;        /* /system/lib64/libc++.so */

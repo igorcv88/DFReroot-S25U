@@ -99,9 +99,10 @@ static const char *target_lib_path = "/vendor/lib64/libstagefrighthw.so";
  * it is still pristine, immediately before it is written - a hash mismatch
  * remains a hard, fail-closed refusal.
  */
-#define DFR_ART_VENDOR 0x1
-#define DFR_ART_LIBC   0x2
-#define DFR_ART_LIBCXX 0x4
+#define DFR_ART_CRASHDUMP 0x1
+#define DFR_ART_VENDOR    0x2
+#define DFR_ART_LIBC      0x4
+#define DFR_ART_LIBCXX    0x8
 static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
                        int artefacts);
 
@@ -766,10 +767,19 @@ static void prop_get(const char *key, char *out, size_t outlen, const char *dflt
 
 /* Compare one userspace artefact's SHA-256 against the profile; log the gate. */
 static int gate_hash(struct Reporter *reporter, const char *tag,
-                     const char *path, const char *expected) {
+                     const char *path, const char *expected, int required) {
     if (expected == NULL || expected[0] == 0) {
+        if (required) {
+            /*
+             * An artefact this stage is about to WRITE must have an established
+             * pristine identity. "We never captured the hash" is not evidence of
+             * a match, so on the exact target it is a refusal, not an UNKNOWN.
+             */
+            REPORTLN("[DFR][USERSPACE] %s FAIL required hash is not pinned path=%s", tag, path);
+            return -1;
+        }
         REPORTLN("[DFR][USERSPACE] %s UNKNOWN (no pinned hash) path=%s", tag, path);
-        return 0; /* unknown != fail: do not block on an unpinned artefact */
+        return 0;
     }
     char hex[65];
     if (dfr_sha256_file_hex(path, hex) != 0) {
@@ -905,18 +915,23 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
      * reported SKIP so a log reader never mistakes an unhashed artefact for a
      * validated one.
      */
+    if (artefacts & DFR_ART_CRASHDUMP) {
+        if (gate_hash(reporter, "ZZIC_CRASHDUMP_IDENTITY", kCrashDump, p->crashdump_sha256, 1)) rc = -1;
+    } else {
+        REPORTLN("[DFR][USERSPACE] ZZIC_CRASHDUMP_IDENTITY SKIP (not this stage's artefact)");
+    }
     if (artefacts & DFR_ART_VENDOR) {
-        if (gate_hash(reporter, "ZZIC_VENDOR_ELF", target_lib_path, p->vendor_target_sha256)) rc = -1;
+        if (gate_hash(reporter, "ZZIC_VENDOR_ELF", target_lib_path, p->vendor_target_sha256, 1)) rc = -1;
     } else {
         REPORTLN("[DFR][USERSPACE] ZZIC_VENDOR_ELF SKIP (not this stage's artefact)");
     }
     if (artefacts & DFR_ART_LIBC) {
-        if (gate_hash(reporter, "ZZIC_LIBC_IDENTITY", "/system/lib64/libc.so", p->libc_sha256)) rc = -1;
+        if (gate_hash(reporter, "ZZIC_LIBC_IDENTITY", "/system/lib64/libc.so", p->libc_sha256, 1)) rc = -1;
     } else {
         REPORTLN("[DFR][USERSPACE] ZZIC_LIBC_IDENTITY SKIP (not this stage's artefact)");
     }
     if (artefacts & DFR_ART_LIBCXX) {
-        if (gate_hash(reporter, "ZZIC_LIBCXX_IDENTITY", "/system/lib64/libc++.so", p->libcxx_sha256)) rc = -1;
+        if (gate_hash(reporter, "ZZIC_LIBCXX_IDENTITY", "/system/lib64/libc++.so", p->libcxx_sha256, 1)) rc = -1;
     } else {
         REPORTLN("[DFR][USERSPACE] ZZIC_LIBCXX_IDENTITY SKIP (not this stage's artefact)");
     }
@@ -939,7 +954,9 @@ int patch_ko(struct Reporter *reporter) {
      * takes the upstream generic path). A partial ZZIC match aborts here.
      */
     dfr_target_class cls = DFR_TARGET_UPSTREAM_GENERIC;
-    if (gate_target(reporter, &cls, DFR_ART_VENDOR) != 0) {
+    /* patch_ko() writes BOTH crash_dump64 (patch #1) and the vendor file
+     * (patch #2), so it owns both artefact boundaries. */
+    if (gate_target(reporter, &cls, DFR_ART_CRASHDUMP | DFR_ART_VENDOR) != 0) {
         REPORTLN("[DFR][TARGET] aborting: target gate refused");
         return 1;
     }
