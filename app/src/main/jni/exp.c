@@ -983,27 +983,17 @@ int patch_ko(struct Reporter *reporter) {
     REPORTLN("* ko android%d-%d.%d (%d bytes)", ko->android_release, ko->kver_major, ko->kver_minor, (int)(ko->end - ko->start));
 
     /*
-     * Fail-closed module policy: on the exact ZZIC target the only bundled
-     * module is the GENERIC android15-6.6 image, which Gate G reports as
-     * UNVERIFIED (empty __versions; no ZZIC Module.symvers to prove symbol-CRC
-     * agreement). Loading an ABI-mismatched module can crash/corrupt the
-     * kernel, so refuse unless either a ZZIC-validated module is bundled
-     * (profile.ko_zzic_verified) or the device operator has explicitly accepted
-     * the risk by creating the override marker.
+     * Fail-closed module policy: on the exact ZZIC target the generic
+     * android15-6.6 image remains UNVERIFIED.  Missing evidence is never an
+     * execution override: the exact target may proceed only when a module has
+     * been positively validated and cryptographically bound to this profile.
      */
     if (cls == DFR_TARGET_S25U_ZZIC) {
         REPORTLN("[DFR][MODULE] ENTER");
         if (!DFR_PROFILE_ZZIC.ko_zzic_verified) {
             REPORTLN("[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED (no ZZIC-validated .ko bundled)");
-            if (access("/data/local/tmp/dfr_allow_unverified_ko", F_OK) == 0) {
-                REPORTLN("[DFR][MODULE] WARN proceeding: operator override marker present"
-                         " (/data/local/tmp/dfr_allow_unverified_ko); kernel-crash risk accepted");
-            } else {
-                REPORTLN("[DFR][MODULE] FAIL fail-closed: refusing to load an unverified module on ZZIC.");
-                REPORTLN("[DFR][MODULE]   bundle a Gate-G COMPATIBLE module, or (owner, at own risk)"
-                         " `touch /data/local/tmp/dfr_allow_unverified_ko` to override.");
-                return 1;
-            }
+            REPORTLN("[DFR][MODULE] FAIL fail-closed: refusing an unverified module on ZZIC.");
+            return 1;
         } else {
             /*
              * ko_zzic_verified=1 is only honoured when the bytes about to be

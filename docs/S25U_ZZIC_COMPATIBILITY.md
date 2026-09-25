@@ -139,10 +139,8 @@ re-validate before touching a file (the JNI methods are exposed independently by
 `StageReceiver` transactions 1–3).
 
 On the exact ZZIC target the generic module is Gate-G `UNVERIFIED`, so
-`patch_ko()` **refuses** to load it (`[DFR][MODULE] FAIL`) unless a
-ZZIC-validated module is bundled (`profile.ko_zzic_verified`) or the device
-owner explicitly accepts the kernel-crash risk with
-`touch /data/local/tmp/dfr_allow_unverified_ko`.
+`patch_ko()` **refuses** to load it (`[DFR][MODULE] FAIL`) unless a ZZIC-validated module is bundled and cryptographically bound to the
+profile.
 
 ## Unit tests (target detection) + regression tests
 
@@ -515,13 +513,9 @@ the flag, and the flag alone is not enough — all three fields go together:
 digest, if the digest does not match the bundled file, or if a digest is left
 pinned while the flag is 0.
 
-Without a validated module, `touch /data/local/tmp/dfr_allow_unverified_ko` is
-the owner-only, at-own-risk escape hatch: it logs
-`[DFR][MODULE] WARN ... kernel-crash risk accepted` and proceeds. It exists so
-the chain can be exercised at all before a validated module exists. Removing it
-is a defensible policy choice (PR #2 does exactly that); keeping it is what makes
-the ZZIC path *executable* today. That trade-off is the repository owner's to
-settle, not something this document should decide silently.
+Without a positively validated module, the ZZIC path remains blocked at Gate G.
+There is no runtime escape hatch for an `UNVERIFIED` module; compatibility must
+be established by evidence and bound to the exact bundled bytes.
 
 ### 3. Runtime evidence that no static check can supply
 
