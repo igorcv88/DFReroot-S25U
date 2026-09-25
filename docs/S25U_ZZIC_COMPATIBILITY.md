@@ -25,7 +25,7 @@ Source of truth: `app/src/main/jni/target_profile.c` (`DFR_PROFILE_ZZIC`) and
 `tools/zzic_profile.json` (Python tools). Values:
 
 ```
-manufacturer      = Samsung
+manufacturer      = samsung
 model             = SM-S938B
 device            = pa3q
 sdk               = 37
@@ -69,6 +69,12 @@ This is recorded as an **independent** state. It is *not* treated as proof of
 end-to-end exploitability (Gate I stays `BLOCKED`).
 
 ## Userspace identity (pinned)
+
+> Hardening note: `/apex/com.android.runtime/bin/crash_dump64` is the first
+> mutation target and its exact ZZIC SHA-256 is not yet pinned. Gate B now treats
+> this missing required hash as FAIL, so the ZZIC mutation path remains blocked
+> until that file is captured and its provenance is established.
+
 
 | Path | SHA-256 | Notes |
 |---|---|---|
@@ -132,15 +138,13 @@ or `uname -m` is therefore a `MISMATCH`, not an "exact" target.
 re-validate before touching a file (the JNI methods are exposed independently by
 `StageReceiver` transactions 1–3).
 
-On the exact ZZIC target the generic module is Gate-G `UNVERIFIED`, so
-`patch_ko()` **refuses** to load it (`[DFR][MODULE] FAIL`) unless a
-ZZIC-validated module is bundled (`profile.ko_zzic_verified`) or the device
-owner explicitly accepts the kernel-crash risk with
-`touch /data/local/tmp/dfr_allow_unverified_ko`.
+On the exact ZZIC target the generic module is Gate-G `UNVERIFIED`.
+All mutating entry points therefore fail closed before any page-cache mutation
+until a ZZIC-validated module is bundled. There is no runtime marker override.
 
 ## Unit tests (target detection) + regression tests
 
-`tools/tests/run_tests.sh` (host `cc`, no Android). **24/24 pass.**
+`tools/tests/run_tests.sh` (host `cc`, no Android). **25/25 pass.**
 
 Target detection: exact ZZIC → `S25U_ZZIC`; and all required negatives → not
 ZZIC: `SM-S938B+ZZI4` (MISMATCH), `SM-S938U`, `SM-S938N`, `pa3q+other display`
@@ -269,10 +273,9 @@ Four review findings were verified and fixed:
 - **P1 — gate every corruption entry point.** `patchLibc`/`patchCxx` (StageReceiver
   transactions 2/3) called `patch_libc`/`patch_cxx` directly, bypassing the
   `patch_ko()` gate. Both now re-run the fail-closed gate at entry.
-- **P1 — refuse the unverified module on ZZIC.** `patch_ko()` no longer proceeds
-  to corrupt the vendor file with the Gate-G `UNVERIFIED` generic module on the
-  ZZIC target; it refuses unless `ko_zzic_verified` or the operator override
-  marker is present.
+- **P1 — refuse the unverified module on ZZIC.** Follow-up hardening moves Gate G
+  ahead of every mutation, so the exact ZZIC path cannot alter crash_dump64,
+  libc, libc++ or the vendor target until a positively validated module is bundled.
 - **P2 — compare `kernel_version` + `kernel_arch`.** Both are now in
   `ObservedTarget` and the fail-closed identity check; a rebuilt kernel with a
   matching `uname -r` but different `uname -v`/`-m` is a `MISMATCH`.
@@ -283,7 +286,7 @@ Four review findings were verified and fixed:
 
 | Gate | Result | Evidence |
 |---|---|---|
-| A — Target identity | **PASS** | fail-closed classifier implemented; 24/24 host tests incl. exact ZZIC + all required negatives |
+| A — Target identity | **PASS** | fail-closed classifier implemented; 25/25 host tests incl. exact ZZIC + all required negatives |
 | B — Kernel/userspace identity | **BLOCKED** | validation code + pinned hashes implemented; runtime SHA-256/symlink/page-size checks need the ZZIC device |
 | C — Java/system-server compat | **BLOCKED** | `[DFR][AMS]` deterministic dumps implemented; needs on-device logcat to compare Android 17 shapes |
 | D — NetworkStack identity | **BLOCKED** (process facts already observed on HW) | `[DFR][PROCESS]` instrumentation implemented; runtime capture pending |
