@@ -203,6 +203,15 @@ jobs:
             echo "\`build-provenance.txt\`."
           } > release-notes.md
 
+          # Resolve the prerelease policy ONCE, before the create/update split.
+          # `inputs.prerelease` is empty on a tag push (inputs only exist for
+          # workflow_dispatch), and an empty value must mean the DECLARED default,
+          # which is true. Reading it as "false" would publish a full release of a
+          # build whose hardware compatibility is UNVERIFIED.
+          PRERELEASE="${{ inputs.prerelease }}"
+          [ -n "$PRERELEASE" ] || PRERELEASE=true
+          echo "publishing $TAG (prerelease=$PRERELEASE)"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             # --clobber only replaces assets of the SAME name, so a version bump
             # would otherwise leave the previous version's APKs sitting in the
@@ -218,20 +227,17 @@ jobs:
               esac
             done
             gh release upload "$TAG" release/* --clobber
-            gh release edit "$TAG" --notes-file release-notes.md
+            # The prerelease state must be applied on the UPDATE path too. Editing
+            # only the notes leaves a release that was previously published as full
+            # - exactly the state the old tag-push default produced - sitting there
+            # as full for ever, and makes a manual dispatch unable to correct it.
+            gh release edit "$TAG" \
+              --notes-file release-notes.md \
+              --prerelease="$PRERELEASE"
           else
-            # `inputs.prerelease` is empty on a tag push (inputs only exist for
-            # workflow_dispatch), and an empty value must mean the DECLARED
-            # default, which is true. Reading it as "false" would publish a full
-            # release of a build whose hardware compatibility is UNVERIFIED.
-            PRERELEASE="${{ inputs.prerelease }}"
-            [ -n "$PRERELEASE" ] || PRERELEASE=true
-            PRE=""
-            if [ "$PRERELEASE" = "true" ]; then PRE="--prerelease"; fi
-            echo "publishing $TAG (prerelease=$PRERELEASE)"
             gh release create "$TAG" release/* \
               --title "DFReroot ${VER} (${TAG})" \
               --notes-file release-notes.md \
               --target "$GITHUB_SHA" \
-              $PRE
+              --prerelease="$PRERELEASE"
           fi
