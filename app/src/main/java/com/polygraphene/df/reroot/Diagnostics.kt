@@ -20,6 +20,14 @@ object Diagnostics {
     private const val TAG = "DFReroot"
     private const val NETWORK_STACK_CONTEXT = "u:r:network_stack:s0"
 
+    /*
+     * Mirrors .network_stack_cap_eff in target_profile.c and
+     * network_stack_cap_eff in tools/zzic_profile.json. Kotlin that needs an
+     * Android runtime cannot be unit-tested here, so the drift between these
+     * three copies is guarded statically by tools/profile_binding_audit.py.
+     */
+    private const val NETWORK_STACK_CAP_EFF = "0x800003c00"
+
     private fun emit(sb: StringBuilder?, line: String) {
         Log.i(TAG, line)
         sb?.appendLine(line)
@@ -161,10 +169,57 @@ object Diagnostics {
         }
         emit(sb, "[DFR][PROCESS] REMOTE_COMPONENT_REACHED=$reached")
 
+        /*
+         * NATIVE_LIBRARY_DISCOVERABLE used to be reported here as PASS/UNKNOWN
+         * from File(nativeLibraryDir, "libexp.so").exists(). That signal could
+         * never read PASS on any device: the APK ships lib/arm64-v8a/libexp.so
+         * Stored with android:extractNativeLibs="false", so the loader maps it
+         * out of base.apk and nothing is ever written to nativeLibraryDir. A
+         * signal with no reachable PASS measures nothing, and it was observed
+         * UNKNOWN right next to LIBEXP_LOADED=PASS in the same process.
+         *
+         * Replaced by two facts that are each separately true or false, neither
+         * standing in for the other, and neither standing in for LIBEXP_LOADED -
+         * which remains the only proof that dlopen succeeded in this domain.
+         */
+        val abi = supportedAbi()
+        val apkEntry = "lib/$abi/libexp.so"
+        val packaged = try {
+            java.util.zip.ZipFile(context.applicationInfo.sourceDir).use { z ->
+                z.getEntry(apkEntry)?.let { "PASS (size=${it.size})" }
+                    ?: "FAIL (no $apkEntry in the package)"
+            }
+        } catch (t: Throwable) {
+            "UNKNOWN (cannot read the package: ${t.javaClass.simpleName})"
+        }
+        emit(sb, "[DFR][PROCESS] NATIVE_PAYLOAD_PACKAGED=$packaged ($apkEntry)")
+
         val libexp = File(nld, "libexp.so")
-        val discoverable = try { libexp.exists() } catch (_: Throwable) { false }
-        emit(sb, "[DFR][PROCESS] NATIVE_LIBRARY_DISCOVERABLE=" +
-            "${if (discoverable) "PASS" else "UNKNOWN"} (${libexp.path})")
+        val extracted = try { libexp.exists() } catch (_: Throwable) { false }
+        emit(sb, "[DFR][PROCESS] NATIVE_PAYLOAD_EXTRACTED=" +
+            "${if (extracted) "YES" else "NO"} (${libexp.path}; NO is expected " +
+            "with extractNativeLibs=false and is not a failure)")
+
+        /*
+         * network_stack_cap_eff was pinned in both profiles and compared
+         * nowhere. A pinned value nobody checks advertises a boundary that is
+         * never enforced - the same defect this code calls out for
+         * android_release. Compared here, where the observation exists.
+         * tools/profile_binding_audit.py asserts this constant still equals the
+         * profile pin, so the two copies cannot drift.
+         */
+        val capEffObserved = readStatusField("CapEff")
+        val capEff = capEffObserved.trim().lowercase().trimStart('0').ifEmpty { "0" }
+        val capEffWanted = NETWORK_STACK_CAP_EFF.removePrefix("0x")
+            .lowercase().trimStart('0').ifEmpty { "0" }
+        val capVerdict = when {
+            where != "network_stack" -> "SKIP (not the remote boundary)"
+            capEffObserved.isEmpty() || capEffObserved == "UNKNOWN" ->
+                "UNKNOWN (CapEff unreadable; absence is not agreement)"
+            capEff == capEffWanted -> "PASS"
+            else -> "FAIL (observed 0x$capEff, pinned 0x$capEffWanted)"
+        }
+        emit(sb, "[DFR][PROCESS] NETWORK_STACK_CAP_EFF=$capVerdict")
     }
 
     /** Real uid/gid from /proc/self/status ("Uid:\treal\teff\tsaved\tfs"). */

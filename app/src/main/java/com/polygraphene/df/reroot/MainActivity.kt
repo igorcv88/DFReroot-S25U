@@ -276,6 +276,16 @@ class MainActivity : Activity() {
 
     private fun append(s: String) {
         val line = s + if (s.endsWith("\n")) "" else "\n"
+        /*
+         * Mirror to logcat BEFORE touching the UI, and outside runOnUiThread.
+         * Every evidence-collection protocol for this app says "wait for X in
+         * logcat", and without this line the whole run trace - `runAll done
+         * res=`, the remote boundary block, the CONTROLLER binder receipt -
+         * existed only on screen, so those instructions were impossible to
+         * follow. Doing it before the post also means a crash inside the UI
+         * update cannot swallow the line that would have explained it.
+         */
+        Log.i(TAG, s.trimEnd('\n'))
         runOnUiThread {
             log.append(line)
             runDialogLog?.append(line)
