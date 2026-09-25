@@ -101,19 +101,28 @@ object Diagnostics {
         val pid = Process.myPid()
         val uid = Process.myUid()
         val gid = readStatusId("Gid")
+        val processName = readProcName()
+        val selinux = readSelinux()
         emit(sb, "[DFR][PROCESS] pid=$pid uid=$uid (status uid=${readStatusId("Uid")}) gid=$gid")
-        emit(sb, "[DFR][PROCESS] process_name=${readProcName()}")
-        emit(sb, "[DFR][PROCESS] selinux_context=${readSelinux()}")
+        emit(sb, "[DFR][PROCESS] process_name=$processName")
+        emit(sb, "[DFR][PROCESS] selinux_context=$selinux")
         emit(sb, "[DFR][PROCESS] abi=${supportedAbi()}")
         emit(sb, "[DFR][PROCESS] classloader=${javaClass.classLoader}")
         val nld = try { context.applicationInfo.nativeLibraryDir } catch (e: Throwable) { "UNKNOWN($e)" }
         emit(sb, "[DFR][PROCESS] nativeLibraryDir=$nld")
 
-        // network_stack observation, kept separate from "reached" (see below).
-        val isNet = uid == StageHop.NETWORK_STACK_UID
-        emit(sb, "[DFR][PROCESS] NETWORKSTACK_PROCESS_FOUND=${if (isNet) "PASS" else "SKIP"} (uid=$uid)")
-        emit(sb, "[DFR][PROCESS] REMOTE_COMPONENT_REACHED=" +
-            if (where == "network_stack") "PASS" else "SKIP")
+        // Treat the remote boundary as proven only by observed process identity,
+        // never by the caller-supplied diagnostic label alone.
+        val uidOk = uid == StageHop.NETWORK_STACK_UID
+        val nameOk = processName == StageHop.NETWORK_STACK_PROCESS
+        val contextOk = selinux == "u:r:network_stack:s0"
+        val isNet = uidOk && nameOk
+        val reached = where == "network_stack" && uidOk && nameOk && contextOk
+        emit(sb, "[DFR][PROCESS] NETWORKSTACK_UID=${if (uidOk) "PASS" else "FAIL"} (uid=$uid)")
+        emit(sb, "[DFR][PROCESS] NETWORKSTACK_NAME=${if (nameOk) "PASS" else "FAIL"} (name=$processName)")
+        emit(sb, "[DFR][PROCESS] NETWORKSTACK_CONTEXT=${if (contextOk) "PASS" else "FAIL"} (ctx=$selinux)")
+        emit(sb, "[DFR][PROCESS] NETWORKSTACK_PROCESS_FOUND=${if (isNet) "PASS" else "FAIL"}")
+        emit(sb, "[DFR][PROCESS] REMOTE_COMPONENT_REACHED=${if (reached) "PASS" else "FAIL"}")
 
         val libexp = File(nld, "libexp.so")
         val discoverable = try { libexp.exists() } catch (_: Throwable) { false }
