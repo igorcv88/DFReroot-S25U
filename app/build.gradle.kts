@@ -35,8 +35,12 @@ android {
         applicationId = "com.polygraphene.df.reroot"
         minSdk = 32
         targetSdk = 36
-        versionCode = 8
-        versionName = "2.0.5-zzic"
+        // One definition for both modules, injected from the environment -
+        // see the root build.gradle.kts. Never a literal here: a release names
+        // BOTH assets from one derived version, so a number left behind in one
+        // module ships as the new version while identifying as the old one.
+        versionCode = rootProject.extra["dfrVersionCode"] as Int
+        versionName = rootProject.extra["dfrVersionName"] as String
 
         // DirtyFrag native payload (stage1.S) is AArch64-only; the rest of the
         // chain (system_server hosting, network_stack hop) is arch-independent

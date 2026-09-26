@@ -96,40 +96,99 @@ TAG_ARG=v2.0.4-zzic VER_ARG=2.0.4-zzic \
 # No version argument at all must keep the old behaviour rather than refusing.
 check "no version argument -> unchanged behaviour"     match  0 "TAG_EXISTS=1"
 
-# --- tools/resolve_dispatch_tag.sh ------------------------------------------
-# The trap this removes: on a workflow_dispatch GITHUB_REF_NAME is the BRANCH, so
-# an empty tag box used to resolve to "main" and `gh release create main` would
-# have created a tag named after the default branch.
+# --- tools/resolve_release_version.sh ---------------------------------------
+# The version is no longer written anywhere in the tree: this is what decides the
+# tag, the versionName and the versionCode of both APKs. Two traps it removes:
+# GITHUB_REF_NAME is the BRANCH on a workflow_dispatch (an empty tag box used to
+# resolve to "main", and `gh release create main` would have created a tag named
+# after the default branch), and a hand-edited version could disagree with the
+# tag it shipped under.
 echo ""
-echo "[T] resolve_dispatch_tag.sh"
-SUT2=tools/resolve_dispatch_tag.sh
+echo "[T] resolve_release_version.sh"
+SUT2=tools/resolve_release_version.sh
 
-dcheck() {
+TAGS="$WORK/tags"
+# v2.0.9 vs v2.0.10 is the case lexical sorting gets wrong: it would bump 2.0.9
+# again and collide with a published tag, several minutes into the build.
+cat > "$TAGS" <<'TAGLIST'
+v1.0
+main
+v2.0.4-zzic
+v2.0.5-zzic
+v2.0.9-zzic
+v2.0.10-zzic
+TAGLIST
+
+# $1 name  $2 expected rc  $3 expected stdout (newline-joined)  rest: argv
+vcheck() {
     name="$1"; want_rc="$2"; want_out="$3"; shift 3
     set +e
     out=$(sh "$SUT2" "$@" 2>"$WORK/err2")
     rc=$?
     set -e
     if [ "$rc" = "$want_rc" ] && [ "$out" = "$want_out" ]; then
-        pass=$((pass + 1)); printf '  ok   - %s (rc=%s out=%s)\n' "$name" "$rc" "${out:-<none>}"
+        pass=$((pass + 1)); printf '  ok   - %s (rc=%s)\n' "$name" "$rc"
     else
         fail=$((fail + 1))
-        printf '  FAIL - %s: rc=%s want %s, out=%s want %s\n' \
-            "$name" "$rc" "$want_rc" "${out:-<none>}" "${want_out:-<none>}"
+        printf '  FAIL - %s: rc=%s want %s\n' "$name" "$rc" "$want_rc"
+        printf '         got  [%s]\n         want [%s]\n' "$out" "$want_out"
         sed 's/^/         /' "$WORK/err2"
     fi
 }
 
-dcheck "explicit input wins"            0 "v2.0.9-zzic" "v2.0.9-zzic" branch main 2.0.5-zzic
-dcheck "whitespace-only input is empty" 0 "v2.0.5-zzic" "   "         branch main 2.0.5-zzic
-dcheck "input is trimmed"               0 "v2.0.9-zzic" " v2.0.9-zzic " branch main 2.0.5-zzic
-dcheck "tag push uses its own tag"      0 "v2.0.4-zzic" ""            tag    v2.0.4-zzic 2.0.5-zzic
-dcheck "empty dispatch derives from versionName, NOT the branch" \
-                                        0 "v2.0.5-zzic" ""            branch main 2.0.5-zzic
-dcheck "a branch called v1.0 is still not used as the tag" \
-                                        0 "v2.0.5-zzic" ""            branch v1.0 2.0.5-zzic
-dcheck "no input, no version -> refuse" 1 ""            ""            branch main ""
-dcheck "tag ref with no name -> refuse" 1 ""            ""            tag    ""   2.0.5-zzic
+DERIVED="TAG=v2.0.11-zzic
+VER=2.0.11-zzic
+VERSION_CODE=20011
+VERSION_SOURCE=derived"
+
+INPUT309="TAG=v3.0.9-zzic
+VER=3.0.9-zzic
+VERSION_CODE=30009
+VERSION_SOURCE=input"
+
+vcheck "empty dispatch bumps the greatest tag, NOT the branch" \
+    0 "$DERIVED" "" branch main "$TAGS"
+vcheck "a branch called v1.0 is still not used as the tag" \
+    0 "$DERIVED" "" branch v1.0 "$TAGS"
+vcheck "whitespace-only input counts as empty" \
+    0 "$DERIVED" "   " branch main "$TAGS"
+vcheck "explicit input wins over the derivation" \
+    0 "$INPUT309" v3.0.9-zzic branch main "$TAGS"
+vcheck "input is trimmed" \
+    0 "$INPUT309" " v3.0.9-zzic " branch main "$TAGS"
+vcheck "tag push publishes its own tag" 0 "TAG=v2.0.6-zzic
+VER=2.0.6-zzic
+VERSION_CODE=20006
+VERSION_SOURCE=tag-push" "" tag v2.0.6-zzic "$TAGS"
+vcheck "a suffixless version is accepted and keeps no suffix" 0 "TAG=v4.1.2
+VER=4.1.2
+VERSION_CODE=40102
+VERSION_SOURCE=input" v4.1.2 branch main "$TAGS"
+
+# The APKs take their versionName FROM this string, so a malformed tag is a
+# malformed shipped identity, not a malformed label. Validate, never trust.
+vcheck "input without the v prefix -> refuse"   1 "" 2.0.6-zzic  branch main "$TAGS"
+vcheck "input missing the patch part -> refuse" 1 "" v2.1-zzic   branch main "$TAGS"
+vcheck "a branch name as the input -> refuse"   1 "" main        branch main "$TAGS"
+vcheck "tag push of a malformed tag -> refuse"  1 "" "" tag release-2 "$TAGS"
+vcheck "tag ref with no name -> refuse"         1 "" "" tag ""        "$TAGS"
+# Leading zeros would give v2.8.9 and v2.08.09 one versionCode for two different
+# versionNames - the same build as far as the device is concerned.
+vcheck "leading zeros -> refuse"                1 "" v2.08.09-zzic branch main "$TAGS"
+# minor/patch above 99 would wrap into the next major's code range, so a NEWER
+# release could ship a LOWER versionCode and be refused as a downgrade.
+vcheck "minor over the scheme limit -> refuse"  1 "" v2.100.0-zzic branch main "$TAGS"
+vcheck "patch over the scheme limit -> refuse"  1 "" v2.0.100-zzic branch main "$TAGS"
+
+# Nothing to bump from, and nothing to guess with.
+: > "$WORK/empty"
+vcheck "no versioned tag to bump -> refuse"     1 "" "" branch main "$WORK/empty"
+vcheck "no tag list on the derive path -> refuse" 1 "" "" branch main
+vcheck "tag list does not exist -> refuse"      1 "" "" branch main "$WORK/nope"
+# Which -zzic/-zzid line the next patch continues is undecidable, and the suffix
+# is carried into the shipped versionName.
+printf 'v2.0.5-zzic\nv2.0.5-zzid\n' > "$WORK/ambig"
+vcheck "two suffixes on the greatest version -> refuse" 1 "" "" branch main "$WORK/ambig"
 
 echo ""
 echo "$((pass)) / $((pass + fail)) checks passed, $fail failed"

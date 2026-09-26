@@ -437,6 +437,31 @@ KEYSTORE_FILE=... KEYSTORE_PASSWORD=... KEY_ALIAS=... KEY_PASSWORD=... ./build.s
 certificate, so a mismatch makes the injected key useless. The release workflow
 compares the two certificate digests and fails if they differ.
 
+### The version is derived, and lives in no file
+
+`app/build.gradle.kts` and `installer/build.gradle.kts` must **never** contain a
+`versionCode`/`versionName` literal again. Both read one pair injected through
+`DFR_VERSION_NAME` / `DFR_VERSION_CODE` (root `build.gradle.kts`), which
+`tools/resolve_release_version.sh` derives per release run: an empty tag box
+bumps the greatest existing tag's patch, an explicit tag or a tag push names the
+version, anything undecidable refuses. `versionCode` is
+`major*10000 + minor*100 + patch`.
+
+The three properties that make this fail-closed, each guarded by
+`tools/profile_binding_audit.py`:
+
+- **an absent pair refuses**; it never defaults to something publishable. A
+  default would compile one version into an APK published under another, and
+  `AutoRootPolicy` binds a qualification to `versionCode` *and* `versionName`;
+- `release.yml` **reads the version back out of both built APKs** and refuses on
+  a mismatch, because an injection nobody checks is not an invariant;
+- nothing reads a version *out of the tree* — that is what made the tag and the
+  APKs able to disagree in the first place.
+
+Reintroducing a literal "so a local build has a version" is not the fix:
+`./build.sh` sets `0.0.0-dev` (code 1) explicitly, which is honest about not
+being a release.
+
 The release must contain both APKs, `SHA256SUMS.txt` and `build-provenance.txt`,
 and the `assets/df_reroot.apk` bundled inside the installer must be
 **byte-identical** to the published `df_reroot.apk` — `tools/ci_build_audit.sh`

@@ -549,34 +549,105 @@ def audit():
             fail("DfrRootCoordinator no longer enforces %r before the hop" % signal)
     r["checks"]["post_root_contract"] = java_contract
 
-    # --- the two APKs must declare the same version ------------------------
-    # release.yml derives VER from app/build.gradle.kts alone and names BOTH
-    # assets with it, so an installer left behind ships as df_installer_<new>.apk
-    # while its own BuildConfig.VERSION_NAME - the string its UI shows - still
-    # says the previous release, at the previous versionCode. The pair is already
-    # required to move together for signing; this is the same rule for identity.
-    versions = {}
+    # --- the version exists in exactly one place, and it is not the tree ----
+    # It used to be four literals in two build files, hand-edited before each
+    # dispatch, and every way of getting that wrong happened: the installer left
+    # a version behind while the app moved, a tag naming a version the tree did
+    # not carry, a tag naming one it already carried. So the literals are gone -
+    # tools/resolve_release_version.sh derives the version per run and the
+    # workflow injects one pair into both modules.
+    #
+    # What has to be checked now is not agreement between two numbers but that
+    # the single source is still wired: a module that goes back to a literal, or
+    # a root build file that quietly defaults an absent environment, would
+    # produce a perfectly good APK carrying an identity that nothing else in the
+    # release agrees with - and AutoRootPolicy binds a qualification to
+    # versionCode AND versionName, so that identity decides whether an
+    # unattended root attempt may trust a previous run's evidence.
+    version_wiring = {}
+    module_srcs = {}
     for module in ("app", "installer"):
         path = os.path.join(ROOT, module, "build.gradle.kts")
         try:
             with open(path, encoding="utf-8") as f:
-                gradle = f.read()
+                module_srcs[module] = f.read()
         except OSError as ex:
             fail("cannot read %s/build.gradle.kts: %s" % (module, ex))
-            continue
-        code = re.search(r"versionCode\s*=\s*(\d+)", gradle)
-        name = re.search(r'versionName\s*=\s*"([^"]+)"', gradle)
+    for module, gradle in module_srcs.items():
+        code = re.search(r"versionCode\s*=\s*(.+)", gradle)
+        name = re.search(r"versionName\s*=\s*(.+)", gradle)
         if not code or not name:
             fail("%s/build.gradle.kts declares no versionCode/versionName" % module)
             continue
-        versions[module] = (int(code.group(1)), name.group(1))
-    if len(versions) == 2 and versions["app"] != versions["installer"]:
-        fail("version drift: app is %s but installer is %s; the release names both "
-             "assets from the app's versionName, so the installer would ship as the "
-             "new version while identifying as the old one"
-             % (versions["app"], versions["installer"]))
-    r["checks"]["module_versions"] = {k: "%s (%d)" % (v[1], v[0])
-                                      for k, v in versions.items()}
+        for what, m, key in (("versionCode", code, "dfrVersionCode"),
+                             ("versionName", name, "dfrVersionName")):
+            expr = m.group(1).strip()
+            if 'rootProject.extra["%s"]' % key not in expr:
+                fail("%s/build.gradle.kts sets %s to %r instead of the shared "
+                     "rootProject.extra[%r]; a literal here ships as the derived "
+                     "version while identifying as something else"
+                     % (module, what, expr, key))
+        version_wiring[module] = "rootProject.extra"
+
+    root_gradle_path = os.path.join(ROOT, "build.gradle.kts")
+    try:
+        with open(root_gradle_path, encoding="utf-8") as f:
+            root_gradle = f.read()
+    except OSError as ex:
+        root_gradle = ""
+        fail("cannot read build.gradle.kts: %s" % ex)
+    for env in ("DFR_VERSION_NAME", "DFR_VERSION_CODE"):
+        if 'System.getenv("%s")' % env not in root_gradle:
+            fail("build.gradle.kts no longer reads %s; the modules read the "
+                 "version from there and nowhere else" % env)
+    for key in ("dfrVersionName", "dfrVersionCode"):
+        if 'extra["%s"]' % key not in root_gradle:
+            fail("build.gradle.kts no longer exports extra[%r] that both modules "
+                 "read" % key)
+    # Absence must refuse, not default. A fallback here is the whole drift back:
+    # it would compile one version into an APK published under another.
+    if root_gradle.count("require(") < 3 or "Refusing to invent one" not in root_gradle:
+        fail("build.gradle.kts no longer refuses an absent/unusable "
+             "DFR_VERSION_NAME/DFR_VERSION_CODE; a default would compile a "
+             "version the release does not publish under")
+    for defaulted in ('System.getenv("DFR_VERSION_NAME") ?: "0',
+                      'System.getenv("DFR_VERSION_CODE") ?: "0',
+                      "toIntOrNull() ?: 1"):
+        if defaulted in root_gradle:
+            fail("build.gradle.kts defaults the version (%r) instead of refusing"
+                 % defaulted)
+    version_wiring["root"] = "env DFR_VERSION_NAME/DFR_VERSION_CODE, refuses if absent"
+
+    release_yml = os.path.join(ROOT, ".github", "workflows", "release.yml")
+    try:
+        with open(release_yml, encoding="utf-8") as f:
+            release_src = f.read()
+    except OSError as ex:
+        release_src = ""
+        fail("cannot read .github/workflows/release.yml: %s" % ex)
+    for signal in ("tools/resolve_release_version.sh",
+                   "DFR_VERSION_NAME=$VER",
+                   "DFR_VERSION_CODE=$VERSION_CODE"):
+        if signal not in release_src:
+            fail("release.yml no longer %s; the build would refuse, or would "
+                 "build a version this run did not resolve" % signal)
+    # The injection is only fail-closed if something reads the identity back out
+    # of the artifacts: a renamed variable or a module that stopped reading the
+    # shared value fails no gate until an APK ships the wrong version.
+    if "aapt2 dump badging" not in release_src.replace('"$AAPT2" dump badging',
+                                                       "aapt2 dump badging"):
+        fail("release.yml no longer reads versionCode/versionName back out of the "
+             "built APKs; the injected identity would be unverified")
+    if "carries $name ($code) but this run publishes" not in release_src:
+        fail("release.yml reads the APK version back but no longer refuses on a "
+             "mismatch")
+    # The footgun itself: reading a version out of the tree is what created the
+    # possibility of the tag and the APKs disagreeing.
+    if re.search(r"versionName['\"]?\s+app/build\.gradle\.kts", release_src) or \
+            "grep -m1 'versionName' app/build.gradle.kts" in release_src:
+        fail("release.yml reads a versionName out of app/build.gradle.kts again; "
+             "the version is derived per run and lives in no file")
+    r["checks"]["version_wiring"] = version_wiring
 
     # --- Auto Root after full boot ----------------------------------------
     # Auto Root changes WHEN the chain runs, so every one of its refusals is a

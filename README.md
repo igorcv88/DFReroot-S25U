@@ -157,12 +157,29 @@ $ KEYSTORE_FILE=/path/to/keystore.jks KEYSTORE_PASSWORD=... \
 With none of those set, the `create-keystore.sh` development defaults are used.
 `.github/workflows/release.yml` builds and publishes signed APKs to GitHub
 Releases from the `KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` /
-`KEY_PASSWORD` repository secrets; push a `v*` tag or run it manually. The tag
-must spell this tree's `versionName` exactly (`v` + `versionName`): the assets,
-their `versionCode` and the release title all come from the gradle file while the
-release is published under the tag, so a disagreement is refused offline, before
-the build is spent. It runs the whole offline gate set first for the same reason —
-a logic regression costs seconds, not a signed build.
+`KEY_PASSWORD` repository secrets; push a `v*` tag or run it manually. It runs
+the whole offline gate set first, so a logic regression costs seconds rather than
+a signed build.
+
+**The version is not written down in this tree.** No `versionCode` or
+`versionName` literal exists in `app/build.gradle.kts` or
+`installer/build.gradle.kts`: both modules read one pair injected from the
+environment (see the root `build.gradle.kts`), and
+`tools/resolve_release_version.sh` derives it once per run —
+
+- dispatch with the tag box **empty** → the greatest existing `v*` tag has its
+  patch bumped (`v2.0.5-zzic` → `v2.0.6-zzic`), which is the normal release;
+- dispatch with an explicit tag, or push a `v*` tag → that tag names the version,
+  validated (`vMAJOR.MINOR.PATCH[-suffix]`, no leading zeros) because the APKs'
+  `versionName` is taken *from* it;
+- `versionCode` is a pure function of the name (`major*10000 + minor*100 + patch`),
+  so two artifacts sharing a `versionName` can never carry different codes.
+
+The tag, both APKs, both asset filenames and the release title therefore cannot
+disagree: there is one value and nothing to type. Gradle **refuses** an absent
+pair instead of defaulting to something publishable, and the workflow reads
+`versionCode`/`versionName` back out of the built APKs and refuses if they are
+not what the run resolved. A local `./build.sh` labels itself `0.0.0-dev` (code 1).
 
 The LKM rebuild needs Docker (GKI DDK), see `dirtyfrag-lkm/build.sh`.
 Build ksud from kdp-612-3.3.0 branch of [my fork](https://github.com/polygraphene/KernelSU/tree/kdp-612-3.3.0) of KernelSU.

@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to create/publish (e.g. v2.0.2). Defaults to the current ref.'
+        description: 'Tag to publish (e.g. v2.0.6-zzic). LEAVE EMPTY to bump the latest tag automatically.'
         required: false
         type: string
       prerelease:
@@ -47,34 +47,49 @@ jobs:
       # target of the tag being published, so publishing would attach these
       # artifacts to a different commit's release. Refuse instead, and do it
       # before spending a signed build.
-      - name: Resolve and validate the release tag
+      - name: Resolve the version and validate the release tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VER=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
-          # WHICH tag this run publishes. On a tag push GITHUB_REF_NAME is the
-          # tag; on a workflow_dispatch it is the BRANCH, so the old
-          # `[ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"` resolved an empty tag box
-          # to `main` - and `gh release create main` would have created a tag named
-          # after the default branch. tools/resolve_dispatch_tag.sh owns the rule
-          # and is unit-tested off-CI (8 cases).
-          TAG=$(sh tools/resolve_dispatch_tag.sh \
-                  "${{ inputs.tag }}" "$GITHUB_REF_TYPE" "$GITHUB_REF_NAME" "$VER")
-          test -n "$TAG" || { echo "::error::no tag to publish"; exit 1; }
-          echo "publishing tag $TAG for versionName $VER"
+          # The version is DERIVED, not read out of the tree: nothing in the
+          # repository names a version any more. An empty tag box bumps the patch
+          # of the greatest existing tag; an explicit tag (or a tag push) names the
+          # version, and the APKs take their versionName/versionCode from it.
+          # tools/resolve_release_version.sh owns the rule and is unit-tested
+          # off-CI. Its output is TAG/VER/VERSION_CODE/VERSION_SOURCE.
+          #
+          # fetch-depth: 0 above fetched the tags, so the bump is computed against
+          # what is actually published.
+          git tag -l > "$RUNNER_TEMP/tags"
+          sh tools/resolve_release_version.sh "${{ inputs.tag }}" \
+              "$GITHUB_REF_TYPE" "$GITHUB_REF_NAME" "$RUNNER_TEMP/tags" \
+              > "$RUNNER_TEMP/version"
+          cat "$RUNNER_TEMP/version"
+          . "$RUNNER_TEMP/version"
 
-          # tools/resolve_release_tag.sh owns this decision and is unit-tested
-          # off-CI (tools/tests/test_resolve_release_tag.sh, 21 cases). It is run
-          # AGAIN immediately before publishing, because the tag can appear during
-          # the several minutes this build takes.
-          # The fourth argument makes the resolver refuse a tag that does not
-          # spell this tree's versionName. Both are read here and nowhere else,
-          # so without it a dispatch could publish v2.0.5-zzic with 2.0.4-zzic
-          # APKs inside - and it would do so only after spending the build.
+          # tools/resolve_release_tag.sh owns the question of whether publishing
+          # TAG from this commit is safe, and is unit-tested off-CI
+          # (tools/tests/test_resolve_release_tag.sh). It is run AGAIN immediately
+          # before publishing, because the tag can appear during the several
+          # minutes this build takes.
+          #
+          # The fourth argument compares the tag against the version being built.
+          # That used to be the guard against a hand-edited versionName the
+          # dispatcher forgot; now the two come from one derivation, so it is a
+          # WIRING check - it fails if this step and the injection below ever stop
+          # describing one version. It costs nothing and runs before any build.
           sh tools/resolve_release_tag.sh "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$VER" \
             >> "$GITHUB_ENV"
-          echo "VER=$VER" >> "$GITHUB_ENV"
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+          # The pair both modules compile from (root build.gradle.kts refuses if
+          # either is absent rather than defaulting to something publishable).
+          {
+            echo "VER=$VER"
+            echo "TAG=$TAG"
+            echo "VERSION_CODE=$VERSION_CODE"
+            echo "DFR_VERSION_NAME=$VER"
+            echo "DFR_VERSION_CODE=$VERSION_CODE"
+          } >> "$GITHUB_ENV"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -159,7 +174,7 @@ jobs:
                    tools/tests/run_installer_tests.sh \
                    tools/tests/exp_syntax_check.sh \
                    tools/resolve_release_tag.sh \
-                   tools/resolve_dispatch_tag.sh \
+                   tools/resolve_release_version.sh \
                    tools/tests/test_resolve_release_tag.sh \
                    dirtyfrag-lkm/build.sh; do
             sh -n "$s"
@@ -210,6 +225,31 @@ jobs:
 
       - name: Gate E - native packaging audit
         run: ./tools/ci_build_audit.sh
+
+      # The injection is only fail-closed if somebody checks it arrived. Gradle
+      # refuses an absent DFR_VERSION_NAME/DFR_VERSION_CODE, but a stale export,
+      # a renamed variable or a module that stopped reading the shared value would
+      # all produce a perfectly good APK carrying the WRONG identity - published
+      # under a filename and a tag that say otherwise, and binding Auto Root
+      # qualification to a versionCode that never shipped. So read the identity
+      # back out of the artifacts and compare it to what this run resolved.
+      - name: Verify both APKs carry the derived version
+        run: |
+          AAPT2="$(find "$ANDROID_SDK_ROOT/build-tools" -name aapt2 | sort | tail -1)"
+          test -x "$AAPT2" || { echo "::error::aapt2 not found"; exit 1; }
+          rc=0
+          for apk in df_reroot.apk df_installer.apk; do
+            line=$("$AAPT2" dump badging "$apk" | grep -m1 '^package:')
+            code=$(printf '%s' "$line" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")
+            name=$(printf '%s' "$line" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+            echo "$apk: versionCode=$code versionName=$name"
+            if [ "$code" != "$VERSION_CODE" ] || [ "$name" != "$VER" ]; then
+              echo "::error::$apk carries $name ($code) but this run publishes" \
+                   "$VER ($VERSION_CODE) under tag $TAG."
+              rc=1
+            fi
+          done
+          exit $rc
 
       - name: Verify APK signature and identity
         env:
