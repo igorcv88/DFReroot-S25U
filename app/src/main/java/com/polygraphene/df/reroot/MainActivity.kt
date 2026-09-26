@@ -59,12 +59,7 @@ class MainActivity : Activity() {
          * proven again on the build that will run it unattended.
          */
         autoRoot.setOnClickListener {
-            val wanted = autoRoot.isChecked
-            if (!AutoRootStore.setOptIn(this, wanted)) {
-                append("[x] Auto Root needs a verified manual run on this exact build first\n")
-            } else {
-                append("[*] AUTO_ROOT_OPT_IN=${if (wanted) 1 else 0}\n")
-            }
+            append(AutoRootStore.setOptIn(autoRoot.isChecked))
             refreshAutoRoot()
         }
         refreshAutoRoot()
@@ -83,8 +78,8 @@ class MainActivity : Activity() {
      * say so rather than keep a stale tick.
      */
     private fun refreshAutoRoot() {
-        val qualified = AutoRootStore.isQualified(this)
-        val optedIn = AutoRootStore.isOptedIn(this)
+        val qualified = AutoRootStore.isQualified()
+        val optedIn = AutoRootStore.isOptedIn()
         autoRoot.isChecked = optedIn
         autoRoot.isEnabled = qualified
         autoRootState.text = when {
@@ -173,10 +168,12 @@ class MainActivity : Activity() {
              * record binds the build, the ksud digest and the firmware it was
              * observed on. Enabling it is still a separate, explicit action.
              */
-            if (result.success && AutoRootStore.recordManualQualification(this, result)) {
-                append("[*] AUTO_ROOT_QUALIFIED=1 for this build; Auto Root can now be" +
-                    " enabled explicitly\n")
-            }
+            /*
+             * Always printed, success or failure. The silent version of this cost
+             * an operator hours: a qualification that never appeared, a checkbox
+             * that stayed disabled, and nothing on screen saying which.
+             */
+            if (result.success) append(AutoRootStore.recordManualQualification(result))
             runOnUiThread {
                 setRunResult(active = false, success = result.success)
                 btnRunAll.isEnabled = true

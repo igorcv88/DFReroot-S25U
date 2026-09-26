@@ -898,6 +898,33 @@ A dispatch that fails the tag/version check costs seconds and no build, so a
 refusal there is cheap. A dispatch of the wrong tag that *succeeds* is what costs
 a release, which is why the check exists.
 
+## Gate I is closed; Auto Root is next
+
+`v2.0.5-zzic`, boot `62e8538c…`: the closeout ran unaided to a same-boot
+`POST_ROOT_COMPLETE`, and the operator independently read `Enforcing` / sysfs `1`,
+`su` in `u:r:ksu:s0`, and `14fb9eaf…` (the pinned daemon) installed at
+`/data/adb/ksud`. Gate I is **physical PASS**; the evidence and who observed each
+part of it are in `docs/S25U_ZZIC_COMPATIBILITY.md`.
+
+The run before it, on the same build, did **not** publish the record, and that
+remains unexplained: the reboot changed two things at once — the manager app was
+not opened, and the `system_server` side stopped hosting a stale APK path (its
+classloader named a different APK than `network_stack`, with
+`NATIVE_PAYLOAD_PACKAGED=UNKNOWN`; after the reboot both match and it reads
+`PASS`). One trial does not isolate a cause between two variables, so neither is
+written down as the reason. If it recurs, the stale-`LoadedApk` shape is the
+cheaper one to test first: reinstalling the app and running without a soft reboot
+reproduces it deliberately.
+
+What is now eligible, and only in this order:
+
+1. **`AUTO_ROOT_FULL_BOOT`** — the seven-step acceptance in `docs/AUTO_ROOT.md`.
+   Auto Root can be armed at last, since the qualification it requires is exactly
+   the manual PASS that just happened, on this exact build. It remains off until
+   the owner ticks it, and takes effect only from the next full reboot.
+2. **`POST_ROOT_LSPOSED_COMPAT`** — its own axis, after the core state is
+   captured, never folded into the root verdict.
+
 ## Perspectives — what could come next
 
 Ordered by what unblocks what, not by appeal. Nothing here is committed work.
@@ -910,6 +937,16 @@ Ordered by what unblocks what, not by appeal. Nothing here is committed work.
    A failure there is a post-root compatibility regression, never a root failure.
 
 **Cheap and useful, no hardware:**
+
+3b. **A diagnostic dump when the post-root wait times out.** The run above spent
+    two minutes reporting only "completion record absent", and the operator then
+    spent an hour in Termux establishing what the app could have said in its first
+    screen: the staged `/data/system/dfreroot-ksud` had been consumed, `/dev/df`
+    was present, and the final SELinux read. The app cannot inspect `/data/adb`
+    (`0700 root`, the system uid cannot even traverse it), but everything under
+    `/data/system` is its own territory. Diagnostic only — it must not become
+    authority for anything.
+
 
 4. **Compile the Kotlin before the next dispatch.** The single real gap in the
    offline gate set is that no Kotlin in this tree has been through a compiler;

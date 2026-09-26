@@ -41,7 +41,43 @@ Do not run this on a device you depend on that day.
 
 ---
 
-## 1. Verify what you are installing
+## 1. No root manager app during the acceptance run
+
+**Check this before anything else.** In the first `v2.0.5-zzic` run the daemon
+installed at `/data/adb/ksud` afterwards was not the pinned one and contained the
+closeout string zero times, and no completion record was ever published — see the
+third physical run in `docs/S25U_ZZIC_COMPATIBILITY.md` for what that does and
+does not prove.
+
+The manager app is the source of those foreign bytes in both plausible
+mechanisms: its `libksud.so install` is what writes `/data/adb/ksud` on a device
+that has it. So for an acceptance run:
+
+```sh
+su -c 'pm list packages | grep -iE "kernelsu|magisk|weishu"'   # under su:
+                                                # package visibility hides these
+su -c 'ls -l /data/adb/ksud'                    # note its size and mtime BEFORE
+su -c 'sha256sum /data/adb/ksud'                # and its hash
+```
+
+- **No KernelSU or Magisk manager package installed**, and none opened during the
+  run. That costs uninstalling one app.
+- Record `/data/adb/ksud`'s hash, size and mtime *before* the run, so that a
+  change afterwards is a measurement rather than a guess.
+
+A populated `/data/adb` is **not** by itself a disqualifier, and demanding an
+empty one would be wrong: DFReroot is a reroot, so from the second use onward it
+is the tool's own normal state to have modules, an allowlist and a daemon there.
+
+> A run with a manager installed is still informative — every gate before the
+> handoff is exercised for real. It simply may not be able to close Gate I.
+> Record it as what it is.
+
+If the closeout is to be tested on a device that must keep its manager, that is a
+contract question for the DFR ksud (refuse a foreign `/data/adb/ksud`, or finish
+the closeout before any handover), not something this protocol can work around.
+
+## 2. Verify what you are installing
 
 The release publishes both APKs, `SHA256SUMS.txt` and `build-provenance.txt`.
 Check them before installing — a mismatch means you are not testing this tree:
@@ -76,7 +112,7 @@ everything. That is correct behaviour, not a bug to work around, and
 
 ---
 
-## 2. Set up capture before you touch the app
+## 3. Set up capture before you touch the app
 
 Every protocol in this repository says "wait for X in logcat". Have logcat
 running, to a file, on the host:
@@ -87,12 +123,18 @@ adb logcat -v time > dfr-$(date +%Y%m%d-%H%M%S).log &
 ```
 
 And record the boot identity, because **evidence is per boot** and states from
-two boots must never be combined into one apparently successful chain:
+two boots must never be combined into one apparently successful chain.
+
+> Both SELinux reads go through `su`. From an ordinary app shell — Termux, for
+> instance — `getenforce` is not on `PATH` and `/sys/fs/selinux/enforce` is not
+> readable, so a plain invocation returns "command not found" and "Permission
+> denied". Neither says anything about the device's state, and reading them as if
+> they did would be the same mistake as reading an unreadable file as absence.
 
 ```sh
 adb shell cat /proc/sys/kernel/random/boot_id
-adb shell getenforce                             # Enforcing
-adb shell cat /sys/fs/selinux/enforce             # 1
+adb shell su -c 'getenforce'                     # Enforcing
+adb shell su -c 'cat /sys/fs/selinux/enforce'     # 1
 adb shell ls -l /dev/df /dev/dfm1 /dev/dfm2 /dev/dfm3 /dev/dfm4   # all absent
 ```
 
@@ -107,7 +149,7 @@ adb logcat -s DFReroot:* | grep -E "\[DFR\]|POST_ROOT|MARKER|TARGET_PROFILE"
 
 ---
 
-## 3. Install, inject, soft reboot
+## 4. Install, inject, soft reboot
 
 1. Install `df_installer_2.0.5-zzic.apk`.
 2. Obtain temporary root by whatever first-stage exploit you use. DFInstaller
@@ -138,12 +180,12 @@ confusing evidence.
 
 ---
 
-## 4. Gate I — the manual run
+## 5. Gate I — the manual run
 
 One run, one boot. Press **Run DirtyFrag** and read the dialog; the same trace is
 in logcat.
 
-### 4.1 What must appear, in order
+### 5.1 What must appear, in order
 
 ```text
 TARGET_PROFILE=S25U_ZZIC
@@ -173,7 +215,7 @@ POST_ROOT_COMPLETE=PASS
 The dialog turns green **only** on that last pair. Everything before it is
 progress, not success.
 
-### 4.2 Read these correctly
+### 5.2 Read these correctly
 
 - `exec_fail=1` (`/dev/dfm4`) is an immediate failure: ksud's `execve` failed.
 - `bind=1` alone (`dfm3` without `helper` and `ns`) is **not** success. The build
@@ -186,29 +228,29 @@ progress, not success.
   read as well, not only the record. If SELinux drifted after the record was
   written, the run refuses and says which value it read.
 
-### 4.3 Immediately after, in the same boot
+### 5.3 Immediately after, in the same boot
 
 ```sh
-adb shell getenforce                        # Enforcing
-adb shell cat /sys/fs/selinux/enforce        # 1
+adb shell su -c 'getenforce'                # Enforcing
+adb shell su -c 'cat /sys/fs/selinux/enforce'   # 1
 adb shell su -c 'id; cat /proc/self/attr/current'
 #   uid=0(root) ... context=u:r:ksu:s0
 adb shell cat /data/system/dfreroot-post-root
-#   state=POST_ROOT_COMPLETE, and boot_id equal to the one from §2
+#   state=POST_ROOT_COMPLETE, and boot_id equal to the one from §3
 adb shell cat /proc/sys/kernel/random/boot_id
 ```
 
 Gate I is **PASS** only if all of that holds **in the boot you started in**. Then
 record it in `docs/S25U_ZZIC_COMPATIBILITY.md` with the `boot_id` and the log.
 
-### 4.4 If it fails
+### 5.4 If it fails
 
 | Symptom | What it means | What to do |
 |---|---|---|
 | refusal before any write (`MISMATCH`, `REFUSE_UNVERIFIED`, `KSUD_*=FAIL`) | the fail-closed design did its job; nothing was written | capture the log and the refusing line; do **not** weaken the gate |
 | `res=3`, no `patch #1`, no page-cache write | the module policy refused | same as above |
 | `exec_fail=1`, or failure after `helper=1` | the helper already made SELinux permissive; stage2's best-effort `setenforce 1` may have run | check `getenforce`. If `Permissive`, restore it by hand with root if you have it, then **hard reboot** |
-| `WAIT_POST_ROOT` timeout | the native side worked, the closeout did not | capture `logcat` around ksud, `/data/system/dfreroot-post-root` if present, and `getenforce`; then hard reboot |
+| `WAIT_POST_ROOT` timeout | the native side worked, the closeout did not | first check §1: `su -c 'grep -ac POST_ROOT_COMPLETE /data/adb/ksud'` and compare the hash/size/mtime with what you recorded before the run. A `0` means the **installed bytes** are not the pinned daemon — which does not by itself name the process that ran, so capture `logcat`, the record if present, `getenforce`, and enable KernelSU's `sulog` before the next attempt if the running daemon has to be identified. Then hard reboot |
 | device rebooted by itself | most likely a kernel oops | after boot, `adb shell dmesg -T \| grep -iE "dirtyfrag\|kernelsu\|oops\|BUG"` and keep the console ramoops if present |
 | boot loop after DFInstaller | `packages.xml` is damaged | restore the backup DFInstaller made, from recovery or a temp-root shell; that is exactly what it exists for |
 
@@ -217,7 +259,7 @@ will refuse while `/dev/df` exists, and that refusal is protecting you.
 
 ---
 
-## 5. Prepare the Auto Root acceptance
+## 6. Prepare the Auto Root acceptance
 
 Only after Gate I is PASS on this exact installed build.
 
@@ -248,7 +290,7 @@ adb logcat -s DFReroot:* | grep AUTOROOT
 
 ---
 
-## 6. `AUTO_ROOT_FULL_BOOT` — the unattended acceptance
+## 7. `AUTO_ROOT_FULL_BOOT` — the unattended acceptance
 
 Seven steps. Each one is a distinct claim, so record each separately.
 
@@ -259,7 +301,7 @@ adb reboot                                          # FULL reboot
 ```
 
 ```sh
-# 2-4. after boot, with logcat running from §2:
+# 2-4. after boot, with logcat running from §3:
 adb shell cat /proc/sys/kernel/random/boot_id      # must be a NEW value
 adb logcat -s DFReroot:* | grep "\[DFR\]\[AUTOROOT\]"
 ```
@@ -274,7 +316,7 @@ Expect, once:
 [DFR][AUTOROOT] AUTO_ROOT_RESULT=SUCCESS boot_id=<new> selinux=1
 ```
 
-Then the same same-boot checks as §4.3. Required: `POST_ROOT_COMPLETE=PASS`,
+Then the same same-boot checks as §5.3. Required: `POST_ROOT_COMPLETE=PASS`,
 `getenforce=Enforcing`, sysfs `1`, `su` in `u:r:ksu:s0`, all with the new
 `boot_id`.
 
@@ -329,7 +371,7 @@ attempt.
 
 ---
 
-## 7. `POST_ROOT_LSPOSED_COMPAT` — separate, and last
+## 8. `POST_ROOT_LSPOSED_COMPAT` — separate, and last
 
 Only with the core state already captured, Enforcing restored, and KernelSU
 working. With Zygisk Next + LSPosed installed and enabled:
@@ -351,7 +393,7 @@ never be reported as one.
 
 ---
 
-## 8. Reporting
+## 9. Reporting
 
 For any outcome, the useful report is: the full logcat from **one** boot, the
 `boot_id`, the exact refusing or failing line, and the same-boot `getenforce` /

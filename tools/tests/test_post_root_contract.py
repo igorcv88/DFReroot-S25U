@@ -66,7 +66,9 @@ check("isOptedIn" in receiver,
 check("G2 — runtime symbol discovery | physical PASS" in release_notes and
       "G4 — SELinux write safety | physical PASS" in release_notes,
       "generated release notes preserve the physical G2/G4 evidence")
-check("I — automatic safe end state | **PENDING PHYSICAL ACCEPTANCE**" in release_notes,
-      "generated release notes keep Gate I pending until the field run")
+check("I — automatic safe end state | physical PASS" in release_notes,
+      "generated release notes carry the Gate-I field result")
+check("AUTO_ROOT_FULL_BOOT | **NOT ACCEPTED" in release_notes,
+      "generated release notes keep Auto Root unaccepted and disabled")
 
 print(f"test_post_root_contract: {len(checks)}/{len(checks)} passed")

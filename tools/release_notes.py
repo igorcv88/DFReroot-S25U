@@ -104,9 +104,9 @@ def main():
             "ZZIC module is bound to the profile |")
     add("| H — installer / `packages.xml` | physical PASS | ABX→TEXT→ABX round trip "
         "accepted by PMS; metadata and backup handling rewritten after the v2.0.2 field run |")
-    add("| I — automatic safe end state | **PENDING PHYSICAL ACCEPTANCE** | this build "
-        "requires live KernelSU proof, automatic Enforcing restore/read-back, a second "
-        "live proof and same-boot `POST_ROOT_COMPLETE` before UI success |")
+    add("| I — automatic safe end state | physical PASS | the closeout ran unaided to a "
+        "same-boot `POST_ROOT_COMPLETE`; the operator independently read Enforcing, sysfs "
+        "`1`, `su` in `u:r:ksu:s0` and the pinned daemon installed |")
     if auto_root_present:
         add("| AUTO_ROOT_FULL_BOOT | **NOT ACCEPTED — ships disabled** | the boot path "
             "exists and is off: it needs a verified manual completion on this exact "
@@ -126,11 +126,12 @@ def main():
         add("every boundary before Gate G is proven on hardware and the fail-closed")
         add("refusal still holds. Running it is an evidence-collection step.")
     else:
-        add("G1 through G4 are physically proven on ZZIC. This build adds the fail-closed")
-        add("Gate-I closeout and pins the DFR-specific ksud as `%s` (%s bytes). It must"
+        add("G1 through G4 and Gate I are physically proven on ZZIC. The fail-closed")
+        add("closeout is pinned to the DFR-specific ksud `%s` (%s bytes) and has now run"
             % (short(profile.get("ksud_sha256")), profile.get("ksud_size")))
-        add("not report success until KernelSU works, SELinux reads back Enforcing, the")
-        add("KernelSU control channel works again and the same boot is recorded. Capture")
+        add("unaided on hardware. It still reports nothing as success until KernelSU works,")
+        add("SELinux reads back Enforcing, the control channel works again and the same")
+        add("boot is recorded - that conjunction is the gate, not a formality. Capture")
         add("the complete log from one boot, do not retry after `/dev/df` appears, and use")
         add("a hard reboot as the recovery path after any post-helper failure.")
     if auto_root_present:

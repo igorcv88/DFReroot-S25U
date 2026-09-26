@@ -1,6 +1,5 @@
 package com.polygraphene.df.reroot
 
-import android.content.Context
 import android.os.Build
 import android.system.Os
 import android.system.OsConstants
@@ -13,7 +12,7 @@ import java.io.FileOutputStream
  *
  * Deliberately thin: every rule about what the records may say lives in
  * [AutoRootPolicy], which has no Android imports and is therefore testable. This
- * class knows where the files are, how to write them without leaving a torn one
+ * object knows where the files are, how to write them without leaving a torn one
  * behind, and nothing else.
  *
  * Three states are kept separate on purpose (they answer different questions, and
@@ -26,99 +25,110 @@ import java.io.FileOutputStream
  *  - /data/system/dfreroot-post-root: written by ksud, same-boot completion
  *    telemetry, owned by neither of the above.
  *
- * Storage is the app's device-protected directory: readable before the user
- * unlocks (a boot-time service runs there), owned by system:system, and not
- * world-writable - AGENTS.md 3.6 forbids naming a world-writable path anywhere
- * in shipped code, and a marker read from one is the only shape an execution
- * override can take.
+ * ## Why /data/system and not the app's own files dir
+ *
+ * The first version used `createDeviceProtectedStorageContext().filesDir`, which
+ * is the textbook answer for state a boot-time component must read before the
+ * user unlocks. On this app it does not work, and the failure is silent: after a
+ * successful manual run that should have written a qualification, both
+ * `/data/data/<pkg>/` and `/data/user_de/0/<pkg>/` contained only `cache` and
+ * `code_cache` - no `files/` at all, which a successful `getFilesDir()` would
+ * have created - and nothing was logged. This app is hosted in the `system`
+ * process with `sharedUserId=android.uid.system`, so its own private data
+ * directory is not usable the way an ordinary app's is.
+ *
+ * /data/system is: writable from exactly this process (`KsudStage` stages the
+ * daemon there at the start of every run and reads it back - the proof is in
+ * every run log as `KSUD_STAGED_VERIFY=PASS`), available before the user
+ * unlocks, which is what device-protected storage was chosen for, not
+ * world-writable, so it does not run into AGENTS.md 3.6, and already the home of
+ * the post-root record this app reads.
+ *
+ * Nothing stored here is ever authority to root anything. These records can only
+ * REMOVE permission: the native chain re-runs every identity, module-policy and
+ * post-root gate on its own evidence regardless. Forging them buys an attacker a
+ * refusal.
  */
 object AutoRootStore {
 
     const val TAG = "DFReroot"
 
-    private const val QUALIFICATION_FILE = "autoroot-qualification"
-    private const val JOURNAL_FILE = "autoroot-journal"
+    /**
+     * Durable qualification: a manual run verified this build, and whether the
+     * owner then opted in.
+     */
+    const val QUALIFICATION_PATH = "/data/system/dfreroot-autoroot-qualification"
 
-    private fun dir(context: Context): File {
-        val ctx = try {
-            context.createDeviceProtectedStorageContext()
-        } catch (t: Throwable) {
-            context
-        }
-        return ctx.filesDir
-    }
+    /** Per-boot journal: what an automatic attempt already did in the boot it names. */
+    const val JOURNAL_PATH = "/data/system/dfreroot-autoroot-journal"
 
     /**
      * null only when the record is genuinely ABSENT.
      *
      * A record that exists and cannot be read comes back as
-     * AutoRootPolicy.RECORD_UNREADABLE instead. Returning null for both would
+     * [AutoRootPolicy.RECORD_UNREADABLE] instead. Returning null for both would
      * make an I/O error on a journal indistinguishable from "this boot has done
      * nothing" - and that journal may say STARTED, i.e. the chain already wrote
      * to the page cache in this boot. An error must never read as a blank slate.
      */
-    private fun read(context: Context, name: String): String? {
-        val f = try {
-            File(dir(context), name)
-        } catch (t: Throwable) {
-            Log.e(TAG, "[DFR][AUTOROOT] cannot resolve $name", t)
-            return AutoRootPolicy.RECORD_UNREADABLE
-        }
+    private fun read(path: String): String? {
+        val f = File(path)
         val exists = try {
             f.exists()
         } catch (t: Throwable) {
             // Cannot even tell whether it is there: that is not absence.
-            Log.e(TAG, "[DFR][AUTOROOT] cannot stat $name", t)
+            Log.e(TAG, "[DFR][AUTOROOT] cannot stat $path", t)
             return AutoRootPolicy.RECORD_UNREADABLE
         }
         if (!exists) return null
         return try {
             f.readText()
         } catch (t: Throwable) {
-            Log.e(TAG, "[DFR][AUTOROOT] $name exists but cannot be read", t)
+            Log.e(TAG, "[DFR][AUTOROOT] $path exists but cannot be read", t)
             AutoRootPolicy.RECORD_UNREADABLE
         }
     }
 
     /**
-     * Stage under a temporary name and rename(2) into place.
+     * Write durably, atomically, and say why when it fails.
      *
-     * The same reason SafeWrite does it for packages.xml: a half-written record
-     * is the one input for which "refuse this boot" and "retry forever" are hard
-     * to tell apart. With an atomic rename the reader sees either the old record
-     * or the new one, and the policy's unreadable-journal refusal stays a real
-     * edge case rather than the normal outcome of an interrupted write.
+     * Returns null on success or the reason it failed. The reason is returned
+     * rather than only logged because the silent version of this function cost an
+     * operator hours: a qualification that never appeared, a checkbox that stayed
+     * disabled, and nothing on screen to say which of the two had gone wrong.
+     *
+     * fsync of the file and then of the directory: rename(2) is atomic for a
+     * concurrent READER, which is all the earlier version claimed, but the
+     * journal's whole job is to survive the thing that makes an attempt dangerous
+     * to repeat - a crash, an oops, a sudden reboot. Without the first fsync the
+     * bytes may only be in the page cache; without the second the rename itself
+     * may not be on disk.
      */
-    private fun write(context: Context, name: String, body: String): Boolean = try {
-        val folder = dir(context)
-        val target = File(folder, name)
-        val tmp = File(folder, "$name.tmp")
-        /*
-         * fsync the file, then the directory holding it.
-         *
-         * rename(2) is atomic for a concurrent READER, which is all the earlier
-         * version claimed, but the journal's whole job is to survive the thing
-         * that makes an attempt dangerous to repeat: a crash, an oops, a sudden
-         * reboot. Without the first fsync the bytes may only be in the page cache;
-         * without the second the rename itself may not be on disk, so a boot could
-         * come back to a directory where STARTED was never recorded - the one
-         * state that must never be forgotten.
-         */
+    private fun write(path: String, body: String): String? = try {
+        val target = File(path)
+        val folder = target.parentFile ?: throw IllegalStateException("$path has no parent")
+        val tmp = File(folder, target.name + ".tmp")
         FileOutputStream(tmp).use { out ->
             out.write(body.toByteArray())
             out.flush()
             out.fd.sync()
         }
+        // Not world-readable: these records are only ever read by this app.
+        try {
+            Os.chmod(tmp.absolutePath, 384) // 0600
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][AUTOROOT] cannot chmod $path", t)
+        }
         if (tmp.readText() != body) {
             tmp.delete()
-            throw IllegalStateException("read-back of $name differs from what was written")
+            throw IllegalStateException("read-back of $path differs from what was written")
         }
-        if (!tmp.renameTo(target)) throw IllegalStateException("rename of $name failed")
+        if (!tmp.renameTo(target)) throw IllegalStateException("rename of $path failed")
         fsyncDir(folder)
-        true
+        null
     } catch (t: Throwable) {
-        Log.e(TAG, "[DFR][AUTOROOT] cannot write $name", t)
-        false
+        Log.e(TAG, "[DFR][AUTOROOT] cannot write $path", t)
+        "${t.javaClass.simpleName}: ${t.message}"
     }
 
     /**
@@ -135,9 +145,9 @@ object AutoRootStore {
         }
     }
 
-    fun qualification(context: Context): String? = read(context, QUALIFICATION_FILE)
+    fun qualification(): String? = read(QUALIFICATION_PATH)
 
-    fun journal(context: Context): String? = read(context, JOURNAL_FILE)
+    fun journal(): String? = read(JOURNAL_PATH)
 
     /** This build's identity, as the policy compares it. */
     fun versionCode(): Int = BuildConfig.VERSION_CODE
@@ -155,45 +165,54 @@ object AutoRootStore {
         ""
     }
 
-    fun isQualified(context: Context): Boolean = AutoRootPolicy.isQualified(
-        qualification(context), versionCode(), versionName(),
+    fun isQualified(): Boolean = AutoRootPolicy.isQualified(
+        qualification(), versionCode(), versionName(),
         KsudStage.pinnedKsudSha256(), deviceFingerprint()
     )
 
-    fun isOptedIn(context: Context): Boolean = AutoRootPolicy.isOptedIn(
-        qualification(context), versionCode(), versionName(),
+    fun isOptedIn(): Boolean = AutoRootPolicy.isOptedIn(
+        qualification(), versionCode(), versionName(),
         KsudStage.pinnedKsudSha256(), deviceFingerprint()
     )
 
     /**
      * Record that a MANUAL run ended in verified same-boot completion.
      *
-     * Opt-in is NOT set here. Qualification says the chain worked once on this
-     * build; running it unattended from now on is a separate decision the owner
-     * makes explicitly.
+     * Returns the line to show the operator, always - success or failure. Opt-in
+     * is NOT set here: qualification says the chain worked once on this build;
+     * running it unattended from now on is a separate decision the owner makes
+     * explicitly.
      */
-    fun recordManualQualification(context: Context, result: DfrRootCoordinator.Result): Boolean {
+    fun recordManualQualification(result: DfrRootCoordinator.Result): String {
         if (!AutoRootPolicy.qualifies(result.nativeResult, result.postRootComplete,
                 result.liveSelinux)) {
-            return false
+            return "[*] AUTO_ROOT_QUALIFIED=0 (run did not end in verified completion)\n"
         }
-        if (result.bootId.isEmpty()) return false
-        val keepOptIn = isOptedIn(context)
-        return write(context, QUALIFICATION_FILE, AutoRootPolicy.formatQualification(
+        if (result.bootId.isEmpty()) {
+            return "[x] AUTO_ROOT_QUALIFIED=0 boot_id unavailable\n"
+        }
+        val keepOptIn = isOptedIn()
+        val failure = write(QUALIFICATION_PATH, AutoRootPolicy.formatQualification(
             versionCode(), versionName(), KsudStage.pinnedKsudSha256(),
             deviceFingerprint(), result.bootId, System.currentTimeMillis(), keepOptIn,
             result.bootId
         ))
+        return if (failure == null) {
+            "[*] AUTO_ROOT_QUALIFIED=1 for this build; Auto Root can now be enabled" +
+                " explicitly\n"
+        } else {
+            "[x] AUTO_ROOT_QUALIFIED=0 could not write $QUALIFICATION_PATH: $failure\n"
+        }
     }
 
     /**
      * Flip the opt-in flag on an existing qualification.
      *
-     * Returns false when there is nothing to flip: the policy refuses to build a
+     * Returns the line to show the operator. The policy refuses to build a
      * qualification out of a toggle, so a user who has never had a verified
      * manual run cannot enable Auto Root at all.
      */
-    fun setOptIn(context: Context, optIn: Boolean): Boolean {
+    fun setOptIn(optIn: Boolean): String {
         /*
          * The current boot is recorded with the flag, and the policy refuses that
          * boot: arming takes effect from the NEXT full reboot. BOOT_COMPLETED is
@@ -203,16 +222,21 @@ object AutoRootStore {
          */
         val bootId = DfrRootCoordinator.readBootId()
         if (bootId.isEmpty()) {
-            Log.e(TAG, "[DFR][AUTOROOT] refusing to change the opt-in: boot_id unreadable")
-            return false
+            return "[x] AUTO_ROOT_OPT_IN unchanged: boot_id unreadable\n"
         }
-        val updated = AutoRootPolicy.withOptIn(qualification(context), optIn, bootId)
-            ?: return false
-        return write(context, QUALIFICATION_FILE, updated)
+        val updated = AutoRootPolicy.withOptIn(qualification(), optIn, bootId)
+            ?: return "[x] Auto Root needs a verified manual run on this exact build first\n"
+        val failure = write(QUALIFICATION_PATH, updated)
+        return if (failure == null) {
+            "[*] AUTO_ROOT_OPT_IN=${if (optIn) 1 else 0} (takes effect from the next" +
+                " full reboot)\n"
+        } else {
+            "[x] AUTO_ROOT_OPT_IN unchanged: $failure\n"
+        }
     }
 
-    fun journalPhase(context: Context, bootId: String, phase: String, attempts: Int,
+    fun journalPhase(bootId: String, phase: String, attempts: Int,
                      nativeStarted: Boolean): Boolean =
-        write(context, JOURNAL_FILE,
-            AutoRootPolicy.formatJournal(bootId, phase, attempts, nativeStarted))
+        write(JOURNAL_PATH,
+            AutoRootPolicy.formatJournal(bootId, phase, attempts, nativeStarted)) == null
 }

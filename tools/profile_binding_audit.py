@@ -629,6 +629,32 @@ def audit():
     if "DfrRootCoordinator.readBootId()" not in autoroot_store_src:
         fail("AutoRootStore sets the opt-in without recording the boot it happened "
              "in, so a framework restart could be taken for a full boot")
+    # The records must NOT live in the app's private data directory.
+    #
+    # It is the textbook answer for state a boot-time component reads before the
+    # user unlocks, and on this app it silently does not work: hosted in the
+    # `system` process with sharedUserId=android.uid.system, the app has no usable
+    # files dir - after a verified manual run both /data/data/<pkg>/ and
+    # /data/user_de/0/<pkg>/ held only cache and code_cache, no files/ at all, and
+    # nothing was logged. The qualification was never written and the checkbox
+    # stayed disabled with no visible reason. /data/system is where this process
+    # demonstrably can write (KsudStage stages the daemon there every run), is
+    # available before unlock, and is not world-writable.
+    store_code = code_only(autoroot_store_src)
+    for banned in ("createDeviceProtectedStorageContext", "filesDir"):
+        if banned in store_code:
+            fail("AutoRootStore is back on the app's private data directory (%s); "
+                 "this app has no usable files dir in the system process and the "
+                 "failure is silent" % banned)
+    for path in ("/data/system/dfreroot-autoroot-qualification",
+                 "/data/system/dfreroot-autoroot-journal"):
+        if path not in autoroot_store_src:
+            fail("AutoRootStore no longer stores %s where this process can write it"
+                 % path)
+    # A write that fails must reach the operator, not only logcat.
+    if "could not write" not in autoroot_store_src:
+        fail("AutoRootStore no longer reports a failed qualification write to the "
+             "caller; the silent version cost an operator hours")
     # The marker probe must be able to say "could not tell".
     coord_code = code_only(coord_src)
     if "AutoRootPolicy.MARKER_UNKNOWN" not in coord_code \
