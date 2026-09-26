@@ -34,6 +34,15 @@ object KsudStage {
         "14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a"
     private const val KSUD_SIZE = 6670272L
 
+    /**
+     * The pinned digest, for code that must bind a decision to these exact bytes
+     * without re-hashing them - the Auto Root qualification, which is void the
+     * moment the daemon changes. Exposed as a function rather than copied, so
+     * there is still exactly one literal in this app and the binding audit still
+     * has one place to compare against target_profile.c and zzic_profile.json.
+     */
+    fun pinnedKsudSha256(): String = KSUD_SHA256
+
     fun stageFromAssets(context: Context): String {
         val raw = try {
             context.assets.open("ksud").use { it.readBytes() }

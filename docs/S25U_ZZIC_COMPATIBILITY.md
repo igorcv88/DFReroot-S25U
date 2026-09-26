@@ -957,6 +957,7 @@ inferred from a nearby firmware.
 | G4 — Write safety | **physical PASS** | system remained operational after `enforcing=0`, KernelSU late-load completed and root worked |
 | H — Installer / packages.xml | **physical PASS** | injected key survived framework restart; write-path fixes regression-tested |
 | I — Automatic safe end state | **PENDING PHYSICAL ACCEPTANCE** | root and manual return to Enforcing are physically proven; the automatic fail-closed source and exact repinned ksud now exist, but have not yet run on the phone |
+| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **UNVERIFIED (ships disabled)** | the boot receiver/service, the pure scheduling policy and the shared coordinator exist and are host-tested; no automatic attempt has run on hardware, and the feature cannot be enabled without a verified manual completion on the same build plus an explicit opt-in. Record: `docs/AUTO_ROOT.md` |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
 remaining blocker to calling the automated flow complete is the post-root
@@ -992,6 +993,30 @@ Host target/profile and contract-shape tests pass. The generated daemon is
 and all three DFR pins carry that identity. Gate I remains **PENDING PHYSICAL
 ACCEPTANCE** until the offline/build gates pass and the final same-boot
 Enforcing state is observed on ZZIC.
+
+### Auto Root source implementation checkpoint (not physical evidence)
+
+The unattended boot path is implemented and **disabled**: `DfrBootReceiver` (boot
+broadcasts only), a non-exported `DfrAutoRootService`, the pure `AutoRootPolicy`
+(41 host cases) and `DfrRootCoordinator`, which is now the single execution path
+for both the button and the boot service.
+
+This promotes nothing. What it adds to the evidence record is negative:
+
+- Auto Root refuses unless a MANUAL run on this exact versionCode, ksud digest
+  and `Build.FINGERPRINT` ended in verified same-boot `POST_ROOT_COMPLETE` with
+  live `/sys/fs/selinux/enforce == 1`, and the owner then opted in explicitly;
+- a soft reboot keeps `boot_id`, so the qualifying boot never triggers a run;
+- `STARTED` is journalled before transaction 5, so no failure after the native
+  run can be followed by a second automatic attempt in that boot;
+- the retry budget is bounded in the journal, with no alarm or job anywhere on
+  the path (the binding audit fails if one appears);
+- no gate is weakened, no override exists, and the automatic PASS is the same
+  conjunction as the manual one.
+
+`AUTO_ROOT_FULL_BOOT` stays UNVERIFIED until the acceptance sequence in
+`docs/AUTO_ROOT.md` is executed on ZZIC, which must happen **after** Gate I passes
+manually.
 
 ## Post-root compatibility — DEFEX / Zygisk Next / LSPosed
 

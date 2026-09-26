@@ -15,4 +15,8 @@
     <string name="terminal_hint">Enter command</string>
     <string name="terminal_send">Send</string>
     <string name="terminal_button">Terminal</string>
+    <string name="auto_root">Auto Root after full boot</string>
+    <string name="auto_root_unqualified">Needs one verified manual run on this build first.</string>
+    <string name="auto_root_qualified">Qualified on this build. Not enabled.</string>
+    <string name="auto_root_armed">Enabled: one attempt per full boot, never after a soft reboot.</string>
 </resources>

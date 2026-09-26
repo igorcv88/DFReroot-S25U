@@ -6,6 +6,10 @@ ROOT = Path(__file__).resolve().parents[2]
 stage = (ROOT / "app/src/main/jni/stage1.S").read_text()
 exp = (ROOT / "app/src/main/jni/exp.c").read_text()
 main = (ROOT / "app/src/main/java/com/polygraphene/df/reroot/MainActivity.kt").read_text()
+DFR = ROOT / "app/src/main/java/com/polygraphene/df/reroot"
+coord = (DFR / "DfrRootCoordinator.kt").read_text()
+service = (DFR / "DfrAutoRootService.kt").read_text()
+receiver = (DFR / "DfrBootReceiver.kt").read_text()
 release_notes = (ROOT / "tools/release_notes.py").read_text()
 
 checks = []
@@ -41,12 +45,24 @@ check("dfm3 is never final success" in exp,
 check("waiting for same-boot POST_ROOT_COMPLETE" in exp,
       "native success is labelled bootstrap-only")
 
-check("val success = runResult == 0 && postRootComplete" in main,
-      "green UI requires native bootstrap plus post-root completion")
-check("PostRootStatus.evaluate(record, bootId, liveSelinux)" in main,
-      "UI validates same-boot record and independent live SELinux state")
-check("ROOT_RESULT=SUCCESS" in main and "POST_ROOT_COMPLETE=PASS" in main,
+# The verdict lives in the shared coordinator now that the boot service is a
+# second caller; both callers only paint or journal what it returns.
+check("val success = runResult == 0 && postRootComplete" in coord,
+      "success requires native bootstrap plus post-root completion")
+check("PostRootStatus.evaluate(record, bootId, liveSelinux)" in coord,
+      "the coordinator validates the same-boot record and live SELinux state")
+check("ROOT_RESULT=SUCCESS" in coord and "POST_ROOT_COMPLETE=PASS" in coord,
       "final success signals are emitted only by the post-root path")
+check("DfrRootCoordinator.run(" in main and "DfrRootCoordinator.run(" in service,
+      "button and boot service share one execution path")
+check("PostRootStatus.evaluate(" not in main and "PostRootStatus.evaluate(" not in service,
+      "neither caller re-implements the post-root verdict")
+check("beforeNativeRun" in service and "PHASE_STARTED" in service,
+      "Auto Root records STARTED before the destructive transaction")
+check("AutoRootPolicy.evaluate(" in service,
+      "Auto Root preflights through the pure policy")
+check("isOptedIn" in receiver,
+      "the boot receiver refuses without an explicit opt-in")
 check("G2 — runtime symbol discovery | physical PASS" in release_notes and
       "G4 — SELinux write safety | physical PASS" in release_notes,
       "generated release notes preserve the physical G2/G4 evidence")
