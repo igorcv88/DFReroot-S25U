@@ -23,9 +23,14 @@ public class AutoRootPolicyTest {
     private static final String QUAL_BOOT = "0643a5e2-9a44-4bb9-b7a4-31a3b255e3ac";
     private static final String BOOT = "11111111-2222-3333-4444-555555555555";
 
+    /** Armed in the boot that qualified it, which is the normal shape. */
     private static String qualified(boolean optIn) {
+        return qualified(optIn, QUAL_BOOT);
+    }
+
+    private static String qualified(boolean optIn, String armedInBoot) {
         return AutoRootPolicy.formatQualification(CODE, NAME, KSUD, FP, QUAL_BOOT,
-                1759000000000L, optIn);
+                1759000000000L, optIn, armedInBoot);
     }
 
     /** A preflight whose every element is satisfied; each test spoils exactly one. */
@@ -39,7 +44,7 @@ public class AutoRootPolicyTest {
         in.versionName = NAME;
         in.versionCode = CODE;
         in.bootCompleted = true;
-        in.markerPresent = false;
+        in.markerState = AutoRootPolicy.MARKER_ABSENT;
         in.liveSelinux = 1;
         in.networkStack = AutoRootPolicy.PROCESS_PRESENT;
         return in;
@@ -139,6 +144,22 @@ public class AutoRootPolicyTest {
         refused(in, "the boot that qualified Auto Root does not run it (soft reboot keeps"
                 + " boot_id, so a framework restart triggers nothing)");
 
+        /*
+         * The hole this closes: armed in a boot that had already finished booting,
+         * so nothing was journalled, and the qualifying boot was an earlier one. A
+         * framework restart re-delivers BOOT_COMPLETED with the SAME boot_id, and
+         * every other condition passed. The switch is now bound to its boot.
+         */
+        in = ready();
+        in.qualificationRecord = qualified(true, BOOT);
+        in.journalRecord = null;
+        refused(in, "a boot in which Auto Root was switched on does not run it, even with"
+                + " no journal entry and a different qualifying boot");
+
+        in = ready();
+        in.qualificationRecord = qualified(true, "99999999-0000-0000-0000-000000000000");
+        allowed(in, "armed in some earlier boot, this boot may run");
+
         // --- one attempt per boot ------------------------------------------
         in = ready();
         in.journalRecord = AutoRootPolicy.formatJournal(BOOT, AutoRootPolicy.PHASE_STARTED,
@@ -217,8 +238,26 @@ public class AutoRootPolicyTest {
 
         // --- observed device state ----------------------------------------
         in = ready();
-        in.markerPresent = true;
+        in.markerState = AutoRootPolicy.MARKER_PRESENT;
         refused(in, "/dev/df or any dfm marker refuses an automatic attempt");
+
+        // A probe that could not answer is not an answer. This is the same rule
+        // the native has_mark() already follows by returning -1.
+        in = ready();
+        in.markerState = AutoRootPolicy.MARKER_UNKNOWN;
+        refused(in, "an undeterminable marker probe refuses, never reads as absent");
+
+        in = new AutoRootPolicy.Inputs();
+        in.qualificationRecord = qualified(true);
+        in.currentBootId = BOOT;
+        in.deviceFingerprint = FP;
+        in.ksudSha256 = KSUD;
+        in.versionName = NAME;
+        in.versionCode = CODE;
+        in.bootCompleted = true;
+        in.liveSelinux = 1;
+        in.networkStack = AutoRootPolicy.PROCESS_PRESENT;
+        refused(in, "an unset marker field defaults to UNKNOWN and refuses");
 
         in = ready();
         in.liveSelinux = 0;
@@ -261,25 +300,34 @@ public class AutoRootPolicyTest {
                 "a failed native result does not qualify");
 
         // --- opt-in toggling cannot invent a qualification -----------------
-        check(AutoRootPolicy.withOptIn(null, true) == null,
+        check(AutoRootPolicy.withOptIn(null, true, BOOT) == null,
                 "opting in with no qualification record yields nothing");
-        check(AutoRootPolicy.withOptIn(AutoRootPolicy.RECORD_UNREADABLE, true) == null,
+        check(AutoRootPolicy.withOptIn(AutoRootPolicy.RECORD_UNREADABLE, true, BOOT) == null,
                 "opting in on an unreadable record yields nothing");
+        check(AutoRootPolicy.withOptIn(qualified(false), true, null) == null,
+                "opting in without a boot id yields nothing; the switch must be bound"
+                        + " to the boot it was flipped in");
         check(!AutoRootPolicy.isOptedIn(AutoRootPolicy.RECORD_UNREADABLE, CODE, NAME, KSUD, FP)
                         && !AutoRootPolicy.isQualified(AutoRootPolicy.RECORD_UNREADABLE,
                                 CODE, NAME, KSUD, FP),
                 "an unreadable record is neither qualified nor opted in");
-        check(AutoRootPolicy.withOptIn("state=QUALIFIED\n", true) == null,
+        check(AutoRootPolicy.withOptIn("state=QUALIFIED\n", true, BOOT) == null,
                 "opting in on a malformed record yields nothing");
-        String flipped = AutoRootPolicy.withOptIn(qualified(false), true);
+        String flipped = AutoRootPolicy.withOptIn(qualified(false), true, BOOT);
         check(flipped != null && AutoRootPolicy.isOptedIn(flipped, CODE, NAME, KSUD, FP),
                 "opting in on a valid record preserves it and sets the flag");
-        String off = AutoRootPolicy.withOptIn(flipped, false);
+        String off = AutoRootPolicy.withOptIn(flipped, false, BOOT);
         check(off != null && !AutoRootPolicy.isOptedIn(off, CODE, NAME, KSUD, FP)
                         && AutoRootPolicy.isQualified(off, CODE, NAME, KSUD, FP),
                 "opting back out keeps the qualification and clears only the flag");
         check(!AutoRootPolicy.isOptedIn(qualified(true), CODE + 1, NAME, KSUD, FP),
                 "isOptedIn is false for another build");
+        AutoRootPolicy.Inputs armedNow = ready();
+        armedNow.qualificationRecord = flipped;
+        armedNow.journalRecord = null;
+        AutoRootPolicy.Decision armedDecision = AutoRootPolicy.evaluate(armedNow);
+        check(!armedDecision.allow && armedDecision.reason.contains("switched on during this boot"),
+                "the record written by opting in refuses in that same boot");
 
         check(AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT >= 8,
                 "the readiness poll cap leaves room for a slow boot instead of"

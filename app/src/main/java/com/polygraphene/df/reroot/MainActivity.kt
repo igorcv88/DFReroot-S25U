@@ -95,10 +95,17 @@ class MainActivity : Activity() {
     }
 
     private fun runDfAll() {
-        if (DfrRootCoordinator.markerPresent()) {
+        val marker = DfrRootCoordinator.markerState()
+        if (marker == AutoRootPolicy.MARKER_PRESENT) {
             append("[x] already hooked (/dev/df or a stage marker present). " +
                 "Refusing second run.\n" +
                 "    Only hard reboot clears armed hooks.\n")
+            return
+        }
+        if (marker != AutoRootPolicy.MARKER_ABSENT) {
+            // A probe that could not answer is not an empty /dev.
+            append("[x] cannot determine whether a stage marker exists; refusing.\n" +
+                "    See logcat for the failing probe.\n")
             return
         }
         val owner = DfrRootCoordinator.currentOwner()
@@ -110,7 +117,9 @@ class MainActivity : Activity() {
     }
 
     private fun updateChip() {
-        if (DfrRootCoordinator.markerPresent()) {
+        // Anything but a positive ABSENT shows the warning chip: an undeterminable
+        // probe must not look like a clean device.
+        if (DfrRootCoordinator.markerState() != AutoRootPolicy.MARKER_ABSENT) {
             statusChip.text = getString(R.string.chip_hooked)
             statusChip.setBackgroundResource(R.drawable.chip_warn)
         } else {

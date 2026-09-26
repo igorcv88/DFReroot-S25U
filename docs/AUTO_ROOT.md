@@ -55,6 +55,26 @@ to two minutes, and a suspend in the middle would produce a reported failure tha
 never happened — after the page-cache writes. `DfrAutoRootService` takes a
 `PARTIAL_WAKE_LOCK` with a bounded budget and releases it in a `finally`.
 
+### What the platform guarantees here, and what it does not
+
+Stated precisely, because it is an acceptance item rather than something the code
+can assert:
+
+- **the process** is `system_server`. It is not background-restricted and not
+  killed for backgrounding; if it dies the device restarts the framework anyway.
+- **the work** runs on a named `dfr-autoroot` thread that holds no reference to
+  the Service beyond calling `stopSelf()` at the end, so stopping the service
+  would not abort a run in flight.
+- **the CPU** stays awake for the bounded window via the wakelock.
+- **what is not guaranteed** is that the platform will never interfere with a
+  plain `startService` component at boot on this exact Android 17 build. Nothing
+  in this design *depends* on surviving that — a run that is cut short simply
+  never reaches `POST_ROOT_COMPLETE`, so it is reported as a failure and the boot
+  stays locked — but "the attempt reliably happens" is a claim only the device can
+  settle. The acceptance run therefore checks that the whole phase sequence
+  appears in one boot, and a truncated sequence is a FAIL to be reported, not a
+  retry to schedule.
+
 ## The three states, kept separate
 
 | State | Lives in | Says |
@@ -100,18 +120,30 @@ or the presence of a KernelSU manager app.
 
 ## Full boot, and exactly one attempt
 
-`/proc/sys/kernel/random/boot_id` is the full-boot identity. Two consequences,
-both tested:
+`/proc/sys/kernel/random/boot_id` is the full-boot identity, and **the broadcast
+is not**: a framework restart re-delivers `BOOT_COMPLETED` with the same
+`boot_id`. Nothing in the receiver or the intent is treated as evidence of a
+kernel boot. Three stored facts carry the guarantee instead, and all three are
+host-tested:
 
-- a **soft reboot** keeps `boot_id`, so the qualifying boot and the current boot
-  are the same and nothing starts. Restarting the framework triggers no attempt.
-- the journal names a boot. A journal from the previous boot never locks this
-  one; a journal for *this* boot in `STARTED`, `COMPLETE` or `FAILED_LOCKED`
-  refuses immediately.
+- the boot that **qualified** Auto Root cannot run it;
+- the boot that Auto Root was **switched on in** cannot run it either. This is
+  the one that closed a real hole: armed after the framework was already up,
+  nothing had been journalled, and the qualifying boot was some earlier one — so
+  a framework restart's `BOOT_COMPLETED` passed every condition. Arming now takes
+  effect from the next full reboot, by construction rather than by a heuristic on
+  uptime;
+- the journal names a boot. A journal from the previous boot never locks this one;
+  a journal for *this* boot in `STARTED`, `COMPLETE` or `FAILED_LOCKED` refuses
+  immediately.
 
 `STARTED` is written **before** transaction 5, and the run is abandoned if that
 write fails: without the record there is no one-attempt guarantee, and a guarantee
-that might not hold is not one. After that point every failure — including a
+that might not hold is not one. The write is also durable, not merely atomic —
+the record is `fsync`ed and so is the directory the rename lands in, because the
+event this record has to survive is exactly the one that makes a repeat dangerous:
+a crash, an oops, a sudden reboot. `rename(2)` alone only protects a concurrent
+reader. After that point every failure — including a
 crash, an oops or a reboot loop — leaves the boot locked. Recovery is a hard
 reboot, the same boundary the manual path has.
 
@@ -147,7 +179,7 @@ Every element refuses on its own, and each has a negative test in
 | current `boot_id` non-empty and different from the qualifying boot | refuse |
 | journal for this boot absent, or below the attempt cap and not `STARTED`/`COMPLETE`/`FAILED_LOCKED` | refuse |
 | journal readable and parsable | refuse **this boot** when it is not — a torn write, an unknown phase, a `native_started` that is neither 0 nor 1, or an I/O error on a file that exists. It may be hiding a `STARTED`, so an error must never read as "no journal" |
-| `/dev/df` and `dfm1..dfm4` absent | refuse |
+| `/dev/df` and `dfm1..dfm4` **positively** absent | refuse when one is present, and refuse when the probe could not answer. The probe is `stat(2)` plus errno, not `File.exists()`: only `ENOENT` is absence, and any other errno is a lookup that failed. `File.exists()` reports both as `false`, and `false` is the answer that would let a run proceed |
 | live `/sys/fs/selinux/enforce == 1` (unreadable reads `-1`) | refuse |
 | `sys.boot_completed == 1` | wait and retry |
 | NetworkStack process visible | wait and retry |
@@ -204,7 +236,7 @@ broadcast to this package, and nothing treats the binder as authority — a forg
 Offline, no device and no SDK (in addition to the AGENTS.md §5 set):
 
 ```sh
-sh tools/tests/run_installer_tests.sh   # AutoRootPolicyTest, 50 cases
+sh tools/tests/run_installer_tests.sh   # AutoRootPolicyTest, 56 cases
 python3 tools/tests/test_post_root_contract.py
 python3 tools/profile_binding_audit.py
 ```

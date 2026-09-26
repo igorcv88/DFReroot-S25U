@@ -80,9 +80,21 @@ public final class AutoRootPolicy {
     public static final int PROCESS_ABSENT = 0;
     public static final int PROCESS_UNKNOWN = -1;
 
+    /**
+     * Tri-state for the /dev/df + dfm1..dfm4 probe.
+     *
+     * A marker probe that answers yes/no reports a failed lookup as "absent",
+     * which is the one answer that lets a run proceed. The native side already
+     * refuses to collapse this (`has_mark()` returns -1 for undeterminable), and
+     * the same rule applies here: only a positive ABSENT may permit a run.
+     */
+    public static final int MARKER_PRESENT = 1;
+    public static final int MARKER_ABSENT = 0;
+    public static final int MARKER_UNKNOWN = -1;
+
     private static final Set<String> QUALIFICATION_KEYS = Set.of(
-            "state", "opt_in", "version_code", "version_name", "ksud_sha256",
-            "device_fingerprint", "boot_id", "recorded_at_ms");
+            "state", "opt_in", "opt_in_boot_id", "version_code", "version_name",
+            "ksud_sha256", "device_fingerprint", "boot_id", "recorded_at_ms");
 
     private static final Set<String> JOURNAL_KEYS = Set.of(
             "boot_id", "phase", "attempts", "native_started");
@@ -103,8 +115,8 @@ public final class AutoRootPolicy {
         public String versionName;
         public int versionCode;
         public boolean bootCompleted;
-        /** /dev/df or any of /dev/dfm1..dfm4 observed. */
-        public boolean markerPresent;
+        /** One of MARKER_PRESENT / MARKER_ABSENT / MARKER_UNKNOWN. */
+        public int markerState = MARKER_UNKNOWN;
         /** 1, 0, or -1 when /sys/fs/selinux/enforce could not be read. */
         public int liveSelinux = -1;
         /** One of PROCESS_PRESENT / PROCESS_ABSENT / PROCESS_UNKNOWN. */
@@ -165,10 +177,14 @@ public final class AutoRootPolicy {
     public static String formatQualification(int versionCode, String versionName,
                                             String ksudSha256, String deviceFingerprint,
                                             String bootId, long recordedAtMs,
-                                            boolean optIn) {
+                                            boolean optIn, String optInBootId) {
         StringBuilder s = new StringBuilder();
         s.append("state=").append(STATE_QUALIFIED).append('\n');
         s.append("opt_in=").append(optIn ? 1 : 0).append('\n');
+        // The boot the switch was last touched in. Empty is not representable -
+        // the parser refuses a valueless field - so a caller with no boot id has
+        // nothing to write, which is itself a refusal.
+        s.append("opt_in_boot_id=").append(optInBootId).append('\n');
         s.append("version_code=").append(versionCode).append('\n');
         s.append("version_name=").append(versionName).append('\n');
         s.append("ksud_sha256=").append(ksudSha256).append('\n');
@@ -194,8 +210,10 @@ public final class AutoRootPolicy {
      * other field. Returns null when the record cannot be read, so a toggle can
      * never CREATE a qualification - only a verified manual run does that.
      */
-    public static String withOptIn(String qualificationRecord, boolean optIn) {
+    public static String withOptIn(String qualificationRecord, boolean optIn,
+                                   String currentBootId) {
         if (RECORD_UNREADABLE.equals(qualificationRecord)) return null;
+        if (blank(currentBootId)) return null;
         Map<String, String> q = parse(qualificationRecord, QUALIFICATION_KEYS);
         if (q == null) return null;
         long recordedAt;
@@ -211,7 +229,8 @@ public final class AutoRootPolicy {
             return null;
         }
         return formatQualification(code, q.get("version_name"), q.get("ksud_sha256"),
-                q.get("device_fingerprint"), q.get("boot_id"), recordedAt, optIn);
+                q.get("device_fingerprint"), q.get("boot_id"), recordedAt, optIn,
+                currentBootId.trim());
     }
 
     /** Whether a record exists, parses, and carries opt_in=1 for this build. */
@@ -306,6 +325,27 @@ public final class AutoRootPolicy {
             return refuse("still in the boot that qualified Auto Root; a full reboot is"
                     + " required before an automatic attempt");
         }
+        /*
+         * And not in the boot it was ARMED in either.
+         *
+         * BOOT_COMPLETED is not evidence of a kernel boot: a framework restart
+         * re-broadcasts it while boot_id stays the same. The journal catches that
+         * only once this boot has a record, so the hole was the first broadcast of
+         * a boot in which Auto Root was switched on after the framework was
+         * already up - nothing had run, nothing was journalled, and the
+         * qualifying boot was some earlier one, so every condition passed.
+         *
+         * Binding the switch to the boot it was flipped in closes it exactly,
+         * rather than by a heuristic on uptime: arming can only ever take effect
+         * in a LATER boot, which is what "Auto Root after full boot" means. Two
+         * stored boot ids plus the journal now carry the guarantee, and no
+         * property of the broadcast is trusted at all.
+         */
+        if (in.currentBootId.equals(q.get("opt_in_boot_id"))) {
+            return refuse("Auto Root was switched on during this boot; it takes effect"
+                    + " from the next full reboot (a framework restart keeps the same"
+                    + " boot_id and is not one)");
+        }
 
         if (RECORD_UNREADABLE.equals(in.journalRecord)) {
             /*
@@ -381,9 +421,15 @@ public final class AutoRootPolicy {
          * run already armed hooks in this boot, and MainActivity refuses a second
          * run for the same reason. The automatic path gets no weaker rule.
          */
-        if (in.markerPresent) {
+        if (in.markerState == MARKER_PRESENT) {
             return refuse("/dev/df or a stage marker is already present; only a hard"
                     + " reboot clears armed hooks");
+        }
+        if (in.markerState != MARKER_ABSENT) {
+            // Not ENOENT, so the probe failed rather than finding nothing. An
+            // unreadable /dev is not an empty /dev.
+            return refuse("whether /dev/df or a stage marker exists could not be"
+                    + " determined; refusing rather than assuming a clean boot");
         }
         if (in.liveSelinux != 1) {
             return refuse("initial /sys/fs/selinux/enforce is " + in.liveSelinux

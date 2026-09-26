@@ -8,6 +8,9 @@ import android.os.Binder
 import android.os.IBinder
 import android.os.Parcel
 import android.os.SystemClock
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import java.io.File
 
@@ -108,11 +111,39 @@ object DfrRootCoordinator {
         -1
     }
 
-    /** /dev/df or any stage marker: evidence that a run already armed hooks. */
-    fun markerPresent(): Boolean {
-        if (File("/dev/df").exists()) return true
-        for (i in 1..4) if (File("/dev/dfm$i").exists()) return true
-        return false
+    /** /dev/df and the stage markers, in the order a run creates them. */
+    private val MARKER_PATHS = listOf(
+        "/dev/df", "/dev/dfm1", "/dev/dfm2", "/dev/dfm3", "/dev/dfm4"
+    )
+
+    /**
+     * Whether a run already armed hooks in this boot:
+     * [AutoRootPolicy.MARKER_PRESENT], `MARKER_ABSENT`, or `MARKER_UNKNOWN`.
+     *
+     * `File.exists()` cannot express the third answer - it returns false both for
+     * "not there" and for "the lookup failed" - and false is the answer that lets
+     * a run proceed. So the probe goes through `stat(2)` and reads errno: only
+     * ENOENT is absence, anything else is a probe that did not answer. The native
+     * side already refuses to collapse this (`has_mark()` returns -1), and
+     * AGENTS.md §3.7 says signals are never collapsed.
+     */
+    fun markerState(): Int {
+        var undeterminable = false
+        for (path in MARKER_PATHS) {
+            try {
+                Os.stat(path)
+                return AutoRootPolicy.MARKER_PRESENT
+            } catch (e: ErrnoException) {
+                if (e.errno != OsConstants.ENOENT) {
+                    Log.e(TAG, "[DFR][MARKER] probe of $path failed: errno=${e.errno}")
+                    undeterminable = true
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "[DFR][MARKER] probe of $path threw: $t")
+                undeterminable = true
+            }
+        }
+        return if (undeterminable) AutoRootPolicy.MARKER_UNKNOWN else AutoRootPolicy.MARKER_ABSENT
     }
 
     private fun refused(reason: String, bootId: String = "") = Result(
@@ -151,9 +182,15 @@ object DfrRootCoordinator {
          * failed run cannot be "tried again", and a second entry point without it
          * would be the same defect AGENTS.md 3.2 describes for the native gates.
          */
-        if (markerPresent()) {
+        val marker = markerState()
+        if (marker == AutoRootPolicy.MARKER_PRESENT) {
             return refused("/dev/df or a stage marker is present; refusing a second run." +
                 " Only a hard reboot clears armed hooks", bootId)
+        }
+        if (marker != AutoRootPolicy.MARKER_ABSENT) {
+            return refused("whether /dev/df or a stage marker exists could not be" +
+                " determined (not ENOENT); refusing rather than assuming a clean boot",
+                bootId)
         }
 
         host.phase(Phase.STAGE_KSUD)

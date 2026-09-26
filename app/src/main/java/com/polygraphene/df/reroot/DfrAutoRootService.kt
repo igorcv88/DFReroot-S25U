@@ -46,7 +46,7 @@ class DfrAutoRootService : Service() {
             Log.i(TAG, "[DFR][AUTOROOT] a run is already in flight in this process")
             return START_NOT_STICKY
         }
-        Thread {
+        Thread({
             var lock: PowerManager.WakeLock? = null
             try {
                 /*
@@ -75,7 +75,7 @@ class DfrAutoRootService : Service() {
                 }
                 stopSelf()
             }
-        }.start()
+        }, "dfr-autoroot").start()
         return START_NOT_STICKY
     }
 
@@ -231,7 +231,7 @@ class DfrAutoRootService : Service() {
         q.versionName = AutoRootStore.versionName()
         q.versionCode = AutoRootStore.versionCode()
         q.bootCompleted = bootCompleted()
-        q.markerPresent = DfrRootCoordinator.markerPresent()
+        q.markerState = DfrRootCoordinator.markerState()
         q.liveSelinux = DfrRootCoordinator.readLiveSelinux()
         q.networkStack = networkStackProcess()
         return q

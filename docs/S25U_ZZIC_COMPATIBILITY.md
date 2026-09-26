@@ -998,7 +998,7 @@ Enforcing state is observed on ZZIC.
 
 The unattended boot path is implemented and **disabled**: `DfrBootReceiver` (boot
 broadcasts only), a non-exported `DfrAutoRootService`, the pure `AutoRootPolicy`
-(50 host cases) and `DfrRootCoordinator`, which is now the single execution path
+(56 host cases) and `DfrRootCoordinator`, which is now the single execution path
 for both the button and the boot service.
 
 This promotes nothing. What it adds to the evidence record is negative:
@@ -1006,7 +1006,13 @@ This promotes nothing. What it adds to the evidence record is negative:
 - Auto Root refuses unless a MANUAL run on this exact versionCode, ksud digest
   and `Build.FINGERPRINT` ended in verified same-boot `POST_ROOT_COMPLETE` with
   live `/sys/fs/selinux/enforce == 1`, and the owner then opted in explicitly;
-- a soft reboot keeps `boot_id`, so the qualifying boot never triggers a run;
+- `BOOT_COMPLETED` is not treated as evidence of a kernel boot: a framework
+  restart re-broadcasts it with the same `boot_id`, so neither the boot that
+  qualified Auto Root nor the boot it was switched on in can run it, and the
+  per-boot journal is durable (`fsync` of the record and of its directory) rather
+  than merely atomic;
+- the `/dev/df` and `dfm*` probe is `stat(2)` plus errno, so a failed lookup
+  refuses instead of reading as a clean device;
 - `STARTED` is journalled before transaction 5, so no failure after the native
   run can be followed by a second automatic attempt in that boot;
 - the retry budget is bounded in the journal, with no alarm or job anywhere on

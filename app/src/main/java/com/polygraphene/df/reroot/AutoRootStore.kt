@@ -2,8 +2,11 @@ package com.polygraphene.df.reroot
 
 import android.content.Context
 import android.os.Build
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import java.io.File
+import java.io.FileOutputStream
 
 /**
  * The only place Auto Root state touches a filesystem.
@@ -87,18 +90,49 @@ object AutoRootStore {
      * edge case rather than the normal outcome of an interrupted write.
      */
     private fun write(context: Context, name: String, body: String): Boolean = try {
-        val target = File(dir(context), name)
-        val tmp = File(dir(context), "$name.tmp")
-        tmp.writeText(body)
+        val folder = dir(context)
+        val target = File(folder, name)
+        val tmp = File(folder, "$name.tmp")
+        /*
+         * fsync the file, then the directory holding it.
+         *
+         * rename(2) is atomic for a concurrent READER, which is all the earlier
+         * version claimed, but the journal's whole job is to survive the thing
+         * that makes an attempt dangerous to repeat: a crash, an oops, a sudden
+         * reboot. Without the first fsync the bytes may only be in the page cache;
+         * without the second the rename itself may not be on disk, so a boot could
+         * come back to a directory where STARTED was never recorded - the one
+         * state that must never be forgotten.
+         */
+        FileOutputStream(tmp).use { out ->
+            out.write(body.toByteArray())
+            out.flush()
+            out.fd.sync()
+        }
         if (tmp.readText() != body) {
             tmp.delete()
             throw IllegalStateException("read-back of $name differs from what was written")
         }
         if (!tmp.renameTo(target)) throw IllegalStateException("rename of $name failed")
+        fsyncDir(folder)
         true
     } catch (t: Throwable) {
         Log.e(TAG, "[DFR][AUTOROOT] cannot write $name", t)
         false
+    }
+
+    /**
+     * Durability of the rename itself. A directory cannot be opened through
+     * java.io, so this goes through Os; a failure here is a failed write, because
+     * "probably persisted" is not the guarantee the journal is claiming.
+     */
+    private fun fsyncDir(dir: File) {
+        val fd = Os.open(dir.absolutePath, OsConstants.O_RDONLY, 0)
+        try {
+            Os.fsync(fd)
+        } finally {
+            Os.close(fd)
+        }
     }
 
     fun qualification(context: Context): String? = read(context, QUALIFICATION_FILE)
@@ -147,7 +181,8 @@ object AutoRootStore {
         val keepOptIn = isOptedIn(context)
         return write(context, QUALIFICATION_FILE, AutoRootPolicy.formatQualification(
             versionCode(), versionName(), KsudStage.pinnedKsudSha256(),
-            deviceFingerprint(), result.bootId, System.currentTimeMillis(), keepOptIn
+            deviceFingerprint(), result.bootId, System.currentTimeMillis(), keepOptIn,
+            result.bootId
         ))
     }
 
@@ -159,7 +194,20 @@ object AutoRootStore {
      * manual run cannot enable Auto Root at all.
      */
     fun setOptIn(context: Context, optIn: Boolean): Boolean {
-        val updated = AutoRootPolicy.withOptIn(qualification(context), optIn) ?: return false
+        /*
+         * The current boot is recorded with the flag, and the policy refuses that
+         * boot: arming takes effect from the NEXT full reboot. BOOT_COMPLETED is
+         * re-broadcast by a framework restart with the same boot_id, so without
+         * this the first broadcast after arming would have looked exactly like a
+         * fresh boot.
+         */
+        val bootId = DfrRootCoordinator.readBootId()
+        if (bootId.isEmpty()) {
+            Log.e(TAG, "[DFR][AUTOROOT] refusing to change the opt-in: boot_id unreadable")
+            return false
+        }
+        val updated = AutoRootPolicy.withOptIn(qualification(context), optIn, bootId)
+            ?: return false
         return write(context, QUALIFICATION_FILE, updated)
     }
 

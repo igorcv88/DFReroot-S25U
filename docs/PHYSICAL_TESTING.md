@@ -229,10 +229,22 @@ in:
 - *Qualified on this build. Not enabled.* — tick it to arm;
 - *Enabled: one attempt per full boot, never after a soft reboot.*
 
-Ticking it writes only the opt-in flag. It cannot create a qualification, and the
-qualification is void the moment the app version, the pinned ksud digest or the
-firmware fingerprint changes — by design, so an update never inherits permission
-to root unattended.
+Ticking it writes only the opt-in flag, **plus the boot id it was ticked in**. It
+cannot create a qualification, and the qualification is void the moment the app
+version, the pinned ksud digest or the firmware fingerprint changes — by design,
+so an update never inherits permission to root unattended.
+
+Because the switch is bound to its boot, arming takes effect from the **next full
+reboot**. Worth confirming once, before the acceptance run proper, since it is
+cheap and it is the guarantee everything else rests on:
+
+```sh
+# arm it, then restart ONLY the framework - boot_id will not change
+adb shell su -c 'stop; start'
+adb logcat -s DFReroot:* | grep AUTOROOT
+#   expect: "Auto Root was switched on during this boot; it takes effect from the
+#            next full reboot" - and no attempt
+```
 
 ---
 
@@ -265,6 +277,13 @@ Expect, once:
 Then the same same-boot checks as §4.3. Required: `POST_ROOT_COMPLETE=PASS`,
 `getenforce=Enforcing`, sysfs `1`, `su` in `u:r:ksu:s0`, all with the new
 `boot_id`.
+
+**Also record whether the run completed at all.** The whole phase sequence
+(`PREFLIGHT` → `STAGE_KSUD` → `WAIT_CONTROLLER` → `RUN_NATIVE` → `WAIT_POST_ROOT`
+→ `DONE`) must appear in that one boot. A sequence that stops partway means the
+platform interrupted an unattended run on this build — the one property this
+design cannot assert from code. That is a FAIL to report with the log, not
+something to retry: the boot is locked by design.
 
 ```sh
 # 5. framework restart only: the boot_id does NOT change, so nothing may run

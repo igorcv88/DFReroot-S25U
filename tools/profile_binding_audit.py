@@ -544,7 +544,7 @@ def audit():
     # without the second-run refusal.
     for signal in ("KsudStage.stageFromAssets(context)",
                    "KSUD_STAGED_VERIFY=PASS",
-                   "markerPresent()"):
+                   "markerState()"):
         if signal not in coord_src:
             fail("DfrRootCoordinator no longer enforces %r before the hop" % signal)
     r["checks"]["post_root_contract"] = java_contract
@@ -590,16 +590,49 @@ def audit():
             fail("AutoRootPolicy no longer defines %r" % signal)
     for signal in ("Auto Root is not opted in",
                    "still in the boot that qualified Auto Root",
+                   "switched on during this boot",
                    "native execution already began in this boot",
-                   "a stage marker is already present"):
+                   "a stage marker is already present",
+                   # the refusal is written across two source lines, so match the
+                   # half that identifies it rather than the joined message
+                   "refusing rather than assuming a clean boot"):
         if signal not in autoroot_policy_src:
             fail("AutoRootPolicy no longer refuses on %r" % signal)
     # A qualification must be bound to the bytes and the build it was observed
     # with, or "it worked once" would survive a repin.
+    policy_code = code_only(autoroot_policy_src)
     for field in ("version_code", "version_name", "ksud_sha256",
-                  "device_fingerprint", "boot_id"):
-        if field not in autoroot_policy_src:
+                  "device_fingerprint", "boot_id", "opt_in_boot_id"):
+        if field not in policy_code:
             fail("the Auto Root qualification no longer binds %r" % field)
+    # A field the record merely CARRIES decides nothing. These two are the ones
+    # that keep a framework restart and a stale qualification from running the
+    # chain, so the comparison itself has to be there.
+    # The comparison itself, not just the field name: `q.get("boot_id")` also
+    # appears where withOptIn copies the record forward, so naming it proves
+    # nothing about the refusal.
+    for compared in ('in.currentBootId.equals(q.get("boot_id"))',
+                     'in.currentBootId.equals(q.get("opt_in_boot_id"))'):
+        if compared not in policy_code:
+            fail("AutoRootPolicy no longer refuses on %s; the record would carry the "
+                 "field without it gating anything" % compared)
+    # The journal is the one-attempt-per-boot guarantee, so it has to survive the
+    # event that makes a repeat dangerous: an abrupt reboot. rename(2) alone is
+    # atomic for a reader, not durable.
+    if "out.fd.sync()" not in autoroot_store_src or "fsyncDir(" not in autoroot_store_src:
+        fail("AutoRootStore no longer fsyncs the record and its directory; a STARTED "
+             "that does not survive a crash is not a guarantee")
+    # The switch must be bound to the boot it was flipped in: BOOT_COMPLETED is
+    # re-broadcast by a framework restart with an unchanged boot_id.
+    if "DfrRootCoordinator.readBootId()" not in autoroot_store_src:
+        fail("AutoRootStore sets the opt-in without recording the boot it happened "
+             "in, so a framework restart could be taken for a full boot")
+    # The marker probe must be able to say "could not tell".
+    coord_code = code_only(coord_src)
+    if "AutoRootPolicy.MARKER_UNKNOWN" not in coord_code \
+            or "OsConstants.ENOENT" not in coord_code:
+        fail("the marker probe collapsed back to a boolean; a failed lookup would "
+             "read as a clean device")
     if "KsudStage.pinnedKsudSha256()" not in autoroot_store_src:
         fail("AutoRootStore no longer binds the qualification to the pinned ksud "
              "digest, so a repinned daemon would keep an old qualification valid")
