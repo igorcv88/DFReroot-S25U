@@ -31,3 +31,12 @@ javac -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
     tools/tests/AutoRootPolicyTest.java
 java -cp "$OUT" AutoRootPolicyTest
+
+# Run control: the Activity/service race and the CONTROLLER deadline. Both are
+# negative cases the Auto Root plan requires and neither can be provoked on a
+# device - the race needs two triggers in one millisecond, the timeout a 30s wait.
+javac -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/RunGuard.java \
+    app/src/main/java/com/polygraphene/df/reroot/AwaitBox.java \
+    tools/tests/RunHandoffTest.java
+java -cp "$OUT" RunHandoffTest

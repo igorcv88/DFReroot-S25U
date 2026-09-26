@@ -524,9 +524,22 @@ def audit():
             fail("%s evaluates the post-root record itself instead of using the "
                  "shared coordinator verdict" % name)
     # The single process-wide owner is what stops a click and a boot trigger from
-    # both reaching transaction 5.
-    if "owner.compareAndSet(null, who)" not in coord_src:
+    # both reaching transaction 5, and the CONTROLLER deadline is what stops an
+    # indefinite wait. Both now live in pure classes so the race and the timeout
+    # are host-tested (tools/tests/RunHandoffTest.java); the coordinator must
+    # still be the thing that uses them.
+    if "guard.tryAcquire(who)" not in coord_src or "guard.release()" not in coord_src:
         fail("DfrRootCoordinator no longer takes a single process-wide run owner")
+    if "controllerBox.await(" not in coord_src:
+        fail("DfrRootCoordinator no longer waits for the CONTROLLER with a deadline")
+    guard_src = dfr_source("RunGuard.java")
+    box_src = dfr_source("AwaitBox.java")
+    if "compareAndSet(null, who)" not in guard_src:
+        fail("RunGuard no longer claims the run atomically")
+    if "deadline - System.currentTimeMillis()" not in box_src \
+            or "if (left <= 0) return null" not in box_src:
+        fail("AwaitBox no longer refuses on its deadline; a missing CONTROLLER "
+             "would wait forever instead of refusing before the native run")
     # Neither caller may reach the chain without staged, verified ksud bytes or
     # without the second-run refusal.
     for signal in ("KsudStage.stageFromAssets(context)",
@@ -535,6 +548,35 @@ def audit():
         if signal not in coord_src:
             fail("DfrRootCoordinator no longer enforces %r before the hop" % signal)
     r["checks"]["post_root_contract"] = java_contract
+
+    # --- the two APKs must declare the same version ------------------------
+    # release.yml derives VER from app/build.gradle.kts alone and names BOTH
+    # assets with it, so an installer left behind ships as df_installer_<new>.apk
+    # while its own BuildConfig.VERSION_NAME - the string its UI shows - still
+    # says the previous release, at the previous versionCode. The pair is already
+    # required to move together for signing; this is the same rule for identity.
+    versions = {}
+    for module in ("app", "installer"):
+        path = os.path.join(ROOT, module, "build.gradle.kts")
+        try:
+            with open(path, encoding="utf-8") as f:
+                gradle = f.read()
+        except OSError as ex:
+            fail("cannot read %s/build.gradle.kts: %s" % (module, ex))
+            continue
+        code = re.search(r"versionCode\s*=\s*(\d+)", gradle)
+        name = re.search(r'versionName\s*=\s*"([^"]+)"', gradle)
+        if not code or not name:
+            fail("%s/build.gradle.kts declares no versionCode/versionName" % module)
+            continue
+        versions[module] = (int(code.group(1)), name.group(1))
+    if len(versions) == 2 and versions["app"] != versions["installer"]:
+        fail("version drift: app is %s but installer is %s; the release names both "
+             "assets from the app's versionName, so the installer would ship as the "
+             "new version while identifying as the old one"
+             % (versions["app"], versions["installer"]))
+    r["checks"]["module_versions"] = {k: "%s (%d)" % (v[1], v[0])
+                                      for k, v in versions.items()}
 
     # --- Auto Root after full boot ----------------------------------------
     # Auto Root changes WHEN the chain runs, so every one of its refusals is a

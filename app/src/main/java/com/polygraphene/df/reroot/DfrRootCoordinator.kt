@@ -10,7 +10,6 @@ import android.os.Parcel
 import android.os.SystemClock
 import android.util.Log
 import java.io.File
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The one execution path: ksud staging, the hop into network_stack, the
@@ -76,13 +75,18 @@ object DfrRootCoordinator {
         val reason: String,
     )
 
-    /** Who holds the run, or null. One owner per process, for the whole process. */
-    private val owner = AtomicReference<String?>(null)
+    /**
+     * Who holds the run, and the controller handoff.
+     *
+     * Both are pure classes rather than an AtomicReference and a lock in here,
+     * because both encode a decision with a negative case that cannot be produced
+     * on a device: two callers racing for one run, and a CONTROLLER that never
+     * arrives before the deadline. RunGuardTest and AwaitBoxTest drive them.
+     */
+    private val guard = RunGuard()
+    private val controllerBox = AwaitBox<IBinder>()
 
-    fun currentOwner(): String? = owner.get()
-
-    @Volatile private var controller: IBinder? = null
-    private val controllerLock = Object()
+    fun currentOwner(): String? = guard.currentOwner()
 
     fun readBootId(): String = try {
         File(BOOT_ID_PATH).readText().trim()
@@ -123,13 +127,14 @@ object DfrRootCoordinator {
      * other one gets while this run is in flight.
      */
     fun run(context: Context, who: String, host: Host): Result {
-        if (!owner.compareAndSet(null, who)) {
-            return refused("a run owned by '${owner.get()}' is already in progress")
+        val held = guard.tryAcquire(who)
+        if (held != null) {
+            return refused("a run owned by '$held' is already in progress")
         }
         try {
             return runOwned(context, who, host)
         } finally {
-            owner.set(null)
+            guard.release()
         }
     }
 
@@ -189,7 +194,7 @@ object DfrRootCoordinator {
                     }
                     val b = intent.extras?.getBinder("CONTROLLER")
                     if (b != null) {
-                        controller = b
+                        controllerBox.set(b)
                         host.log("networkstack CONTROLLER binder received\n")
                     } else {
                         // Diagnostics without a controller: the hop landed but
@@ -200,8 +205,6 @@ object DfrRootCoordinator {
                     }
                 } catch (t: Throwable) {
                     host.log("[x] resolve binder: $t\n")
-                } finally {
-                    synchronized(controllerLock) { controllerLock.notifyAll() }
                 }
             }
         }
@@ -215,7 +218,7 @@ object DfrRootCoordinator {
          * It is registered per run rather than for the app's whole lifetime, so
          * the exported surface does not exist while the app sits idle.
          */
-        controller = null
+        controllerBox.clear()
         try {
             context.registerReceiver(
                 receiver, IntentFilter(StageReceiver.EVIL_ACTION), Context.RECEIVER_EXPORTED
@@ -326,25 +329,10 @@ object DfrRootCoordinator {
         )
     }
 
-    private fun awaitController(timeoutMs: Long, host: Host): IBinder? {
-        val deadline = SystemClock.uptimeMillis() + timeoutMs
-        synchronized(controllerLock) {
-            var c = controller
-            while (c == null) {
-                val left = deadline - SystemClock.uptimeMillis()
-                if (left <= 0) break
-                host.log("[*] waiting for CONTROLLER... (${left / 1000}s left)\n")
-                try {
-                    controllerLock.wait(minOf(left, 5_000))
-                } catch (e: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    break
-                }
-                c = controller
-            }
-            return c
+    private fun awaitController(timeoutMs: Long, host: Host): IBinder? =
+        controllerBox.await(timeoutMs, 5_000L) { msLeft ->
+            host.log("[*] waiting for CONTROLLER... (${msLeft / 1000}s left)\n")
         }
-    }
 
     /**
      * Poll the DFR-only completion record until it is valid for THIS boot, or
