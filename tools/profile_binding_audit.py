@@ -524,9 +524,22 @@ def audit():
             fail("%s evaluates the post-root record itself instead of using the "
                  "shared coordinator verdict" % name)
     # The single process-wide owner is what stops a click and a boot trigger from
-    # both reaching transaction 5.
-    if "owner.compareAndSet(null, who)" not in coord_src:
+    # both reaching transaction 5, and the CONTROLLER deadline is what stops an
+    # indefinite wait. Both now live in pure classes so the race and the timeout
+    # are host-tested (tools/tests/RunHandoffTest.java); the coordinator must
+    # still be the thing that uses them.
+    if "guard.tryAcquire(who)" not in coord_src or "guard.release()" not in coord_src:
         fail("DfrRootCoordinator no longer takes a single process-wide run owner")
+    if "controllerBox.await(" not in coord_src:
+        fail("DfrRootCoordinator no longer waits for the CONTROLLER with a deadline")
+    guard_src = dfr_source("RunGuard.java")
+    box_src = dfr_source("AwaitBox.java")
+    if "compareAndSet(null, who)" not in guard_src:
+        fail("RunGuard no longer claims the run atomically")
+    if "deadline - System.currentTimeMillis()" not in box_src \
+            or "if (left <= 0) return null" not in box_src:
+        fail("AwaitBox no longer refuses on its deadline; a missing CONTROLLER "
+             "would wait forever instead of refusing before the native run")
     # Neither caller may reach the chain without staged, verified ksud bytes or
     # without the second-run refusal.
     for signal in ("KsudStage.stageFromAssets(context)",
