@@ -123,12 +123,18 @@ adb logcat -v time > dfr-$(date +%Y%m%d-%H%M%S).log &
 ```
 
 And record the boot identity, because **evidence is per boot** and states from
-two boots must never be combined into one apparently successful chain:
+two boots must never be combined into one apparently successful chain.
+
+> Both SELinux reads go through `su`. From an ordinary app shell — Termux, for
+> instance — `getenforce` is not on `PATH` and `/sys/fs/selinux/enforce` is not
+> readable, so a plain invocation returns "command not found" and "Permission
+> denied". Neither says anything about the device's state, and reading them as if
+> they did would be the same mistake as reading an unreadable file as absence.
 
 ```sh
 adb shell cat /proc/sys/kernel/random/boot_id
-adb shell getenforce                             # Enforcing
-adb shell cat /sys/fs/selinux/enforce             # 1
+adb shell su -c 'getenforce'                     # Enforcing
+adb shell su -c 'cat /sys/fs/selinux/enforce'     # 1
 adb shell ls -l /dev/df /dev/dfm1 /dev/dfm2 /dev/dfm3 /dev/dfm4   # all absent
 ```
 
@@ -225,8 +231,8 @@ progress, not success.
 ### 5.3 Immediately after, in the same boot
 
 ```sh
-adb shell getenforce                        # Enforcing
-adb shell cat /sys/fs/selinux/enforce        # 1
+adb shell su -c 'getenforce'                # Enforcing
+adb shell su -c 'cat /sys/fs/selinux/enforce'   # 1
 adb shell su -c 'id; cat /proc/self/attr/current'
 #   uid=0(root) ... context=u:r:ksu:s0
 adb shell cat /data/system/dfreroot-post-root
