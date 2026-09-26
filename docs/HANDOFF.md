@@ -837,7 +837,7 @@ re-derive whether something was actually done.
 | `DfrBootReceiver`, exported only as the protected boot broadcast requires | done; boot actions only, and the audit fails if another action is added |
 | `android.permission.RECEIVE_BOOT_COMPLETED` | done, plus `WAKE_LOCK` (below) |
 | non-exported `DfrAutoRootService` | done; the audit fails if it is exported |
-| a foreground notification/channel *if the target build requires one* | **deliberately not built.** It does not: `android:process="system"` hosts these components inside `system_server`, which is neither background-start-restricted nor killed for backgrounding. What the bounded post-root wait does need is a `PARTIAL_WAKE_LOCK`, so that is what it takes |
+| a foreground notification/channel *if the target build requires one* | **not built, and whether it is required is unproven.** An earlier version of this table justified that with `process="system"` hosting the components in `system_server`; that does not follow from a manifest attribute and is corrected in `docs/AUTO_ROOT.md`. What the bounded post-root wait definitely needs is a `PARTIAL_WAKE_LOCK`, which it takes. If the acceptance run shows a truncated phase sequence, a foreground service is the remedy — before Auto Root is accepted |
 | device-protected storage for opt-in and scheduling state only, never root authority | done, as two atomically-renamed records rather than `SharedPreferences`, so the same pure parser that refuses them is the one the tests drive |
 | qualification requires a manual PASS, live SELinux `1`, and explicit opt-in | done; the opt-in cannot *create* a qualification |
 | qualification persists target, app version, ksud digest and time; a change to any invalidates it | done as versionCode + versionName + pinned ksud digest + `Build.FINGERPRINT`. The profile itself is not stored, and does not need to be: the runtime identity gate already requires the device's fingerprint to equal the profile's pinned one, so a repinned profile either names this same firmware or makes the chain refuse on this device |
@@ -925,6 +925,15 @@ Ordered by what unblocks what, not by appeal. Nothing here is committed work.
    evidence gets mixed with another's. A single post-root pass that prints
    `boot_id` alongside every value would make the record self-consistent by
    construction (AGENTS.md §3.8).
+
+**Owed if the Auto Root acceptance run truncates:**
+
+10. **A foreground service for the boot-time run.** The current design does not
+    establish that the platform keeps a plain `startService` component alive to
+    completion at boot; it only establishes that a run cut short fails closed. A
+    foreground service with its own channel is the remedy, and it is the one
+    change that should precede accepting the automatic flow. It is not a retry and
+    not a scheduler, so it does not touch the bounded-attempt rules.
 
 **Structural, only if the project wants it:**
 

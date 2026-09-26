@@ -47,6 +47,7 @@ public class AutoRootPolicyTest {
         in.markerState = AutoRootPolicy.MARKER_ABSENT;
         in.liveSelinux = 1;
         in.networkStack = AutoRootPolicy.PROCESS_PRESENT;
+        in.broadcastUptimeMs = 45_000L;   // a normal BOOT_COMPLETED
         return in;
     }
 
@@ -159,6 +160,43 @@ public class AutoRootPolicyTest {
         in = ready();
         in.qualificationRecord = qualified(true, "99999999-0000-0000-0000-000000000000");
         allowed(in, "armed in some earlier boot, this boot may run");
+
+        /*
+         * The general case the arming rule does NOT cover: a later boot in which
+         * nothing of ours ran, so there is no journal and neither stored boot id
+         * matches. A framework restart there is distinguishable only by how long
+         * the kernel has been up.
+         */
+        in = ready();
+        in.journalRecord = null;
+        in.broadcastUptimeMs = 5L * 60 * 60 * 1000;   // five hours into the boot
+        refused(in, "a boot trigger hours after kernel boot is refused, even with no"
+                + " journal and no matching stored boot id");
+
+        in = ready();
+        in.broadcastUptimeMs = AutoRootPolicy.MAX_BOOT_WINDOW_MS + 1;
+        refused(in, "one millisecond past the boot window is outside it");
+
+        in = ready();
+        in.broadcastUptimeMs = AutoRootPolicy.MAX_BOOT_WINDOW_MS;
+        allowed(in, "the last millisecond of the boot window still runs");
+
+        in = ready();
+        in.broadcastUptimeMs = -1L;
+        refused(in, "an unreadable time since boot refuses, never assumed recent");
+
+        in = new AutoRootPolicy.Inputs();
+        in.qualificationRecord = qualified(true);
+        in.currentBootId = BOOT;
+        in.deviceFingerprint = FP;
+        in.ksudSha256 = KSUD;
+        in.versionName = NAME;
+        in.versionCode = CODE;
+        in.bootCompleted = true;
+        in.liveSelinux = 1;
+        in.markerState = AutoRootPolicy.MARKER_ABSENT;
+        in.networkStack = AutoRootPolicy.PROCESS_PRESENT;
+        refused(in, "an unset uptime field defaults to unavailable and refuses");
 
         // --- one attempt per boot ------------------------------------------
         in = ready();

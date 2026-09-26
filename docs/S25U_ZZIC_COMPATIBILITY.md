@@ -998,7 +998,7 @@ Enforcing state is observed on ZZIC.
 
 The unattended boot path is implemented and **disabled**: `DfrBootReceiver` (boot
 broadcasts only), a non-exported `DfrAutoRootService`, the pure `AutoRootPolicy`
-(56 host cases) and `DfrRootCoordinator`, which is now the single execution path
+(61 host cases) and `DfrRootCoordinator`, which is now the single execution path
 for both the button and the boot service.
 
 This promotes nothing. What it adds to the evidence record is negative:
@@ -1008,9 +1008,16 @@ This promotes nothing. What it adds to the evidence record is negative:
   live `/sys/fs/selinux/enforce == 1`, and the owner then opted in explicitly;
 - `BOOT_COMPLETED` is not treated as evidence of a kernel boot: a framework
   restart re-broadcasts it with the same `boot_id`, so neither the boot that
-  qualified Auto Root nor the boot it was switched on in can run it, and the
-  per-boot journal is durable (`fsync` of the record and of its directory) rather
-  than merely atomic;
+  qualified Auto Root nor the boot it was switched on in can run it, an attempt
+  must arrive within 10 minutes of kernel boot, and the per-boot journal is
+  durable (`fsync` of the record and of its directory) rather than merely atomic.
+  The enforced property is "at most once per boot_id, inside the boot window,
+  never in the qualifying or arming boot" — deliberately stated that way rather
+  than as "only after a full boot", which the code does not establish;
+- whether the platform keeps the boot-time service alive to completion on this
+  build is **unproven**. A truncated run fails closed, but the reliability of the
+  attempt itself is an acceptance item, and a foreground service is the identified
+  remedy if it truncates;
 - the `/dev/df` and `dfm*` probe is `stat(2)` plus errno, so a failed lookup
   refuses instead of reading as a clean device;
 - `STARTED` is journalled before transaction 5, so no failure after the native

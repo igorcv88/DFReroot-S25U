@@ -40,40 +40,56 @@ Notably absent: launching `MainActivity` from the background. The Activity used 
 own execution, receiver registration and UI state in one class; that is why
 `DfrRootCoordinator` exists at all.
 
-## Why there is no foreground service
+## No foreground service — and what that does and does not rest on
 
 The plan asked for a foreground notification if the target build requires one for
-a bounded boot-time operation. It does not, and the reason is specific to this
-app: `android:process="system"` plus `sharedUserId="android.uid.system"` means
-these components are hosted inside `system_server`. That process is not subject
-to background-start restrictions and is not killed for being in the background,
-so a plain `startService` is enough and a notification channel would add surface
-for nothing.
+a bounded boot-time operation. None was built, and the honest reason is narrower
+than the one first written here.
 
-What a boot-time run *does* need is a wakelock: the post-root wait polls for up
-to two minutes, and a suspend in the middle would produce a reported failure that
-never happened — after the page-cache writes. `DfrAutoRootService` takes a
-`PARTIAL_WAKE_LOCK` with a bounded budget and releases it in a `finally`.
+**What was claimed and is not established.** An earlier version of this file said
+`android:process="system"` plus `sharedUserId="android.uid.system"` *means* these
+components run inside `system_server`, and used that to dismiss service-lifetime
+restrictions. That does not follow. The `process` attribute names the process the
+app's components are hosted in; the shared UID grants the identity. Neither line
+in a manifest makes a process *be* `system_server`, and no reading of this
+repository's code establishes that it is.
 
-### What the platform guarantees here, and what it does not
+**What the evidence does say.** On this exact firmware the app's code has been
+observed reaching `system_server`-internal state in-process — `StageHop` resolves
+`com.android.server.am.ActivityManagerService` from the object returned by
+`ServiceManager.getService()`, walks `mProcessList.mProcessNames`, and reads
+`mOnewayThread` off a `ProcessRecord`. That worked on hardware (Gate C, physical
+PASS in `docs/S25U_ZZIC_COMPATIBILITY.md`), which a process holding only a Binder
+proxy could not do. So the hosting is an **observed property of this
+device/firmware**, recorded as evidence — not something the manifest guarantees,
+and not a basis for assuming anything about component lifetime.
 
-Stated precisely, because it is an acceptance item rather than something the code
-can assert:
+**What is still unproven, and it matters.** Being hosted in a persistent process
+would say nothing about whether AMS may stop a `Service` component, and naming the
+worker thread does not extend its life past the process. So the following is an
+acceptance item, not an argument:
 
-- **the process** is `system_server`. It is not background-restricted and not
-  killed for backgrounding; if it dies the device restarts the framework anyway.
-- **the work** runs on a named `dfr-autoroot` thread that holds no reference to
-  the Service beyond calling `stopSelf()` at the end, so stopping the service
-  would not abort a run in flight.
-- **the CPU** stays awake for the bounded window via the wakelock.
-- **what is not guaranteed** is that the platform will never interfere with a
-  plain `startService` component at boot on this exact Android 17 build. Nothing
-  in this design *depends* on surviving that — a run that is cut short simply
-  never reaches `POST_ROOT_COMPLETE`, so it is reported as a failure and the boot
-  stays locked — but "the attempt reliably happens" is a claim only the device can
-  settle. The acceptance run therefore checks that the whole phase sequence
-  appears in one boot, and a truncated sequence is a FAIL to be reported, not a
-  retry to schedule.
+- the work runs on a `dfr-autoroot` thread that holds no reference to the Service
+  beyond calling `stopSelf()` at the end, so *stopping the service* alone would not
+  abort a run in flight — but if the **process** goes away, the thread goes with
+  it, and `START_NOT_STICKY` means nothing resumes;
+- the wakelock covers CPU suspend for a bounded window, and nothing else;
+- whether a plain `startService` at boot survives to completion on this Android 17
+  build **is not established by this code**. Nothing in the design *depends* on it
+  — a run that is cut short never reaches `POST_ROOT_COMPLETE`, so it is reported
+  as a failure and the boot stays locked — but "the attempt reliably happens" is a
+  claim only the device can settle.
+
+The acceptance run therefore requires the whole phase sequence in one boot, and
+treats a truncated sequence as a FAIL to report. **If it truncates, the remedy is
+a foreground service** (with its notification channel), not a retry or a
+scheduler; that is the change to make before Auto Root is accepted, and it is
+listed in `docs/HANDOFF.md`.
+
+What a boot-time run definitely does need is the wakelock: the post-root wait
+polls for up to two minutes, and a suspend in the middle would produce a reported
+failure that never happened — after the page-cache writes. `DfrAutoRootService`
+takes a `PARTIAL_WAKE_LOCK` with a bounded budget and releases it in a `finally`.
 
 ## The three states, kept separate
 
@@ -123,8 +139,16 @@ or the presence of a KernelSU manager app.
 `/proc/sys/kernel/random/boot_id` is the full-boot identity, and **the broadcast
 is not**: a framework restart re-delivers `BOOT_COMPLETED` with the same
 `boot_id`. Nothing in the receiver or the intent is treated as evidence of a
-kernel boot. Three stored facts carry the guarantee instead, and all three are
-host-tested:
+kernel boot.
+
+State the property the code actually enforces, because it is weaker than "only
+after a full boot" and the difference is the whole point of this section:
+
+> An attempt may occur **at most once per `boot_id`**, **only within
+> `MAX_BOOT_WINDOW_MS` of kernel boot**, and **never in the boot that qualified
+> Auto Root or the boot it was switched on in**.
+
+Four facts carry that, and all four are host-tested:
 
 - the boot that **qualified** Auto Root cannot run it;
 - the boot that Auto Root was **switched on in** cannot run it either. This is
@@ -135,7 +159,26 @@ host-tested:
   uptime;
 - the journal names a boot. A journal from the previous boot never locks this one;
   a journal for *this* boot in `STARTED`, `COMPLETE` or `FAILED_LOCKED` refuses
-  immediately.
+  immediately;
+- the trigger must arrive within `MAX_BOOT_WINDOW_MS` (10 minutes) of kernel boot,
+  measured at the broadcast rather than at the poll.
+
+### What that does not prove
+
+The first three facts only speak for boots this code has stored something about.
+A *later* boot in which nothing of ours ran leaves no journal and matches neither
+stored boot id, so a framework restart there is distinguishable from a fresh boot
+in exactly one observable way: how long the kernel has been up. That is what the
+boot window bounds, and it is a **necessary condition, not a sufficient one**:
+
+- a framework restart hours into a session is refused;
+- a boot slow enough to exceed the window gets no automatic attempt — a false
+  refusal, which is the safe direction;
+- a framework restart *within* the window of a boot in which nothing of ours ran
+  is still permitted. That is a fresh kernel boot with no prior attempt, every
+  other gate still applies, and the once-per-boot journal still holds — but it is
+  not the "only after a full boot" that plain language would suggest, and calling
+  it that would be the overclaim this section exists to prevent.
 
 `STARTED` is written **before** transaction 5, and the run is abandoned if that
 write fails: without the record there is no one-attempt guarantee, and a guarantee
@@ -236,7 +279,7 @@ broadcast to this package, and nothing treats the binder as authority — a forg
 Offline, no device and no SDK (in addition to the AGENTS.md §5 set):
 
 ```sh
-sh tools/tests/run_installer_tests.sh   # AutoRootPolicyTest, 56 cases
+sh tools/tests/run_installer_tests.sh   # AutoRootPolicyTest, 61 cases
 python3 tools/tests/test_post_root_contract.py
 python3 tools/profile_binding_audit.py
 ```

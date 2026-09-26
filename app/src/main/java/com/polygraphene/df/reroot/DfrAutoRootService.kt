@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -29,10 +30,28 @@ import java.util.concurrent.atomic.AtomicBoolean
  *    [AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT]; there is no alarm or job to fire
  *    again later, because a self-rescheduling root attempt is exactly the shape
  *    that must not exist.
+ *
+ * What this class does NOT establish, and must not be read as claiming: that the
+ * platform will keep a plain `startService` component alive to completion at boot
+ * on this build. The manifest's `process="system"` names the process the
+ * components are hosted in - it does not make that process `system_server`, and
+ * the shared UID does not either. Naming the worker thread does not extend its
+ * life past the process. If the phase sequence truncates during the acceptance
+ * run, the remedy is a foreground service, not a retry; docs/AUTO_ROOT.md carries
+ * the reasoning and the evidence that does exist.
  */
 class DfrAutoRootService : Service() {
 
     private val started = AtomicBoolean(false)
+
+    /**
+     * Time since kernel boot when the trigger arrived, captured before any work.
+     *
+     * Read once, at the broadcast, and reused for every readiness poll: the loop
+     * may span minutes and the question the policy asks is how close to the boot
+     * the TRIGGER was, not how long we have been polling.
+     */
+    @Volatile private var broadcastUptimeMs = -1L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -45,6 +64,11 @@ class DfrAutoRootService : Service() {
         if (!started.compareAndSet(false, true)) {
             Log.i(TAG, "[DFR][AUTOROOT] a run is already in flight in this process")
             return START_NOT_STICKY
+        }
+        broadcastUptimeMs = try {
+            SystemClock.elapsedRealtime()
+        } catch (t: Throwable) {
+            -1L
         }
         Thread({
             var lock: PowerManager.WakeLock? = null
@@ -232,6 +256,7 @@ class DfrAutoRootService : Service() {
         q.versionCode = AutoRootStore.versionCode()
         q.bootCompleted = bootCompleted()
         q.markerState = DfrRootCoordinator.markerState()
+        q.broadcastUptimeMs = broadcastUptimeMs
         q.liveSelinux = DfrRootCoordinator.readLiveSelinux()
         q.networkStack = networkStackProcess()
         return q

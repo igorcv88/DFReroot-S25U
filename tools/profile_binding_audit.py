@@ -591,6 +591,8 @@ def audit():
     for signal in ("Auto Root is not opted in",
                    "still in the boot that qualified Auto Root",
                    "switched on during this boot",
+                   "boot window; a framework restart re-broadcasts it",
+                   "time since kernel boot is unavailable",
                    "native execution already began in this boot",
                    "a stage marker is already present",
                    # the refusal is written across two source lines, so match the
@@ -646,6 +648,17 @@ def audit():
         fail("DfrAutoRootService no longer records STARTED before the native run")
     if "AutoRootPolicy.evaluate(" not in autoroot_service_src:
         fail("DfrAutoRootService no longer consults the Auto Root policy")
+    # The boot window must be measured at the trigger, not at the poll: a
+    # readiness loop spanning minutes would otherwise decide its own verdict.
+    svc_code = code_only(autoroot_service_src)
+    if "SystemClock.elapsedRealtime()" not in svc_code \
+            or "q.broadcastUptimeMs = broadcastUptimeMs" not in svc_code:
+        fail("DfrAutoRootService no longer captures the time since kernel boot at the "
+             "trigger and passes it to the policy")
+    if "in.broadcastUptimeMs > MAX_BOOT_WINDOW_MS" not in policy_code:
+        fail("AutoRootPolicy no longer bounds how long after kernel boot a trigger "
+             "may start an attempt; a framework restart hours into a session would "
+             "be indistinguishable from a full boot")
     for forbidden in ("AlarmManager", "JobScheduler", "setRepeating", "setExactAndAllowWhileIdle"):
         if forbidden in autoroot_service_src or forbidden in boot_receiver_src:
             fail("the Auto Root path schedules work through %s; the retry budget "
