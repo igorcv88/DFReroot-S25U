@@ -956,7 +956,7 @@ inferred from a nearby firmware.
 | G3 — `selinux_state` layout | **physical PASS** | exact BTF predicted offset 0 and the hardware write produced the expected global enforcing state change |
 | G4 — Write safety | **physical PASS** | system remained operational after `enforcing=0`, KernelSU late-load completed and root worked |
 | H — Installer / packages.xml | **physical PASS** | injected key survived framework restart; write-path fixes regression-tested |
-| I — Automatic safe end state | **PENDING PHYSICAL ACCEPTANCE** | root and manual return to Enforcing are physically proven; the automatic fail-closed source and exact repinned ksud now exist, but have not yet run on the phone |
+| I — Automatic safe end state | **PENDING PHYSICAL ACCEPTANCE** | root and manual return to Enforcing are physically proven. `v2.0.5-zzic` has now run on the phone: every gate up to the handoff passed and root worked, but no same-boot `POST_ROOT_COMPLETE` was ever published, so the closeout itself remains untested — see the third physical run below |
 | AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **UNVERIFIED (ships disabled)** | the boot receiver/service, the pure scheduling policy and the shared coordinator exist and are host-tested; no automatic attempt has run on hardware, and the feature cannot be enabled without a verified manual completion on the same build plus an explicit opt-in. Record: `docs/AUTO_ROOT.md` |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
@@ -1077,16 +1077,46 @@ The pinned DFR daemon is `14fb9eaf…` at 6,670,272 bytes and **contains** that
 string — `tools/profile_binding_audit.py` fails the build if the bundled asset
 does not. The daemon left in control therefore is not it.
 
-**Cause.** The device already carried a complete KernelSU userspace before the
-run: the manager app `me.weishu.kernelsu`, `/data/adb/ksu/` with an allowlist
-dated months earlier, and modules (LSPosed, Zygisk Next, Shamiko, TrickyStore,
-Specter, bindhosts, meta-overlayfs). That installation's own
-`libksud.so install` is what writes `/data/adb/ksud` on this device — its earlier
-invocation is recorded in the device's `sulog`. The chain brought KernelSU up and
-root works, but the daemon that ended up installed and in control is the manager's,
-not the pinned one, so the closeout that publishes the completion record never ran.
+### What was observed, and what is inferred from it
 
-**What this does and does not establish.**
+The distinction matters here more than usual, because the two are easy to blur
+and only one of them is evidence.
+
+**Observed.** At observation time the bytes installed at `/data/adb/ksud` are not
+the pinned daemon and contain the closeout string zero times. The staged
+`/data/system/dfreroot-ksud` was consumed. No completion record was ever
+published. Root works, SELinux is `Enforcing`, and the device carries a KernelSU
+userspace predating the run: the manager app `me.weishu.kernelsu`, `/data/adb/ksu/`
+with an allowlist dated months earlier, and modules (LSPosed, Zygisk Next,
+Shamiko, TrickyStore, Specter, bindhosts, meta-overlayfs). The device's own
+`sulog` records that installation running `libksud.so install`, which is how
+`/data/adb/ksud` gets written there.
+
+**Inferred, and not established.** Which daemon was executing during the run. A
+process that has already `execve`d continues from its image even if the file it
+came from is later replaced or unlinked, so post-run file contents cannot say who
+was running, who caused the timeout, or who owned the session. Three mechanisms
+fit every observation above equally well:
+
+1. the DFR daemon ran and took the upstream `install` path, which copies the
+   manager's `libksud.so` over `/data/adb/ksud` — overwriting itself before
+   reaching the closeout;
+2. it exited early on finding an existing installation, and that installation's
+   daemon took over;
+3. it died after `execve` (which leaves no `dfm4`, since that marker is created
+   only when `execve` itself fails).
+
+**What would settle it**, and neither needs a new build:
+
+- `sha256sum` of the manager APK's `lib/arm64/libksud.so`. If it equals the
+  installed `99aaa607…`, the installed bytes are bound to that APK as their
+  source — which narrows the question but still does not name the running
+  process;
+- KernelSU's own `sulog` (present on this device but switched off — the July log
+  ends with `feature set sulog 0`). With it enabled, every root `execve` is
+  recorded, which binds the active daemon to its binary directly.
+
+### What this run does and does not establish
 
 - It does **not** promote Gate I: no same-boot `POST_ROOT_COMPLETE`, so no PASS.
   The UI refusing success with root visibly working is the contract behaving
@@ -1094,14 +1124,29 @@ not the pinned one, so the closeout that publishes the completion record never r
   claims, and only the second one is a gate.
 - It does **not** count as a Gate-I FAIL either: the automatic closeout was never
   reached, so nothing about it was tested.
-- It **does** establish a precondition that was implicit and is now explicit: the
-  Gate-I acceptance requires a device with **no pre-existing KernelSU (or Magisk)
-  userspace**. The chain assumes it is the one bringing KernelSU up; where another
-  installation already owns `/data/adb`, that one wins and the record can never
-  appear. `docs/PHYSICAL_TESTING.md` §1 now checks this before anything else.
+- It **does** show that a foreign KernelSU daemon can end up installed over the
+  pinned one during a run, on a device carrying its own KernelSU userspace, and
+  that the completion record does not appear when that happens. Whether that is
+  cause or consequence is the open question above.
 - It **does** re-confirm, on hardware and in one boot, every gate before the
   handoff — including the exact ZZIC module binding and all six page-cache writes
   — on `v2.0.5-zzic`.
+
+### The precondition, stated at the width the evidence supports
+
+An earlier version of this record turned the inference into a rule: "the
+acceptance requires a device with no pre-existing KernelSU or Magisk userspace".
+That is both unsupported and, more importantly, **wrong for what this tool is**.
+DFReroot is a *reroot*: from the second use onward `/data/adb` is populated —
+with modules, an allowlist and a daemon — precisely because the tool put them
+there. A rule demanding an empty `/data/adb` would exclude the tool's own normal
+state.
+
+What the evidence supports is narrower: the **manager app is the source of the
+foreign bytes** in both plausible mechanisms, so an acceptance run should be made
+with no KernelSU manager package installed, and the manager should not be opened
+during the run. That costs uninstalling one app, not the module set.
+`docs/PHYSICAL_TESTING.md` §1 checks for it and says so.
 
 ## Post-root compatibility — DEFEX / Zygisk Next / LSPosed
 

@@ -910,19 +910,26 @@ pinned DFR ksud      14fb9eaf…   6,670,272 bytes, contains POST_ROOT_COMPLETE
 /data/adb/ksud after 99aaa607…   4,892,712 bytes, contains it 0 times
 ```
 
-The device already carried a full KernelSU userspace — manager app, allowlist,
-LSPosed, Zygisk Next, Shamiko, TrickyStore, modules. That installation's daemon
-ended up in control, so the DFR closeout, which is the only thing that publishes
-the same-boot completion record, never ran. No record, no PASS, and the app
-refusing success while root visibly works is the contract behaving correctly.
+The device carried a KernelSU userspace predating the run — manager app,
+allowlist, LSPosed, Zygisk Next, Shamiko, TrickyStore, modules. What is *observed*
+is that foreign bytes ended up installed and no record was published; which daemon
+was executing is an **inference**, since an already-`execve`d process survives its
+file being replaced. The dossier keeps the two apart and names the two tests that
+would settle it, neither of which needs a new build. No record, no PASS, and the
+app refusing success while root visibly works is the contract behaving correctly.
 
 Three ways forward, in order of how much they cost:
 
-1. **Run the acceptance on a device the chain can own** — no pre-existing
-   KernelSU or Magisk userspace. This is now checked first in
-   `docs/PHYSICAL_TESTING.md` §1. Cheapest, and the only one that needs no code.
-2. **Clear the existing installation on the test device** before the run. Costs
-   LSPosed, Zygisk Next, Shamiko, TrickyStore and every module on it.
+1. **Run the acceptance with no root manager app installed** (and none opened
+   during the run). The manager is the source of the foreign bytes in both
+   plausible mechanisms, and this costs uninstalling one app — not the module
+   set. A populated `/data/adb` is not itself a disqualifier: this is a reroot,
+   so that is its own normal state from the second use onward.
+   `docs/PHYSICAL_TESTING.md` §1.
+2. **Identify the running daemon** before changing anything: enable KernelSU's
+   `sulog` (present but switched off on the test device) and hash the manager
+   APK's `libksud.so`. That turns the current inference into evidence, and may
+   point at a different fix than the one assumed.
 3. **Teach the DFR ksud to handle a foreign `/data/adb/ksud`** — refuse it, or
    complete the closeout before any handover. That is a contract change in
    `RMGLabs-Payloads`, not here, and it is the only option that makes the

@@ -41,40 +41,41 @@ Do not run this on a device you depend on that day.
 
 ---
 
-## 1. The device must not already be rooted by something else
+## 1. No root manager app during the acceptance run
 
-**Check this before anything else.** It is the precondition the first
-`v2.0.5-zzic` run discovered the hard way: the chain assumes *it* is what brings
-KernelSU up. Where a KernelSU or Magisk userspace already exists, that one owns
-`/data/adb`, its daemon ends up in control, and the DFR closeout — the only thing
-that writes the completion record — never runs. The result is root that visibly
-works and a Gate-I verdict that can never be produced.
+**Check this before anything else.** In the first `v2.0.5-zzic` run the daemon
+installed at `/data/adb/ksud` afterwards was not the pinned one and contained the
+closeout string zero times, and no completion record was ever published — see the
+third physical run in `docs/S25U_ZZIC_COMPATIBILITY.md` for what that does and
+does not prove.
 
-From a root shell on the candidate device:
+The manager app is the source of those foreign bytes in both plausible
+mechanisms: its `libksud.so install` is what writes `/data/adb/ksud` on a device
+that has it. So for an acceptance run:
 
 ```sh
-su -c 'ls -la /data/adb/'
-su -c 'ls -l /data/adb/ksud /data/adb/magisk 2>/dev/null'
-pm list packages | grep -iE 'kernelsu|magisk|weishu'   # run under su: package
-                                                       # visibility hides these
+su -c 'pm list packages | grep -iE "kernelsu|magisk|weishu"'   # under su:
+                                                # package visibility hides these
+su -c 'ls -l /data/adb/ksud'                    # note its size and mtime BEFORE
+su -c 'sha256sum /data/adb/ksud'                # and its hash
 ```
 
-The device is a valid Gate-I candidate only if **all** of the following hold:
+- **No KernelSU or Magisk manager package installed**, and none opened during the
+  run. That costs uninstalling one app.
+- Record `/data/adb/ksud`'s hash, size and mtime *before* the run, so that a
+  change afterwards is a measurement rather than a guess.
 
-- no `/data/adb/ksud` and no `/data/adb/magisk`;
-- no `/data/adb/ksu/` with an existing allowlist;
-- no root manager package installed;
-- no `/data/adb/modules` with a populated module set.
+A populated `/data/adb` is **not** by itself a disqualifier, and demanding an
+empty one would be wrong: DFReroot is a reroot, so from the second use onward it
+is the tool's own normal state to have modules, an allowlist and a daemon there.
 
-If any of them is present, this device cannot produce a Gate-I result as it
-stands. Either use another device, or remove that installation first — which
-also removes whatever depends on it (LSPosed, Zygisk Next, Shamiko, TrickyStore
-and every module). That is a real cost, and it is a decision to make deliberately
-rather than discover at the 120-second timeout.
+> A run with a manager installed is still informative — every gate before the
+> handoff is exercised for real. It simply may not be able to close Gate I.
+> Record it as what it is.
 
-> A run on such a device is still informative: every gate before the handoff is
-> exercised for real. It simply cannot close Gate I. Record it as what it is —
-> see the third physical run in `docs/S25U_ZZIC_COMPATIBILITY.md`.
+If the closeout is to be tested on a device that must keep its manager, that is a
+contract question for the DFR ksud (refuse a foreign `/data/adb/ksud`, or finish
+the closeout before any handover), not something this protocol can work around.
 
 ## 2. Verify what you are installing
 
@@ -229,7 +230,7 @@ adb shell cat /sys/fs/selinux/enforce        # 1
 adb shell su -c 'id; cat /proc/self/attr/current'
 #   uid=0(root) ... context=u:r:ksu:s0
 adb shell cat /data/system/dfreroot-post-root
-#   state=POST_ROOT_COMPLETE, and boot_id equal to the one from §2
+#   state=POST_ROOT_COMPLETE, and boot_id equal to the one from §3
 adb shell cat /proc/sys/kernel/random/boot_id
 ```
 
@@ -243,7 +244,7 @@ record it in `docs/S25U_ZZIC_COMPATIBILITY.md` with the `boot_id` and the log.
 | refusal before any write (`MISMATCH`, `REFUSE_UNVERIFIED`, `KSUD_*=FAIL`) | the fail-closed design did its job; nothing was written | capture the log and the refusing line; do **not** weaken the gate |
 | `res=3`, no `patch #1`, no page-cache write | the module policy refused | same as above |
 | `exec_fail=1`, or failure after `helper=1` | the helper already made SELinux permissive; stage2's best-effort `setenforce 1` may have run | check `getenforce`. If `Permissive`, restore it by hand with root if you have it, then **hard reboot** |
-| `WAIT_POST_ROOT` timeout | the native side worked, the closeout did not | first check §1: `su -c 'ls -l /data/adb/ksud'` and `su -c 'grep -ac POST_ROOT_COMPLETE /data/adb/ksud'`. A `0` there means another daemon is installed and in control, and no run on this device can close Gate I. Otherwise capture `logcat`, the record if present, and `getenforce`; then hard reboot |
+| `WAIT_POST_ROOT` timeout | the native side worked, the closeout did not | first check §1: `su -c 'grep -ac POST_ROOT_COMPLETE /data/adb/ksud'` and compare the hash/size/mtime with what you recorded before the run. A `0` means the **installed bytes** are not the pinned daemon — which does not by itself name the process that ran, so capture `logcat`, the record if present, `getenforce`, and enable KernelSU's `sulog` before the next attempt if the running daemon has to be identified. Then hard reboot |
 | device rebooted by itself | most likely a kernel oops | after boot, `adb shell dmesg -T \| grep -iE "dirtyfrag\|kernelsu\|oops\|BUG"` and keep the console ramoops if present |
 | boot loop after DFInstaller | `packages.xml` is damaged | restore the backup DFInstaller made, from recovery or a temp-root shell; that is exactly what it exists for |
 
@@ -294,7 +295,7 @@ adb reboot                                          # FULL reboot
 ```
 
 ```sh
-# 2-4. after boot, with logcat running from §2:
+# 2-4. after boot, with logcat running from §3:
 adb shell cat /proc/sys/kernel/random/boot_id      # must be a NEW value
 adb logcat -s DFReroot:* | grep "\[DFR\]\[AUTOROOT\]"
 ```
