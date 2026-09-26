@@ -293,8 +293,23 @@ object DfrRootCoordinator {
             host.phase(Phase.DONE)
         }
 
+        /*
+         * The verdict includes this LAST independent read, not just the one
+         * awaitPostRootComplete() happened to sample.
+         *
+         * Without it, a device that went permissive - or a sysfs read that became
+         * unavailable - between that sample and here would be reported as
+         * SUCCESS while the very same log line carried selinux=0. AGENTS.md is
+         * explicit: never call a post-root state PASS without reading the final
+         * enforcing state back, and evidence in one run must not contradict
+         * itself.
+         */
         val liveSelinux = readLiveSelinux()
-        val success = runResult == 0 && postRootComplete
+        val success = runResult == 0 && postRootComplete && liveSelinux == 1
+        if (runResult == 0 && postRootComplete && liveSelinux != 1) {
+            host.log("[DFR][POST_ROOT] FAIL final /sys/fs/selinux/enforce reads" +
+                " $liveSelinux after completion; refusing to report success\n")
+        }
         return Result(
             success = success,
             nativeResult = runResult,
@@ -302,7 +317,12 @@ object DfrRootCoordinator {
             nativeStarted = nativeStarted,
             liveSelinux = liveSelinux,
             bootId = bootId,
-            reason = if (success) "ROOT_RESULT=SUCCESS" else reason,
+            reason = when {
+                success -> "ROOT_RESULT=SUCCESS"
+                runResult == 0 && postRootComplete ->
+                    "final live SELinux state is $liveSelinux, not 1"
+                else -> reason
+            },
         )
     }
 

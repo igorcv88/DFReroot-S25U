@@ -116,13 +116,23 @@ class DfrAutoRootService : Service() {
                     " one-attempt-per-boot could not be guaranteed")
                 return
             }
+            /*
+             * Give up on THIS invocation without locking the boot.
+             *
+             * Readiness never arriving is not a failed attempt: nothing was
+             * staged, hopped or written. Writing FAILED_LOCKED here used to end
+             * the boot after about a minute, so the LOCKED_BOOT_COMPLETED that
+             * arrives before `sys.boot_completed` consumed the whole budget and
+             * the real BOOT_COMPLETED only ever found a locked journal. The
+             * journal keeps the poll COUNT instead, so a later broadcast resumes
+             * the same bounded budget rather than a fresh one, and the policy
+             * refuses on its own once the count is spent.
+             */
             if (attempts >= AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT ||
                 System.currentTimeMillis() + backoffMs > deadline) {
-                Log.i(TAG, "[DFR][AUTOROOT] FAILED_LOCKED_UNTIL_REBOOT readiness never" +
-                    " reached: ${decision.reason}")
-                AutoRootStore.journalPhase(
-                    context, bootId, AutoRootPolicy.PHASE_FAILED_LOCKED, attempts, false
-                )
+                Log.i(TAG, "[DFR][AUTOROOT] WAIT_BOOT_READY gave up for now after" +
+                    " $attempts/${AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT} polls:" +
+                    " ${decision.reason}")
                 return
             }
             try {
@@ -131,7 +141,9 @@ class DfrAutoRootService : Service() {
                 Thread.currentThread().interrupt()
                 return
             }
-            backoffMs *= 2
+            // Capped, so a long boot keeps being polled instead of the interval
+            // running away past the readiness window.
+            backoffMs = minOf(backoffMs * 2, MAX_BACKOFF_MS)
         }
     }
 
@@ -273,6 +285,9 @@ class DfrAutoRootService : Service() {
         const val READINESS_BUDGET_MS = 10 * 60 * 1000L
 
         const val FIRST_BACKOFF_MS = 20_000L
+
+        /** Polling interval ceiling, so the budget is spent on polls, not sleep. */
+        const val MAX_BACKOFF_MS = 60_000L
 
         /** Readiness budget plus the controller and post-root deadlines, doubled. */
         const val WAKELOCK_BUDGET_MS = 15 * 60 * 1000L

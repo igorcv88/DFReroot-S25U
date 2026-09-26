@@ -45,12 +45,36 @@ object AutoRootStore {
         return ctx.filesDir
     }
 
-    private fun read(context: Context, name: String): String? = try {
-        val f = File(dir(context), name)
-        if (f.exists()) f.readText() else null
-    } catch (t: Throwable) {
-        Log.e(TAG, "[DFR][AUTOROOT] cannot read $name", t)
-        null
+    /**
+     * null only when the record is genuinely ABSENT.
+     *
+     * A record that exists and cannot be read comes back as
+     * AutoRootPolicy.RECORD_UNREADABLE instead. Returning null for both would
+     * make an I/O error on a journal indistinguishable from "this boot has done
+     * nothing" - and that journal may say STARTED, i.e. the chain already wrote
+     * to the page cache in this boot. An error must never read as a blank slate.
+     */
+    private fun read(context: Context, name: String): String? {
+        val f = try {
+            File(dir(context), name)
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][AUTOROOT] cannot resolve $name", t)
+            return AutoRootPolicy.RECORD_UNREADABLE
+        }
+        val exists = try {
+            f.exists()
+        } catch (t: Throwable) {
+            // Cannot even tell whether it is there: that is not absence.
+            Log.e(TAG, "[DFR][AUTOROOT] cannot stat $name", t)
+            return AutoRootPolicy.RECORD_UNREADABLE
+        }
+        if (!exists) return null
+        return try {
+            f.readText()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][AUTOROOT] $name exists but cannot be read", t)
+            AutoRootPolicy.RECORD_UNREADABLE
+        }
     }
 
     /**

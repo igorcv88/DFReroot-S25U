@@ -47,7 +47,7 @@ check("waiting for same-boot POST_ROOT_COMPLETE" in exp,
 
 # The verdict lives in the shared coordinator now that the boot service is a
 # second caller; both callers only paint or journal what it returns.
-check("val success = runResult == 0 && postRootComplete" in coord,
+check("val success = runResult == 0 && postRootComplete && liveSelinux == 1" in coord,
       "success requires native bootstrap plus post-root completion")
 check("PostRootStatus.evaluate(record, bootId, liveSelinux)" in coord,
       "the coordinator validates the same-boot record and live SELinux state")

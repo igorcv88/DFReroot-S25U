@@ -508,7 +508,7 @@ def audit():
     # second caller of it. Kotlin cannot be unit-tested here (AGENTS.md 5), so the
     # guard follows the decision rather than staying pointed at the old file.
     for signal in (
-            "val success = runResult == 0 && postRootComplete",
+            "val success = runResult == 0 && postRootComplete && liveSelinux == 1",
             "PostRootStatus.evaluate(record, bootId, liveSelinux)",
             "ROOT_RESULT=SUCCESS"):
         if signal not in coord_src:

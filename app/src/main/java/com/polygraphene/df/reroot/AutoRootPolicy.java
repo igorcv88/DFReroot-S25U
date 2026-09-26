@@ -47,13 +47,33 @@ public final class AutoRootPolicy {
     public static final String PHASE_FAILED_LOCKED = "FAILED_LOCKED";
 
     /**
-     * How many pre-STARTED attempts one boot may make.
+     * How many pre-STARTED readiness polls one boot may make, in total, across
+     * however many times the service is started in that boot.
      *
      * Bounded on purpose, and bounded HERE rather than by an alarm or a job:
      * "never schedule an infinite retry loop" is a property of this number plus
      * the service's single thread, not of a scheduler's good behaviour.
+     *
+     * It has to be large enough for a real boot. LOCKED_BOOT_COMPLETED arrives
+     * well before `sys.boot_completed` is 1, so the first polls always fail;
+     * with a cap of 3 the readiness window closed after about a minute and any
+     * slower boot was skipped entirely. The time budget in DfrAutoRootService is
+     * meant to be what binds, and this number is only the backstop that keeps
+     * the loop finite.
      */
-    public static final int MAX_ATTEMPTS_PER_BOOT = 3;
+    public static final int MAX_ATTEMPTS_PER_BOOT = 12;
+
+    /**
+     * What the store passes when a record EXISTS but could not be read.
+     *
+     * Distinguishing this from "no record" is load-bearing for the journal: a
+     * missing journal means this boot has done nothing, while an unreadable one
+     * may be hiding a STARTED from an attempt that already wrote to the page
+     * cache. Collapsing the two would turn an I/O error into permission to run
+     * again. It never parses, so every reader refuses it; the constant exists so
+     * the refusal names the real cause.
+     */
+    public static final String RECORD_UNREADABLE = "dfr_record_unreadable";
 
     /** Tri-state for the NetworkStack readiness probe. */
     public static final int PROCESS_PRESENT = 1;
@@ -175,6 +195,7 @@ public final class AutoRootPolicy {
      * never CREATE a qualification - only a verified manual run does that.
      */
     public static String withOptIn(String qualificationRecord, boolean optIn) {
+        if (RECORD_UNREADABLE.equals(qualificationRecord)) return null;
         Map<String, String> q = parse(qualificationRecord, QUALIFICATION_KEYS);
         if (q == null) return null;
         long recordedAt;
@@ -254,6 +275,9 @@ public final class AutoRootPolicy {
         if (in == null) return refuse("no inputs");
         if (blank(in.currentBootId)) return refuse("current boot_id is unavailable");
 
+        if (RECORD_UNREADABLE.equals(in.qualificationRecord)) {
+            return refuse("the Auto Root qualification exists but could not be read");
+        }
         Map<String, String> q = parse(in.qualificationRecord, QUALIFICATION_KEYS);
         if (q == null) {
             return refuse("no readable Auto Root qualification: a manual run must first"
@@ -283,6 +307,14 @@ public final class AutoRootPolicy {
                     + " required before an automatic attempt");
         }
 
+        if (RECORD_UNREADABLE.equals(in.journalRecord)) {
+            /*
+             * An existing journal we cannot read is the worst case, not a blank
+             * slate: it may say STARTED. Refuse the boot; a reboot clears it.
+             */
+            return refuse("the Auto Root journal exists but could not be read;"
+                    + " refusing this boot");
+        }
         if (in.journalRecord != null && !blank(in.journalRecord)) {
             Map<String, String> j = parse(in.journalRecord, JOURNAL_KEYS);
             if (j == null) {
@@ -296,6 +328,24 @@ public final class AutoRootPolicy {
             }
             if (in.currentBootId.equals(j.get("boot_id"))) {
                 String phase = j.get("phase");
+                /*
+                 * Exact enum validation, before any of the branches below. A
+                 * journal that parses but carries a phase or a flag this build
+                 * does not know - a corrupted record, or one written by a newer
+                 * version - is uncertain evidence about a boot that may already
+                 * have run the chain. Falling through it to `allow` is the one
+                 * outcome that must not be reachable.
+                 */
+                String nativeStarted = j.get("native_started");
+                if (!"0".equals(nativeStarted) && !"1".equals(nativeStarted)) {
+                    return refuse("Auto Root journal native_started is " + nativeStarted
+                            + ", not 0 or 1");
+                }
+                if (!PHASE_PREFLIGHT.equals(phase) && !PHASE_STARTED.equals(phase)
+                        && !PHASE_COMPLETE.equals(phase)
+                        && !PHASE_FAILED_LOCKED.equals(phase)) {
+                    return refuse("Auto Root journal phase is not a known state: " + phase);
+                }
                 if (PHASE_COMPLETE.equals(phase)) {
                     return refuse("Auto Root already completed in this boot");
                 }

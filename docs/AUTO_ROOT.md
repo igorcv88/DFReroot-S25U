@@ -115,12 +115,24 @@ that might not hold is not one. After that point every failure — including a
 crash, an oops or a reboot loop — leaves the boot locked. Recovery is a hard
 reboot, the same boundary the manual path has.
 
-Before `STARTED`, readiness failures may be retried: at most
-`AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT` times, counted **in the journal** so a
-process restart cannot buy a fresh budget, with doubling backoff inside one
-bounded readiness window. There is no alarm and no job: the retry budget is one
+Before `STARTED`, readiness failures may be retried. The bound is a time window
+(`READINESS_BUDGET_MS`, ten minutes per service invocation) plus a total poll
+count kept **in the journal**, so a process restart cannot buy a fresh count;
+backoff doubles from 20 s and is capped at 60 s, so the budget is spent on polls
+rather than on sleeping. There is no alarm and no job: the retry budget is one
 thread and one number, and the binding audit fails if `AlarmManager` or
 `JobScheduler` appears anywhere on this path.
+
+Two details that a smaller cap got wrong, and that must not be reintroduced:
+
+- the poll cap has to leave room for a real boot. `LOCKED_BOOT_COMPLETED` arrives
+  well before `sys.boot_completed` is 1, so the first polls always fail; a cap of
+  three closed the window after about a minute and any slower boot was skipped.
+- **readiness never arriving does not lock the boot.** Nothing was staged, hopped
+  or written, so it is not a failed attempt. The journal keeps the poll count and
+  the invocation simply stops; the later `BOOT_COMPLETED` resumes the same bounded
+  budget instead of finding a journal that locked itself out. `FAILED_LOCKED` is
+  reserved for an attempt that actually reached the coordinator.
 
 ## Preflight
 
@@ -134,7 +146,7 @@ Every element refuses on its own, and each has a negative test in
 | qualification matches this versionCode, versionName, ksud digest and firmware | refuse |
 | current `boot_id` non-empty and different from the qualifying boot | refuse |
 | journal for this boot absent, or below the attempt cap and not `STARTED`/`COMPLETE`/`FAILED_LOCKED` | refuse |
-| unreadable journal | refuse **this boot** — it may be a torn write from a run that died after the writes |
+| journal readable and parsable | refuse **this boot** when it is not — a torn write, an unknown phase, a `native_started` that is neither 0 nor 1, or an I/O error on a file that exists. It may be hiding a `STARTED`, so an error must never read as "no journal" |
 | `/dev/df` and `dfm1..dfm4` absent | refuse |
 | live `/sys/fs/selinux/enforce == 1` (unreadable reads `-1`) | refuse |
 | `sys.boot_completed == 1` | wait and retry |
@@ -154,9 +166,17 @@ become an unbounded one.
 
 Exactly the manual one, from the shared coordinator: live KernelSU proof,
 automatic restoration to Enforcing with read-back, a second live proof, a
-same-boot `POST_ROOT_COMPLETE`, and only then success. The final decision is one
-expression in one place — `runResult == 0 && postRootComplete` in
-`DfrRootCoordinator` — and both callers merely report it.
+same-boot `POST_ROOT_COMPLETE`, and a **final** independent
+`/sys/fs/selinux/enforce == 1` read taken after all of it. The decision is one
+expression in one place — `runResult == 0 && postRootComplete && liveSelinux == 1`
+in `DfrRootCoordinator` — and both callers merely report it.
+
+That last read is in the verdict rather than beside it on purpose. The sample
+`awaitPostRootComplete()` accepted proves the state at that instant; if the device
+went permissive, or the sysfs read became unavailable, between then and the end of
+the run, a verdict built only from the sample would report `SUCCESS` on a log line
+that itself carried `selinux=0`. Evidence from one run must not contradict
+itself.
 
 ## The shared coordinator
 
@@ -184,7 +204,7 @@ broadcast to this package, and nothing treats the binder as authority — a forg
 Offline, no device and no SDK (in addition to the AGENTS.md §5 set):
 
 ```sh
-sh tools/tests/run_installer_tests.sh   # AutoRootPolicyTest, 41 cases
+sh tools/tests/run_installer_tests.sh   # AutoRootPolicyTest, 50 cases
 python3 tools/tests/test_post_root_contract.py
 python3 tools/profile_binding_audit.py
 ```

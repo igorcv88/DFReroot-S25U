@@ -998,7 +998,7 @@ Enforcing state is observed on ZZIC.
 
 The unattended boot path is implemented and **disabled**: `DfrBootReceiver` (boot
 broadcasts only), a non-exported `DfrAutoRootService`, the pure `AutoRootPolicy`
-(41 host cases) and `DfrRootCoordinator`, which is now the single execution path
+(50 host cases) and `DfrRootCoordinator`, which is now the single execution path
 for both the button and the boot service.
 
 This promotes nothing. What it adds to the evidence record is negative:

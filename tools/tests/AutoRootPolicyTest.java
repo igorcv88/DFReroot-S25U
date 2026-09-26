@@ -177,7 +177,38 @@ public class AutoRootPolicyTest {
 
         in = ready();
         in.journalRecord = "phase=STARTED\n";
-        refused(in, "an unreadable journal refuses the boot rather than being ignored");
+        refused(in, "a malformed journal refuses the boot rather than being ignored");
+
+        // An I/O error on an existing journal must not read as "no journal": the
+        // record it could not read may say STARTED, i.e. the chain already wrote.
+        in = ready();
+        in.journalRecord = AutoRootPolicy.RECORD_UNREADABLE;
+        refused(in, "an unreadable journal refuses the boot, never counts as absent");
+
+        in = ready();
+        in.qualificationRecord = AutoRootPolicy.RECORD_UNREADABLE;
+        refused(in, "an unreadable qualification refuses and says why");
+
+        // A journal that parses but carries a state this build does not know is
+        // uncertain evidence about a boot that may already have run the chain.
+        in = ready();
+        in.journalRecord = AutoRootPolicy.formatJournal(BOOT, "UNKNOWN", 0, false);
+        refused(in, "an unknown journal phase refuses instead of falling through");
+
+        in = ready();
+        in.journalRecord = AutoRootPolicy.formatJournal(BOOT, "", 0, false);
+        refused(in, "an empty journal phase refuses");
+
+        in = ready();
+        in.journalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_PREFLIGHT, 0, false)
+                .replace("native_started=0", "native_started=2");
+        refused(in, "a native_started value other than 0 or 1 refuses");
+
+        in = ready();
+        in.journalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_PREFLIGHT, 0, false);
+        allowed(in, "a known PREFLIGHT phase with no attempt spent still runs");
 
         in = ready();
         in.journalRecord = AutoRootPolicy.formatJournal(BOOT, "PREFLIGHT", 0, false)
@@ -232,6 +263,12 @@ public class AutoRootPolicyTest {
         // --- opt-in toggling cannot invent a qualification -----------------
         check(AutoRootPolicy.withOptIn(null, true) == null,
                 "opting in with no qualification record yields nothing");
+        check(AutoRootPolicy.withOptIn(AutoRootPolicy.RECORD_UNREADABLE, true) == null,
+                "opting in on an unreadable record yields nothing");
+        check(!AutoRootPolicy.isOptedIn(AutoRootPolicy.RECORD_UNREADABLE, CODE, NAME, KSUD, FP)
+                        && !AutoRootPolicy.isQualified(AutoRootPolicy.RECORD_UNREADABLE,
+                                CODE, NAME, KSUD, FP),
+                "an unreadable record is neither qualified nor opted in");
         check(AutoRootPolicy.withOptIn("state=QUALIFIED\n", true) == null,
                 "opting in on a malformed record yields nothing");
         String flipped = AutoRootPolicy.withOptIn(qualified(false), true);
@@ -243,6 +280,10 @@ public class AutoRootPolicyTest {
                 "opting back out keeps the qualification and clears only the flag");
         check(!AutoRootPolicy.isOptedIn(qualified(true), CODE + 1, NAME, KSUD, FP),
                 "isOptedIn is false for another build");
+
+        check(AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT >= 8,
+                "the readiness poll cap leaves room for a slow boot instead of"
+                        + " closing the window in the first minute");
 
         System.out.println("");
         System.out.println("AutoRootPolicyTest: " + pass + "/" + (pass + fail) + " passed");
