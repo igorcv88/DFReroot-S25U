@@ -898,6 +898,40 @@ A dispatch that fails the tag/version check costs seconds and no build, so a
 refusal there is cheap. A dispatch of the wrong tag that *succeeds* is what costs
 a release, which is why the check exists.
 
+## Current blocker — Gate I needs a device the chain can own
+
+The first `v2.0.5-zzic` hardware run (boot `28beeff3-…`) passed every gate up to
+the handoff and produced working KernelSU root with SELinux back at `Enforcing`,
+and still could not close Gate I. The evidence is recorded in
+`docs/S25U_ZZIC_COMPATIBILITY.md`; the short version:
+
+```text
+pinned DFR ksud      14fb9eaf…   6,670,272 bytes, contains POST_ROOT_COMPLETE
+/data/adb/ksud after 99aaa607…   4,892,712 bytes, contains it 0 times
+```
+
+The device already carried a full KernelSU userspace — manager app, allowlist,
+LSPosed, Zygisk Next, Shamiko, TrickyStore, modules. That installation's daemon
+ended up in control, so the DFR closeout, which is the only thing that publishes
+the same-boot completion record, never ran. No record, no PASS, and the app
+refusing success while root visibly works is the contract behaving correctly.
+
+Three ways forward, in order of how much they cost:
+
+1. **Run the acceptance on a device the chain can own** — no pre-existing
+   KernelSU or Magisk userspace. This is now checked first in
+   `docs/PHYSICAL_TESTING.md` §1. Cheapest, and the only one that needs no code.
+2. **Clear the existing installation on the test device** before the run. Costs
+   LSPosed, Zygisk Next, Shamiko, TrickyStore and every module on it.
+3. **Teach the DFR ksud to handle a foreign `/data/adb/ksud`** — refuse it, or
+   complete the closeout before any handover. That is a contract change in
+   `RMGLabs-Payloads`, not here, and it is the only option that makes the
+   automatic closeout meaningful on an already-rooted device.
+
+Nothing in this repository is known to be wrong from that run. What it did prove,
+on hardware and in one boot, is every gate before the handoff on `v2.0.5-zzic`,
+including the exact ZZIC module binding and all six page-cache writes.
+
 ## Perspectives — what could come next
 
 Ordered by what unblocks what, not by appeal. Nothing here is committed work.
@@ -910,6 +944,16 @@ Ordered by what unblocks what, not by appeal. Nothing here is committed work.
    A failure there is a post-root compatibility regression, never a root failure.
 
 **Cheap and useful, no hardware:**
+
+3b. **A diagnostic dump when the post-root wait times out.** The run above spent
+    two minutes reporting only "completion record absent", and the operator then
+    spent an hour in Termux establishing what the app could have said in its first
+    screen: the staged `/data/system/dfreroot-ksud` had been consumed, `/dev/df`
+    was present, and the final SELinux read. The app cannot inspect `/data/adb`
+    (`0700 root`, the system uid cannot even traverse it), but everything under
+    `/data/system` is its own territory. Diagnostic only — it must not become
+    authority for anything.
+
 
 4. **Compile the Kotlin before the next dispatch.** The single real gap in the
    offline gate set is that no Kotlin in this tree has been through a compiler;

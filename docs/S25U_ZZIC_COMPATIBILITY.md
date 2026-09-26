@@ -1031,6 +1031,78 @@ This promotes nothing. What it adds to the evidence record is negative:
 `docs/AUTO_ROOT.md` is executed on ZZIC, which must happen **after** Gate I passes
 manually.
 
+### Third physical run — `v2.0.5-zzic`, displaced by a pre-existing KernelSU
+
+The first hardware run of the automatic closeout. It did **not** promote Gate I,
+and the reason is not a defect in this repository.
+
+```text
+boot_id=28beeff3-ffe6-4862-9bd1-128ad8183900
+```
+
+Everything up to the handoff passed, in one boot:
+
+```text
+TARGET_PROFILE=S25U_ZZIC            PASS exact identity
+ZZIC_KERNEL_*                       PASS (identity, version, aarch64, 4096)
+KSUD_IDENTITY=PASS                  KSUD_STAGED_VERIFY=PASS (6,670,272 bytes)
+PROCESS_LOOKUP=PASS                 REMOTE_COMPONENT_REACHED=PASS
+NETWORK_STACK_CAP_EFF=PASS          LIBEXP_LOADED=PASS
+ZZIC_CRASHDUMP_IDENTITY PASS        ZZIC_VENDOR_PROVENANCE=PASS_AVB
+ZZIC_MODULE_POLICY=ALLOW            ZZIC_MODULE_BINDING=PASS
+patch #1..#6                        all six page-cache writes completed
+[DFR][MARKER] df=1 helper=1 ns=1 bind=1 exec_fail=0
+[DFR][BOOTSTRAP] PASS helper=-E2BIG namespace=private bind=complete
+runAll done res=0
+```
+
+Then the post-root wait ran its full 120 s and refused:
+
+```text
+[DFR][POST_ROOT] pending: completion record absent or empty
+```
+
+State observed afterwards, in the same boot:
+
+| Observation | Value |
+|---|---|
+| `getenforce` | `Enforcing` |
+| `su` | `uid=0(root) … context=u:r:ksu:s0` |
+| `/data/system/dfreroot-post-root` | **absent — never written** |
+| `/data/system/dfreroot-ksud` (staged) | absent; consumed after staging |
+| `/data/adb/ksud` | `99aaa607…`, **4,892,712** bytes, mtime inside the run |
+| `grep -c POST_ROOT_COMPLETE /data/adb/ksud` | **0** |
+
+The pinned DFR daemon is `14fb9eaf…` at 6,670,272 bytes and **contains** that
+string — `tools/profile_binding_audit.py` fails the build if the bundled asset
+does not. The daemon left in control therefore is not it.
+
+**Cause.** The device already carried a complete KernelSU userspace before the
+run: the manager app `me.weishu.kernelsu`, `/data/adb/ksu/` with an allowlist
+dated months earlier, and modules (LSPosed, Zygisk Next, Shamiko, TrickyStore,
+Specter, bindhosts, meta-overlayfs). That installation's own
+`libksud.so install` is what writes `/data/adb/ksud` on this device — its earlier
+invocation is recorded in the device's `sulog`. The chain brought KernelSU up and
+root works, but the daemon that ended up installed and in control is the manager's,
+not the pinned one, so the closeout that publishes the completion record never ran.
+
+**What this does and does not establish.**
+
+- It does **not** promote Gate I: no same-boot `POST_ROOT_COMPLETE`, so no PASS.
+  The UI refusing success with root visibly working is the contract behaving
+  exactly as designed — "it worked" and "I verified it worked" are different
+  claims, and only the second one is a gate.
+- It does **not** count as a Gate-I FAIL either: the automatic closeout was never
+  reached, so nothing about it was tested.
+- It **does** establish a precondition that was implicit and is now explicit: the
+  Gate-I acceptance requires a device with **no pre-existing KernelSU (or Magisk)
+  userspace**. The chain assumes it is the one bringing KernelSU up; where another
+  installation already owns `/data/adb`, that one wins and the record can never
+  appear. `docs/PHYSICAL_TESTING.md` §1 now checks this before anything else.
+- It **does** re-confirm, on hardware and in one boot, every gate before the
+  handoff — including the exact ZZIC module binding and all six page-cache writes
+  — on `v2.0.5-zzic`.
+
 ## Post-root compatibility — DEFEX / Zygisk Next / LSPosed
 
 This is a separate compatibility axis from Gate I's root-safe-completion state.
