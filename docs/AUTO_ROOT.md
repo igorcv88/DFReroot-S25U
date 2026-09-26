@@ -95,8 +95,8 @@ takes a `PARTIAL_WAKE_LOCK` with a bounded budget and releases it in a `finally`
 
 | State | Lives in | Says |
 |---|---|---|
-| qualification | `autoroot-qualification`, device-protected storage | a manual run once ended in verified same-boot completion on this exact build and firmware, and whether the owner opted in |
-| journal | `autoroot-journal`, device-protected storage | what an automatic attempt already did **in the boot it names** |
+| qualification | `/data/system/dfreroot-autoroot-qualification` | a manual run once ended in verified same-boot completion on this exact build and firmware, and whether the owner opted in |
+| journal | `/data/system/dfreroot-autoroot-journal` | what an automatic attempt already did **in the boot it names** |
 | completion record | `/data/system/dfreroot-post-root` (written by ksud) | same-boot post-root telemetry |
 
 None of them is authority to root anything. They can only ever *remove*
@@ -104,10 +104,38 @@ permission — the native chain re-runs identity, module policy and the post-roo
 contract on its own evidence regardless. That asymmetry is deliberate: forging
 these files buys an attacker nothing but a refusal.
 
-Device-protected storage (`system:system`, not world-writable) is used because
-the service runs before the user unlocks. AGENTS.md §3.6 forbids naming a
-world-writable path anywhere in shipped code, and the binding audit enforces it
-by mechanism.
+### Why /data/system and not the app's own files dir
+
+The first implementation used `createDeviceProtectedStorageContext().filesDir` —
+the textbook answer for state a boot-time component must read before the user
+unlocks. **On this app it does not work, and it fails silently.** After a manual
+run that ended in a verified `POST_ROOT_COMPLETE` and should have written a
+qualification, the checkbox stayed disabled; on the device both
+`/data/data/<pkg>/` and `/data/user_de/0/<pkg>/` contained only `cache` and
+`code_cache` — no `files/` at all, which a successful `getFilesDir()` would have
+created — and nothing was in logcat. This app is hosted in the `system` process
+with `sharedUserId="android.uid.system"`, so its private data directory is not
+usable the way an ordinary app's is.
+
+`/data/system` is used instead because it is the one place this process is
+*proven* to write: `KsudStage` stages the daemon at
+`/data/system/dfreroot-ksud` at the start of every run and reads it back, which
+is what `KSUD_STAGED_VERIFY=PASS` in every run log means. It is also available
+before the user unlocks (which is all device-protected storage was wanted for),
+it is not world-writable, so AGENTS.md §3.6 is satisfied, and it already holds
+the post-root record this app reads.
+
+The binding audit fails if `filesDir` or `createDeviceProtectedStorageContext`
+reappear in the store, because the textbook answer will look correct to the next
+reader.
+
+### Failures are reported, not only logged
+
+The store returns the reason a write failed, and the caller prints it. The
+silent version cost an operator several hours: a qualification that never
+appeared, a checkbox that stayed disabled, and nothing on screen to say which of
+the two had gone wrong. A fail-closed component that cannot say *why* it refused
+is only half built.
 
 ## Qualification
 

@@ -38,7 +38,7 @@ class DfrBootReceiver : BroadcastReceiver() {
          * journal - not the number of broadcasts - is what keeps a single attempt
          * single.
          */
-        if (!AutoRootStore.isOptedIn(context)) {
+        if (!AutoRootStore.isOptedIn()) {
             Log.i(TAG, "[DFR][AUTOROOT] not opted in for this build; nothing to do")
             return
         }

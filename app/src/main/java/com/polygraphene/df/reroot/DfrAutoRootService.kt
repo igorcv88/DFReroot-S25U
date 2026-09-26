@@ -115,7 +115,7 @@ class DfrAutoRootService : Service() {
         var backoffMs = FIRST_BACKOFF_MS
 
         while (true) {
-            val decision = AutoRootPolicy.evaluate(inputs(context, bootId))
+            val decision = AutoRootPolicy.evaluate(inputs(bootId))
             if (decision.allow) {
                 Log.i(TAG, "[DFR][AUTOROOT] ${decision.reason}")
                 attempt(context, bootId)
@@ -131,11 +131,11 @@ class DfrAutoRootService : Service() {
              * budget. The count is what makes the policy refuse permanently once
              * MAX_ATTEMPTS_PER_BOOT is reached.
              */
-            val attempts = attemptsSoFar(context, bootId) + 1
+            val attempts = attemptsSoFar(bootId) + 1
             Log.i(TAG, "[DFR][AUTOROOT] WAIT_BOOT_READY ${decision.reason}" +
                 " (attempt $attempts/${AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT})")
             if (!AutoRootStore.journalPhase(
-                    context, bootId, AutoRootPolicy.PHASE_PREFLIGHT, attempts, false)) {
+                    bootId, AutoRootPolicy.PHASE_PREFLIGHT, attempts, false)) {
                 Log.e(TAG, "[DFR][AUTOROOT] REFUSED cannot record the attempt count;" +
                     " one-attempt-per-boot could not be guaranteed")
                 return
@@ -173,7 +173,7 @@ class DfrAutoRootService : Service() {
 
     /** The one automatic attempt this boot may have. */
     private fun attempt(context: Context, bootId: String) {
-        val attemptNo = attemptsSoFar(context, bootId) + 1
+        val attemptNo = attemptsSoFar(bootId) + 1
         val host = object : DfrRootCoordinator.Host {
             override fun log(line: String) {
                 // logcat is the evidence channel for an unattended run; every
@@ -195,7 +195,7 @@ class DfrAutoRootService : Service() {
                  * with nothing written.
                  */
                 val ok = AutoRootStore.journalPhase(
-                    context, bootId, AutoRootPolicy.PHASE_STARTED, attemptNo, true
+                    bootId, AutoRootPolicy.PHASE_STARTED, attemptNo, true
                 )
                 if (!ok) {
                     Log.e(TAG, "[DFR][AUTOROOT] REFUSED cannot record STARTED;" +
@@ -217,7 +217,7 @@ class DfrAutoRootService : Service() {
          * unattended loop starts. The operator can still run it by hand.
          */
         AutoRootStore.journalPhase(
-            context, bootId, phase, attemptNo, result.nativeStarted
+            bootId, phase, attemptNo, result.nativeStarted
         )
         if (result.success) {
             Log.i(TAG, "[DFR][AUTOROOT] AUTO_ROOT_RESULT=SUCCESS boot_id=$bootId" +
@@ -229,8 +229,8 @@ class DfrAutoRootService : Service() {
         }
     }
 
-    private fun attemptsSoFar(context: Context, bootId: String): Int {
-        val record = AutoRootStore.journal(context) ?: return 0
+    private fun attemptsSoFar(bootId: String): Int {
+        val record = AutoRootStore.journal() ?: return 0
         var seenBoot = false
         var attempts = 0
         for (raw in record.split("\n")) {
@@ -245,10 +245,10 @@ class DfrAutoRootService : Service() {
         return if (seenBoot) attempts else 0
     }
 
-    private fun inputs(context: Context, bootId: String): AutoRootPolicy.Inputs {
+    private fun inputs(bootId: String): AutoRootPolicy.Inputs {
         val q = AutoRootPolicy.Inputs()
-        q.qualificationRecord = AutoRootStore.qualification(context)
-        q.journalRecord = AutoRootStore.journal(context)
+        q.qualificationRecord = AutoRootStore.qualification()
+        q.journalRecord = AutoRootStore.journal()
         q.currentBootId = bootId
         q.deviceFingerprint = AutoRootStore.deviceFingerprint()
         q.ksudSha256 = KsudStage.pinnedKsudSha256()
