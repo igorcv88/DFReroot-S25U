@@ -1106,15 +1106,34 @@ fit every observation above equally well:
 3. it died after `execve` (which leaves no `dfm4`, since that marker is created
    only when `execve` itself fails).
 
-**What would settle it**, and neither needs a new build:
+**Established since**: the installed bytes are byte-identical to the manager
+APK's own daemon.
 
-- `sha256sum` of the manager APK's `lib/arm64/libksud.so`. If it equals the
-  installed `99aaa607…`, the installed bytes are bound to that APK as their
-  source — which narrows the question but still does not name the running
-  process;
-- KernelSU's own `sulog` (present on this device but switched off — the July log
-  ends with `feature set sulog 0`). With it enabled, every root `execve` is
-  recorded, which binds the active daemon to its binary directly.
+```text
+/data/adb/ksud                                     99aaa607…
+…/me.weishu.kernelsu-…/lib/arm64/libksud.so        99aaa607…
+```
+
+That is identity, not resemblance, and it fixes the *source* of the bytes: they
+were copied from the installed manager APK during the run (the file's mtime falls
+inside it, and `/data/adb/ksu/bin` and `lib` were rewritten in the same minute,
+which is what a KernelSU `install` does).
+
+It still does not name the process that performed the copy, and the two remaining
+candidates lead to different fixes:
+
+| Who copied | What it would mean |
+|---|---|
+| the DFR daemon itself, via the upstream `install` path | a defect in the DFR ksud build: its install path replaces its own binary with the manager's before the closeout can run. The fix is in `RMGLabs-Payloads`, and it would bite on any device with a manager installed |
+| the manager app, running its own `install` at that moment | a competing writer, not a defect. Uninstalling the manager for the acceptance run is then sufficient |
+
+**What separates them**, still with no new build: when the manager's process
+started. Its window is in logcat (`am_proc_start` / `Start proc` for
+`me.weishu.kernelsu`). A process that started *after* the file was written cannot
+have written it, which would leave the DFR daemon's own install path as the only
+candidate. KernelSU's `sulog` — present on this device but switched off, its July
+log ending in `feature set sulog 0` — records every root `execve` and would bind
+the active daemon to its binary directly on the next attempt.
 
 ### What this run does and does not establish
 
