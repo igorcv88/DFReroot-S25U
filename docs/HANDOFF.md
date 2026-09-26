@@ -755,6 +755,30 @@ while SELinux remains Enforcing.
 Record that outcome separately as `POST_ROOT_LSPOSED_COMPAT=PASS|FAIL`; it does
 not redefine the root-success gate.
 
+## Auto Root after full boot — implemented, disabled, unaccepted
+
+The unattended boot path now exists in source and ships **off**:
+`DfrBootReceiver` -> non-exported `DfrAutoRootService` -> pure `AutoRootPolicy`
+-> `DfrRootCoordinator`, which is the single execution path the button uses too.
+
+`docs/AUTO_ROOT.md` is the authoritative record: the ownership decision, why there
+is no foreground service on this app, the three separated states, qualification,
+the full-boot/one-attempt rules, every preflight refusal, and the physical
+acceptance sequence that is still owed.
+
+Two sequencing rules that this handoff's own plan implies and that must not be
+lost:
+
+- Auto Root is **not** what `v2.0.5-zzic` is for. Gate I is accepted manually
+  first. The feature is inert until a verified manual PASS on the installed build
+  plus an explicit opt-in, so shipping it does not change what the next release
+  is proving - but the release notes must keep saying it is disabled and
+  unaccepted, and `tools/release_notes.py` generates that from the shipped
+  manifest rather than from prose.
+- `AUTO_ROOT_FULL_BOOT` is tracked separately from Gate I and from
+  `POST_ROOT_LSPOSED_COMPAT`. A failure of the automatic path is not a failure to
+  obtain root.
+
 ## Release discipline
 
 Do not spend signing secrets on intermediate iterations. Build the new

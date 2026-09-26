@@ -44,6 +44,16 @@ def main():
         print("cannot build release notes from the profile: %s" % e, file=sys.stderr)
         return 1
     c = audit.get("c_profile", {})
+    # Whether Auto Root is even present in the APK is read out of the shipped
+    # manifest rather than asserted in prose: the notes must never describe a
+    # feature this build does not contain, nor omit one it does.
+    try:
+        with open(os.path.join(ROOT, "app", "src", "main",
+                               "AndroidManifest.xml")) as f:
+            manifest = f.read()
+    except OSError:
+        manifest = ""
+    auto_root_present = "DfrAutoRootService" in manifest
     ko_ok = c.get("ko_zzic_verified") == 1
     binding_ok = audit.get("status") == "PASS"
 
@@ -97,6 +107,10 @@ def main():
     add("| I — automatic safe end state | **PENDING PHYSICAL ACCEPTANCE** | this build "
         "requires live KernelSU proof, automatic Enforcing restore/read-back, a second "
         "live proof and same-boot `POST_ROOT_COMPLETE` before UI success |")
+    if auto_root_present:
+        add("| AUTO_ROOT_FULL_BOOT | **NOT ACCEPTED — ships disabled** | the boot path "
+            "exists and is off: it needs a verified manual completion on this exact "
+            "build plus an explicit opt-in, and has not been accepted on hardware |")
     add("")
     if not ko_ok:
         add("On the exact ZZIC target this build **will still refuse to root the device**,")
@@ -119,6 +133,15 @@ def main():
         add("KernelSU control channel works again and the same boot is recorded. Capture")
         add("the complete log from one boot, do not retry after `/dev/df` appears, and use")
         add("a hard reboot as the recovery path after any post-helper failure.")
+    if auto_root_present:
+        add("")
+        add("**Auto Root after full boot** is present in this build and **disabled**. It")
+        add("cannot be enabled until a manual run on this exact versionCode, ksud digest")
+        add("and firmware has ended in a verified same-boot `POST_ROOT_COMPLETE`, and the")
+        add("owner then opts in. Once enabled it makes **one** attempt per full boot,")
+        add("identified by a new `boot_id`, so a framework restart triggers nothing, and")
+        add("any failure after the native run locks that boot until a hard reboot. It runs")
+        add("the same gates as the button; it has no separate path and no override.")
     add("")
     if not binding_ok:
         # Should be unreachable: release.yml runs the audit as a gate first.
