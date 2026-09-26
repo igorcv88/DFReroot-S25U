@@ -956,7 +956,7 @@ inferred from a nearby firmware.
 | G3 — `selinux_state` layout | **physical PASS** | exact BTF predicted offset 0 and the hardware write produced the expected global enforcing state change |
 | G4 — Write safety | **physical PASS** | system remained operational after `enforcing=0`, KernelSU late-load completed and root worked |
 | H — Installer / packages.xml | **physical PASS** | injected key survived framework restart; write-path fixes regression-tested |
-| I — Automatic safe end state | **PENDING PHYSICAL ACCEPTANCE** | root and manual return to Enforcing are physically proven. `v2.0.5-zzic` has now run on the phone: every gate up to the handoff passed and root worked, but no same-boot `POST_ROOT_COMPLETE` was ever published, so the closeout itself remains untested — see the third physical run below |
+| I — Automatic safe end state | **physical PASS** | `v2.0.5-zzic`, boot `62e8538c…`: the closeout ran unaided to a same-boot `POST_ROOT_COMPLETE`, and the operator independently read `Enforcing` / sysfs `1`, `su` in `u:r:ksu:s0`, and the pinned daemon installed at `/data/adb/ksud`. See the fourth physical run below |
 | AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **UNVERIFIED (ships disabled)** | the boot receiver/service, the pure scheduling policy and the shared coordinator exist and are host-tested; no automatic attempt has run on hardware, and the feature cannot be enabled without a verified manual completion on the same build plus an explicit opt-in. Record: `docs/AUTO_ROOT.md` |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
@@ -1166,6 +1166,65 @@ foreign bytes** in both plausible mechanisms, so an acceptance run should be mad
 with no KernelSU manager package installed, and the manager should not be opened
 during the run. That costs uninstalling one app, not the module set.
 `docs/PHYSICAL_TESTING.md` §1 checks for it and says so.
+
+### Fourth physical run — `v2.0.5-zzic`, Gate I closed
+
+The automatic closeout ran to completion on hardware, unaided, in one boot.
+
+```text
+boot_id=62e8538c-31c5-4531-9bbe-0045e23cf519
+```
+
+Everything through the handoff passed as in the previous run, and then:
+
+```text
+[DFR][MARKER] df=1 helper=1 ns=1 bind=1 exec_fail=0
+[DFR][BOOTSTRAP] PASS helper=-E2BIG namespace=private bind=complete
+runAll done res=0
+[DFR][POST_ROOT] WAIT_POST_ROOT: native bootstrap complete; final success is still pending
+[DFR][POST_ROOT] pending: completion record absent or empty
+[DFR][POST_ROOT] POST_ROOT_COMPLETE=PASS boot_id=62e8538c-31c5-4531-9bbe-0045e23cf519
+                 ksu_version=32601 uapi_version=2 runtime_mode=late-load selinux=1
+[DFR][POST_ROOT] ROOT_RESULT=SUCCESS
+```
+
+The one `pending:` line before the PASS is the wait doing its job: the record did
+not exist when the first poll ran, and appeared during the window.
+
+**Evidence, separated by who observed it.** This matters for a gate whose whole
+subject is whether a claim can be trusted.
+
+| Fact | Observed by | Value |
+|---|---|---|
+| same-boot completion record | ksud (telemetry), read and validated by the app | `state=POST_ROOT_COMPLETE`, `boot_id=62e8538c…`, `ksu_version=32601`, `uapi_version=2`, `runtime_mode=late-load`, `selinux=1` |
+| live SELinux at the end of the run | the app, as a term of its own verdict | `1` |
+| **SELinux, independently** | operator, `su -c 'getenforce; cat /sys/fs/selinux/enforce'` | `Enforcing` / `1` |
+| **KernelSU control alive** | operator, `su -c 'id; cat /proc/self/attr/current'` | `uid=0(root) … u:r:ksu:s0` |
+| **same boot** | operator, `/proc/sys/kernel/random/boot_id` | `62e8538c…`, equal to the record's |
+| **the daemon in place is the pinned one** | operator, `sha256sum /data/adb/ksud` | `14fb9eaf…`, 6,670,272 bytes |
+
+The last row is the direct contrast with the previous run, where the same path
+held `99aaa607…` at 4,892,712 bytes. It is a measurement, not an inference.
+
+**What is promoted.** Gate I — automatic safe end state — to **physical PASS**.
+The chain now reaches, without human intervention: KernelSU control proven,
+SELinux restored to `Enforcing` and read back, control proven again, a same-boot
+record published, and only then a green UI. Three of those five are corroborated
+by operator-side reads that do not pass through the daemon's own telemetry.
+
+**What is not resolved.** Why the third run did not publish. Two things changed
+between the two runs and the reboot changed both at once:
+
+- the manager app was not opened during this run;
+- in the failed run the `system_server` side was hosting a **stale APK path** —
+  its `classloader` named `~~LNLuKJ9…` while `network_stack` had `~~ZM-pqZr…`,
+  and `NATIVE_PAYLOAD_PACKAGED` came back `UNKNOWN (NoSuchFileException)`. In this
+  run both name the same path and it reads `PASS`. The app had been updated
+  without a soft reboot, so the old `LoadedApk` was still resident.
+
+One trial does not isolate a cause between two changed variables, so neither is
+recorded as the reason. The staged bytes were verified identical in both runs
+(`KSUD_IDENTITY=PASS`), so the difference is not in what was staged.
 
 ## Post-root compatibility — DEFEX / Zygisk Next / LSPosed
 

@@ -898,46 +898,32 @@ A dispatch that fails the tag/version check costs seconds and no build, so a
 refusal there is cheap. A dispatch of the wrong tag that *succeeds* is what costs
 a release, which is why the check exists.
 
-## Current blocker — Gate I needs a device the chain can own
+## Gate I is closed; Auto Root is next
 
-The first `v2.0.5-zzic` hardware run (boot `28beeff3-…`) passed every gate up to
-the handoff and produced working KernelSU root with SELinux back at `Enforcing`,
-and still could not close Gate I. The evidence is recorded in
-`docs/S25U_ZZIC_COMPATIBILITY.md`; the short version:
+`v2.0.5-zzic`, boot `62e8538c…`: the closeout ran unaided to a same-boot
+`POST_ROOT_COMPLETE`, and the operator independently read `Enforcing` / sysfs `1`,
+`su` in `u:r:ksu:s0`, and `14fb9eaf…` (the pinned daemon) installed at
+`/data/adb/ksud`. Gate I is **physical PASS**; the evidence and who observed each
+part of it are in `docs/S25U_ZZIC_COMPATIBILITY.md`.
 
-```text
-pinned DFR ksud      14fb9eaf…   6,670,272 bytes, contains POST_ROOT_COMPLETE
-/data/adb/ksud after 99aaa607…   4,892,712 bytes, contains it 0 times
-```
+The run before it, on the same build, did **not** publish the record, and that
+remains unexplained: the reboot changed two things at once — the manager app was
+not opened, and the `system_server` side stopped hosting a stale APK path (its
+classloader named a different APK than `network_stack`, with
+`NATIVE_PAYLOAD_PACKAGED=UNKNOWN`; after the reboot both match and it reads
+`PASS`). One trial does not isolate a cause between two variables, so neither is
+written down as the reason. If it recurs, the stale-`LoadedApk` shape is the
+cheaper one to test first: reinstalling the app and running without a soft reboot
+reproduces it deliberately.
 
-The device carried a KernelSU userspace predating the run — manager app,
-allowlist, LSPosed, Zygisk Next, Shamiko, TrickyStore, modules. What is *observed*
-is that foreign bytes ended up installed and no record was published; which daemon
-was executing is an **inference**, since an already-`execve`d process survives its
-file being replaced. The dossier keeps the two apart and names the two tests that
-would settle it, neither of which needs a new build. No record, no PASS, and the
-app refusing success while root visibly works is the contract behaving correctly.
+What is now eligible, and only in this order:
 
-Three ways forward, in order of how much they cost:
-
-1. **Run the acceptance with no root manager app installed** (and none opened
-   during the run). The manager is the source of the foreign bytes in both
-   plausible mechanisms, and this costs uninstalling one app — not the module
-   set. A populated `/data/adb` is not itself a disqualifier: this is a reroot,
-   so that is its own normal state from the second use onward.
-   `docs/PHYSICAL_TESTING.md` §1.
-2. **Identify the running daemon** before changing anything: enable KernelSU's
-   `sulog` (present but switched off on the test device) and hash the manager
-   APK's `libksud.so`. That turns the current inference into evidence, and may
-   point at a different fix than the one assumed.
-3. **Teach the DFR ksud to handle a foreign `/data/adb/ksud`** — refuse it, or
-   complete the closeout before any handover. That is a contract change in
-   `RMGLabs-Payloads`, not here, and it is the only option that makes the
-   automatic closeout meaningful on an already-rooted device.
-
-Nothing in this repository is known to be wrong from that run. What it did prove,
-on hardware and in one boot, is every gate before the handoff on `v2.0.5-zzic`,
-including the exact ZZIC module binding and all six page-cache writes.
+1. **`AUTO_ROOT_FULL_BOOT`** — the seven-step acceptance in `docs/AUTO_ROOT.md`.
+   Auto Root can be armed at last, since the qualification it requires is exactly
+   the manual PASS that just happened, on this exact build. It remains off until
+   the owner ticks it, and takes effect only from the next full reboot.
+2. **`POST_ROOT_LSPOSED_COMPAT`** — its own axis, after the core state is
+   captured, never folded into the root verdict.
 
 ## Perspectives — what could come next
 

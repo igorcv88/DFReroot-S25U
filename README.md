@@ -39,9 +39,8 @@ uncertain.
 
 ### Current state
 
-The automatic closeout now exists in source and is the content of the next
-candidate, `v2.0.5-zzic` (versionCode 8), which **has not been built or run on
-hardware yet**:
+The automatic closeout is the content of `v2.0.5-zzic` (versionCode 8), and it
+has now run unaided on hardware — Gate I is closed:
 
 - the UI cannot go green on a native result alone. Final success requires a live
   KernelSU control proof, automatic restoration to `Enforcing`, a sysfs
@@ -60,7 +59,7 @@ hardware yet**:
 | Gate | State |
 |---|---|
 | A–H (identity, kernel, AMS/NetworkStack, module ABI, ELF, installer) | physically proven on `S938BXXUCZZIC` |
-| I — automatic safe end state | **pending physical acceptance** |
+| I — automatic safe end state | **physical PASS** (`v2.0.5-zzic`, one boot, operator-verified) |
 | `AUTO_ROOT_FULL_BOOT` | **unverified, ships disabled** |
 | `POST_ROOT_LSPOSED_COMPAT` | proven on `ZZI4`, not yet on `ZZIC` |
 
