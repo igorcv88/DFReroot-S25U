@@ -27,7 +27,7 @@ Gate I therefore awaits the next physical run rather than being blocked by G1.
 |---|---|
 | Upstream | `polygraphene/DFReroot` |
 | Working fork | `igorcv88/DFReroot-S25U` |
-| Reference version | upstream `v2.0.1`; this fork builds as `2.0.4-zzic` (versionCode 7) |
+| Reference version | upstream `v2.0.1`; this fork builds as `2.0.5-zzic` (versionCode 8, both APKs). `2.0.4-zzic` (7) is the last version physically validated |
 | Base commit | `9f1d6cd592d898b42d2e0c2d25ee1577e2aabe77` |
 | Branch | `claude/dfreroot-s25u-zzic-support-dgw8fi` |
 | Architecture preserved | build system, packages, module table, exploit flow unchanged |

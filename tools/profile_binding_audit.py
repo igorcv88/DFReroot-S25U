@@ -549,6 +549,35 @@ def audit():
             fail("DfrRootCoordinator no longer enforces %r before the hop" % signal)
     r["checks"]["post_root_contract"] = java_contract
 
+    # --- the two APKs must declare the same version ------------------------
+    # release.yml derives VER from app/build.gradle.kts alone and names BOTH
+    # assets with it, so an installer left behind ships as df_installer_<new>.apk
+    # while its own BuildConfig.VERSION_NAME - the string its UI shows - still
+    # says the previous release, at the previous versionCode. The pair is already
+    # required to move together for signing; this is the same rule for identity.
+    versions = {}
+    for module in ("app", "installer"):
+        path = os.path.join(ROOT, module, "build.gradle.kts")
+        try:
+            with open(path, encoding="utf-8") as f:
+                gradle = f.read()
+        except OSError as ex:
+            fail("cannot read %s/build.gradle.kts: %s" % (module, ex))
+            continue
+        code = re.search(r"versionCode\s*=\s*(\d+)", gradle)
+        name = re.search(r'versionName\s*=\s*"([^"]+)"', gradle)
+        if not code or not name:
+            fail("%s/build.gradle.kts declares no versionCode/versionName" % module)
+            continue
+        versions[module] = (int(code.group(1)), name.group(1))
+    if len(versions) == 2 and versions["app"] != versions["installer"]:
+        fail("version drift: app is %s but installer is %s; the release names both "
+             "assets from the app's versionName, so the installer would ship as the "
+             "new version while identifying as the old one"
+             % (versions["app"], versions["installer"]))
+    r["checks"]["module_versions"] = {k: "%s (%d)" % (v[1], v[0])
+                                      for k, v in versions.items()}
+
     # --- Auto Root after full boot ----------------------------------------
     # Auto Root changes WHEN the chain runs, so every one of its refusals is a
     # gate. The policy is pure and host-tested (tools/tests/AutoRootPolicyTest.java);
