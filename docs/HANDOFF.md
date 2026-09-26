@@ -68,25 +68,51 @@ sha256     14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a
 size       6670272
 ```
 
-PRs #21 and #22 are merged. The host gates pass, including target/profile
-`74/74`, module rules `66/66`, AVB `38/38`, symvers derivation `62/62`,
-post-root static guards `14/14`, installer `SafeWrite` `49/49`, post-root record
-parser `12/12`, release-tag resolution `8/8`, the binding audit, shell/YAML
-syntax, Python compilation and generated release notes. The Java suites were
-run locally through the image's `jdk.compiler` module because it exposes the
-compiler module without installing a `javac` launcher.
+PRs #21, #22 and #24 are merged. #24 also added the fail-closed Auto Root path
+(off by default) and two release guards; the host gate set now stands at:
+
+```text
+target profile + gates        74/74      installer SafeWrite        49/49
+module / Gate-G rules         66/66      post-root record parser    12/12
+AVB provenance                38/38      Auto Root policy           50/50
+symvers derivation            62/62      run guard / controller     23/23
+post-root static guards       19/19      release-tag resolution     13/13
+binding audit                 PASS       strict ZZIC module         COMPATIBLE, 5/5
+release notes / YAML / shell  PASS       elf + AVB audits           PASS
+```
 
 The executor does not contain the Gradle distribution or Android SDK/NDK and
-cannot download them under its network policy. Per `AGENTS.md` section 6.1,
-do not enable or dispatch `ci.yml`. The remaining sequence is:
+cannot download them under its network policy, so **no Kotlin in this tree has
+ever been compiled**; the signed `release.yml` run is the first thing that will
+tell. Per `AGENTS.md` section 6.1, do not enable or dispatch `ci.yml`.
 
-1. merge the version/handoff follow-up PR;
-2. dispatch `release.yml` once from `main`, with tag `v2.0.5-zzic` and
-   `prerelease=false`; this is the repository's authorized full build,
-   packaging audit, signature check and release publication path;
-3. perform the one-boot physical Gate-I acceptance below;
+### The version pin and the tag now have to agree
+
+`release.yml` reads the dispatched tag and `app/build.gradle.kts`' `versionName`
+and, until #24, compared neither: the assets, their `versionCode` and the release
+title all come from `versionName` while the release is published under the tag. A
+dispatch of `v2.0.5-zzic` from a tree still at `2.0.4-zzic` would have published a
+release whose APKs describe the previous version, and only after spending the
+build. `tools/resolve_release_tag.sh` now refuses that offline, before any network
+call, as its fourth argument.
+
+The practical consequence: **this PR's version bump has to land before the tag can
+be dispatched.** While `main` says `2.0.4-zzic`, a `v2.0.5-zzic` dispatch fails in
+the first seconds by design — which is the guard working, not a regression.
+
+The remaining sequence is:
+
+1. merge this version/handoff PR, so `main` carries versionCode 8 /
+   `2.0.5-zzic`;
+2. dispatch `release.yml` once from `main`, tag `v2.0.5-zzic`,
+   `prerelease=false`; this is the repository's authorized full build, packaging
+   audit, signature check and release publication path, and the only workflow
+   that needs to run;
+3. perform the one-boot physical Gate-I acceptance — `docs/PHYSICAL_TESTING.md`
+   is the step-by-step, including what to capture and when to stop;
 4. promote Gate I only after the same boot ends with KernelSU root functional
-   and SELinux read back as Enforcing.
+   and SELinux read back as Enforcing;
+5. only then consider the Auto Root acceptance in `docs/AUTO_ROOT.md`.
 
 The generated daemon contains the expected DFR staging path and every post-root
 closeout string. `tools/profile_binding_audit.py` must bind those bytes to all
@@ -771,167 +797,78 @@ while SELinux remains Enforcing.
 Record that outcome separately as `POST_ROOT_LSPOSED_COMPAT=PASS|FAIL`; it does
 not redefine the root-success gate.
 
-## Next implementation after Gate I — Auto Root after full boot
+## Auto Root after full boot — implemented, disabled, unaccepted
 
-Do not mix Auto Root into `v2.0.5-zzic`. First prove the manual path ends in
-same-boot `POST_ROOT_COMPLETE` with SELinux Enforcing. Auto Root changes when
-the exploit runs and how failures are recovered; it needs its own PR and its
-own physical acceptance.
+The unattended boot path now exists in source and ships **off**:
+`DfrBootReceiver` -> non-exported `DfrAutoRootService` -> pure `AutoRootPolicy`
+-> `DfrRootCoordinator`, which is the single execution path the button uses too.
 
-### Ownership decision
+`docs/AUTO_ROOT.md` is the authoritative record: the ownership decision, why there
+is no foreground service on this app, the three separated states, qualification,
+the full-boot/one-attempt rules, every preflight refusal, and the physical
+acceptance sequence that is still owed.
 
-Two designs are possible:
+Two sequencing rules that this handoff's own plan implies and that must not be
+lost:
 
-| Design | Trigger | Consequence |
-|---|---|---|
-| DFReroot-owned | a DFReroot `BOOT_COMPLETED` receiver starts an internal service | no dependency on RMGLabs being alive; the app that owns the gates also owns execution and final status |
-| RMGLabs-orchestrated | RMGLabs receives boot and sends an explicit intent to DFReroot | centralizes the user-facing switch in RMGLabs, but adds a cross-package authorization and lifecycle boundary |
+- Auto Root is **not** what `v2.0.5-zzic` is for. Gate I is accepted manually
+  first. The feature is inert until a verified manual PASS on the installed build
+  plus an explicit opt-in, so shipping it does not change what the next release
+  is proving - but the release notes must keep saying it is disabled and
+  unaccepted, and `tools/release_notes.py` generates that from the shipped
+  manifest rather than from prose.
+- `AUTO_ROOT_FULL_BOOT` is tracked separately from Gate I and from
+  `POST_ROOT_LSPOSED_COMPAT`. A failure of the automatic path is not a failure to
+  obtain root.
 
-Use the **DFReroot-owned receiver/service** unless a later product decision
-requires RMGLabs to be the visible controller. RMGLabs may expose settings or
-send a wake-up request, but an external intent must never be authority to run.
-DFReroot must independently enforce opt-in, full-boot identity, exact target,
-one attempt per boot and every existing fail-closed gate.
+### The plan in this handoff, point by point
 
-Do not automate by opening `MainActivity` from the background. Android 17 may
-block background activity launches, and the Activity currently owns UI state,
-dynamic receiver registration and execution in one class. Extract the shared
-execution path first.
+The design above was the plan; this is where each of its requirements stands.
+`docs/AUTO_ROOT.md` carries the reasoning — this table exists so nobody has to
+re-derive whether something was actually done.
 
-### Required refactor
+| The plan asked for | State |
+|---|---|
+| DFReroot-owned receiver + internal service, not RMGLabs-orchestrated | done; the alternative was not built (see below) |
+| no automation by launching `MainActivity` from the background | done; the service drives the coordinator, no Activity is started |
+| `DfrRootCoordinator` shared by UI and service, holding staging, the reply receiver, the hop, the 30 s controller deadline, transaction 5, the 120 s post-root wait, the live SELinux read and the final decision | done, and two things are stricter than the code it replaced: the staging verdict is now *read* (the UI used to discard it), and the final live SELinux read is a term of the verdict rather than a field beside it |
+| one process-wide guard so a click and a boot trigger cannot both run | done, in the pure `RunGuard`; the 32-thread race is host-tested |
+| the coordinator exposes events/results instead of touching views | done, via `DfrRootCoordinator.Host` |
+| `DfrBootReceiver`, exported only as the protected boot broadcast requires | done; boot actions only, and the audit fails if another action is added |
+| `android.permission.RECEIVE_BOOT_COMPLETED` | done, plus `WAKE_LOCK` (below) |
+| non-exported `DfrAutoRootService` | done; the audit fails if it is exported |
+| a foreground notification/channel *if the target build requires one* | **deliberately not built.** It does not: `android:process="system"` hosts these components inside `system_server`, which is neither background-start-restricted nor killed for backgrounding. What the bounded post-root wait does need is a `PARTIAL_WAKE_LOCK`, so that is what it takes |
+| device-protected storage for opt-in and scheduling state only, never root authority | done, as two atomically-renamed records rather than `SharedPreferences`, so the same pure parser that refuses them is the one the tests drive |
+| qualification requires a manual PASS, live SELinux `1`, and explicit opt-in | done; the opt-in cannot *create* a qualification |
+| qualification persists target, app version, ksud digest and time; a change to any invalidates it | done as versionCode + versionName + pinned ksud digest + `Build.FINGERPRINT`. The profile itself is not stored, and does not need to be: the runtime identity gate already requires the device's fingerprint to equal the profile's pinned one, so a repinned profile either names this same firmware or makes the chain refuse on this device |
+| three states kept separate | done: durable qualification, per-boot journal, and ksud's `/data/system/dfreroot-post-root` |
+| `boot_id` as full-boot identity; a soft reboot must not start a run | done and host-tested |
+| `STARTED` recorded atomically before anything destructive | done, immediately before transaction 5; the run is abandoned if that write fails, because the guarantee would not hold |
+| only pre-`STARTED` readiness failures retried, bounded, no infinite alarm/job loop | done: a ten-minute window plus a journal-persisted poll count, no `AlarmManager` and no `JobScheduler` (the audit fails if either appears) |
+| the eight preflight requirements | all present; the NetworkStack probe is tri-state and proceeds on `UNKNOWN` while logging it, because it gates nothing destructive and the hop's own `PROCESS_LOOKUP` runs before any write |
+| the automatic PASS is exactly the manual PASS | done, one expression in one place |
+| policy in a pure host-testable class, with the listed negative cases | done: `AutoRootPolicy` (50 cases), `PostRootStatus` (12), `RunGuard`/`AwaitBox` (23). The controller-timeout and Activity-vs-service cases the plan names were the two that had no test until the deadline and the owner guard were extracted into pure classes |
+| extend `profile_binding_audit.py` with the export/coordinator/bypass assertions | done, and every new guard was confirmed to fail when its rule is violated |
+| the Auto Root physical acceptance sequence | **still owed**, and it comes after Gate I |
 
-Create a `DfrRootCoordinator` used by both `MainActivity` and the boot service.
-Move into it, without changing semantics:
+### What was deliberately not built
 
-- `KsudStage.stageFromAssets()` and its byte/read-back checks;
-- the package-scoped reply receiver for the network-stack `CONTROLLER` binder;
-- `StageHop.hopToNetworkStack()` and the 30-second controller deadline;
-- binder transaction 5 and reporter-log transport;
-- the 120-second `POST_ROOT_COMPLETE` wait;
-- the independent live `/sys/fs/selinux/enforce == 1` read;
-- the final `runResult == 0 && postRootComplete` decision.
+The **RMGLabs-orchestrated** variant. DFReroot owns the trigger, so there is no
+cross-package authorization to get right: an external intent has nothing to
+grant. If that design is ever chosen, the plan's requirements for it still stand
+(target the component explicitly, record whether both APKs share a signing
+certificate, use a signature permission only if they do, otherwise pin the
+package and certificate digest, and apply the full local policy anyway) — and the
+receiving component must still treat the intent as a request, never as authority.
 
-The coordinator should expose events/results to the UI and service rather than
-touching views. Use one process-wide atomic/mutex guard so an Activity click and
-a boot trigger cannot start competing runs.
+### What is still owed
 
-Add:
-
-- `DfrBootReceiver`, manifest-exported only as required for the protected
-  system `BOOT_COMPLETED` broadcast;
-- `android.permission.RECEIVE_BOOT_COMPLETED`;
-- an internal, `exported=false` `DfrAutoRootService`;
-- a foreground notification/channel if the target build requires a foreground
-  service for the bounded boot-time operation;
-- device-protected preferences for opt-in and scheduling state only. These
-  preferences are never root authority.
-
-If RMGLabs orchestration is chosen instead, target the service component
-explicitly. First record whether both APKs share a signing certificate. Use a
-signature permission only if they do. Otherwise pin the allowed RMGLabs package
-and certificate digest inside DFReroot and reject every mismatch. The receiving
-component must still apply the full local policy below.
-
-### Qualification and persistent state
-
-Auto Root must remain disabled on install/update. Enablement requires:
-
-1. one manual run on the exact target ending in valid same-boot
-   `POST_ROOT_COMPLETE`;
-2. live SELinux read-back `1` and final KernelSU control success from that run;
-3. explicit user opt-in after success.
-
-Persist the qualification with the target profile, app version, ksud SHA-256
-and completion time. A changed target profile, version or ksud digest invalidates
-qualification and disables Auto Root until another manual PASS. Never infer
-qualification from `dfm3`, `/dev/df`, the serialization marker or a KernelSU
-manager app.
-
-Keep three states separate:
-
-- durable opt-in/qualification in device-protected app storage;
-- a per-boot Auto Root journal for scheduling and retry prevention;
-- `/data/system/dfreroot-post-root` as same-boot completion telemetry.
-
-### Full-boot and one-attempt policy
-
-Use `/proc/sys/kernel/random/boot_id` as the full-boot identity. A framework or
-soft reboot keeps the same boot ID and must not start Auto Root. Before doing
-anything destructive, atomically record `STARTED` for the current boot ID.
-
-Suggested service states:
-
-```text
-DISABLED
--> WAIT_BOOT_READY
--> PREFLIGHT
--> STARTED
--> WAIT_CONTROLLER
--> RUN_NATIVE
--> WAIT_POST_ROOT
--> COMPLETE
-or FAILED_LOCKED_UNTIL_REBOOT
-```
-
-Only readiness failures that occur before `STARTED` may be retried, with a
-bounded deadline/backoff. After transaction 5 begins, `dfm1` appears or
-`/dev/df` exists, any failure locks the current boot against another automatic
-attempt. Recovery remains a hard reboot. Never schedule an infinite alarm/job
-loop.
-
-Preflight must require:
-
-- Auto Root is opted in and its qualification still matches this build;
-- a non-empty boot ID different from the last completed/attempted boot;
-- `sys.boot_completed == 1` and the NetworkStack process is discoverable;
-- `/dev/df` and `dfm1..dfm4` are absent;
-- SELinux starts Enforcing and sysfs reads `1`;
-- the bundled/staged ksud passes the existing exact digest and size checks;
-- the normal exact target/kernel/runtime gates remain unchanged.
-
-The final automatic PASS is exactly the manual PASS: live KernelSU proof,
-automatic Enforcing restoration and read-back, second live KernelSU proof,
-same-boot `POST_ROOT_COMPLETE`, then and only then service/UI success.
-
-### Auto Root tests
-
-Put scheduling policy in a pure host-testable class. Required negative cases:
-
-- opt-in absent or qualification absent;
-- qualification belongs to another app version, target or ksud digest;
-- empty, stale or already-attempted boot ID;
-- soft/framework reboot with unchanged boot ID;
-- `/dev/df` or any marker already present;
-- initial SELinux state is not `1`;
-- malformed/stale post-root record;
-- wrong KSU version/UAPI/runtime mode;
-- controller timeout before native start;
-- any failure after native start blocks retry for that boot;
-- an explicit RMGLabs intent with wrong package/certificate, if that design is
-  implemented;
-- Activity and service racing results in exactly one coordinator owner.
-
-Extend `profile_binding_audit.py` to assert the receiver/service are not
-exported beyond the chosen contract, the boot path calls the same coordinator,
-and no Auto Root path bypasses ksud staging, `/dev/df` refusal or
-`POST_ROOT_COMPLETE`.
-
-### Auto Root physical acceptance
-
-After the manual Gate-I release passes:
-
-1. enable Auto Root explicitly;
-2. perform a full reboot and record the new boot ID;
-3. verify exactly one automatic attempt starts after boot readiness;
-4. require `POST_ROOT_COMPLETE=PASS`, `getenforce=Enforcing`, sysfs `1` and
-   `su` in `u:r:ksu:s0` in that same boot;
-5. restart only the Android framework and confirm the unchanged boot ID does
-   not trigger another run;
-6. reboot fully again and confirm one new attempt occurs for the new boot ID;
-7. validate disable/cancel behavior before calling Auto Root complete.
-
-Track this separately from Gate I as `AUTO_ROOT_FULL_BOOT=PASS|FAIL` and keep
-LSPosed/Zygisk compatibility as its own post-root result.
+- the manual **Gate I** physical acceptance, on a signed build;
+- then the **Auto Root** acceptance sequence in `docs/AUTO_ROOT.md`;
+- the separate `POST_ROOT_LSPOSED_COMPAT` check under final Enforcing;
+- a compiled build: nothing in the executor that produced this code has the
+  Android SDK, NDK or a Gradle distribution, so the Kotlin has never been through
+  a compiler. The signed `release.yml` run is the first thing that will tell.
 
 ## Release discipline
 
@@ -944,6 +881,66 @@ workflow.
 The current stable validation release remains `v2.0.4-zzic`; it proves the
 root chain but can leave SELinux permissive until manually restored. Do not
 describe it as automatic safe completion.
+
+### Which workflows are needed, and which are not
+
+For `v2.0.5-zzic`, exactly one: `release.yml`, dispatched once from `main` after
+the version bump lands. Nothing else in this repository needs a runner.
+
+| Workflow | Needed now? | Why |
+|---|---|---|
+| `release.yml` | **yes, once** | it is the only place the signing secrets exist; it also re-runs the whole offline gate set *before* spending the build, so it doubles as the CI run |
+| `ci.yml` | **no — and it is disabled at the repository level** | it re-proved what `release.yml` already gates, on every push to every branch. Never re-enable it, never add push/PR triggers |
+| `build-zzic-dirtyfrag.yml` | no | it built the exact ZZIC LKM. That module is built, audited `COMPATIBLE` with `COMPLETE (5/5)` coverage, and committed with its provenance. Re-run it only to rebuild the module itself |
+| `RMGLabs-Payloads` exact-port | no | the DFR ksud is generated, bundled and pinned at `14fb9eaf…`. Re-run it only when the daemon must change — and then the digest has to be repinned in all three places |
+
+A dispatch that fails the tag/version check costs seconds and no build, so a
+refusal there is cheap. A dispatch of the wrong tag that *succeeds* is what costs
+a release, which is why the check exists.
+
+## Perspectives — what could come next
+
+Ordered by what unblocks what, not by appeal. Nothing here is committed work.
+
+**Owed before anything else (hardware):**
+
+1. **Gate I** — the manual one-boot acceptance. `docs/PHYSICAL_TESTING.md`.
+2. **`AUTO_ROOT_FULL_BOOT`** — the unattended acceptance, after Gate I.
+3. **`POST_ROOT_LSPOSED_COMPAT`** — a separate axis; proven on ZZI4, not on ZZIC.
+   A failure there is a post-root compatibility regression, never a root failure.
+
+**Cheap and useful, no hardware:**
+
+4. **Compile the Kotlin before the next dispatch.** The single real gap in the
+   offline gate set is that no Kotlin in this tree has been through a compiler;
+   every other property is checked by shape. An `./build.sh` on a machine with the
+   SDK/NDK costs nothing and no runner minutes, and would catch the one class of
+   defect the audits structurally cannot. Worth doing before spending the signed
+   build, not after it fails.
+5. **Gate F to `PASS`.** `tools/elf_audit.py` stays `UNVERIFIED` only because two
+   of the four target ELFs are not present locally; pass `--root` at a dump of the
+   device's `/system/lib64` and it decides. No new code.
+6. **An evidence-bundle mode for `tools/zzic_collect.sh`.** The Gate-I protocol
+   ends in a fixed set of observations; collecting them by hand is where a boot's
+   evidence gets mixed with another's. A single post-root pass that prints
+   `boot_id` alongside every value would make the record self-consistent by
+   construction (AGENTS.md §3.8).
+
+**Structural, only if the project wants it:**
+
+7. **A second target profile.** The architecture already separates identity
+   (`target_profile.{h,c}` + `tools/zzic_profile.json`) from the module family
+   table and the derived CRC evidence, so another exact firmware is additive
+   rather than a rewrite. The cost is per-firmware evidence: witness modules from
+   that exact kernel for the derived symvers, its own AVB chain, its own hashes.
+   Nothing may be reused across firmwares — that is the whole point of §3.1.
+8. **RMGLabs-orchestrated Auto Root**, if the product wants the visible switch to
+   live there. The local policy stays exactly as it is; only the trigger moves,
+   and the cross-package authorization requirements in the table above apply.
+9. **A per-boot status surface** for unattended runs. Today an Auto Root attempt
+   reports to logcat and the journal; the UI shows the qualification state but not
+   the last automatic outcome. Reading the journal into the Activity would close
+   that without inventing any new authority.
 
 ## Things not to change while doing this
 
@@ -978,11 +975,15 @@ Then inspect these exact implementation points before editing:
 
 ```text
 DFReroot-S25U:
+  docs/AUTO_ROOT.md
+  docs/PHYSICAL_TESTING.md
   app/src/main/jni/stage1.S
   app/src/main/jni/include.inc
   app/src/main/jni/exp.c
   app/src/main/java/com/polygraphene/df/reroot/MainActivity.kt
   app/src/main/java/com/polygraphene/df/reroot/KsudStage.kt
+  app/src/main/java/com/polygraphene/df/reroot/DfrRootCoordinator.kt
+  app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java
   app/src/main/AndroidManifest.xml
   tools/profile_binding_audit.py
 

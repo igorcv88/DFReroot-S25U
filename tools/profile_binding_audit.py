@@ -353,14 +353,23 @@ def audit():
              "has nothing to guard")
     r["checks"]["modversion_coverage"] = cov_reports
 
-    main_kt_path = os.path.join(ROOT, "app", "src", "main", "java", "com",
-                                "polygraphene", "df", "reroot", "MainActivity.kt")
-    try:
-        with open(main_kt_path, encoding="utf-8") as f:
-            main_src_holder = [f.read()]
-    except OSError as ex:
-        fail("cannot read MainActivity.kt: %s" % ex)
-        main_src_holder = [""]
+    def dfr_source(name):
+        """Read one shipped DFReroot Kotlin/Java source, or fail loudly."""
+        path = os.path.join(ROOT, "app", "src", "main", "java", "com",
+                            "polygraphene", "df", "reroot", name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+        except OSError as ex:
+            fail("cannot read %s: %s" % (name, ex))
+            return ""
+
+    main_src_holder = [dfr_source("MainActivity.kt")]
+    coord_src = dfr_source("DfrRootCoordinator.kt")
+    autoroot_policy_src = dfr_source("AutoRootPolicy.java")
+    autoroot_store_src = dfr_source("AutoRootStore.kt")
+    autoroot_service_src = dfr_source("DfrAutoRootService.kt")
+    boot_receiver_src = dfr_source("DfrBootReceiver.kt")
 
     # --- the ksud that gets handed uid 0 -----------------------------------
     # Same invariant shape as the module's, and for the same reason: the asset is
@@ -495,13 +504,119 @@ def audit():
     if "liveSelinux != 1" not in post_src or "stale boot_id" not in post_src:
         fail("PostRootStatus no longer refuses stale boots or live SELinux != 1")
     main_src = main_src_holder[0]
+    # The decision moved into DfrRootCoordinator when the boot service became a
+    # second caller of it. Kotlin cannot be unit-tested here (AGENTS.md 5), so the
+    # guard follows the decision rather than staying pointed at the old file.
     for signal in (
-            "val success = runResult == 0 && postRootComplete",
+            "val success = runResult == 0 && postRootComplete && liveSelinux == 1",
             "PostRootStatus.evaluate(record, bootId, liveSelinux)",
             "ROOT_RESULT=SUCCESS"):
-        if signal not in main_src:
-            fail("MainActivity post-root fail-closed signal missing: %r" % signal)
+        if signal not in coord_src:
+            fail("DfrRootCoordinator post-root fail-closed signal missing: %r" % signal)
+    # ... and both entry points must go through it rather than re-implementing it.
+    for name, src in (("MainActivity.kt", main_src),
+                      ("DfrAutoRootService.kt", autoroot_service_src)):
+        if "DfrRootCoordinator.run(" not in src:
+            fail("%s does not run the chain through DfrRootCoordinator; a second "
+                 "copy of the sequence is a second place a gate can be forgotten"
+                 % name)
+        if "PostRootStatus.evaluate(" in src:
+            fail("%s evaluates the post-root record itself instead of using the "
+                 "shared coordinator verdict" % name)
+    # The single process-wide owner is what stops a click and a boot trigger from
+    # both reaching transaction 5.
+    if "owner.compareAndSet(null, who)" not in coord_src:
+        fail("DfrRootCoordinator no longer takes a single process-wide run owner")
+    # Neither caller may reach the chain without staged, verified ksud bytes or
+    # without the second-run refusal.
+    for signal in ("KsudStage.stageFromAssets(context)",
+                   "KSUD_STAGED_VERIFY=PASS",
+                   "markerPresent()"):
+        if signal not in coord_src:
+            fail("DfrRootCoordinator no longer enforces %r before the hop" % signal)
     r["checks"]["post_root_contract"] = java_contract
+
+    # --- Auto Root after full boot ----------------------------------------
+    # Auto Root changes WHEN the chain runs, so every one of its refusals is a
+    # gate. The policy is pure and host-tested (tools/tests/AutoRootPolicyTest.java);
+    # what cannot be tested without Android is checked here by shape.
+    autoroot = {}
+    for signal in ('PHASE_STARTED = "STARTED"',
+                   'PHASE_FAILED_LOCKED = "FAILED_LOCKED"',
+                   "MAX_ATTEMPTS_PER_BOOT"):
+        if signal not in autoroot_policy_src:
+            fail("AutoRootPolicy no longer defines %r" % signal)
+    for signal in ("Auto Root is not opted in",
+                   "still in the boot that qualified Auto Root",
+                   "native execution already began in this boot",
+                   "a stage marker is already present"):
+        if signal not in autoroot_policy_src:
+            fail("AutoRootPolicy no longer refuses on %r" % signal)
+    # A qualification must be bound to the bytes and the build it was observed
+    # with, or "it worked once" would survive a repin.
+    for field in ("version_code", "version_name", "ksud_sha256",
+                  "device_fingerprint", "boot_id"):
+        if field not in autoroot_policy_src:
+            fail("the Auto Root qualification no longer binds %r" % field)
+    if "KsudStage.pinnedKsudSha256()" not in autoroot_store_src:
+        fail("AutoRootStore no longer binds the qualification to the pinned ksud "
+             "digest, so a repinned daemon would keep an old qualification valid")
+    if "qualifies(result.nativeResult, result.postRootComplete" not in autoroot_store_src:
+        fail("AutoRootStore records a qualification without requiring a verified "
+             "same-boot completion")
+    # STARTED is the one-attempt-per-boot guarantee: it has to be written before
+    # the destructive transaction, which is what beforeNativeRun() is for.
+    if "beforeNativeRun" not in autoroot_service_src or \
+            "PHASE_STARTED" not in autoroot_service_src:
+        fail("DfrAutoRootService no longer records STARTED before the native run")
+    if "AutoRootPolicy.evaluate(" not in autoroot_service_src:
+        fail("DfrAutoRootService no longer consults the Auto Root policy")
+    for forbidden in ("AlarmManager", "JobScheduler", "setRepeating", "setExactAndAllowWhileIdle"):
+        if forbidden in autoroot_service_src or forbidden in boot_receiver_src:
+            fail("the Auto Root path schedules work through %s; the retry budget "
+                 "must stay bounded by MAX_ATTEMPTS_PER_BOOT and one thread"
+                 % forbidden)
+    if "ACTION_BOOT_COMPLETED" not in boot_receiver_src:
+        fail("DfrBootReceiver no longer compares the broadcast action")
+    if "isOptedIn" not in boot_receiver_src:
+        fail("DfrBootReceiver starts the service without an opt-in")
+    manifest_path = os.path.join(ROOT, "app", "src", "main", "AndroidManifest.xml")
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = f.read()
+    except OSError as ex:
+        fail("cannot read AndroidManifest.xml: %s" % ex)
+        manifest = ""
+    manifest_code = re.sub(r"<!--.*?-->", "", manifest, flags=re.S)
+    svc = re.search(r"<service[^>]*DfrAutoRootService.*?/>", manifest_code, flags=re.S)
+    if not svc:
+        fail("DfrAutoRootService is not declared in the manifest")
+    elif 'android:exported="false"' not in svc.group(0):
+        fail("DfrAutoRootService is exported; an external component must not be "
+             "able to ask for an unattended root run")
+    else:
+        autoroot["service_exported"] = "false"
+    rcv = re.search(r"<receiver[^>]*DfrBootReceiver.*?</receiver>", manifest_code,
+                    flags=re.S)
+    if not rcv:
+        fail("DfrBootReceiver is not declared in the manifest")
+    else:
+        if "android.intent.action.BOOT_COMPLETED" not in rcv.group(0):
+            fail("DfrBootReceiver has no BOOT_COMPLETED filter, so Auto Root can "
+                 "never start")
+        # It receives a protected system broadcast, so it is exported on purpose -
+        # but it must carry nothing else, and nothing may be launched from it
+        # except the non-exported service.
+        extra = [a for a in re.findall(r'<action android:name="([^"]+)"', rcv.group(0))
+                 if a not in ("android.intent.action.BOOT_COMPLETED",
+                              "android.intent.action.LOCKED_BOOT_COMPLETED")]
+        if extra:
+            fail("DfrBootReceiver listens to %s beyond the boot broadcasts" % extra)
+        autoroot["boot_receiver_actions"] = "boot only"
+    if "android.permission.RECEIVE_BOOT_COMPLETED" not in manifest_code:
+        fail("RECEIVE_BOOT_COMPLETED is not requested, so the boot receiver would "
+             "never fire")
+    r["checks"]["auto_root"] = autoroot
 
     # stage1 must branch on the helper's intentional -E2BIG before creating the
     # positive marker or touching the namespace. An isolated dfm3 can never be

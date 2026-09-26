@@ -2,6 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     android:sharedUserId="android.uid.system">
 
+    <!--
+      Auto Root is driven from BOOT_COMPLETED and polls for up to two minutes
+      after the native run. WAKE_LOCK is what keeps that wait from being decided
+      by a suspend: a device that slept through the post-root window would report
+      a failure that never happened, after the page-cache writes.
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application
         android:label="@string/app_name"
         android:allowBackup="true"
@@ -22,6 +31,31 @@
         <receiver
             android:name=".StageReceiver"
             android:exported="false" />
+        <!--
+          exported="true" only because BOOT_COMPLETED is delivered by the system,
+          not by this app. It is a protected broadcast, the action is compared in
+          onReceive, and the receiver authorises nothing: DfrAutoRootService
+          re-derives permission from AutoRootPolicy plus observed device state, and
+          its first requirement is a qualification record no sender can forge.
+        -->
+        <receiver
+            android:name=".DfrBootReceiver"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        <!--
+          Never exported. Only DfrBootReceiver, in this package, may start it; an
+          external component asking for an automatic root run is exactly what this
+          must not offer.
+        -->
+        <service
+            android:name=".DfrAutoRootService"
+            android:exported="false"
+            android:directBootAware="true" />
     </application>
 
 </manifest>

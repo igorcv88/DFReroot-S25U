@@ -23,3 +23,11 @@ javac -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/PostRootStatus.java \
     tools/tests/PostRootStatusTest.java
 java -cp "$OUT" PostRootStatusTest
+
+# Auto Root scheduling policy: qualification, opt-in, full-boot identity and the
+# one-attempt-per-boot journal. Pure by design, because none of these states can
+# be produced on demand on a device.
+javac -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
+    tools/tests/AutoRootPolicyTest.java
+java -cp "$OUT" AutoRootPolicyTest

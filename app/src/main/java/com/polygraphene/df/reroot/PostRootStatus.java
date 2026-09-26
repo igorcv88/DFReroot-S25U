@@ -15,6 +15,18 @@ public final class PostRootStatus {
 
     private PostRootStatus() {}
 
+    /*
+     * String.isBlank() is API 34; this app declares minSdk 32. On the pinned
+     * ZZIC firmware (Android 17) the difference is invisible, but on a device
+     * the manifest still claims to support, that call raises NoSuchMethodError
+     * - an Error, not an Exception, so the caller's catch would not hold it and
+     * the post-root wait would die with the dialog still spinning. A parser
+     * whose whole job is to refuse must not be the thing that throws.
+     */
+    private static boolean blank(String s) {
+        return s == null || s.trim().isEmpty();
+    }
+
     public static final class Verdict {
         public final boolean complete;
         public final String reason;
@@ -30,8 +42,8 @@ public final class PostRootStatus {
     }
 
     public static Verdict evaluate(String record, String currentBootId, int liveSelinux) {
-        if (record == null || record.isBlank()) return fail("completion record absent or empty");
-        if (currentBootId == null || currentBootId.isBlank()) return fail("current boot_id unavailable");
+        if (blank(record)) return fail("completion record absent or empty");
+        if (blank(currentBootId)) return fail("current boot_id unavailable");
 
         Map<String, String> values = new HashMap<>();
         for (String raw : record.split("\\n", -1)) {

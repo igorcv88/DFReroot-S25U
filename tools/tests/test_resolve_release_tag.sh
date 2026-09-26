@@ -50,7 +50,8 @@ esac
 EOF
     chmod +x "$WORK/bin/gh"
     set +e
-    out=$(PATH="$WORK/bin:$PATH" sh "$SUT" owner/repo v9.9.9 "$SHA_OK" 2>"$WORK/err")
+    out=$(PATH="$WORK/bin:$PATH" sh "$SUT" owner/repo "${TAG_ARG:-v9.9.9}" "$SHA_OK" \
+        ${VER_ARG+"$VER_ARG"} 2>"$WORK/err")
     rc=$?
     set -e
     ok=1
@@ -80,6 +81,20 @@ check "resolved but no sha -> refuse"                no_sha             1 ""
 # a tag over one that already exists, the very thing this check prevents.
 check "gh unreachable -> refuse, not 'absent'"       transport          1 ""
 check "rate limited (403) -> refuse, not 'absent'"   ratelimit          1 ""
+
+# The tag and app/build.gradle.kts versionName were never compared, so a
+# dispatch could publish a v2.0.5 tag whose assets are all 2.0.4. The refusal is
+# offline and happens before the build: with `mismatch` stubbed for gh, an
+# agreeing version still reaches the (refusing) sha comparison, which proves the
+# version check did not simply swallow the call.
+VER_ARG=9.9.9 check "version agrees with the tag -> proceeds to the sha check" \
+    mismatch 1 ""
+VER_ARG=9.9.9 check "version agrees with the tag -> publishes"  match    0 "TAG_EXISTS=1"
+VER_ARG=2.0.4-zzic check "tag disagrees with versionName -> refuse" match 1 ""
+TAG_ARG=v2.0.4-zzic VER_ARG=2.0.4-zzic \
+    check "matching non-trivial version pair is accepted"  match  0 "TAG_EXISTS=1"
+# No version argument at all must keep the old behaviour rather than refusing.
+check "no version argument -> unchanged behaviour"     match  0 "TAG_EXISTS=1"
 
 echo ""
 echo "$((pass)) / $((pass + fail)) checks passed, $fail failed"

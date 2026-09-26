@@ -1,7 +1,7 @@
 #!/bin/sh
 # resolve_release_tag.sh - decide whether it is safe to publish <tag> from <sha>.
 #
-#   tools/resolve_release_tag.sh <owner/repo> <tag> <expected_sha>
+#   tools/resolve_release_tag.sh <owner/repo> <tag> <expected_sha> [version_name]
 #
 # Prints TAG_EXISTS=0 (absent, will be created) or TAG_EXISTS=1 (exists and
 # already points at <expected_sha>) and exits 0. Exits 1 on anything else, with
@@ -14,12 +14,34 @@
 # commit is worth testing off-CI. tools/tests/test_resolve_release_tag.sh drives
 # every branch against a stubbed gh.
 #
+# With <version_name> (app/build.gradle.kts `versionName`) it ALSO refuses a tag
+# that does not spell that exact version. Nothing else compared the two: the
+# release names its assets and its title from versionName while it is published
+# under the dispatched tag, so dispatching v2.0.5-zzic from a tree still at
+# 2.0.4-zzic produced a release tagged for a version whose APKs carry the
+# previous versionCode - a mismatch no offline gate could see, on the one
+# workflow the owner is allowed to spend. The comparison is exact and runs
+# before any network call, so it costs nothing and fails in the first seconds.
+#
 # Requires `gh` (authenticated via GH_TOKEN) and `jq` on PATH.
 set -eu
 
 REPO="${1:?usage: resolve_release_tag.sh <owner/repo> <tag> <expected_sha>}"
 TAG="${2:?missing tag}"
 WANT="${3:?missing expected sha}"
+VER="${4:-}"
+
+if [ -n "$VER" ]; then
+    if [ "$TAG" != "v$VER" ]; then
+        echo "::error::tag $TAG does not match app/build.gradle.kts versionName" >&2
+        echo "::error::$VER (expected tag v$VER)." >&2
+        echo "::error::Refusing before the build: the APKs, their versionCode and" >&2
+        echo "::error::the release title would describe a different version than the" >&2
+        echo "::error::tag they are published under. Bump versionName/versionCode, or" >&2
+        echo "::error::dispatch the tag that matches this tree." >&2
+        exit 1
+    fi
+fi
 
 # Emptiness of stdout cannot decide whether the tag exists: `gh api` writes its
 # error BODY to stdout, so a 404 leaves a non-empty {"message":"Not Found",...}

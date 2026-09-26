@@ -57,10 +57,14 @@ jobs:
           test -n "$TAG" || { echo "::error::no tag to publish"; exit 1; }
 
           # tools/resolve_release_tag.sh owns this decision and is unit-tested
-          # off-CI (tools/tests/test_resolve_release_tag.sh, 8 cases). It is run
+          # off-CI (tools/tests/test_resolve_release_tag.sh, 13 cases). It is run
           # AGAIN immediately before publishing, because the tag can appear during
           # the several minutes this build takes.
-          sh tools/resolve_release_tag.sh "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" \
+          # The fourth argument makes the resolver refuse a tag that does not
+          # spell this tree's versionName. Both are read here and nowhere else,
+          # so without it a dispatch could publish v2.0.5-zzic with 2.0.4-zzic
+          # APKs inside - and it would do so only after spending the build.
+          sh tools/resolve_release_tag.sh "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$VER" \
             >> "$GITHUB_ENV"
           echo "VER=$VER" >> "$GITHUB_ENV"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
@@ -262,7 +266,7 @@ jobs:
           # This is a check, not a lock: nothing here can reserve a ref. It closes
           # the window from minutes to the gap between this call and the publish
           # below, which is the best a non-atomic API allows.
-          sh tools/resolve_release_tag.sh "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" \
+          sh tools/resolve_release_tag.sh "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$VER" \
             > "$RUNNER_TEMP/tagstate"
           cat "$RUNNER_TEMP/tagstate"
           . "$RUNNER_TEMP/tagstate"   # refreshes TAG_EXISTS for this step
