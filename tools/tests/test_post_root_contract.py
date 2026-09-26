@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 stage = (ROOT / "app/src/main/jni/stage1.S").read_text()
 exp = (ROOT / "app/src/main/jni/exp.c").read_text()
 main = (ROOT / "app/src/main/java/com/polygraphene/df/reroot/MainActivity.kt").read_text()
+release_notes = (ROOT / "tools/release_notes.py").read_text()
 
 checks = []
 
@@ -46,5 +47,10 @@ check("PostRootStatus.evaluate(record, bootId, liveSelinux)" in main,
       "UI validates same-boot record and independent live SELinux state")
 check("ROOT_RESULT=SUCCESS" in main and "POST_ROOT_COMPLETE=PASS" in main,
       "final success signals are emitted only by the post-root path")
+check("G2 — runtime symbol discovery | physical PASS" in release_notes and
+      "G4 — SELinux write safety | physical PASS" in release_notes,
+      "generated release notes preserve the physical G2/G4 evidence")
+check("I — automatic safe end state | **PENDING PHYSICAL ACCEPTANCE**" in release_notes,
+      "generated release notes keep Gate I pending until the field run")
 
 print(f"test_post_root_contract: {len(checks)}/{len(checks)} passed")

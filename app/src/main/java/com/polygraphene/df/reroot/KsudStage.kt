@@ -31,8 +31,8 @@ object KsudStage {
      * on a bundled asset whose digest is not this one.
      */
     private const val KSUD_SHA256 =
-        "b82c194db398ace90fa777bed4d8419c70041eb99d7bbe2915caa900100de75f"
-    private const val KSUD_SIZE = 6664728L
+        "14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a"
+    private const val KSUD_SIZE = 6670272L
 
     fun stageFromAssets(context: Context): String {
         val raw = try {

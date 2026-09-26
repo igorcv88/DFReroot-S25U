@@ -78,21 +78,25 @@ def main():
     add("| D — `network_stack` boundary | physical PASS | CONTROLLER binder received; "
         "the remote process now reports its own uid/context/`LIBEXP_LOADED` back to the UI |")
     if ko_ok:
-        add("| G1 — kernel module loader/import ABI | PASS (offline) | bound to `%s` "
-            "(`%s`); exact ZZIC modversions are COMPLETE (5/5) |"
+        add("| G1 — kernel module loader/import ABI | physical PASS | bound to `%s` "
+            "(`%s`); exact ZZIC modversions are COMPLETE (5/5), and the helper "
+            "success path executed on hardware |"
             % (c.get("ko_filename"), short(c.get("ko_sha256"))))
-        add("| G2 — runtime symbol discovery | **RUNTIME UNVERIFIED** | "
-            "`kallsyms_lookup_name` / `selinux_state` are resolved at runtime; "
-            "the first hardware run must prove that path |")
-        add("| G3 — `selinux_state` layout | supported offline | exact ZZIC BTF places "
-            "`enforcing` at offset 0; runtime confirmation is still pending |")
-        add("| G4 — SELinux write safety | **UNVERIFIED** | CRC agreement proves the "
-            "loader ABI, not that writing `selinux_state.enforcing = 0` is safe |")
+        add("| G2 — runtime symbol discovery | physical PASS | the helper success path "
+            "requires the sprint-symbol anchor plus `kallsyms_lookup_name` and "
+            "`selinux_state` resolution |")
+        add("| G3 — `selinux_state` layout | physical PASS | exact ZZIC BTF predicts "
+            "offset 0, and the hardware write produced the expected global state change |")
+        add("| G4 — SELinux write safety | physical PASS | the system remained operational, "
+            "KernelSU late-load completed and root survived manual restoration to Enforcing |")
     else:
         add("| G — kernel module ABI | **UNVERIFIED** | no positively validated "
             "ZZIC module is bound to the profile |")
     add("| H — installer / `packages.xml` | physical PASS | ABX→TEXT→ABX round trip "
         "accepted by PMS; metadata and backup handling rewritten after the v2.0.2 field run |")
+    add("| I — automatic safe end state | **PENDING PHYSICAL ACCEPTANCE** | this build "
+        "requires live KernelSU proof, automatic Enforcing restore/read-back, a second "
+        "live proof and same-boot `POST_ROOT_COMPLETE` before UI success |")
     add("")
     if not ko_ok:
         add("On the exact ZZIC target this build **will still refuse to root the device**,")
@@ -108,14 +112,13 @@ def main():
         add("every boundary before Gate G is proven on hardware and the fail-closed")
         add("refusal still holds. Running it is an evidence-collection step.")
     else:
-        add("G1 is closed offline, so this build is allowed to proceed past the old")
-        add("module-policy refusal. The first run is therefore a real hardware experiment:")
-        add("it may reach the page-cache writes and the helper may set SELinux permissive.")
-        add("G2 and G4 are still unverified, and automatic restoration to `Enforcing`")
-        add("after KernelSU readiness is not yet proven. Keep a verified `packages.xml`")
-        add("backup, capture the complete log from one boot, do not retry after `/dev/df`")
-        add("appears, and use a hard reboot as the recovery path if the run fails after")
-        add("the helper has executed.")
+        add("G1 through G4 are physically proven on ZZIC. This build adds the fail-closed")
+        add("Gate-I closeout and pins the DFR-specific ksud as `%s` (%s bytes). It must"
+            % (short(profile.get("ksud_sha256")), profile.get("ksud_size")))
+        add("not report success until KernelSU works, SELinux reads back Enforcing, the")
+        add("KernelSU control channel works again and the same boot is recorded. Capture")
+        add("the complete log from one boot, do not retry after `/dev/df` appears, and use")
+        add("a hard reboot as the recovery path after any post-helper failure.")
     add("")
     if not binding_ok:
         # Should be unreachable: release.yml runs the audit as a gate first.
