@@ -39,6 +39,11 @@ if [ -n "$VER" ]; then
         echo "::error::the release title would describe a different version than the" >&2
         echo "::error::tag they are published under. Bump versionName/versionCode, or" >&2
         echo "::error::dispatch the tag that matches this tree." >&2
+        case "$TAG" in
+            v*) ;;
+            *)  echo "::error::(\"$TAG\" does not even start with 'v' - if it is a branch" >&2
+                echo "::error::name, the dispatch ran with an empty tag input.)" >&2 ;;
+        esac
         exit 1
     fi
 fi

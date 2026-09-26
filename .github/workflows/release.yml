@@ -52,12 +52,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VER=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
-          TAG="${{ inputs.tag }}"
-          [ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"
+          # WHICH tag this run publishes. On a tag push GITHUB_REF_NAME is the
+          # tag; on a workflow_dispatch it is the BRANCH, so the old
+          # `[ -n "$TAG" ] || TAG="${GITHUB_REF_NAME}"` resolved an empty tag box
+          # to `main` - and `gh release create main` would have created a tag named
+          # after the default branch. tools/resolve_dispatch_tag.sh owns the rule
+          # and is unit-tested off-CI (8 cases).
+          TAG=$(sh tools/resolve_dispatch_tag.sh \
+                  "${{ inputs.tag }}" "$GITHUB_REF_TYPE" "$GITHUB_REF_NAME" "$VER")
           test -n "$TAG" || { echo "::error::no tag to publish"; exit 1; }
+          echo "publishing tag $TAG for versionName $VER"
 
           # tools/resolve_release_tag.sh owns this decision and is unit-tested
-          # off-CI (tools/tests/test_resolve_release_tag.sh, 13 cases). It is run
+          # off-CI (tools/tests/test_resolve_release_tag.sh, 21 cases). It is run
           # AGAIN immediately before publishing, because the tag can appear during
           # the several minutes this build takes.
           # The fourth argument makes the resolver refuse a tag that does not
@@ -152,6 +159,7 @@ jobs:
                    tools/tests/run_installer_tests.sh \
                    tools/tests/exp_syntax_check.sh \
                    tools/resolve_release_tag.sh \
+                   tools/resolve_dispatch_tag.sh \
                    tools/tests/test_resolve_release_tag.sh \
                    dirtyfrag-lkm/build.sh; do
             sh -n "$s"

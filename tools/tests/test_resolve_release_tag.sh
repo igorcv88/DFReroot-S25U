@@ -96,6 +96,41 @@ TAG_ARG=v2.0.4-zzic VER_ARG=2.0.4-zzic \
 # No version argument at all must keep the old behaviour rather than refusing.
 check "no version argument -> unchanged behaviour"     match  0 "TAG_EXISTS=1"
 
+# --- tools/resolve_dispatch_tag.sh ------------------------------------------
+# The trap this removes: on a workflow_dispatch GITHUB_REF_NAME is the BRANCH, so
+# an empty tag box used to resolve to "main" and `gh release create main` would
+# have created a tag named after the default branch.
+echo ""
+echo "[T] resolve_dispatch_tag.sh"
+SUT2=tools/resolve_dispatch_tag.sh
+
+dcheck() {
+    name="$1"; want_rc="$2"; want_out="$3"; shift 3
+    set +e
+    out=$(sh "$SUT2" "$@" 2>"$WORK/err2")
+    rc=$?
+    set -e
+    if [ "$rc" = "$want_rc" ] && [ "$out" = "$want_out" ]; then
+        pass=$((pass + 1)); printf '  ok   - %s (rc=%s out=%s)\n' "$name" "$rc" "${out:-<none>}"
+    else
+        fail=$((fail + 1))
+        printf '  FAIL - %s: rc=%s want %s, out=%s want %s\n' \
+            "$name" "$rc" "$want_rc" "${out:-<none>}" "${want_out:-<none>}"
+        sed 's/^/         /' "$WORK/err2"
+    fi
+}
+
+dcheck "explicit input wins"            0 "v2.0.9-zzic" "v2.0.9-zzic" branch main 2.0.5-zzic
+dcheck "whitespace-only input is empty" 0 "v2.0.5-zzic" "   "         branch main 2.0.5-zzic
+dcheck "input is trimmed"               0 "v2.0.9-zzic" " v2.0.9-zzic " branch main 2.0.5-zzic
+dcheck "tag push uses its own tag"      0 "v2.0.4-zzic" ""            tag    v2.0.4-zzic 2.0.5-zzic
+dcheck "empty dispatch derives from versionName, NOT the branch" \
+                                        0 "v2.0.5-zzic" ""            branch main 2.0.5-zzic
+dcheck "a branch called v1.0 is still not used as the tag" \
+                                        0 "v2.0.5-zzic" ""            branch v1.0 2.0.5-zzic
+dcheck "no input, no version -> refuse" 1 ""            ""            branch main ""
+dcheck "tag ref with no name -> refuse" 1 ""            ""            tag    ""   2.0.5-zzic
+
 echo ""
 echo "$((pass)) / $((pass + fail)) checks passed, $fail failed"
 [ "$fail" = 0 ]
