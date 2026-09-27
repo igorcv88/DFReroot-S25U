@@ -903,14 +903,34 @@ def audit():
     # explain - so absolute paths are tried first and the bare name last. Without
     # that, "no transport" and "wrong PATH" are the same observation, and the next
     # tap's answer would be worth nothing.
-    if "val SU_CANDIDATES = listOf(" not in transport_code \
-            or '"/system/bin/su",' not in transport_code:
-        fail("RootTransport no longer tries absolute su paths before the bare name; "
-             "ENOENT would again be indistinguishable from a PATH that does not list "
-             "where su lives")
-    if transport_code.index('"su",') < transport_code.index('"/system/bin/su",'):
-        fail("RootTransport tries the bare `su` before the absolute paths; the bare "
-             "name is the one that depends on PATH and must be last")
+    # Read the literal out and check its SHAPE, not one pair of offsets: a guard
+    # that only compares `"su"` against `"/system/bin/su"` passes a list that puts
+    # the bare name second, which is the failure it exists to prevent.
+    su_list = re.search(r"val SU_CANDIDATES = listOf\((.*?)\)",
+                        transport_code, re.S)
+    if su_list is None:
+        fail("RootTransport no longer declares SU_CANDIDATES as a listOf literal; "
+             "the audit cannot tell which order the candidates are tried in, and an "
+             "unordered probe makes ENOENT indistinguishable from a wrong PATH")
+    su_candidates = ([] if su_list is None
+                     else re.findall(r'"([^"]*)"', su_list.group(1)))
+    if su_list is not None and len(su_candidates) < 2:
+        fail("RootTransport tries fewer than two su candidates; with only the bare "
+             "name, ENOENT and a PATH that does not list where su lives are the same "
+             "observation")
+    if su_candidates and su_candidates[-1] != "su":
+        fail("RootTransport does not try the bare `su` last (last candidate is "
+             + repr(su_candidates[-1]) + "); the bare name is the one that depends "
+             "on PATH, so it must come after every absolute path")
+    for cand in su_candidates[:-1]:
+        if not cand.startswith("/"):
+            fail("RootTransport tries the PATH-dependent candidate " + repr(cand)
+                 + " before the end of SU_CANDIDATES; every candidate but the last "
+                   "must be an absolute path, or a successful probe proves nothing "
+                   "about where su actually lives")
+    if su_candidates and "/system/bin/su" not in su_candidates:
+        fail("RootTransport no longer probes /system/bin/su, the conventional "
+             "absolute path on this firmware")
     if "token.length != 64" not in transport_code:
         fail("RootTransport no longer validates the sha256sum output; anything that "
              "is not exactly one 64-character digest must read as 'could not tell'")
