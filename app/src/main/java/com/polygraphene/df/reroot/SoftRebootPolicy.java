@@ -116,7 +116,32 @@ public final class SoftRebootPolicy {
         return new Decision(false, reason, null);
     }
 
+    /**
+     * Everything decidable WITHOUT a root shell.
+     *
+     * Split out because the candidate digests cannot be read by this app at all.
+     * The chain consumes the staged daemon and installs it at {@code /data/adb/ksud}
+     * - observed on ZZIC: after a successful run the staged path is gone and
+     * {@code /data/adb} is {@code drwx------ root root u:object_r:adb_data_file:s0},
+     * so uid 1000 cannot even traverse it. The digests therefore have to be taken
+     * through the privileged shell, which means the shell has to be obtained first,
+     * which means the cheap boot-scope and post-root refusals must run before that
+     * or a stale notification would spawn a root shell just to be refused.
+     *
+     * Returns null when nothing here refuses, or the refusal.
+     */
+    public static Decision precheck(Inputs in) {
+        Decision d = preCandidateChecks(in);
+        return d != null ? d : new Decision(true, "SOFT_REBOOT_PRECHECK=PASS", null);
+    }
+
     public static Decision evaluate(Inputs in) {
+        Decision refusal = preCandidateChecks(in);
+        if (refusal != null) return refusal;
+        return selectBinary(in);
+    }
+
+    private static Decision preCandidateChecks(Inputs in) {
         if (in == null) return refuse("no inputs");
         if (blank(in.currentBootId)) return refuse("current boot_id is unavailable");
         if (blank(in.requestBootId)) {
@@ -178,17 +203,20 @@ public final class SoftRebootPolicy {
             }
             // A lock naming another boot is last boot's record and locks nothing.
         }
+        return null;
+    }
 
-        /*
+    /*
          * Bind the claim to bytes (AGENTS.md 3.5). The binary that performs this
          * is chosen by DIGEST, never by path, because on this device
          * /data/adb/ksud is routinely replaced by the root manager's own build:
-         * it was observed holding 99aaa607... (4,892,712 bytes, byte-identical to
-         * the manager APK's libksud.so) while the pinned DFR daemon is
-         * 14fb9eaf... (6,670,272 bytes). Invoking whatever happens to sit at that
-         * path would be handing a privileged lifecycle operation to an
-         * unidentified binary.
-         */
+     * it has been observed holding 99aaa607... (4,892,712 bytes, byte-identical to
+     * the manager APK's libksud.so) at one point and the pinned DFR daemon
+     * 14fb9eaf... (6,670,272 bytes) at another, on the same device. Invoking
+     * whatever happens to sit at that path would be handing a privileged lifecycle
+     * operation to an unidentified binary.
+     */
+    private static Decision selectBinary(Inputs in) {
         if (blank(in.pinnedKsudSha256)) {
             return refuse("no pinned ksud digest to compare against");
         }

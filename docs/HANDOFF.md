@@ -149,21 +149,28 @@ The remaining sequence is:
    workflow that needs a runner;
 2. run steps 5-7 of the Auto Root sequence in `docs/AUTO_ROOT.md` — the negative
    half, which a successful boot cannot speak for;
-3. tap **Apply Modules (Soft Reboot)** once and record which way it goes. Expect a
-   refusal: RMGLabs recorded `su: connect daemon: Permission denied` in app context
-   on this exact hardware after a late-load reporting `rc=0`, and its own conclusion
-   is that a direct app `su` path needs a user-granted KernelSU Manager permission.
-   `NOT_ROOT` and `NO_ROOT_TRANSPORT` are different answers and the refusal names
-   which one (`docs/AUTO_ROOT.md`, *What is still unproven*). Do **not** grant
-   DFReroot in the manager yet — it is uid 1000, shared with the platform, and
-   whether KernelSU keys its allowlist strictly by uid is an open question recorded
-   in that section;
+3. tap **Apply Modules (Soft Reboot)** once and record which way it goes. The first
+   tap on `2.0.7-zzic` refused for a reason that was this repository's bug, not the
+   transport: the digest gate hashed candidates this app cannot read at all (sixth
+   physical run in the dossier). That is fixed — the digest now comes through the
+   root shell — so the next tap actually reaches the transport question. Expect a
+   refusal there too: RMGLabs recorded `su: connect daemon: Permission denied` in app
+   context on this exact hardware after a late-load reporting `rc=0`, and its own
+   conclusion is that a direct app `su` path needs a user-granted KernelSU Manager
+   permission. `NOT_ROOT` and `NO_ROOT_TRANSPORT` are different answers and the
+   refusal names which one. Do **not** grant DFReroot in the manager yet — it is uid
+   1000, shared with the platform, and whether KernelSU keys its allowlist strictly
+   by uid is an open question recorded in `docs/AUTO_ROOT.md`;
 4. only then consider `POST_ROOT_LSPOSED_COMPAT`.
 
-Before any of that, set the log buffer to a value this build accepts:
-`persist.logd.size=5M`. `16M` is silently out of range (`logcat -G 16M` answers
-`MAX log buffer size is 5 MiB`) and the default 128 KiB per buffer loses a
-boot-time trace within seconds.
+Before any of that, the log buffer — and note that the obvious knob does **not**
+work here. With `persist.logd.size=5M` set, a full boot came up with `main`,
+`system` and `crash` still at **128 KiB** and only `kernel` at 5 MiB, with no
+`ro.logd.size*` override to explain it. `persist.logd.size.main` and
+`.system` are set and untested; check with `logcat -g` as the FIRST command after a
+boot. Until one of them takes, `[DFR][*]` evidence from a boot-time run does not
+survive to when a root shell exists, and the journal plus the post-root record are
+the only channels that do.
 
 The generated daemon contains the expected DFR staging path and every post-root
 closeout string. `tools/profile_binding_audit.py` must bind those bytes to all

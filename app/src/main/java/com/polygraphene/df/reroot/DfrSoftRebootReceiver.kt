@@ -91,15 +91,61 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         inputs.lockRecord = AutoRootStore.softRebootLock()
         inputs.pinnedKsudSha256 = KsudStage.pinnedKsudSha256()
         /*
-         * Preference order, but the DIGEST decides. The staged copy comes first
-         * because this build wrote and verified it in this boot; /data/adb/ksud is
-         * offered second and was observed holding the root manager's own build
-         * (99aaa607..., 4,892,712 bytes) rather than the pinned daemon, which is
-         * exactly why neither path is trusted on its own.
+         * Everything decidable without privilege, first. A notification minted in
+         * another boot, or a boot this build did not root, must be refused WITHOUT
+         * asking for a root shell - the cheap refusals cost nothing and the shell
+         * may prompt the operator.
          */
-        for (path in arrayOf(KsudStage.DEST, ADB_KSUD)) {
+        val pre = SoftRebootPolicy.precheck(inputs)
+        if (!pre.allow) {
+            Log.i(TAG, "[DFR][SOFT_REBOOT] REFUSED ${pre.reason}")
+            RootNotifier.notifySoftReboot(
+                context, context.getString(R.string.notif_soft_reboot_refused), pre.reason
+            )
+            return
+        }
+
+        /*
+         * Now the transport, because the digests cannot be taken without it. The
+         * first shipped version hashed the candidates from this process and refused
+         * every time with "unreadable": the chain consumes the staged copy and the
+         * daemon it installs lives under /data/adb, which is 0700 root. That made the
+         * digest gate unsatisfiable by construction (AGENTS.md 3.3). Proving the
+         * shell first and hashing through it keeps the gate and makes it reachable.
+         */
+        val probe = RootTransport.runAsRoot("id", RootTransport.PROBE_TIMEOUT_MS)
+        if (probe.rc == RootTransport.RC_NO_TRANSPORT) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT ${probe.output}")
+            RootNotifier.notifySoftReboot(
+                context, context.getString(R.string.notif_soft_reboot_refused),
+                "no su binary this app can start (${probe.output}). Root itself is" +
+                    " unaffected; the module lifecycle was not re-applied."
+            )
+            return
+        }
+        if (!probe.ran || !probe.output.contains("uid=0")) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT] NOT_ROOT rc=${probe.rc} ${probe.output}")
+            RootNotifier.notifySoftReboot(
+                context, context.getString(R.string.notif_soft_reboot_refused),
+                "su answered but this app is not root: a KernelSU Manager grant is" +
+                    " required for a direct app su path (${probe.output}). Root itself" +
+                    " is unaffected; the module lifecycle was not re-applied."
+            )
+            return
+        }
+
+        /*
+         * Preference order, but the DIGEST decides. /data/adb/ksud comes first now
+         * because that is where the chain's own staging contract puts the daemon:
+         * stage1.S calls stage_daemon_from("/data/system/dfreroot-ksud") and ksud
+         * installs it there, so after a successful run the staged path does not
+         * exist. It is still offered second in case a future change stops consuming
+         * it. Neither path is trusted on its own - /data/adb/ksud has been observed
+         * holding the root manager's own build as well as the pinned daemon.
+         */
+        for (path in arrayOf(ADB_KSUD, KsudStage.DEST)) {
             inputs.candidates.add(
-                SoftRebootPolicy.Candidate(path, RootTransport.sha256File(path))
+                SoftRebootPolicy.Candidate(path, RootTransport.sha256AsRoot(path))
             )
         }
 
@@ -130,38 +176,20 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         }
 
         /*
-         * Proven, not attempted: the transport is probed with `id` before the real
-         * command, so a refusal names which of the two things is missing. See
-         * RootTransport.runAsRootProven for the field evidence that this is the
-         * likely outcome rather than a theoretical one.
+         * The transport was already proven above and the digest was taken through
+         * it, so this is the invocation and nothing else.
          */
-        val outcome = RootTransport.runAsRootProven(
+        val outcome = RootTransport.runAsRoot(
             "'${decision.binaryPath}' soft-reboot", TRANSPORT_TIMEOUT_MS
         )
         when {
             outcome.rc == RootTransport.RC_NO_TRANSPORT -> {
-                Log.e(TAG, "[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT ${outcome.output}")
+                // The shell worked seconds ago; losing it here is a real anomaly.
+                Log.e(TAG, "[DFR][SOFT_REBOOT] TRANSPORT_LOST ${outcome.output}")
                 RootNotifier.notifySoftReboot(
-                    context, context.getString(R.string.notif_soft_reboot_refused),
-                    "no su binary this app can start (${outcome.output}). Root itself" +
-                        " is unaffected; the module lifecycle was not re-applied."
-                )
-            }
-            outcome.rc == RootTransport.RC_NOT_ROOT -> {
-                /*
-                 * The expected failure. KernelSU grants su from an allowlist its
-                 * manager maintains, and nothing about a successful root run puts
-                 * this app on it - RMGLabs recorded exactly this on this hardware
-                 * ("su: connect daemon: Permission denied") after a late-load that
-                 * reported rc=0.
-                 */
-                Log.e(TAG, "[DFR][SOFT_REBOOT] NOT_ROOT ${outcome.output}")
-                RootNotifier.notifySoftReboot(
-                    context, context.getString(R.string.notif_soft_reboot_refused),
-                    "su answered but this app is not root: a KernelSU Manager grant" +
-                        " is required for a direct app su path (${outcome.output})." +
-                        " Root itself is unaffected; the module lifecycle was not" +
-                        " re-applied."
+                    context, context.getString(R.string.notif_soft_reboot_failed),
+                    "the root shell that answered the probe could not be started" +
+                        " again (${outcome.output}); nothing was re-applied."
                 )
             }
             outcome.rc == RootTransport.RC_TIMEOUT -> {

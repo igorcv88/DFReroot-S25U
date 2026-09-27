@@ -190,6 +190,66 @@ public class SoftRebootPolicyTest {
         nearMiss.candidates.add(new Candidate(STAGED, PINNED.substring(0, 63) + "b"));
         refuse("a one-character digest difference refuses", nearMiss);
 
+        // --- precheck: everything decidable WITHOUT a root shell ---------------
+        // It exists because no candidate digest can be read by this app at all: the
+        // chain consumes the staged daemon and installs it under /data/adb, which is
+        // 0700 root. The digests come from `su -c sha256sum`, so the shell has to be
+        // obtained first - and the cheap refusals must therefore come before it, or a
+        // notification minted in another boot would make the device ask for root only
+        // to be refused.
+        System.out.println("");
+        System.out.println("[T] SoftRebootPolicy.precheck");
+
+        Inputs noCands = ok();
+        noCands.candidates.clear();
+        Decision p1 = SoftRebootPolicy.precheck(noCands);
+        if (p1.allow && p1.binaryPath == null) {
+            pass++;
+            System.out.println("  ok   - passes with no candidates at all (they come later)");
+        } else {
+            fail++;
+            System.out.println("  FAIL - precheck needs candidates: " + p1.reason);
+        }
+
+        // Every unprivileged refusal must still fire here, or the receiver would
+        // reach for a root shell on a request it should have rejected outright.
+        String[][] cases = {
+            {"stale request boot", "requestBootId"},
+            {"post-root from another boot", "postRoot"},
+            {"permissive SELinux", "selinux"},
+            {"already dispatched this boot", "lock"},
+        };
+        for (String[] c : cases) {
+            Inputs in = ok();
+            in.candidates.clear();
+            switch (c[1]) {
+                case "requestBootId": in.requestBootId = OTHER_BOOT; break;
+                case "postRoot": in.postRootRecord = postRoot(OTHER_BOOT); break;
+                case "selinux": in.liveSelinux = 0; break;
+                case "lock": in.lockRecord = SoftRebootPolicy.formatLock(BOOT, 1L); break;
+                default: break;
+            }
+            Decision d = SoftRebootPolicy.precheck(in);
+            if (!d.allow && d.reason != null && !d.reason.isEmpty()) {
+                pass++;
+                System.out.println("  ok   - refuses before asking for root: " + c[0]);
+            } else {
+                fail++;
+                System.out.println("  FAIL - precheck allowed " + c[0]);
+            }
+        }
+
+        // precheck must never hand back a binary: choosing one needs the digests,
+        // and the digests need the shell precheck runs before.
+        Decision p2 = SoftRebootPolicy.precheck(ok());
+        if (p2.binaryPath == null) {
+            pass++;
+            System.out.println("  ok   - precheck never selects a binary");
+        } else {
+            fail++;
+            System.out.println("  FAIL - precheck selected " + p2.binaryPath);
+        }
+
         System.out.println("");
         System.out.println("SoftRebootPolicyTest: " + pass + "/" + (pass + fail) + " passed");
         if (fail != 0) System.exit(1);

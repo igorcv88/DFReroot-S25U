@@ -1663,3 +1663,83 @@ range on this build — `logcat -G 16M` answers `MAX log buffer size is 5 MiB` �
 `5M` is the value that can be honoured at boot. This is why the verdict is now also
 posted as a notification: the two `/data/system` records plus the notification are
 the evidence channels that do not depend on the log buffer.
+
+
+### Sixth physical run — `2.0.7-zzic`, and what the soft-reboot button found
+
+The `2.0.7-zzic` release built and installed (`versionCode=20007`), which also
+confirms the `compileReleaseKotlin` break in `claimSoftReboot` is fixed. Three
+findings, in order of what they change.
+
+**1. No automatic attempt ran in boot `f40c5b44…`, and that is correct.** The
+journal still named the previous boot:
+
+```text
+current boot   f40c5b44-f92d-4573-9c72-08963fa6ff88
+journal        boot_id=2e447aaf-…  phase=COMPLETE  attempts=1
+post-root      boot_id=f40c5b44-…  ksu 32601  uapi 2  late-load  selinux=1
+```
+
+`DfrAutoRootService.attempt()` always writes the journal, so an untouched journal
+means no automatic attempt completed. The reason is the version bump: the
+qualification on disk was recorded for `versionCode 20006` and the installed build
+is `20007`, so `AutoRootPolicy.buildMatches()` invalidates it. Root in that boot came
+from the operator's manual run, which then wrote a fresh `20007` qualification and
+armed opt-in for the *next* full boot.
+
+A "Root restored" notification appearing about a minute later was read as a second
+automatic run. It was not: `RootNotifier.notifyRunVerdict` is posted by **both**
+callers, the manual path included, and the notification does not auto-cancel. The
+journal is the discriminator and it says no service run happened. `logcat` could not
+corroborate either way — see finding 3.
+
+**Consequence for the acceptance sequence:** step 6 (a later full boot making exactly
+one attempt) was not exercised by this boot and is still owed. It is now reachable on
+the next full reboot, since the `20007` qualification is armed.
+
+**2. The soft-reboot digest gate was unsatisfiable by construction.** The first tap
+produced:
+
+```text
+Soft reboot refused
+no candidate ksud matches the pinned digest 14fb9eaf…;
+found: /data/system/dfreroot-ksud=unreadable /data/adb/ksud=unreadable
+```
+
+Both candidates are unreadable to this app, permanently:
+
+```text
+ls /data/system/dfreroot-ksud   -> No such file or directory
+ls -ldZ /data/adb              -> drwx------ root root u:object_r:adb_data_file:s0
+ls -lZ  /data/adb/ksud         -> -rwxr-xr-x root root u:object_r:ksu_file:s0  6670272
+```
+
+The staged copy is **consumed** by the chain — `stage1.S` calls
+`stage_daemon_from("/data/system/dfreroot-ksud")` — and the daemon it installs sits
+in a directory uid 1000 cannot traverse. Note the size: 6,670,272 bytes is exactly
+the pinned `ksud_size`, so `/data/adb/ksud` *is* the pinned daemon; it is the reading
+that was impossible, not the identity that was wrong.
+
+This is the failure AGENTS.md 3.3 describes, committed by this repository rather than
+caught by it. The fix follows that rule's own remedy — the proof changes form, not
+whether one is required: the digest is now taken through the proven root shell
+(`su -c "sha256sum …"`), still compared to the pinned value, still before the
+privileged call. An earlier note in `docs/AUTO_ROOT.md` said `/data/adb/ksud` "was
+observed" holding the manager's build; it was observed **as root, from a shell**, and
+that was conflated with the app being able to read it.
+
+**3. `persist.logd.size` does not resize the buffers that matter on this firmware.**
+After a full boot with `persist.logd.size=5M` set:
+
+```text
+main:   ring buffer is 128 KiB
+system: ring buffer is 128 KiB
+crash:  ring buffer is 128 KiB
+kernel: ring buffer is 5 MiB
+```
+
+Only `kernel` took the value. `ro.logd.size` and `ro.logd.size.main` are both empty,
+so nothing read-only is overriding it. `persist.logd.size.main` / `.system` have been
+set and are untested. Until one of them works, `[DFR][*]` evidence from a boot-time
+run does not survive to when a root shell exists, and the two `/data/system` records
+plus the verdict notification remain the only channels that do.
