@@ -123,7 +123,7 @@ object RootTransport {
          * thread and holds nothing the caller needs.
          */
         val sink = StringBuilder()
-        val drain = Thread {
+        val drain = Thread({
             try {
                 p.inputStream.bufferedReader().use { r ->
                     val buf = CharArray(4096)
@@ -138,7 +138,7 @@ object RootTransport {
             } catch (_: Throwable) {
                 // The pipe closing under us is the normal end of a soft reboot.
             }
-        }
+        }, "dfr-root-transport-reader")
         drain.isDaemon = true
         drain.start()
         return try {
@@ -185,7 +185,9 @@ object RootTransport {
                 d.update(buf, 0, n)
             }
         }
-        d.digest().joinToString("") { "%02x".format(it) }
+        val sb = StringBuilder(64)
+        for (x in d.digest()) sb.append("%02x".format(x))
+        sb.toString()
     } catch (t: Throwable) {
         Log.i(TAG, "[DFR][SOFT_REBOOT] cannot hash $path: ${t.javaClass.simpleName}")
         null
