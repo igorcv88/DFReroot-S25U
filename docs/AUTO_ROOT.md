@@ -513,14 +513,83 @@ one. Three things carry the guarantee between them, and none is redundant:
 | the lock exists but is unreadable | an I/O error is not an empty lock |
 | no candidate `ksud` matches the pinned digest | see below |
 
-**The binary is chosen by digest, never by path.** On the target,
-`/data/adb/ksud` is routinely replaced by the root manager's own build: it was
-observed holding `99aaa607…` (4,892,712 bytes, byte-identical to the manager
-APK's `libksud.so`) while the pinned DFR daemon is `14fb9eaf…` (6,670,272
-bytes). Invoking whatever sits at that path would hand a privileged lifecycle
-operation to an unidentified binary. `/data/system/dfreroot-ksud` — staged and
-verified by `KsudStage` in this boot — is offered first, `/data/adb/ksud` second,
-and each is admitted only if its SHA-256 equals the pinned digest.
+**The binary is chosen by digest, never by path.** `/data/adb/ksud` has been
+observed on this device holding the root manager's own build (`99aaa607…`,
+4,892,712 bytes, byte-identical to the manager APK's `libksud.so`) at one point
+and the pinned DFR daemon (`14fb9eaf…`, 6,670,272 bytes) at another. Invoking
+whatever sits at that path would hand a privileged lifecycle operation to an
+unidentified binary.
+
+**And the digest is taken through the root shell, because this app cannot read any
+candidate.** The first shipped version hashed them locally and refused every single
+time:
+
+```
+Soft reboot refused
+no candidate ksud matches the pinned digest 14fb9eaf…;
+found: /data/system/dfreroot-ksud=unreadable /data/adb/ksud=unreadable
+```
+
+Two facts, both observed on ZZIC after a successful run, make that permanent:
+
+- **the staged copy is gone.** `stage1.S` calls
+  `stage_daemon_from("/data/system/dfreroot-ksud")` and ksud installs it, so
+  `ls /data/system/dfreroot-ksud` → *No such file or directory*. `KsudStage`'s
+  `KSUD_STAGED_VERIFY=PASS` earlier in the same run is real — the file existed and
+  was readable *then*;
+- **where it lands is unreachable.** `/data/adb` is
+  `drwx------ root root u:object_r:adb_data_file:s0`, so uid 1000 cannot traverse
+  the directory, and `/data/adb/ksud` is `-rwxr-xr-x root root
+  u:object_r:ksu_file:s0`, 6,670,272 bytes — the pinned daemon, sitting somewhere
+  this process cannot look.
+
+That was a gate demanding a read that cannot happen — the failure AGENTS.md 3.3
+names. The rule's own remedy applies: **the proof changes form, not whether one is
+required.** The digest is still compared, still before the privileged operation, and
+still against the pinned value; it is simply read by something that can read it,
+via `su -c "sha256sum '<path>'"`, and anything that is not exactly one
+64-character hex digest reads as "could not tell" and refuses.
+
+This adds no exposure. A root shell that would lie about `sha256sum` is a root shell
+that could run `soft-reboot`, or anything else, directly.
+
+**And the digest is re-checked in the shell that execs.** Hashing a path and then
+executing that path binds the claim to a *name*, not to bytes (AGENTS.md 3.5) — and
+this name is documented to change. Between the candidate hash and the call there is
+another hash, a policy evaluation and a lock write with an fsync; a replacement
+landing in that window would have the app execute bytes nothing checked. So the
+comparison happens again, inside the privileged shell, immediately before `exec`:
+
+```sh
+p='/data/adb/ksud'; sha256sum "$p" | cut -d' ' -f1 | grep -qx '<pinned>' || exit 91
+exec "$p" soft-reboot
+```
+
+`grep -qx`, not `grep -q`: a digest that merely *contains* the pinned one is not the
+pinned one. Exit 91 is reported as its own outcome — nothing ran, and the lock stays
+claimed, because a retry would race the same replacement.
+
+**The residual window, named rather than hidden.** `sha256sum` opens the path and
+`exec` opens it again: two syscalls in one shell. Closing that completely means
+executing a private copy, or `exec`ing a `/proc/self/fd` path held open across the
+hash. Both change *how* ksud is invoked, and nothing in this environment can verify
+that ksud behaves identically started from a copied path or an fd — `soft_reboot()`
+itself does not reference its own path, but that is one file of its source, not a
+proof. A privileged mechanism this repository cannot test is a worse trade than a
+two-syscall window that is written down. Revisit if ksud is ever shown
+path-independent.
+
+That shell is the only place here where a digest decides whether a privileged binary
+runs, it is composed in Kotlin nothing here compiles, and it is run by a shell
+nothing here reaches — so `tools/tests/test_soft_reboot_shell.sh` drives the shell
+itself against scratch files, with the `exec` replaced by an echo, and asserts the
+receiver still composes those exact fragments.
+
+**Order matters, and it is guarded.** `SoftRebootPolicy.precheck()` runs everything
+decidable without privilege — boot scoping, the same-boot post-root record, SELinux,
+the dispatch lock — *before* a root shell is requested, so a notification minted in
+another boot cannot make the device prompt for root only to be refused.
+`tools/profile_binding_audit.py` fails if that order is inverted.
 
 ### Structurally unable to root
 
@@ -528,6 +597,22 @@ and each is admitted only if its SHA-256 equals the pinned digest.
 `DirtyFrag`, `StageHop` or `KsudStage.stageFromAssets`, and
 `tools/profile_binding_audit.py` fails if one appears. The action can only ask an
 already-rooted boot to re-apply modules.
+
+### What the button is actually for
+
+Narrower than first assumed, and the device settled it. After a late-load the
+modules **are** already mounted:
+
+```
+KSU on /system type overlay (ro,…,lowerdir=/data/adb/metamodule/mnt/NFC_Card_Emulator/system:/system,redirect_dir=on)
+/dev/block/loop48 on /data/adb/modules/meta-overlayfsx/mnt type ext4 (rw,…)
+```
+
+with eight modules present under `/data/adb/modules` (`zygisk_lsposed`, `zygisksu`,
+`meta-overlayfsx`, `ViPER4Android-RE-AIDL`, `bindhosts` and others). So the action is
+not "make modules work that did not come up" — the chain already does that. It is
+for re-running the lifecycle **within the same boot** after a module is installed,
+enabled or changed, without a full reboot.
 
 ### What is still unproven, and will announce itself
 

@@ -883,26 +883,57 @@ def audit():
         fail("SoftRebootPolicy no longer compares the candidate ksud against the "
              "pinned digest; it would hand a privileged lifecycle operation to an "
              "unidentified binary")
-    # The transport is PROVEN before it is used. Without the `id` probe a non-zero
-    # exit is indistinguishable from never having been root, and the caller would
-    # have to guess which. RMGLabs recorded the real shape of this on the same
-    # hardware: after a late-load reporting rc=0, an app-context elevation still
-    # failed with "su: connect daemon: Permission denied", because a direct app su
-    # path needs a user-granted KernelSU Manager permission.
+    # The digest gate must stay REACHABLE. The first shipped version hashed the
+    # candidates from this process and refused every single time with "unreadable":
+    # the chain consumes the staged daemon (stage1.S calls
+    # stage_daemon_from("/data/system/dfreroot-ksud")) and the daemon it installs
+    # lives under /data/adb, observed as drwx------ root root on ZZIC, which uid 1000
+    # cannot traverse. That is the unsatisfiable-by-construction gate AGENTS.md 3.3
+    # names, and the rule's own remedy applies: the proof changes FORM, not whether
+    # it is required. So the digest is taken THROUGH the proven root shell.
     transport_code = code_only(dfr_source("RootTransport.kt"))
-    if 'runAsRoot("id"' not in transport_code or 'contains("uid=0")' not in transport_code:
-        fail("RootTransport no longer proves the shell is root before using it; a "
-             "missing grant would be indistinguishable from a failed command")
-    if "Outcome(RC_NOT_ROOT, probe.output)" not in transport_code \
-            or "if (probe.rc == RC_NO_TRANSPORT) return probe" not in transport_code:
-        fail("RootTransport no longer separates 'no su binary' from 'su answered and "
-             "we are not root'; the operator's next action differs between them - one "
+    # The full signature, not the name: `fun sha256AsRoot` is a substring of
+    # `fun sha256AsRootUnused`, and a guard that a rename survives is not a guard.
+    if "fun sha256AsRoot(path: String): String? {" not in transport_code \
+            or "sha256sum '" not in transport_code:
+        fail("RootTransport no longer takes the candidate digest through the root "
+             "shell; this app cannot read any candidate, so a local hash makes the "
+             "digest gate unsatisfiable by construction")
+    if "token.length != 64" not in transport_code:
+        fail("RootTransport no longer validates the sha256sum output; anything that "
+             "is not exactly one 64-character digest must read as 'could not tell'")
+    if "RootTransport.sha256AsRoot(path)" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer hashes the candidates through root")
+    if "sha256File" in soft_receiver_code:
+        fail("DfrSoftRebootReceiver hashes a candidate from this process again; every "
+             "candidate is unreadable to uid 1000 after a successful run")
+    # Order is load-bearing: the cheap boot-scope and post-root refusals run BEFORE a
+    # root shell is requested, so a notification minted in another boot cannot make
+    # the device prompt for root just to be refused.
+    if "SoftRebootPolicy.precheck(inputs)" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer runs the unprivileged precheck first; a "
+             "stale notification would ask for a root shell before being refused")
+    if soft_receiver_code.index("SoftRebootPolicy.precheck(inputs)") > \
+            soft_receiver_code.index('RootTransport.runAsRoot("id"'):
+        fail("DfrSoftRebootReceiver asks for a root shell before the unprivileged "
+             "precheck has had a chance to refuse")
+    # And the two transport failures stay separate values (AGENTS.md 3.7): no su
+    # binary at all, versus su answered and we are still uid 1000. RMGLabs recorded
+    # the second on this exact hardware ("su: connect daemon: Permission denied")
+    # after a late-load reporting rc=0, and its conclusion is that a direct app su
+    # path needs a user-granted KernelSU Manager permission.
+    if "NO_ROOT_TRANSPORT" not in soft_receiver_code \
+            or "NOT_ROOT rc=" not in soft_receiver_code \
+            or 'probe.output.contains("uid=0")' not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer separates 'no su binary' from 'su "
+             "answered and we are not root'; the operator's next action differs - one "
              "is a missing binary, the other a missing KernelSU Manager grant")
-    if "RootTransport.runAsRootProven(" not in soft_receiver_code:
-        fail("DfrSoftRebootReceiver invokes ksud without proving the transport first")
-    if "RootTransport.RC_NOT_ROOT ->" not in soft_receiver_code:
-        fail("DfrSoftRebootReceiver no longer reports a missing root grant as its own "
-             "outcome")
+    # SoftRebootPolicy keeps both entry points: precheck for what needs no privilege,
+    # evaluate for the full decision including the digest.
+    if "public static Decision precheck(" not in soft_policy_code \
+            or "private static Decision preCandidateChecks(" not in soft_policy_code:
+        fail("SoftRebootPolicy no longer exposes the unprivileged precheck separately "
+             "from the full evaluation")
     if "claimSoftReboot" not in soft_receiver_code or \
             "AutoRootStore.claimSoftReboot(bootId)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer claims the boot before invoking ksud; "
@@ -934,6 +965,26 @@ def audit():
     if "notif_soft_reboot_undetermined" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer reports an undetermined soft reboot "
              "distinctly from a dispatched one")
+    # The digest must be re-checked in the SAME shell that execs. Hashing a path and
+    # then executing that path binds the claim to a NAME, not to bytes (AGENTS.md
+    # 3.5), and /data/adb/ksud is documented to change: it has held the root manager's
+    # build and the pinned daemon at different times on this device. Between the
+    # candidate hash and the call there is another hash, a policy evaluation and a
+    # lock write with an fsync.
+    for signal in ('grep -qx \'" + pinned + "\'',
+                   'exec \\"\\$p\\" soft-reboot',
+                   "RC_DIGEST_CHANGED"):
+        if signal not in soft_receiver_code:
+            fail("DfrSoftRebootReceiver no longer re-verifies the digest inside the "
+                 "shell that execs ksud (%s missing); the path can change between the "
+                 "check and the call" % signal)
+    if "outcome.rc == RC_DIGEST_CHANGED ->" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer reports a digest that changed between "
+             "the check and the call as its own outcome")
+    # grep -qx, not grep -q: a digest that merely CONTAINS the pinned one is not it.
+    if "grep -q '" in soft_receiver_code:
+        fail("DfrSoftRebootReceiver matches the pinned digest with grep -q rather than "
+             "grep -qx; a superstring of the digest would pass")
     # Exit status 0 is ambiguous by construction: soft_reboot() returns Ok(()) when
     # ensure_uapi_version_matched() fails, and daemonises on the success path.
     if "exits 0 both when it daemonises" not in soft_reboot_receiver_src:

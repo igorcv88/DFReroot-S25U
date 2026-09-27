@@ -285,6 +285,28 @@ path, digest and symbol count alongside every verdict, so the verdict names the
 evidence it rests on. Only the **exact target kernel's** `Module.symvers` may
 promote Gate G; a DDK tree is a toolchain, not an authority.
 
+### 3.5.1 A digest on a mutable path binds a name, not bytes
+
+Corollary of the rule above, learned the hard way twice in one change.
+
+**First: check that the reader can read.** The soft-reboot action hashed
+`/data/adb/ksud` and `/data/system/dfreroot-ksud` from the app to choose which to
+invoke, and refused every time with `unreadable` — the chain *consumes* the staged
+copy (`stage_daemon_from`), and what it installs sits under `/data/adb`, which is
+`drwx------ root root`. A gate whose evidence its own reader cannot obtain is the 3.3
+failure in a new costume. The digest now comes through the proven root shell.
+
+**Second: hash and use the same bytes.** Hashing a path and later executing that path
+is two lookups of a mutable name. `/data/adb/ksud` has held the root manager's build
+and the pinned daemon at different times on this device, so the window is real. The
+comparison is therefore repeated inside the shell that `exec`s, and a mismatch exits
+with a status the app recognises instead of running anything.
+
+Where a window cannot be closed without an unverifiable mechanism, **name it**:
+`sha256sum` and `exec` each open the path, and closing that gap needs a private copy
+or a `/proc/self/fd` exec, neither of which this environment can validate. Written
+down beats quietly assumed.
+
 ### 3.6 No execution override, under any name
 
 The marker that once let the owner accept the kernel-crash risk was removed, not

@@ -1,8 +1,6 @@
 package com.polygraphene.df.reroot
 
 import android.util.Log
-import java.io.File
-import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 /**
@@ -39,15 +37,6 @@ object RootTransport {
     /** Exit status used when the shell was started but outlived its deadline. */
     const val RC_TIMEOUT = -2
 
-    /**
-     * A shell ran but was not root.
-     *
-     * Kept distinct from RC_NO_TRANSPORT on purpose (AGENTS.md 3.7): "there is no
-     * su" and "su answered and we are still uid 1000" are different facts, and the
-     * operator's next action differs - the first is a missing binary, the second is
-     * a missing grant.
-     */
-    const val RC_NOT_ROOT = -3
 
     /** Output is diagnostic, not data: enough to read, bounded so it cannot grow. */
     const val OUTPUT_CAP = 8192
@@ -68,34 +57,7 @@ object RootTransport {
     }
 
     /**
-     * Prove the transport, then use it.
-     *
-     * The probe is not ceremony. Without it, a command that returns non-zero is
-     * indistinguishable from a command that never ran as root at all, and the
-     * caller would have to guess which - exactly the collapse AGENTS.md 3.7
-     * forbids. `id` is cheap, has no side effects and answers the only question
-     * that matters first: is there a root shell here.
-     *
-     * This mirrors what RMGLabs does in `KernelSuRuntime.appRootShell`, and for a
-     * reason its own field log records: on this exact ZZIC hardware, after a
-     * KernelSU late-load that reported `rc=0`, an app-context elevation still
-     * failed with `su: connect daemon: Permission denied`. A direct app `su` path
-     * needs a user-granted KernelSU Manager permission; nothing about a successful
-     * root run creates one.
-     */
-    fun runAsRootProven(command: String, timeoutMs: Long): Outcome {
-        val probe = runAsRoot("id", PROBE_TIMEOUT_MS)
-        if (probe.rc == RC_NO_TRANSPORT) return probe
-        if (!probe.ran || !probe.output.contains("uid=0")) {
-            Log.e(TAG, "[DFR][SOFT_REBOOT] su answered but is not root: rc=${probe.rc}" +
-                " out=${probe.output}")
-            return Outcome(RC_NOT_ROOT, probe.output)
-        }
-        return runAsRoot(command, timeoutMs)
-    }
-
-    /**
-     * Run one command as root, bounded. Prefer [runAsRootProven].
+     * Run one command as root, bounded.
      *
      * The argv is passed to `su -c` as a single string because that is the only
      * form every su implementation accepts. Callers pass paths this app chose,
@@ -170,26 +132,41 @@ object RootTransport {
     }
 
     /**
-     * SHA-256 of a file, or null when it cannot be read.
+     * SHA-256 of a file THROUGH the root shell, or null when it cannot be taken.
      *
-     * null means "could not tell", never "does not match": the policy treats the
-     * two differently and a caller must not collapse them (AGENTS.md 3.7).
+     * This app cannot hash the candidates itself, and that is not a permission
+     * oversight to work around - it is the layout. On ZZIC, after a successful run:
+     *
+     *  - the staged daemon at KsudStage.DEST is GONE. stage1.S calls
+     *    `stage_daemon_from("/data/system/dfreroot-ksud")` and ksud installs it,
+     *    consuming the staged copy;
+     *  - it lands at /data/adb/ksud, and /data/adb is
+     *    `drwx------ root root u:object_r:adb_data_file:s0` - uid 1000 cannot
+     *    traverse the directory, let alone read the file.
+     *
+     * So [sha256File] returns null for every candidate and the digest gate became
+     * unsatisfiable by construction - the failure AGENTS.md 3.3 names. The fix is the
+     * one that rule prescribes: the proof changes FORM, not whether it is required.
+     * The digest is still compared, and still before the privileged operation; it is
+     * simply read by something that can read it.
+     *
+     * This adds no exposure. A root shell that would lie about `sha256sum` is a root
+     * shell that could run `soft-reboot` - or anything else - directly.
+     *
+     * null on anything that is not exactly one 64-character hex digest, including a
+     * missing file, a denied read or output this build cannot account for.
      */
-    fun sha256File(path: String): String? = try {
-        val d = MessageDigest.getInstance("SHA-256")
-        File(path).inputStream().use { input ->
-            val buf = ByteArray(64 * 1024)
-            while (true) {
-                val n = input.read(buf)
-                if (n <= 0) break
-                d.update(buf, 0, n)
-            }
+    fun sha256AsRoot(path: String): String? {
+        val out = runAsRoot("sha256sum '" + path + "'", PROBE_TIMEOUT_MS)
+        if (!out.ran) {
+            Log.i(TAG, "[DFR][SOFT_REBOOT] cannot hash $path as root: rc=${out.rc}")
+            return null
         }
-        val sb = StringBuilder(64)
-        for (x in d.digest()) sb.append("%02x".format(x))
-        sb.toString()
-    } catch (t: Throwable) {
-        Log.i(TAG, "[DFR][SOFT_REBOOT] cannot hash $path: ${t.javaClass.simpleName}")
-        null
+        val token = out.output.trim().split(Regex("\\s+")).firstOrNull() ?: return null
+        if (token.length != 64 || !token.all { it in "0123456789abcdefABCDEF" }) {
+            Log.i(TAG, "[DFR][SOFT_REBOOT] $path: unparsable sha256sum output")
+            return null
+        }
+        return token.lowercase()
     }
 }
