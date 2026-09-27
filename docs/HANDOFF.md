@@ -16,9 +16,13 @@ kernel 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k
 aarch64 / 4096-byte pages
 ```
 
-The last physically validated release is `v2.0.4-zzic` (versionCode 7). The
-next candidate is `v2.0.5-zzic` (versionCode 8); it contains the automatic
-fail-closed closeout but is not physically accepted yet.
+The last physically validated release is `v2.0.5-zzic` (versionCode 8): Gate I
+is a physical PASS on boot `62e8538c-31c5-4531-9bbe-0045e23cf519` — see the
+dossier, which is authoritative for evidence. `AUTO_ROOT_FULL_BOOT` and
+`POST_ROOT_LSPOSED_COMPAT` remain unaccepted.
+
+Version numbers are no longer part of the state to hand over: nothing in the
+tree names one (see *The version is derived per release run*, below).
 
 ## Implementation checkpoint — fail-closed closeout
 
@@ -86,33 +90,59 @@ cannot download them under its network policy, so **no Kotlin in this tree has
 ever been compiled**; the signed `release.yml` run is the first thing that will
 tell. Per `AGENTS.md` section 6.1, do not enable or dispatch `ci.yml`.
 
-### The version pin and the tag now have to agree
+### The version is derived per release run
 
-`release.yml` reads the dispatched tag and `app/build.gradle.kts`' `versionName`
-and, until #24, compared neither: the assets, their `versionCode` and the release
-title all come from `versionName` while the release is published under the tag. A
-dispatch of `v2.0.5-zzic` from a tree still at `2.0.4-zzic` would have published a
-release whose APKs describe the previous version, and only after spending the
-build. `tools/resolve_release_tag.sh` now refuses that offline, before any network
-call, as its fourth argument.
+Releasing used to mean hand-editing four literals in two build files before
+dispatching a tag that had to spell the same string, and every way of getting
+that wrong was tried at least once: the installer left a version behind while
+the app moved; a `v2.0.5-zzic` dispatch from a tree still at `2.0.4-zzic`; a
+`v2.0.5` dispatch (suffix dropped) from a tree at `2.0.5-zzic`; an empty tag box
+resolving to the branch name `main`. The guards caught each of them — after a
+runner had been spent, on the one workflow the owner is allowed to run.
 
-The practical consequence: **this PR's version bump has to land before the tag can
-be dispatched.** While `main` says `2.0.4-zzic`, a `v2.0.5-zzic` dispatch fails in
-the first seconds by design — which is the guard working, not a regression.
+So the version now lives in no file. `tools/resolve_release_version.sh` derives
+it once per run and `release.yml` injects `DFR_VERSION_NAME` /
+`DFR_VERSION_CODE`, which the root `build.gradle.kts` hands to both modules:
+
+| dispatch | result |
+|---|---|
+| tag box **empty** (the normal release) | the greatest existing `v*` tag has its patch bumped, suffix carried over |
+| an explicit tag, or a `v*` tag push | that tag names the version, validated rather than trusted |
+| anything undecidable | refuses before the build |
+
+`versionCode` is `major*10000 + minor*100 + patch`, so it is a pure function of
+the name and cannot disagree with it; minor/patch ≥ 100 refuse rather than wrap
+into the next major's range, which would let a newer release ship a *lower*
+code and be refused on the device as a downgrade. Leading zeros refuse for the
+same reason (`v2.8.9` and `v2.08.09` would share one code).
+
+Three things keep the injection fail-closed rather than merely convenient:
+
+1. the root `build.gradle.kts` **refuses** an absent or unusable pair instead of
+   defaulting — a default would compile one version into an APK published under
+   another, and `AutoRootPolicy` binds a qualification to `versionCode` *and*
+   `versionName`, so that identity decides whether an unattended attempt may
+   trust a previous run's evidence;
+2. `release.yml` reads `versionCode`/`versionName` back out of both built APKs
+   (`aapt2 dump badging`) and refuses if they are not what the run resolved;
+3. `tools/profile_binding_audit.py` fails if either module goes back to a
+   literal, if the root file stops reading the environment or starts defaulting
+   it, if the workflow stops injecting or stops verifying, or if it reads a
+   version out of the tree again. Each of those six sabotages was confirmed to
+   fail the audit.
+
+`tools/resolve_release_tag.sh`'s fourth argument (tag vs. version) is kept as a
+*wiring* check: with one derivation it can only fail if the resolution step and
+the injection stop describing one version.
 
 The remaining sequence is:
 
-1. merge this version/handoff PR, so `main` carries versionCode 8 /
-   `2.0.5-zzic`;
-2. dispatch `release.yml` once from `main`, tag `v2.0.5-zzic`,
-   `prerelease=false`; this is the repository's authorized full build, packaging
-   audit, signature check and release publication path, and the only workflow
-   that needs to run;
-3. perform the one-boot physical Gate-I acceptance — `docs/PHYSICAL_TESTING.md`
-   is the step-by-step, including what to capture and when to stop;
-4. promote Gate I only after the same boot ends with KernelSU root functional
-   and SELinux read back as Enforcing;
-5. only then consider the Auto Root acceptance in `docs/AUTO_ROOT.md`.
+1. dispatch `release.yml` from `main` with the tag box **empty** whenever a
+   release is wanted; it derives the next patch version, and it is the only
+   workflow that needs a runner;
+2. perform the `AUTO_ROOT_FULL_BOOT` acceptance in `docs/AUTO_ROOT.md` on that
+   build — `docs/PHYSICAL_TESTING.md` is the step-by-step;
+3. only then consider `POST_ROOT_LSPOSED_COMPAT`.
 
 The generated daemon contains the expected DFR staging path and every post-root
 closeout string. `tools/profile_binding_audit.py` must bind those bytes to all
@@ -884,8 +914,9 @@ describe it as automatic safe completion.
 
 ### Which workflows are needed, and which are not
 
-For `v2.0.5-zzic`, exactly one: `release.yml`, dispatched once from `main` after
-the version bump lands. Nothing else in this repository needs a runner.
+Exactly one: `release.yml`, dispatched once from `main` with an empty tag box.
+There is no version bump to land first — it derives the next version itself.
+Nothing else in this repository needs a runner.
 
 | Workflow | Needed now? | Why |
 |---|---|---|
