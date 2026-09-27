@@ -899,6 +899,18 @@ def audit():
         fail("RootTransport no longer takes the candidate digest through the root "
              "shell; this app cannot read any candidate, so a local hash makes the "
              "digest gate unsatisfiable by construction")
+    # The first field failure was ENOENT on a bare `su`, which PATH alone could
+    # explain - so absolute paths are tried first and the bare name last. Without
+    # that, "no transport" and "wrong PATH" are the same observation, and the next
+    # tap's answer would be worth nothing.
+    if "val SU_CANDIDATES = listOf(" not in transport_code \
+            or '"/system/bin/su",' not in transport_code:
+        fail("RootTransport no longer tries absolute su paths before the bare name; "
+             "ENOENT would again be indistinguishable from a PATH that does not list "
+             "where su lives")
+    if transport_code.index('"su",') < transport_code.index('"/system/bin/su",'):
+        fail("RootTransport tries the bare `su` before the absolute paths; the bare "
+             "name is the one that depends on PATH and must be last")
     if "token.length != 64" not in transport_code:
         fail("RootTransport no longer validates the sha256sum output; anything that "
              "is not exactly one 64-character digest must read as 'could not tell'")

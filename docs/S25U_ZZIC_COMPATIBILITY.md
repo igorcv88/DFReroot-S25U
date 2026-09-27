@@ -1743,3 +1743,78 @@ so nothing read-only is overriding it. `persist.logd.size.main` / `.system` have
 set and are untested. Until one of them works, `[DFR][*]` evidence from a boot-time
 run does not survive to when a root shell exists, and the two `/data/system` records
 plus the verdict notification remain the only channels that do.
+
+
+### Seventh physical run — `2.0.8-zzic`: acceptance step 6 passes
+
+**Step 6 of `docs/AUTO_ROOT.md` — a later full boot making exactly one automatic
+attempt — is a physical PASS.** Boot `7d1cea20-f2d7-4285-b6d1-53511a11f3a4`:
+
+```text
+journal    boot_id=7d1cea20-…  phase=COMPLETE  attempts=1  native_started=1
+post-root  boot_id=7d1cea20-…  ksu 32601  uapi 2  late-load  selinux=1
+operator   Enforcing / sysfs 1 / id -> u:r:ksu:s0
+```
+
+And for the first time the logcat survived to corroborate it, because
+`persist.logd.size.main=5M` works where the global property did not (see below):
+
+```text
+13:48:57.026 [DFR][AUTOROOT] boot=android.intent.action.BOOT_COMPLETED handed to DfrAutoRootService
+13:48:57.043 [DFR][MARKER] probe of /dev/df failed: errno=13
+13:48:57.043 [DFR][MARKER] probe of /dev/dfm1 failed: errno=13
+13:48:57.043 [DFR][MARKER] probe of /dev/dfm2 failed: errno=13
+13:48:57.043 [DFR][MARKER] probe of /dev/dfm3 failed: errno=13
+13:48:57.265 [DFR][AUTOROOT] REFUSED Auto Root already completed in this boot
+```
+
+That fragment is the **second** broadcast of the boot being refused because the
+journal already recorded `COMPLETE` — which is exactly the one-attempt-per-boot rule
+firing, observed rather than inferred. The run itself happened on the earlier trigger.
+
+**A marker-probe observation, recorded because it changes which mechanism is
+load-bearing.** After the chain has run, `Os.stat` of `/dev/df*` returns `errno=13`
+(`EACCES`) from `system_server`, not `ENOENT` — the markers are `---------- root root`
+and the probe cannot see them. `AutoRootPolicy` maps that to `MARKER_UNKNOWN` and
+refuses, which is the fail-closed direction, so nothing is weakened. But it means the
+marker probe is effectively blind *after* a run, and the **journal** is what actually
+carries the one-attempt guarantee. Before the first run of a boot the markers do not
+exist, the probe reads `ENOENT` → `MARKER_ABSENT`, and the chain proceeds; that path is
+unaffected.
+
+**The log buffer question is settled.** `persist.logd.size` alone moved only the
+`kernel` buffer. `persist.logd.size.main` (and `.system`) do work, and were honoured
+across two full boots:
+
+```text
+main:   ring buffer is 5 MiB (4 MiB consumed, 22 MiB readable)
+system: ring buffer is 5 MiB
+```
+
+371 `[DFR]` lines were captured from the manual run in boot `6ae7dd04`, against 0 in
+every earlier attempt.
+
+**The soft-reboot button answered `NO_ROOT_TRANSPORT`,** and the answer is narrower
+than the previous entry in this dossier implied:
+
+```text
+[DFR][SOFT_REBOOT] no root transport: java.io.IOException:
+  Cannot run program "su": error=2, No such file or directory
+```
+
+`ENOENT` from inside `system_server`, while `su` works from Termux. Two causes fit —
+the uid is not on KernelSU's allowlist, or `su` is somewhere this process's `PATH` does
+not list — and **neither is established**: the KernelSU sources that would settle it
+are not at the paths tried for the pinned revision from this environment. The code now
+tries `/system/bin/su`, `/debug_ramdisk/su` and `/sbin/su` before the bare name and
+logs which started, so the next tap's `ENOENT` will no longer have the `PATH`
+explanation available.
+
+**Step 7 is NOT closed by what was observed.** Updating to `2.0.8` unticked the Auto
+Root box and the following full boot started nothing until a manual run. That is the
+**version** refusal, not the opt-in one: the qualification on disk was
+`version_code=20007` against an app at `20008`, so `AutoRootPolicy.buildMatches()`
+invalidated it before `opt_in` was ever consulted. Step 7 requires a **valid**
+qualification for the installed build, the box then unticked, and a full boot that
+starts nothing — the `"Auto Root is not opted in"` path. Different code, different
+evidence, still owed.
