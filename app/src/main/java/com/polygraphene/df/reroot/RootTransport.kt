@@ -39,8 +39,21 @@ object RootTransport {
     /** Exit status used when the shell was started but outlived its deadline. */
     const val RC_TIMEOUT = -2
 
+    /**
+     * A shell ran but was not root.
+     *
+     * Kept distinct from RC_NO_TRANSPORT on purpose (AGENTS.md 3.7): "there is no
+     * su" and "su answered and we are still uid 1000" are different facts, and the
+     * operator's next action differs - the first is a missing binary, the second is
+     * a missing grant.
+     */
+    const val RC_NOT_ROOT = -3
+
     /** Output is diagnostic, not data: enough to read, bounded so it cannot grow. */
     const val OUTPUT_CAP = 8192
+
+    /** `id` either answers immediately or there is nothing to answer it. */
+    const val PROBE_TIMEOUT_MS = 5_000L
 
     class Outcome(val rc: Int, val output: String) {
         /**
@@ -55,7 +68,34 @@ object RootTransport {
     }
 
     /**
-     * Run one command as root, bounded.
+     * Prove the transport, then use it.
+     *
+     * The probe is not ceremony. Without it, a command that returns non-zero is
+     * indistinguishable from a command that never ran as root at all, and the
+     * caller would have to guess which - exactly the collapse AGENTS.md 3.7
+     * forbids. `id` is cheap, has no side effects and answers the only question
+     * that matters first: is there a root shell here.
+     *
+     * This mirrors what RMGLabs does in `KernelSuRuntime.appRootShell`, and for a
+     * reason its own field log records: on this exact ZZIC hardware, after a
+     * KernelSU late-load that reported `rc=0`, an app-context elevation still
+     * failed with `su: connect daemon: Permission denied`. A direct app `su` path
+     * needs a user-granted KernelSU Manager permission; nothing about a successful
+     * root run creates one.
+     */
+    fun runAsRootProven(command: String, timeoutMs: Long): Outcome {
+        val probe = runAsRoot("id", PROBE_TIMEOUT_MS)
+        if (probe.rc == RC_NO_TRANSPORT) return probe
+        if (!probe.ran || !probe.output.contains("uid=0")) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT] su answered but is not root: rc=${probe.rc}" +
+                " out=${probe.output}")
+            return Outcome(RC_NOT_ROOT, probe.output)
+        }
+        return runAsRoot(command, timeoutMs)
+    }
+
+    /**
+     * Run one command as root, bounded. Prefer [runAsRootProven].
      *
      * The argv is passed to `su -c` as a single string because that is the only
      * form every su implementation accepts. Callers pass paths this app chose,

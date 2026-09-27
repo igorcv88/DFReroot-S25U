@@ -883,6 +883,26 @@ def audit():
         fail("SoftRebootPolicy no longer compares the candidate ksud against the "
              "pinned digest; it would hand a privileged lifecycle operation to an "
              "unidentified binary")
+    # The transport is PROVEN before it is used. Without the `id` probe a non-zero
+    # exit is indistinguishable from never having been root, and the caller would
+    # have to guess which. RMGLabs recorded the real shape of this on the same
+    # hardware: after a late-load reporting rc=0, an app-context elevation still
+    # failed with "su: connect daemon: Permission denied", because a direct app su
+    # path needs a user-granted KernelSU Manager permission.
+    transport_code = code_only(dfr_source("RootTransport.kt"))
+    if 'runAsRoot("id"' not in transport_code or 'contains("uid=0")' not in transport_code:
+        fail("RootTransport no longer proves the shell is root before using it; a "
+             "missing grant would be indistinguishable from a failed command")
+    if "Outcome(RC_NOT_ROOT, probe.output)" not in transport_code \
+            or "if (probe.rc == RC_NO_TRANSPORT) return probe" not in transport_code:
+        fail("RootTransport no longer separates 'no su binary' from 'su answered and "
+             "we are not root'; the operator's next action differs between them - one "
+             "is a missing binary, the other a missing KernelSU Manager grant")
+    if "RootTransport.runAsRootProven(" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver invokes ksud without proving the transport first")
+    if "RootTransport.RC_NOT_ROOT ->" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer reports a missing root grant as its own "
+             "outcome")
     if "claimSoftReboot" not in soft_receiver_code or \
             "AutoRootStore.claimSoftReboot(bootId)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer claims the boot before invoking ksud; "

@@ -149,9 +149,15 @@ The remaining sequence is:
    workflow that needs a runner;
 2. run steps 5-7 of the Auto Root sequence in `docs/AUTO_ROOT.md` — the negative
    half, which a successful boot cannot speak for;
-3. tap **Apply Modules (Soft Reboot)** once and record which way it goes: the root
-   transport is the one unproven part, and either outcome is the evidence
-   (`docs/AUTO_ROOT.md`, *What is still unproven*);
+3. tap **Apply Modules (Soft Reboot)** once and record which way it goes. Expect a
+   refusal: RMGLabs recorded `su: connect daemon: Permission denied` in app context
+   on this exact hardware after a late-load reporting `rc=0`, and its own conclusion
+   is that a direct app `su` path needs a user-granted KernelSU Manager permission.
+   `NOT_ROOT` and `NO_ROOT_TRANSPORT` are different answers and the refusal names
+   which one (`docs/AUTO_ROOT.md`, *What is still unproven*). Do **not** grant
+   DFReroot in the manager yet — it is uid 1000, shared with the platform, and
+   whether KernelSU keys its allowlist strictly by uid is an open question recorded
+   in that section;
 4. only then consider `POST_ROOT_LSPOSED_COMPAT`.
 
 Before any of that, set the log buffer to a value this build accepts:

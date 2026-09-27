@@ -114,22 +114,39 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
             return
         }
 
-        val outcome = RootTransport.runAsRoot(
+        /*
+         * Proven, not attempted: the transport is probed with `id` before the real
+         * command, so a refusal names which of the two things is missing. See
+         * RootTransport.runAsRootProven for the field evidence that this is the
+         * likely outcome rather than a theoretical one.
+         */
+        val outcome = RootTransport.runAsRootProven(
             "'${decision.binaryPath}' soft-reboot", TRANSPORT_TIMEOUT_MS
         )
         when {
             outcome.rc == RootTransport.RC_NO_TRANSPORT -> {
-                /*
-                 * The expected failure on an unproven device: KernelSU grants su
-                 * from its manager's allowlist and nothing establishes that this
-                 * app is on it. Named, not silent.
-                 */
                 Log.e(TAG, "[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT ${outcome.output}")
                 RootNotifier.notifySoftReboot(
                     context, context.getString(R.string.notif_soft_reboot_refused),
-                    "no root transport: this app could not obtain a su shell" +
-                        " (${outcome.output}). Root itself is unaffected; the module" +
-                        " lifecycle was not re-applied."
+                    "no su binary this app can start (${outcome.output}). Root itself" +
+                        " is unaffected; the module lifecycle was not re-applied."
+                )
+            }
+            outcome.rc == RootTransport.RC_NOT_ROOT -> {
+                /*
+                 * The expected failure. KernelSU grants su from an allowlist its
+                 * manager maintains, and nothing about a successful root run puts
+                 * this app on it - RMGLabs recorded exactly this on this hardware
+                 * ("su: connect daemon: Permission denied") after a late-load that
+                 * reported rc=0.
+                 */
+                Log.e(TAG, "[DFR][SOFT_REBOOT] NOT_ROOT ${outcome.output}")
+                RootNotifier.notifySoftReboot(
+                    context, context.getString(R.string.notif_soft_reboot_refused),
+                    "su answered but this app is not root: a KernelSU Manager grant" +
+                        " is required for a direct app su path (${outcome.output})." +
+                        " Root itself is unaffected; the module lifecycle was not" +
+                        " re-applied."
                 )
             }
             outcome.rc == RootTransport.RC_TIMEOUT || outcome.ran -> {

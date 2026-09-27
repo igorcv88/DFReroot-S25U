@@ -487,20 +487,57 @@ already-rooted boot to re-apply modules.
 
 ### What is still unproven, and will announce itself
 
-**The root transport.** After the chain completes, this app is uid 1000 in
-`u:r:system_server:s0`. The CONTROLLER binder it held exposes transactions 1-5 and
-no exec, by design, so nothing privileged survives the run and `su` is the only
-transport left. KernelSU grants `su` from an allowlist its manager maintains, and
-nothing establishes that this app is on it. A denial is an expected outcome, not a
-defect, and it arrives as a named refusal:
+**The root transport, and it is likely to be refused.** After the chain completes,
+this app is uid 1000 in `u:r:system_server:s0`. The CONTROLLER binder it held
+exposes transactions 1-5 and no exec, by design, so nothing privileged survives the
+run and `su` is the only transport left. KernelSU grants `su` from an allowlist its
+manager maintains, and nothing about a successful root run puts this app on it.
 
-```text
-[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT ...
-```
+This is not a theoretical worry. RMGLabs recorded it on this exact ZZIC hardware
+(`RootMyGalaxy-20260923-193921`, its `HANDOFF.md` section 21): after a KernelSU
+late-load that reported `rc=0`, an app-context elevation still failed with
+`su: connect daemon: Permission denied`. Its own conclusion is stated plainly —
+"User-granted KernelSU Manager app permissions remain required for the direct app
+`su` path."
 
-with a notification saying root itself is unaffected and the lifecycle was not
-re-applied. The first tap is therefore an experiment whose result — either outcome
-— is the evidence.
+So the transport is probed with `id` before it is used, and the refusal names which
+of two different things is missing:
+
+| logcat | meaning | what would change it |
+|---|---|---|
+| `[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT` | no `su` binary this app can even start | nothing the owner does in the manager |
+| `[DFR][SOFT_REBOOT] NOT_ROOT` | `su` answered and we are still uid 1000 | a KernelSU Manager grant — see the caveat |
+
+Both come with a notification saying root itself is unaffected and the lifecycle was
+not re-applied. The first tap is an experiment whose result, either way, is the
+evidence.
+
+**The caveat on granting it.** DFReroot runs as uid 1000, shared with the platform,
+so granting it in the KernelSU manager is not the same act as granting an ordinary
+app. Whether KernelSU keys its allowlist strictly by uid — and therefore whether
+such a grant would reach every system-uid component rather than this app alone — is
+**not established here**: the allowlist source could not be read at the pinned
+revision from this environment. Resolve that before recommending the grant. It is a
+question, not a finding.
+
+**And the fallbacks RMGLabs uses are not available here.** Its working path on this
+device selects among Shizuku, an app helper, an authorised app `su`, or a paired
+Local ADB session, and its soft-reboot handoff stages a script and an accepted
+marker under `/data/local/tmp` (`chmod 0666`). DFReroot cannot port any of that:
+AGENTS.md 3.6 forbids any source shipped inside DFReroot from referencing a
+world-writable `/data/local/tmp` path at all, by mechanism, and
+`tools/profile_binding_audit.py` enforces it. That asymmetry is permanent and
+deliberate — a world-writable handoff is the exact shape an execution override
+takes — so DFReroot has fewer routes to a root shell than RMGLabs, not more.
+
+**One RMGLabs design change that does not transfer.** It moved Apply Modules off a
+broadcast receiver and into a foreground service, because holding a broadcast open
+with `goAsync` was too short-lived for the work. That is a correct fix for an
+ordinary app, whose process becomes killable the moment `onReceive` returns. Here
+the components are hosted in `system_server` (observed: `pid=2988`,
+`process_name=system_server`, `u:r:system_server:s0`), which is not killed for
+memory, and the same observation is what retired the foreground service for the boot
+path. The raw worker thread is sound for this host and would not be for theirs.
 
 **A soft-reboot failure specific to this firmware.** A bad `stop`/`start`, a
 metamodule mount that does not come back, a service that does not restart. That is
