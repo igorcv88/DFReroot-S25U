@@ -608,9 +608,11 @@ another boot cannot make the device prompt for root only to be refused.
 ### Structurally unable to root
 
 `DfrSoftRebootReceiver` holds no reference to `DfrRootCoordinator.run`,
-`DirtyFrag`, `StageHop` or `KsudStage.stageFromAssets`, and
-`tools/profile_binding_audit.py` fails if one appears. The action can only ask an
-already-rooted boot to re-apply modules.
+`DirtyFrag` or `StageHop`, and `tools/profile_binding_audit.py` fails if one
+appears. Staging the paired helper is not a root attempt: the helper can obtain
+privilege only from the already-loaded DFR KernelSU module, after the same-boot
+post-root precheck. The action can only ask a boot this build already rooted to
+re-apply modules.
 
 ### What the button is actually for
 
@@ -628,87 +630,49 @@ not "make modules work that did not come up" — the chain already does that. It
 for re-running the lifecycle **within the same boot** after a module is installed,
 enabled or changed, without a full reboot.
 
-### What is still unproven, and will announce itself
+### The paired DFR root transport
 
-**The root transport, and it is likely to be refused.** After the chain completes,
-this app is uid 1000 in `u:r:system_server:s0`. The CONTROLLER binder it held
-exposes transactions 1-5 and no exec, by design, so nothing privileged survives the
-run and `su` is the only transport left. KernelSU grants `su` from an allowlist its
-manager maintains, and nothing about a successful root run puts this app on it.
+The ninth investigation closed the ambiguity above by reading the pinned KernelSU
+source and the process mount namespaces. KernelSU's sucompat intercepts
+`/system/bin/su` only *after* `ksu_is_allow_uid_for_current(uid)` succeeds. DFReroot
+runs in `system_server` as the shared platform uid 1000, and that namespace has no
+real `/system/bin/su`; all four direct candidates therefore fell through to `ENOENT`.
+Termux sees KernelSU's authorised namespace, so its working `su` never established a
+path the `system_server` process could execute.
 
-This is not a theoretical worry. RMGLabs recorded it on this exact ZZIC hardware
-(`RootMyGalaxy-20260923-193921`, its `HANDOFF.md` section 21): after a KernelSU
-late-load that reported `rc=0`, an app-context elevation still failed with
-`su: connect daemon: Permission denied`. Its own conclusion is stated plainly —
-"User-granted KernelSU Manager app permissions remain required for the direct app
-`su` path."
+Granting DFReroot in KernelSU Manager is not an acceptable remedy: the allowlist is
+uid-based, so it would grant the shared platform uid rather than one ordinary app.
+The paired DFR build instead adds one narrow `KSU_IOCTL_GRANT_ROOT` permission:
 
-So the transport is probed with `id` before it is used, and the refusal names which
-of two different things is missing:
+- caller uid and euid must both be 1000;
+- caller and real parent must both carry the policy-owned
+  `u:r:system_server:s0` SID;
+- the helper task name must be exactly `dfreroot-ksud`;
+- normal sucompat and the KernelSU uid allowlist remain unchanged.
 
-| logcat | meaning | what would change it |
-|---|---|---|
-| `[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT` | no `su` this app can start, from any candidate path | possibly a KernelSU Manager grant — see below |
-| `[DFR][SOFT_REBOOT] NOT_ROOT` | `su` started and we are still uid 1000 | a KernelSU Manager grant |
+The SELinux SID is the identity boundary. Task names are mutable and therefore only
+defense in depth; the build and its workflow explicitly reject any return to using a
+parent `comm` as authority.
 
-**What the device answered, and a row this table used to get wrong.** The first tap
-returned `NO_ROOT_TRANSPORT`:
+The app stages the exact hash-pinned DFR ksud at
+`/data/system/dfreroot-ksud`, verifies the bytes after writing, re-verifies the
+helper before every invocation, and starts:
 
+```text
+dfreroot-ksud debug su --global-mnt
 ```
-[DFR][SOFT_REBOOT] no root transport: java.io.IOException:
-  Cannot run program "su": error=2, No such file or directory
-```
 
-`ENOENT`, from inside `system_server`, while `su` works from Termux. An earlier
-version of this table said that outcome meant "nothing the owner does in the manager"
-would change it. **That was wrong**, and stated with more confidence than the
-evidence carried: two causes fit `ENOENT` and they have different remedies —
+One controlled command is written to that root shell. Candidate daemon hashes are
+still taken through the shell, and the selected daemon is still checked again in the
+same shell immediately before `exec ... soft-reboot`. No `/data/local/tmp` handoff,
+manager grant, bare `su`, or conventional absolute `su` path remains.
 
-1. this uid is not on KernelSU's allowlist, so nothing resolves `su` for it;
-2. `su` exists somewhere this process's `PATH` does not list.
-
-Which one it is is **not established**. The KernelSU sources that would settle it are
-not at the paths tried for the pinned revision from this environment, so asserting
-either would be an inference dressed as an observation.
-
-So the code was changed to narrow it: `RootTransport.SU_CANDIDATES` tries
-`/system/bin/su`, `/debug_ramdisk/su` and `/sbin/su` before the bare name, and logs
-which one started. The bare name is last precisely because it is the one that depends
-on `PATH`.
-
-**That narrows cause 2; it does not close it.** `ENOENT` from all four rules out
-exactly three conventional absolute locations plus whatever this process's `PATH`
-resolves. If the `su` that works in Termux is a wrapper, or an executable at any
-other absolute path, all four probes still return `ENOENT` for a reason that is
-`PATH`-shaped and not an allowlist decision. **The real path of the working `su` was
-never captured** — the only observation on record is that `su -c` succeeds in a
-Termux shell, which says nothing about where the binary lives. Until
-`command -v su` / `readlink -f` is read off the device and that path is either
-already in the candidate list or added to it, cause 2 stays live and the next tap's
-answer stays ambiguous. Recording the absence is the point: three ruled-out paths is
-not the same fact as "the PATH explanation is dead".
-
-Both come with a notification saying root itself is unaffected and the lifecycle was
-not re-applied. The first tap is an experiment whose result, either way, is the
-evidence.
-
-**The caveat on granting it.** DFReroot runs as uid 1000, shared with the platform,
-so granting it in the KernelSU manager is not the same act as granting an ordinary
-app. Whether KernelSU keys its allowlist strictly by uid — and therefore whether
-such a grant would reach every system-uid component rather than this app alone — is
-**not established here**: the allowlist source could not be read at the pinned
-revision from this environment. Resolve that before recommending the grant. It is a
-question, not a finding.
-
-**And the fallbacks RMGLabs uses are not available here.** Its working path on this
-device selects among Shizuku, an app helper, an authorised app `su`, or a paired
-Local ADB session, and its soft-reboot handoff stages a script and an accepted
-marker under `/data/local/tmp` (`chmod 0666`). DFReroot cannot port any of that:
-AGENTS.md 3.6 forbids any source shipped inside DFReroot from referencing a
-world-writable `/data/local/tmp` path at all, by mechanism, and
-`tools/profile_binding_audit.py` enforces it. That asymmetry is permanent and
-deliberate — a world-writable handoff is the exact shape an execution override
-takes — so DFReroot has fewer routes to a root shell than RMGLabs, not more.
+The paired source and exact-port workflow are implemented. The generated helper is
+`ksud-pa3q-S938BXXUCZZIC-dfreroot-v3.3.0`, with published SHA-256
+`f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c`.
+The remaining evidence is physical: the final APK must show
+`PINNED_TRANSPORT_READY=PASS`, a root `id`, a matching installed-daemon digest and
+then `DISPATCHED` or the deliberately separate `UNDETERMINED` timeout outcome.
 
 **One RMGLabs design change that does not transfer.** It moved Apply Modules off a
 broadcast receiver and into a foreground service, because holding a broadcast open

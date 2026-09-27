@@ -883,58 +883,36 @@ def audit():
         fail("SoftRebootPolicy no longer compares the candidate ksud against the "
              "pinned digest; it would hand a privileged lifecycle operation to an "
              "unidentified binary")
-    # The digest gate must stay REACHABLE. The first shipped version hashed the
-    # candidates from this process and refused every single time with "unreadable":
-    # the chain consumes the staged daemon (stage1.S calls
-    # stage_daemon_from("/data/system/dfreroot-ksud")) and the daemon it installs
-    # lives under /data/adb, observed as drwx------ root root on ZZIC, which uid 1000
-    # cannot traverse. That is the unsatisfiable-by-construction gate AGENTS.md 3.3
-    # names, and the rule's own remedy applies: the proof changes FORM, not whether
-    # it is required. So the digest is taken THROUGH the proven root shell.
+    # The digest gate must stay reachable, but the root transport must not depend
+    # on /system/bin/su. The target proved that path exists in Termux's KernelSU
+    # namespace and is absent from system_server's mount namespace. Nor may the
+    # shared platform uid be granted in the manager. The DFR-specific pair instead
+    # stages the exact pinned helper and invokes its debug-su ioctl path; the paired
+    # kernel module restricts that ioctl to a helper and real parent carrying the
+    # policy-owned system_server SID; the helper task name is defense in depth.
     transport_code = code_only(dfr_source("RootTransport.kt"))
-    # The full signature, not the name: `fun sha256AsRoot` is a substring of
-    # `fun sha256AsRootUnused`, and a guard that a rename survives is not a guard.
     if "fun sha256AsRoot(path: String): String? {" not in transport_code \
-            or "sha256sum '" not in transport_code:
+            or "sha256sum '" not in transport_code \
+            or 'val prefix = "DFR_SHA256="' not in transport_code:
         fail("RootTransport no longer takes the candidate digest through the root "
-             "shell; this app cannot read any candidate, so a local hash makes the "
-             "digest gate unsatisfiable by construction")
-    # The first field failure was ENOENT on a bare `su`, which PATH alone could
-    # explain - so absolute paths are tried first and the bare name last. Without
-    # that, "no transport" and "wrong PATH" are the same observation, and the next
-    # tap's answer would be worth nothing.
-    # Read the literal out and check its SHAPE, not one pair of offsets: a guard
-    # that only compares `"su"` against `"/system/bin/su"` passes a list that puts
-    # the bare name second, which is the failure it exists to prevent.
-    su_list = re.search(r"val SU_CANDIDATES = listOf\((.*?)\)",
-                        transport_code, re.S)
-    if su_list is None:
-        fail("RootTransport no longer declares SU_CANDIDATES as a listOf literal; "
-             "the audit cannot tell which order the candidates are tried in, and an "
-             "unordered probe makes ENOENT indistinguishable from a wrong PATH")
-    su_candidates = ([] if su_list is None
-                     else re.findall(r'"([^"]*)"', su_list.group(1)))
-    if su_list is not None and len(su_candidates) < 2:
-        fail("RootTransport tries fewer than two su candidates; with only the bare "
-             "name, ENOENT and a PATH that does not list where su lives are the same "
-             "observation")
-    if su_candidates and su_candidates[-1] != "su":
-        fail("RootTransport does not try the bare `su` last (last candidate is "
-             + repr(su_candidates[-1]) + "); the bare name is the one that depends "
-             "on PATH, so it must come after every absolute path")
-    for cand in su_candidates[:-1]:
-        if not cand.startswith("/"):
-            fail("RootTransport tries the PATH-dependent candidate " + repr(cand)
-                 + " before the end of SU_CANDIDATES; every candidate but the last "
-                   "must be an absolute path, or a successful probe proves nothing "
-                   "about where su actually lives")
-    if su_candidates and "/system/bin/su" not in su_candidates:
-        fail("RootTransport no longer probes /system/bin/su, the conventional "
-             "absolute path on this firmware")
+             "shell; the installed daemon is under /data/adb, which uid 1000 cannot "
+             "traverse")
+    for signal in ('KsudStage.stageFromAssets(context)',
+                   'stageLog.contains("KSUD_STAGED_VERIFY=PASS")',
+                   'ProcessBuilder(helperPath, "debug", "su", "--global-mnt")',
+                   'actual != KsudStage.pinnedKsudSha256()',
+                   'transport=pinned-dfr-ksud'):
+        if signal not in transport_code:
+            fail("RootTransport no longer carries the pinned DFR helper transport "
+                 "invariant %r" % signal)
+    if "SU_CANDIDATES" in transport_code or 'ProcessBuilder("su"' in transport_code \
+            or 'ProcessBuilder("/system/bin/su"' in transport_code:
+        fail("RootTransport fell back to namespace-dependent su probing; ZZIC proved "
+             "that system_server cannot resolve those paths")
     if "token.length != 64" not in transport_code:
         fail("RootTransport no longer validates the sha256sum output; anything that "
              "is not exactly one 64-character digest must read as 'could not tell'")
-    if "RootTransport.sha256AsRoot(path)" not in soft_receiver_code:
+    if "transport.sha256AsRoot(path)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer hashes the candidates through root")
     if "sha256File" in soft_receiver_code:
         fail("DfrSoftRebootReceiver hashes a candidate from this process again; every "
@@ -945,21 +923,30 @@ def audit():
     if "SoftRebootPolicy.precheck(inputs)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer runs the unprivileged precheck first; a "
              "stale notification would ask for a root shell before being refused")
-    if soft_receiver_code.index("SoftRebootPolicy.precheck(inputs)") > \
-            soft_receiver_code.index('RootTransport.runAsRoot("id"'):
+    if "RootTransport.prepare(context)" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer prepares the pinned transport")
+    elif soft_receiver_code.index("SoftRebootPolicy.precheck(inputs)") > \
+            soft_receiver_code.index("RootTransport.prepare(context)"):
         fail("DfrSoftRebootReceiver asks for a root shell before the unprivileged "
              "precheck has had a chance to refuse")
-    # And the two transport failures stay separate values (AGENTS.md 3.7): no su
-    # binary at all, versus su answered and we are still uid 1000. RMGLabs recorded
-    # the second on this exact hardware ("su: connect daemon: Permission denied")
-    # after a late-load reporting rc=0, and its conclusion is that a direct app su
-    # path needs a user-granted KernelSU Manager permission.
+    # Keep transport creation, helper identity drift and a started-but-unprivileged
+    # helper as separate facts (AGENTS.md 3.7).
     if "NO_ROOT_TRANSPORT" not in soft_receiver_code \
+            or "PINNED_TRANSPORT_CHANGED" not in soft_receiver_code \
             or "NOT_ROOT rc=" not in soft_receiver_code \
             or 'probe.output.contains("uid=0")' not in soft_receiver_code:
-        fail("DfrSoftRebootReceiver no longer separates 'no su binary' from 'su "
-             "answered and we are not root'; the operator's next action differs - one "
-             "is a missing binary, the other a missing KernelSU Manager grant")
+        fail("DfrSoftRebootReceiver collapses transport absence, helper identity "
+             "drift or an ioctl permission refusal into one outcome")
+    if "KernelSU Manager grant for uid 1000 is neither required nor" \
+            not in soft_receiver_code or '" recommended.' not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver again recommends a broad KernelSU grant for the "
+             "shared platform uid")
+    transport_source = dfr_source("RootTransport.kt")
+    for claim in ("policy-owned", "`u:r:system_server:s0` SID",
+                  "task name is an additional", "not the identity boundary"):
+        if claim not in transport_source:
+            fail("RootTransport no longer documents the immutable SELinux identity "
+                 "boundary: missing %r" % claim)
     # SoftRebootPolicy keeps both entry points: precheck for what needs no privilege,
     # evaluate for the full decision including the digest.
     if "public static Decision precheck(" not in soft_policy_code \
