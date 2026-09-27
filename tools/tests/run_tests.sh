@@ -32,3 +32,9 @@ python3 tools/tests/test_derive_symvers.py
 # Assembly/native/UI ordering cannot run on the host, so guard the exact
 # branch/order shape that keeps finit_module errors and dfm3 fail-closed.
 python3 tools/tests/test_post_root_contract.py
+
+# The one privileged shell in this repository: the digest re-check that decides
+# whether ksud is exec'd. Composed in Kotlin (which nothing here compiles) and run by
+# a root shell (which nothing here reaches) - but the shell logic itself is testable,
+# so it is tested, against scratch files and with the exec replaced by an echo.
+sh tools/tests/test_soft_reboot_shell.sh

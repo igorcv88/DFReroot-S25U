@@ -965,6 +965,26 @@ def audit():
     if "notif_soft_reboot_undetermined" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer reports an undetermined soft reboot "
              "distinctly from a dispatched one")
+    # The digest must be re-checked in the SAME shell that execs. Hashing a path and
+    # then executing that path binds the claim to a NAME, not to bytes (AGENTS.md
+    # 3.5), and /data/adb/ksud is documented to change: it has held the root manager's
+    # build and the pinned daemon at different times on this device. Between the
+    # candidate hash and the call there is another hash, a policy evaluation and a
+    # lock write with an fsync.
+    for signal in ('grep -qx \'" + pinned + "\'',
+                   'exec \\"\\$p\\" soft-reboot',
+                   "RC_DIGEST_CHANGED"):
+        if signal not in soft_receiver_code:
+            fail("DfrSoftRebootReceiver no longer re-verifies the digest inside the "
+                 "shell that execs ksud (%s missing); the path can change between the "
+                 "check and the call" % signal)
+    if "outcome.rc == RC_DIGEST_CHANGED ->" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer reports a digest that changed between "
+             "the check and the call as its own outcome")
+    # grep -qx, not grep -q: a digest that merely CONTAINS the pinned one is not it.
+    if "grep -q '" in soft_receiver_code:
+        fail("DfrSoftRebootReceiver matches the pinned digest with grep -q rather than "
+             "grep -qx; a superstring of the digest would pass")
     # Exit status 0 is ambiguous by construction: soft_reboot() returns Ok(()) when
     # ensure_uapi_version_matched() fails, and daemonises on the success path.
     if "exits 0 both when it daemonises" not in soft_reboot_receiver_src:

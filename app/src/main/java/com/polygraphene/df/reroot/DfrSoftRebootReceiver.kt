@@ -176,13 +176,59 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         }
 
         /*
-         * The transport was already proven above and the digest was taken through
-         * it, so this is the invocation and nothing else.
+         * Re-verify the digest in the SAME shell that execs it.
+         *
+         * Hashing a path and then executing that path binds the claim to a NAME,
+         * not to bytes (AGENTS.md 3.5), and this particular name is documented to
+         * change: /data/adb/ksud has held the root manager's build and the pinned
+         * daemon at different times on this device. Between the candidate hash
+         * above and this call there were another hash, a policy evaluation and a
+         * lock write with an fsync - easily seconds. A replacement landing in that
+         * window would have this execute bytes nothing checked.
+         *
+         * So the comparison happens again, inside the privileged shell, immediately
+         * before `exec`, and a mismatch exits with a code this build recognises
+         * instead of running anything. The app still chooses WHICH path to try from
+         * the first hash; the shell is what binds the choice to the bytes it runs.
+         *
+         * The residual window is now the gap between `sha256sum` opening the path
+         * and `exec` opening it again - two syscalls in one shell. Closing that
+         * completely means executing a private copy, or an `exec` of a
+         * /proc/self/fd path held open across the hash. Both change HOW ksud is
+         * invoked, and nothing in this environment can verify that ksud behaves
+         * identically when started from a copied path or an fd - a privileged
+         * mechanism this repository cannot test is a worse trade than a two-syscall
+         * window that is now named. Revisit if ksud is ever shown path-independent.
          */
-        val outcome = RootTransport.runAsRoot(
-            "'${decision.binaryPath}' soft-reboot", TRANSPORT_TIMEOUT_MS
-        )
+        val pinned = KsudStage.pinnedKsudSha256()
+        /*
+         * No command substitution: `$(` inside a Kotlin string literal is a template
+         * start the compiler may or may not accept as a literal `$`, and nothing here
+         * compiles Kotlin to settle it. `grep -qx` against the pinned digest does the
+         * same job with only `$p` to escape, and it matches the WHOLE line, so a
+         * digest that merely contains the pinned one cannot pass.
+         */
+        val verifyAndExec =
+            "p='" + decision.binaryPath + "'; " +
+                "sha256sum \"\$p\" 2>/dev/null | cut -d' ' -f1 | " +
+                "grep -qx '" + pinned + "' || exit " + RC_DIGEST_CHANGED + "; " +
+                "exec \"\$p\" soft-reboot"
+        val outcome = RootTransport.runAsRoot(verifyAndExec, TRANSPORT_TIMEOUT_MS)
         when {
+            outcome.rc == RC_DIGEST_CHANGED -> {
+                /*
+                 * The binary at that path is no longer the pinned daemon. Nothing
+                 * was executed, and the lock stays claimed: this boot has spent its
+                 * dispatch, and a retry would race the same replacement again.
+                 */
+                Log.e(TAG, "[DFR][SOFT_REBOOT] DIGEST_CHANGED at ${decision.binaryPath}")
+                RootNotifier.notifySoftReboot(
+                    context, context.getString(R.string.notif_soft_reboot_refused),
+                    "the binary at ${decision.binaryPath} stopped matching the pinned" +
+                        " digest between the check and the call, so nothing was run." +
+                        " Root is unaffected; a full reboot re-applies modules."
+                )
+            }
             outcome.rc == RootTransport.RC_NO_TRANSPORT -> {
                 // The shell worked seconds ago; losing it here is a real anomaly.
                 Log.e(TAG, "[DFR][SOFT_REBOOT] TRANSPORT_LOST ${outcome.output}")
@@ -270,6 +316,15 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
 
         /** KernelSU's own daemon path, offered as a candidate but never trusted. */
         const val ADB_KSUD = "/data/adb/ksud"
+
+        /**
+         * Exit status the privileged shell uses when the re-check fails.
+         *
+         * Arbitrary but distinguishable: ksud's own exits are 0 or its error codes,
+         * and this must not be mistaken for either. A collision would read as a
+         * generic ksud failure, which is the safe direction.
+         */
+        const val RC_DIGEST_CHANGED = 91
 
         /**
          * Short on purpose. A successful dispatch daemonises and then kills this
