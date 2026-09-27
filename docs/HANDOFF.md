@@ -147,8 +147,11 @@ The remaining sequence is:
 1. dispatch `release.yml` from `main` with the tag box **empty** whenever a
    release is wanted; it derives the next patch version, and it is the only
    workflow that needs a runner;
-2. run steps 5-7 of the Auto Root sequence in `docs/AUTO_ROOT.md` — the negative
-   half, which a successful boot cannot speak for;
+2. run step **7** of the Auto Root sequence in `docs/AUTO_ROOT.md` — steps 5 and 6
+   are done (seventh physical run). Step 7 has a trap: a version bump also stops Auto
+   Root, via `buildMatches`, before `opt_in` is consulted, so "nothing ran after the
+   update" is not evidence for it. It needs a valid qualification for the installed
+   build, the box unticked, and the `"Auto Root is not opted in"` path;
 3. tap **Apply Modules (Soft Reboot)** once and record which way it goes. The first
    tap on `2.0.7-zzic` refused for a reason that was this repository's bug, not the
    transport: the digest gate hashed candidates this app cannot read at all (sixth
@@ -163,14 +166,11 @@ The remaining sequence is:
    by uid is an open question recorded in `docs/AUTO_ROOT.md`;
 4. only then consider `POST_ROOT_LSPOSED_COMPAT`.
 
-Before any of that, the log buffer — and note that the obvious knob does **not**
-work here. With `persist.logd.size=5M` set, a full boot came up with `main`,
-`system` and `crash` still at **128 KiB** and only `kernel` at 5 MiB, with no
-`ro.logd.size*` override to explain it. `persist.logd.size.main` and
-`.system` are set and untested; check with `logcat -g` as the FIRST command after a
-boot. Until one of them takes, `[DFR][*]` evidence from a boot-time run does not
-survive to when a root shell exists, and the journal plus the post-root record are
-the only channels that do.
+Before any of that, the log buffer — and the answer is now known.
+`persist.logd.size` alone moves only the `kernel` buffer, but
+**`persist.logd.size.main` and `.system` do work** and were honoured across two full
+boots (`main: 5 MiB`, 371 `[DFR]` lines captured against 0 before). Set those, and
+check with `logcat -g` as the first command after a boot.
 
 The generated daemon contains the expected DFR staging path and every post-root
 closeout string. `tools/profile_binding_audit.py` must bind those bytes to all

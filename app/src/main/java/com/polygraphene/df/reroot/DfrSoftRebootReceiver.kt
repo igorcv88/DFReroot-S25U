@@ -118,8 +118,10 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
             Log.e(TAG, "[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT ${probe.output}")
             RootNotifier.notifySoftReboot(
                 context, context.getString(R.string.notif_soft_reboot_refused),
-                "no su binary this app can start (${probe.output}). Root itself is" +
-                    " unaffected; the module lifecycle was not re-applied."
+                "no su this app can start, from any candidate path" +
+                    " (${probe.output}). This may mean the app is not granted in the" +
+                    " KernelSU manager. Root itself is unaffected; the module" +
+                    " lifecycle was not re-applied."
             )
             return
         }

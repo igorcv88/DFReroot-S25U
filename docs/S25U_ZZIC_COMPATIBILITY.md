@@ -957,7 +957,7 @@ inferred from a nearby firmware.
 | G4 — Write safety | **physical PASS** | system remained operational after `enforcing=0`, KernelSU late-load completed and root worked |
 | H — Installer / packages.xml | **physical PASS** | injected key survived framework restart; write-path fixes regression-tested |
 | I — Automatic safe end state | **physical PASS** | `v2.0.5-zzic`, boot `62e8538c…`: the closeout ran unaided to a same-boot `POST_ROOT_COMPLETE`, and the operator independently read `Enforcing` / sysfs `1`, `su` in `u:r:ksu:s0`, and the pinned daemon installed at `/data/adb/ksud`. See the fourth physical run below |
-| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **PARTIALLY ACCEPTED (still ships disabled)** | `2.0.6-zzic`, boot `2e447aaf…`: the service completed an unattended attempt after a full reboot. Its own per-boot journal — written by `DfrAutoRootService` and by nothing else — read `phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id` as a valid post-root record, with `Enforcing` / sysfs `1` and `su` in `u:r:ksu:s0`. That is the positive path only. The gate also covers boundaries one successful boot cannot speak for — a framework restart must trigger nothing, the next full boot exactly one attempt, opting out nothing at all — and those are **untested**, so this is not a promotion to PASS (AGENTS.md section 8). It ships OFF: a verified manual completion on the exact build plus an explicit opt-in remain required. See the fifth physical run below |
+| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **PARTIALLY ACCEPTED (still ships disabled)** | `2.0.6-zzic`, boot `2e447aaf…`: the service completed an unattended attempt after a full reboot. Its own per-boot journal — written by `DfrAutoRootService` and by nothing else — read `phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id` as a valid post-root record, with `Enforcing` / sysfs `1` and `su` in `u:r:ksu:s0`. The gate also covers three boundaries one successful boot cannot speak for, and they are now in different states: a framework restart must trigger nothing (**done**, seventh physical run, with the caveat recorded there), the next full boot must make exactly one attempt (**done**, `2.0.8-zzic`, boot `7d1cea20…`, with the refusal of the boot's second broadcast in the log), and opting out must suppress the next boot (**still untested** — and note that a version bump stops Auto Root through `buildMatches` before `opt_in` is consulted, so "nothing ran after an update" is not evidence for it). Step 7 is therefore why this is not a promotion to PASS (AGENTS.md section 8). It ships OFF: a verified manual completion on the exact build plus an explicit opt-in remain required. See the fifth and seventh physical runs below |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
 remaining blocker to calling the automated flow complete is the post-root
@@ -1743,3 +1743,105 @@ so nothing read-only is overriding it. `persist.logd.size.main` / `.system` have
 set and are untested. Until one of them works, `[DFR][*]` evidence from a boot-time
 run does not survive to when a root shell exists, and the two `/data/system` records
 plus the verdict notification remain the only channels that do.
+
+
+### Seventh physical run — `2.0.8-zzic`: acceptance step 6 passes
+
+**Step 6 of `docs/AUTO_ROOT.md` — a later full boot making exactly one automatic
+attempt — is a physical PASS.** Boot `7d1cea20-f2d7-4285-b6d1-53511a11f3a4`:
+
+```text
+journal    boot_id=7d1cea20-…  phase=COMPLETE  attempts=1  native_started=1
+post-root  boot_id=7d1cea20-…  ksu 32601  uapi 2  late-load  selinux=1
+operator   Enforcing / sysfs 1 / id -> u:r:ksu:s0
+```
+
+And for the first time the logcat survived to corroborate it, because
+`persist.logd.size.main=5M` works where the global property did not (see below):
+
+```text
+13:48:57.026 [DFR][AUTOROOT] boot=android.intent.action.BOOT_COMPLETED handed to DfrAutoRootService
+13:48:57.043 [DFR][MARKER] probe of /dev/df failed: errno=13
+13:48:57.043 [DFR][MARKER] probe of /dev/dfm1 failed: errno=13
+13:48:57.043 [DFR][MARKER] probe of /dev/dfm2 failed: errno=13
+13:48:57.043 [DFR][MARKER] probe of /dev/dfm3 failed: errno=13
+13:48:57.265 [DFR][AUTOROOT] REFUSED Auto Root already completed in this boot
+```
+
+That fragment is the **second** broadcast of the boot being refused because the
+journal already recorded `COMPLETE` — which is exactly the one-attempt-per-boot rule
+firing, observed rather than inferred. The run itself happened on the earlier trigger.
+
+**A marker-probe observation, recorded because it changes which mechanism is
+load-bearing.** After the chain has run, `Os.stat` of `/dev/df*` returns `errno=13`
+(`EACCES`) from `system_server`, not `ENOENT` — the markers are `---------- root root`
+and the probe cannot see them. `AutoRootPolicy` maps that to `MARKER_UNKNOWN` and
+refuses, which is the fail-closed direction, so nothing is weakened. But it means the
+marker probe is effectively blind *after* a run, and the **journal** is what actually
+carries the one-attempt guarantee. Before the first run of a boot the markers do not
+exist, the probe reads `ENOENT` → `MARKER_ABSENT`, and the chain proceeds; that path is
+unaffected.
+
+**The log buffer question is settled.** `persist.logd.size` alone moved only the
+`kernel` buffer. `persist.logd.size.main` (and `.system`) do work, and were honoured
+across two full boots:
+
+```text
+main:   ring buffer is 5 MiB (4 MiB consumed, 22 MiB readable)
+system: ring buffer is 5 MiB
+```
+
+371 `[DFR]` lines were captured from the manual run in boot `6ae7dd04`, against 0 in
+every earlier attempt.
+
+**The soft-reboot button answered `NO_ROOT_TRANSPORT`,** and the answer is narrower
+than the previous entry in this dossier implied:
+
+```text
+[DFR][SOFT_REBOOT] no root transport: java.io.IOException:
+  Cannot run program "su": error=2, No such file or directory
+```
+
+`ENOENT` from inside `system_server`, while `su` works from Termux. Two causes fit —
+the uid is not on KernelSU's allowlist, or `su` is somewhere this process's `PATH` does
+not list — and **neither is established**: the KernelSU sources that would settle it
+are not at the paths tried for the pinned revision from this environment. The code now
+tries `/system/bin/su`, `/debug_ramdisk/su` and `/sbin/su` before the bare name and
+logs which started, which **narrows** the `PATH` cause to three conventional locations
+without eliminating it: the path of the `su` that works in Termux was never captured,
+so a wrapper or an executable anywhere else still explains `ENOENT` from all four. The
+observation that closes it is `command -v su` / `readlink -f` read off the device; it
+is owed, and until it lands the next tap's `ENOENT` remains ambiguous between the two
+causes.
+
+**Step 5 — a framework-only restart triggers nothing — recorded here, which it was
+not before.** The observation belongs to boot `2e447aaf…` on `2.0.6-zzic`: after a
+soft reboot, `/proc/sys/kernel/random/boot_id` was unchanged and the journal still
+read `boot_id=2e447aaf…` / `phase=COMPLETE` / `attempts=1`, i.e. **no new attempt was
+recorded**. Root was already present from the earlier automatic run, so nothing
+observable would have changed either way; the journal is what carries it.
+
+What that run does **not** establish, stated because it was nearly skipped: the log
+buffer was still 128 KiB at the time, so the refusal line itself was never seen, and
+an unchanged journal is equally consistent with "the receiver never fired" and "it
+fired and refused" — a refusal writes no journal. The mechanism was corroborated
+later, in boot `7d1cea20…`, where the **second** `BOOT_COMPLETED` of a boot whose
+journal said `COMPLETE` logged exactly the refusal step 5 asks for:
+
+```text
+[DFR][AUTOROOT] REFUSED Auto Root already completed in this boot
+```
+
+That is the same code path under the same condition (unchanged boot, journal already
+COMPLETE), reached by a second broadcast rather than by a deliberately induced
+framework restart. Together the two observations cover step 5; neither does alone,
+and that is why both are written down.
+
+**Step 7 is NOT closed by what was observed.** Updating to `2.0.8` unticked the Auto
+Root box and the following full boot started nothing until a manual run. That is the
+**version** refusal, not the opt-in one: the qualification on disk was
+`version_code=20007` against an app at `20008`, so `AutoRootPolicy.buildMatches()`
+invalidated it before `opt_in` was ever consulted. Step 7 requires a **valid**
+qualification for the installed build, the box then unticked, and a full boot that
+starts nothing — the `"Auto Root is not opted in"` path. Different code, different
+evidence, still owed.

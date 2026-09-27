@@ -341,7 +341,7 @@ verdict, `STARTED` is recorded before the native run, the qualification is bound
 to the pinned ksud digest, and no scheduler appears on this path. Each of those
 guards was confirmed to fail when its rule is violated.
 
-## Physical acceptance — steps 1-4 done, 5-7 still owed
+## Physical acceptance — steps 1-6 done, step 7 still owed
 
 Gate I passed manually first, in that order. The acceptance run is recorded in
 `docs/S25U_ZZIC_COMPATIBILITY.md` as the fifth physical run
@@ -350,16 +350,30 @@ Gate I passed manually first, in that order. The acceptance run is recorded in
 as a valid post-root record, with `Enforcing`, sysfs `1` and `su` in
 `u:r:ksu:s0`. That covers steps 1-4.
 
-What remains is the *negative* half of the sequence, which is what proves the
-scheduling rather than the chain:
+Steps 5 and 6 are now also done, on `2.0.8-zzic` (seventh physical run in the
+dossier):
 
-5. restart only the Android framework; confirm the unchanged `boot_id` triggers
-   nothing (`[DFR][AUTOROOT] REFUSED Auto Root already completed in this boot`);
-6. full reboot again; confirm exactly **one** new attempt for the new `boot_id`;
-7. untick the box; confirm no attempt on the next full boot.
+5. **done**, and the evidence is in the dossier's seventh physical run — it was
+   promoted here before being recorded there, which is backwards and is fixed. Two
+   observations together: boot `2e447aaf…` where a soft reboot left the journal
+   untouched, and boot `7d1cea20…` where the second `BOOT_COMPLETED` of a boot whose
+   journal said `COMPLETE` logged `REFUSED Auto Root already completed in this boot`.
+   Neither covers it alone: the first has no log (128 KiB buffer at the time) and an
+   unchanged journal cannot distinguish "never fired" from "fired and refused", while
+   the second reaches the same code path under the same condition by a second
+   broadcast rather than a deliberate framework restart.
+6. **done, with log corroboration.** Boot `7d1cea20…`: journal `phase=COMPLETE` /
+   `attempts=1` / `native_started=1` on the new `boot_id`, and the second broadcast of
+   that boot logged `REFUSED Auto Root already completed in this boot` — the
+   one-attempt-per-boot rule observed rather than inferred.
+7. **still owed.** Untick the box and confirm no attempt on the next full boot.
 
-Steps 5 and 7 are the ones a single successful boot cannot speak for, and step 6
-is what distinguishes "it worked once" from "it works per boot".
+Step 7 is the one a successful boot cannot speak for, and it has a trap: updating the
+app also stops Auto Root, but through a **different** refusal. A version bump
+invalidates the qualification (`buildMatches`) before `opt_in` is consulted, so
+"nothing ran after the update" is not evidence for step 7. It needs a valid
+qualification for the installed build, the box then unticked, and the
+`"Auto Root is not opted in"` path taken.
 
 Record the outcome separately from Gate I and from `POST_ROOT_LSPOSED_COMPAT`. A
 failure of the automatic path is not a failure to obtain root, and must not be
@@ -634,8 +648,45 @@ of two different things is missing:
 
 | logcat | meaning | what would change it |
 |---|---|---|
-| `[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT` | no `su` binary this app can even start | nothing the owner does in the manager |
-| `[DFR][SOFT_REBOOT] NOT_ROOT` | `su` answered and we are still uid 1000 | a KernelSU Manager grant — see the caveat |
+| `[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT` | no `su` this app can start, from any candidate path | possibly a KernelSU Manager grant — see below |
+| `[DFR][SOFT_REBOOT] NOT_ROOT` | `su` started and we are still uid 1000 | a KernelSU Manager grant |
+
+**What the device answered, and a row this table used to get wrong.** The first tap
+returned `NO_ROOT_TRANSPORT`:
+
+```
+[DFR][SOFT_REBOOT] no root transport: java.io.IOException:
+  Cannot run program "su": error=2, No such file or directory
+```
+
+`ENOENT`, from inside `system_server`, while `su` works from Termux. An earlier
+version of this table said that outcome meant "nothing the owner does in the manager"
+would change it. **That was wrong**, and stated with more confidence than the
+evidence carried: two causes fit `ENOENT` and they have different remedies —
+
+1. this uid is not on KernelSU's allowlist, so nothing resolves `su` for it;
+2. `su` exists somewhere this process's `PATH` does not list.
+
+Which one it is is **not established**. The KernelSU sources that would settle it are
+not at the paths tried for the pinned revision from this environment, so asserting
+either would be an inference dressed as an observation.
+
+So the code was changed to narrow it: `RootTransport.SU_CANDIDATES` tries
+`/system/bin/su`, `/debug_ramdisk/su` and `/sbin/su` before the bare name, and logs
+which one started. The bare name is last precisely because it is the one that depends
+on `PATH`.
+
+**That narrows cause 2; it does not close it.** `ENOENT` from all four rules out
+exactly three conventional absolute locations plus whatever this process's `PATH`
+resolves. If the `su` that works in Termux is a wrapper, or an executable at any
+other absolute path, all four probes still return `ENOENT` for a reason that is
+`PATH`-shaped and not an allowlist decision. **The real path of the working `su` was
+never captured** — the only observation on record is that `su -c` succeeds in a
+Termux shell, which says nothing about where the binary lives. Until
+`command -v su` / `readlink -f` is read off the device and that path is either
+already in the candidate list or added to it, cause 2 stays live and the next tap's
+answer stays ambiguous. Recording the absence is the point: three ruled-out paths is
+not the same fact as "the PATH explanation is dead".
 
 Both come with a notification saying root itself is unaffected and the lifecycle was
 not re-applied. The first tap is an experiment whose result, either way, is the

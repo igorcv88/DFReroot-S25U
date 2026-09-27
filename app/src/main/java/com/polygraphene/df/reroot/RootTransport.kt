@@ -44,6 +44,21 @@ object RootTransport {
     /** `id` either answers immediately or there is nothing to answer it. */
     const val PROBE_TIMEOUT_MS = 5_000L
 
+    /**
+     * Where a root shell might be, absolute paths first.
+     *
+     * The bare name is last on purpose: it depends on this process's PATH, which is
+     * the variable that made the first field failure ambiguous. Nothing here grants
+     * anything - each candidate either starts or does not, and a shell that starts
+     * still has to answer `id` with uid=0 before it is used.
+     */
+    val SU_CANDIDATES = listOf(
+        "/system/bin/su",
+        "/debug_ramdisk/su",
+        "/sbin/su",
+        "su",
+    )
+
     class Outcome(val rc: Int, val output: String) {
         /**
          * True only when a shell ran and exited 0.
@@ -65,19 +80,60 @@ object RootTransport {
      * caller that exists passes a path a digest comparison already accepted.
      */
     fun runAsRoot(command: String, timeoutMs: Long): Outcome {
-        val p = try {
-            /*
-             * redirectErrorStream so there is ONE pipe to drain. Two pipes and a
-             * single reader is the classic deadlock, and here it would be worse
-             * than a hang: a chatty failure that filled the 64 KiB pipe buffer
-             * before waitFor() returned would come back as RC_TIMEOUT, which this
-             * caller reads as "dispatched". A failure must never be able to
-             * present itself as a successful handover.
-             */
-            ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
-        } catch (t: Throwable) {
-            Log.e(TAG, "[DFR][SOFT_REBOOT] no root transport: $t")
-            return Outcome(RC_NO_TRANSPORT, "${t.javaClass.simpleName}: ${t.message}")
+        /*
+         * Every candidate is tried before concluding there is no transport, and the
+         * bare name is tried LAST.
+         *
+         * The first version used `ProcessBuilder("su", ...)` alone, which resolves
+         * through this process's PATH. On the target that produced:
+         *
+         *   Cannot run program "su": error=2, No such file or directory
+         *
+         * ENOENT, from the app inside system_server, while `su` works from Termux.
+         * Two causes fit that observation and they have different remedies: the uid
+         * is not on KernelSU's allowlist so nothing resolves `su` for it, or `su`
+         * lives somewhere this process's PATH does not list. Which one it is could
+         * not be established - the KernelSU sources that would settle it are not at
+         * the paths tried for the pinned revision from this environment.
+         *
+         * Rather than assert one, the ambiguity is removed from the code: absolute
+         * paths are attempted, so ENOENT from all of them no longer has "the PATH
+         * was wrong" as a live explanation. Absence of evidence was about to become
+         * a conclusion, which is the one move this repository forbids.
+         */
+        var last: Throwable? = null
+        var p: Process? = null
+        for (su in SU_CANDIDATES) {
+            try {
+                /*
+                 * redirectErrorStream so there is ONE pipe to drain. Two pipes and a
+                 * single reader is the classic deadlock, and here it would be worse
+                 * than a hang: a chatty failure that filled the 64 KiB pipe buffer
+                 * before waitFor() returned would come back as RC_TIMEOUT, which this
+                 * caller reads as "dispatched". A failure must never be able to
+                 * present itself as a successful handover.
+                 */
+                p = ProcessBuilder(su, "-c", command).redirectErrorStream(true).start()
+                Log.i(TAG, "[DFR][SOFT_REBOOT] su transport = $su")
+                break
+            } catch (t: Throwable) {
+                last = t
+                Log.i(TAG, "[DFR][SOFT_REBOOT] $su unusable: ${t.javaClass.simpleName}")
+            }
+        }
+        /*
+         * Bound to a val before anything else touches it. The drain thread below
+         * captures it, and Kotlin will not smart-cast a captured `var` from
+         * Process? to Process - a detail no compiler in this environment would
+         * catch before a release run.
+         */
+        val proc = p
+        if (proc == null) {
+            val why = last?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "unknown"
+            Log.e(TAG, "[DFR][SOFT_REBOOT] no root transport after " +
+                "${SU_CANDIDATES.size} candidate(s): $why")
+            return Outcome(RC_NO_TRANSPORT,
+                "none of ${SU_CANDIDATES.joinToString(", ")} could be started ($why)")
         }
         /*
          * Drained concurrently and capped. The command may daemonise and keep the
@@ -87,7 +143,7 @@ object RootTransport {
         val sink = StringBuilder()
         val drain = Thread({
             try {
-                p.inputStream.bufferedReader().use { r ->
+                proc.inputStream.bufferedReader().use { r ->
                     val buf = CharArray(4096)
                     while (true) {
                         val n = r.read(buf)
@@ -104,7 +160,7 @@ object RootTransport {
         drain.isDaemon = true
         drain.start()
         return try {
-            val finished = p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
             // Give the reader a moment to catch up, then take whatever it has.
             try {
                 drain.join(500L)
@@ -119,12 +175,12 @@ object RootTransport {
                  * says so rather than claiming either outcome.
                  */
                 try {
-                    p.destroy()
+                    proc.destroy()
                 } catch (_: Throwable) {
                 }
                 Outcome(RC_TIMEOUT, out)
             } else {
-                Outcome(p.exitValue(), out)
+                Outcome(proc.exitValue(), out)
             }
         } catch (t: Throwable) {
             Outcome(RC_NO_TRANSPORT, "${t.javaClass.simpleName}: ${t.message}")
