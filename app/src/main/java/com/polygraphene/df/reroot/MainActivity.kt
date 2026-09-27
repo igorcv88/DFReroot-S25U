@@ -174,6 +174,18 @@ class MainActivity : Activity() {
              * that stayed disabled, and nothing on screen saying which.
              */
             if (result.success) append(AutoRootStore.recordManualQualification(result))
+            /*
+             * Also notified from the UI path, not only from the unattended one.
+             * A manual run whose dialog the operator navigated away from has the
+             * same problem an automatic one has: the verdict is on screen and the
+             * screen is gone. And it is the manual run that arms the soft-reboot
+             * action, so the action has to be reachable from it.
+             */
+            try {
+                RootNotifier.notifyRunVerdict(applicationContext, result, "ui")
+            } catch (t: Throwable) {
+                append("[!] verdict notification not posted: $t\n")
+            }
             runOnUiThread {
                 setRunResult(active = false, success = result.success)
                 btnRunAll.isEnabled = true

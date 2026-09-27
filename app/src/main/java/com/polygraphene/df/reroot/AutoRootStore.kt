@@ -63,6 +63,16 @@ object AutoRootStore {
     const val JOURNAL_PATH = "/data/system/dfreroot-autoroot-journal"
 
     /**
+     * Per-boot soft-reboot lock: a soft reboot was already dispatched in the boot
+     * it names.
+     *
+     * Separate from the journal on purpose. The journal answers "did the CHAIN run
+     * in this boot", and a soft reboot must not be able to change that answer in
+     * either direction: it neither counts as a root attempt nor clears one.
+     */
+    const val SOFT_REBOOT_LOCK_PATH = "/data/system/dfreroot-softreboot-lock"
+
+    /**
      * null only when the record is genuinely ABSENT.
      *
      * A record that exists and cannot be read comes back as
@@ -239,4 +249,18 @@ object AutoRootStore {
                      nativeStarted: Boolean): Boolean =
         write(JOURNAL_PATH,
             AutoRootPolicy.formatJournal(bootId, phase, attempts, nativeStarted)) == null
+
+    fun softRebootLock(): String? = read(SOFT_REBOOT_LOCK_PATH)
+
+    /**
+     * Claim this boot's single soft-reboot dispatch.
+     *
+     * Written BEFORE ksud is invoked, and a failure to write refuses the dispatch:
+     * the whole point of the lock is that a second tap cannot start a second
+     * teardown of userspace, and a lock written afterwards would not be there to
+     * stop one. Returns null on success or the reason it failed.
+     */
+    fun claimSoftReboot(bootId: String): String? =
+        write(SOFT_REBOOT_LOCK_PATH,
+            SoftRebootPolicy.formatLock(bootId, System.currentTimeMillis()))
 }

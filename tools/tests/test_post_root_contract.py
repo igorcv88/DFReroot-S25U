@@ -68,7 +68,13 @@ check("G2 — runtime symbol discovery | physical PASS" in release_notes and
       "generated release notes preserve the physical G2/G4 evidence")
 check("I — automatic safe end state | physical PASS" in release_notes,
       "generated release notes carry the Gate-I field result")
-check("AUTO_ROOT_FULL_BOOT | **NOT ACCEPTED" in release_notes,
-      "generated release notes keep Auto Root unaccepted and disabled")
+# Auto Root is accepted on hardware AND still ships disabled. Both halves are
+# load-bearing: the gate is proven, and proving it is not the same as arming it -
+# a build that shipped with the box pre-ticked would root unattended on a device
+# whose owner never ran the manual qualification.
+check("AUTO_ROOT_FULL_BOOT | physical PASS" in release_notes,
+      "generated release notes carry the Auto Root field result")
+check("ships disabled" in release_notes,
+      "generated release notes still say Auto Root ships off")
 
 print(f"test_post_root_contract: {len(checks)}/{len(checks)} passed")

@@ -19,4 +19,15 @@
     <string name="auto_root_unqualified">Needs one verified manual run on this build first.</string>
     <string name="auto_root_qualified">Qualified on this build. Not enabled.</string>
     <string name="auto_root_armed">Enabled: one attempt per full boot, never after a soft reboot.</string>
+    <string name="notif_channel_name">Root verdict</string>
+    <string name="notif_channel_desc">The outcome of a DirtyFrag run, including unattended ones at boot.</string>
+    <string name="notif_root_restored">Root restored</string>
+    <string name="notif_root_restored_detail">boot %1$s · KernelSU %2$d · SELinux Enforcing</string>
+    <string name="notif_root_failed">Root NOT restored</string>
+    <string name="notif_root_failed_detail">boot %1$s · %2$s</string>
+    <string name="notif_apply_modules">Apply Modules (Soft Reboot)</string>
+    <string name="notif_soft_reboot_dispatched">Soft reboot dispatched</string>
+    <string name="notif_soft_reboot_dispatched_detail">KernelSU is re-running the module lifecycle. This app cannot observe the result: the restart tears down the process that would have watched it.</string>
+    <string name="notif_soft_reboot_refused">Soft reboot refused</string>
+    <string name="notif_soft_reboot_failed">Soft reboot failed</string>
 </resources>

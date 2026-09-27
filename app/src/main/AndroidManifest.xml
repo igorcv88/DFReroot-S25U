@@ -10,6 +10,15 @@
     -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!--
+      The verdict notification is the only channel an unattended boot-time run has
+      to a human: this firmware's default log buffer is 128 KiB per buffer and
+      system_server saturates it in seconds, so the [DFR][*] trace of a boot run is
+      gone long before anyone can read it. A missing grant degrades to "no
+      notification" and never changes a run's outcome - RootNotifier logs the
+      failure and returns.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="@string/app_name"
@@ -56,6 +65,17 @@
             android:name=".DfrAutoRootService"
             android:exported="false"
             android:directBootAware="true" />
+        <!--
+          The notification action for "Apply Modules (Soft Reboot)". Never
+          exported: the PendingIntent names this component explicitly, so the
+          platform delivers it with this app's own identity and no external caller
+          needs - or gets - a way in. It authorises nothing on arrival either;
+          SoftRebootPolicy re-derives every permission from the same-boot post-root
+          record and a digest comparison on the binary it is about to invoke.
+        -->
+        <receiver
+            android:name=".DfrSoftRebootReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

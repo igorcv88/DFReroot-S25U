@@ -16,10 +16,17 @@ kernel 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k
 aarch64 / 4096-byte pages
 ```
 
-The last physically validated release is `v2.0.5-zzic` (versionCode 8): Gate I
-is a physical PASS on boot `62e8538c-31c5-4531-9bbe-0045e23cf519` — see the
-dossier, which is authoritative for evidence. `AUTO_ROOT_FULL_BOOT` and
-`POST_ROOT_LSPOSED_COMPAT` remain unaccepted.
+Gate I is a physical PASS (`v2.0.5-zzic`, boot `62e8538c…`) and
+`AUTO_ROOT_FULL_BOOT` is a physical PASS as of `2.0.6-zzic`, boot `2e447aaf…`:
+the service completed an unattended attempt after a full reboot, with its own
+journal reading `phase=COMPLETE` / `native_started=1` / `attempts=1` against a
+same-boot post-root record. It still **ships disabled**. See the dossier, which is
+authoritative for evidence.
+
+`POST_ROOT_LSPOSED_COMPAT` remains unaccepted, and so does the *negative* half of
+the Auto Root sequence (steps 5-7 in `docs/AUTO_ROOT.md`: a framework restart must
+trigger nothing, the next full boot exactly one attempt, and unticking the box
+nothing at all).
 
 Version numbers are no longer part of the state to hand over: nothing in the
 tree names one (see *The version is derived per release run*, below).
@@ -140,9 +147,17 @@ The remaining sequence is:
 1. dispatch `release.yml` from `main` with the tag box **empty** whenever a
    release is wanted; it derives the next patch version, and it is the only
    workflow that needs a runner;
-2. perform the `AUTO_ROOT_FULL_BOOT` acceptance in `docs/AUTO_ROOT.md` on that
-   build — `docs/PHYSICAL_TESTING.md` is the step-by-step;
-3. only then consider `POST_ROOT_LSPOSED_COMPAT`.
+2. run steps 5-7 of the Auto Root sequence in `docs/AUTO_ROOT.md` — the negative
+   half, which a successful boot cannot speak for;
+3. tap **Apply Modules (Soft Reboot)** once and record which way it goes: the root
+   transport is the one unproven part, and either outcome is the evidence
+   (`docs/AUTO_ROOT.md`, *What is still unproven*);
+4. only then consider `POST_ROOT_LSPOSED_COMPAT`.
+
+Before any of that, set the log buffer to a value this build accepts:
+`persist.logd.size=5M`. `16M` is silently out of range (`logcat -G 16M` answers
+`MAX log buffer size is 5 MiB`) and the default 128 KiB per buffer loses a
+boot-time trace within seconds.
 
 The generated daemon contains the expected DFR staging path and every post-root
 closeout string. `tools/profile_binding_audit.py` must bind those bytes to all
@@ -867,7 +882,7 @@ re-derive whether something was actually done.
 | `DfrBootReceiver`, exported only as the protected boot broadcast requires | done; boot actions only, and the audit fails if another action is added |
 | `android.permission.RECEIVE_BOOT_COMPLETED` | done, plus `WAKE_LOCK` (below) |
 | non-exported `DfrAutoRootService` | done; the audit fails if it is exported |
-| a foreground notification/channel *if the target build requires one* | **not built, and whether it is required is unproven.** An earlier version of this table justified that with `process="system"` hosting the components in `system_server`; that does not follow from a manifest attribute and is corrected in `docs/AUTO_ROOT.md`. What the bounded post-root wait definitely needs is a `PARTIAL_WAKE_LOCK`, which it takes. If the acceptance run shows a truncated phase sequence, a foreground service is the remedy — before Auto Root is accepted |
+| a foreground notification/channel *if the target build requires one* | **not built, and the acceptance run settled that it is not required.** The whole phase sequence completed in one boot with `attempts=1`, and the run log read `process_name=system_server` / `u:r:system_server:s0` for the app's own pid — an observation, not the manifest inference an earlier version of this table made. A foreground service would now *raise* risk: `startForeground()` missing its ~5 s deadline raises `ForegroundServiceDidNotStartInTimeException` inside `system_server`. The bounded post-root wait still needs its `PARTIAL_WAKE_LOCK`, which it takes. Reopen only if a boot truncates |
 | device-protected storage for opt-in and scheduling state only, never root authority | done, as two atomically-renamed records rather than `SharedPreferences`, so the same pure parser that refuses them is the one the tests drive |
 | qualification requires a manual PASS, live SELinux `1`, and explicit opt-in | done; the opt-in cannot *create* a qualification |
 | qualification persists target, app version, ksud digest and time; a change to any invalidates it | done as versionCode + versionName + pinned ksud digest + `Build.FINGERPRINT`. The profile itself is not stored, and does not need to be: the runtime identity gate already requires the device's fingerprint to equal the profile's pinned one, so a repinned profile either names this same firmware or makes the chain refuse on this device |
@@ -879,7 +894,10 @@ re-derive whether something was actually done.
 | the automatic PASS is exactly the manual PASS | done, one expression in one place |
 | policy in a pure host-testable class, with the listed negative cases | done: `AutoRootPolicy` (50 cases), `PostRootStatus` (12), `RunGuard`/`AwaitBox` (23). The controller-timeout and Activity-vs-service cases the plan names were the two that had no test until the deadline and the owner guard were extracted into pure classes |
 | extend `profile_binding_audit.py` with the export/coordinator/bypass assertions | done, and every new guard was confirmed to fail when its rule is violated |
-| the Auto Root physical acceptance sequence | **still owed**, and it comes after Gate I |
+| the Auto Root physical acceptance sequence | steps 1-4 **done** (fifth physical run, boot `2e447aaf…`, `attempts=1`); steps 5-7 — the negative half — still owed |
+| a pre-transaction failure must not spend the boot | done: `nativeStarted == false` means transaction 5 was never issued and provably nothing was written, so it is journalled as `PREFLIGHT` and consumes one attempt instead of locking the boot. Once the transaction is issued, `FAILED_LOCKED` is unchanged |
+| the unattended CONTROLLER deadline | separated: 90 s for the boot path against 30 s for the button. Margin, not a fix — the accepted run's controller arrived well inside 30 s |
+| the run verdict where a human can see it | done: a notification from both callers, never a gate. The FAIL one matters more; the buffer that used to carry this evidence holds 128 KiB and rotates in seconds |
 
 ### What was deliberately not built
 
