@@ -1,228 +1,186 @@
 package com.polygraphene.df.reroot
 
+import android.content.Context
 import android.util.Log
+import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 /**
- * The only place this app asks for a root shell, and the only place it hashes a
- * file on disk.
+ * Post-root command transport for the DFR-specific KernelSU pair.
  *
- * Deliberately tiny, and deliberately NOT used anywhere in the root chain: the
- * chain obtains its own privilege through the Dirty Frag primitive and never
- * shells out. This exists for the one operation that happens AFTER root already
- * exists and cannot be done any other way - asking the resident KernelSU daemon
- * to re-apply the module lifecycle.
+ * The app is physically hosted by `system_server` on ZZIC. That mount namespace
+ * does not contain `/system/bin/su`, even though KernelSU exposes it inside an
+ * authorised Termux namespace. Granting this package in KernelSU Manager would
+ * also be the wrong boundary: the package shares uid 1000 with the platform.
  *
- * ## Why a `su` shell at all
- *
- * After the chain completes, this app is still uid 1000 in
- * `u:r:system_server:s0`. The CONTROLLER binder it held during the run exposes
- * transactions 1-5 (the three patch stages, the orphan helper and runAll) and
- * nothing else - there is no exec transaction, by design. So there is no
- * privileged channel left over from the run, and `su` is the transport KernelSU
- * itself provides.
- *
- * **This is unproven on the target.** KernelSU grants `su` from an allowlist its
- * manager maintains, and nothing establishes that this app is on it. A denial is
- * therefore an expected outcome, not a defect, and it must arrive as a named
- * refusal the operator can read rather than as silence.
+ * The DFR-specific KernelSU module therefore accepts `KSU_IOCTL_GRANT_ROOT` only
+ * when both the helper and its real parent carry the policy-owned
+ * `u:r:system_server:s0` SID. The `dfreroot-ksud` task name is an additional
+ * contract check, not the identity boundary. Normal sucompat and the uid
+ * allowlist are unchanged. This class stages the already hash-pinned ksud asset,
+ * executes its `debug su --global-mnt` entry point, and sends one controlled
+ * command to the resulting root shell.
  */
 object RootTransport {
 
     const val TAG = "DFReroot"
-
-    /** Exit status used when the shell could not be started at all. */
     const val RC_NO_TRANSPORT = -1
-
-    /** Exit status used when the shell was started but outlived its deadline. */
     const val RC_TIMEOUT = -2
-
-
-    /** Output is diagnostic, not data: enough to read, bounded so it cannot grow. */
+    const val RC_HELPER_CHANGED = -3
     const val OUTPUT_CAP = 8192
-
-    /** `id` either answers immediately or there is nothing to answer it. */
     const val PROBE_TIMEOUT_MS = 5_000L
 
-    /**
-     * Where a root shell might be, absolute paths first.
-     *
-     * The bare name is last on purpose: it depends on this process's PATH, which is
-     * the variable that made the first field failure ambiguous. Nothing here grants
-     * anything - each candidate either starts or does not, and a shell that starts
-     * still has to answer `id` with uid=0 before it is used.
-     */
-    val SU_CANDIDATES = listOf(
-        "/system/bin/su",
-        "/debug_ramdisk/su",
-        "/sbin/su",
-        "su",
-    )
-
     class Outcome(val rc: Int, val output: String) {
-        /**
-         * True only when a shell ran and exited 0.
-         *
-         * Never read this as "the command did what it was asked": `ksud
-         * soft-reboot` exits 0 both when it daemonises successfully and when it
-         * skips the whole operation on a UAPI mismatch. What the exit status
-         * establishes is narrower - that a root shell existed and the binary ran.
-         */
         val ran: Boolean get() = rc == 0
     }
 
-    /**
-     * Run one command as root, bounded.
-     *
-     * The argv is passed to `su -c` as a single string because that is the only
-     * form every su implementation accepts. Callers pass paths this app chose,
-     * never operator input, so there is nothing to quote-escape - and the one
-     * caller that exists passes a path a digest comparison already accepted.
-     */
-    fun runAsRoot(command: String, timeoutMs: Long): Outcome {
-        /*
-         * Every candidate is tried before concluding there is no transport, and the
-         * bare name is tried LAST.
-         *
-         * The first version used `ProcessBuilder("su", ...)` alone, which resolves
-         * through this process's PATH. On the target that produced:
-         *
-         *   Cannot run program "su": error=2, No such file or directory
-         *
-         * ENOENT, from the app inside system_server, while `su` works from Termux.
-         * Two causes fit that observation and they have different remedies: the uid
-         * is not on KernelSU's allowlist so nothing resolves `su` for it, or `su`
-         * lives somewhere this process's PATH does not list. Which one it is could
-         * not be established - the KernelSU sources that would settle it are not at
-         * the paths tried for the pinned revision from this environment.
-         *
-         * Rather than assert one, the ambiguity is removed from the code: absolute
-         * paths are attempted, so ENOENT from all of them no longer has "the PATH
-         * was wrong" as a live explanation. Absence of evidence was about to become
-         * a conclusion, which is the one move this repository forbids.
-         */
-        var last: Throwable? = null
-        var p: Process? = null
-        for (su in SU_CANDIDATES) {
-            try {
-                /*
-                 * redirectErrorStream so there is ONE pipe to drain. Two pipes and a
-                 * single reader is the classic deadlock, and here it would be worse
-                 * than a hang: a chatty failure that filled the 64 KiB pipe buffer
-                 * before waitFor() returned would come back as RC_TIMEOUT, which this
-                 * caller reads as "dispatched". A failure must never be able to
-                 * present itself as a successful handover.
-                 */
-                p = ProcessBuilder(su, "-c", command).redirectErrorStream(true).start()
-                Log.i(TAG, "[DFR][SOFT_REBOOT] su transport = $su")
-                break
-            } catch (t: Throwable) {
-                last = t
-                Log.i(TAG, "[DFR][SOFT_REBOOT] $su unusable: ${t.javaClass.simpleName}")
+    class Preparation internal constructor(
+        val transport: Prepared?,
+        val detail: String,
+    ) {
+        val ready: Boolean get() = transport != null
+    }
+
+    class Prepared internal constructor(private val helperPath: String) {
+
+        fun runAsRoot(command: String, timeoutMs: Long): Outcome {
+            val actual = sha256File(helperPath)
+            val pinned = KsudStage.pinnedKsudSha256()
+            if (actual != pinned) {
+                val why = actual ?: "unreadable"
+                Log.e(TAG, "[DFR][SOFT_REBOOT] staged helper changed: $why")
+                return Outcome(
+                    RC_HELPER_CHANGED,
+                    "staged helper no longer matches the pinned digest (found $why)",
+                )
             }
-        }
-        /*
-         * Bound to a val before anything else touches it. The drain thread below
-         * captures it, and Kotlin will not smart-cast a captured `var` from
-         * Process? to Process - a detail no compiler in this environment would
-         * catch before a release run.
-         */
-        val proc = p
-        if (proc == null) {
-            val why = last?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "unknown"
-            Log.e(TAG, "[DFR][SOFT_REBOOT] no root transport after " +
-                "${SU_CANDIDATES.size} candidate(s): $why")
-            return Outcome(RC_NO_TRANSPORT,
-                "none of ${SU_CANDIDATES.joinToString(", ")} could be started ($why)")
-        }
-        /*
-         * Drained concurrently and capped. The command may daemonise and keep the
-         * write end open, so the reader can outlive the deadline; it is a daemon
-         * thread and holds nothing the caller needs.
-         */
-        val sink = StringBuilder()
-        val drain = Thread({
-            try {
-                proc.inputStream.bufferedReader().use { r ->
-                    val buf = CharArray(4096)
-                    while (true) {
-                        val n = r.read(buf)
-                        if (n <= 0) break
-                        if (sink.length < OUTPUT_CAP) {
-                            synchronized(sink) { sink.append(buf, 0, n) }
+
+            val proc = try {
+                ProcessBuilder(helperPath, "debug", "su", "--global-mnt")
+                    .redirectErrorStream(true)
+                    .start()
+            } catch (t: Throwable) {
+                val why = "${t.javaClass.simpleName}: ${t.message}"
+                Log.e(TAG, "[DFR][SOFT_REBOOT] pinned helper could not start: $why")
+                return Outcome(RC_NO_TRANSPORT, why)
+            }
+            Log.i(TAG, "[DFR][SOFT_REBOOT] transport=pinned-dfr-ksud path=$helperPath")
+
+            val sink = StringBuilder()
+            val drain = Thread({
+                try {
+                    proc.inputStream.bufferedReader().use { reader ->
+                        val buffer = CharArray(4096)
+                        while (true) {
+                            val count = reader.read(buffer)
+                            if (count <= 0) break
+                            synchronized(sink) {
+                                val remaining = OUTPUT_CAP - sink.length
+                                if (remaining > 0) {
+                                    sink.append(buffer, 0, minOf(count, remaining))
+                                }
+                            }
                         }
                     }
-                }
-            } catch (_: Throwable) {
-                // The pipe closing under us is the normal end of a soft reboot.
-            }
-        }, "dfr-root-transport-reader")
-        drain.isDaemon = true
-        drain.start()
-        return try {
-            val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
-            // Give the reader a moment to catch up, then take whatever it has.
-            try {
-                drain.join(500L)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-            }
-            val out = synchronized(sink) { sink.toString().trim() }
-            if (!finished) {
-                /*
-                 * A soft reboot tears userspace down, so a command that is still
-                 * running at the deadline is ambiguous, not failed. The caller
-                 * says so rather than claiming either outcome.
-                 */
-                try {
-                    proc.destroy()
                 } catch (_: Throwable) {
+                    // A successful soft reboot closes the pipe with userspace.
                 }
-                Outcome(RC_TIMEOUT, out)
-            } else {
-                Outcome(proc.exitValue(), out)
+            }, "dfr-root-transport-reader")
+            drain.isDaemon = true
+            drain.start()
+
+            try {
+                proc.outputStream.bufferedWriter().use { writer ->
+                    writer.write(command)
+                    writer.newLine()
+                    writer.write("exit")
+                    writer.newLine()
+                    writer.flush()
+                }
+            } catch (t: Throwable) {
+                // The helper may have refused and closed stdin. waitFor below owns
+                // the verdict and captures its diagnostic output.
+                Log.i(TAG, "[DFR][SOFT_REBOOT] helper stdin closed: ${t.javaClass.simpleName}")
             }
-        } catch (t: Throwable) {
-            Outcome(RC_NO_TRANSPORT, "${t.javaClass.simpleName}: ${t.message}")
+
+            return try {
+                val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+                try {
+                    drain.join(500L)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+                val output = synchronized(sink) { sink.toString().trim() }
+                if (!finished) {
+                    try {
+                        proc.destroy()
+                    } catch (_: Throwable) {
+                    }
+                    Outcome(RC_TIMEOUT, output)
+                } else {
+                    Outcome(proc.exitValue(), output)
+                }
+            } catch (t: Throwable) {
+                Outcome(RC_NO_TRANSPORT, "${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+
+        fun sha256AsRoot(path: String): String? {
+            val outcome = runAsRoot(
+                "sha256sum '" + path + "' 2>/dev/null | cut -d' ' -f1 | " +
+                    "sed 's/^/DFR_SHA256=/'",
+                PROBE_TIMEOUT_MS,
+            )
+            if (!outcome.ran) {
+                Log.i(TAG, "[DFR][SOFT_REBOOT] cannot hash $path as root: rc=${outcome.rc}")
+                return null
+            }
+            val prefix = "DFR_SHA256="
+            val token = outcome.output.lineSequence()
+                .map { it.trim() }
+                .firstOrNull { it.startsWith(prefix) }
+                ?.removePrefix(prefix)
+                ?: return null
+            if (token.length != 64 || !token.all { it in "0123456789abcdefABCDEF" }) {
+                Log.i(TAG, "[DFR][SOFT_REBOOT] $path: unparsable sha256sum output")
+                return null
+            }
+            return token.lowercase()
         }
     }
 
-    /**
-     * SHA-256 of a file THROUGH the root shell, or null when it cannot be taken.
-     *
-     * This app cannot hash the candidates itself, and that is not a permission
-     * oversight to work around - it is the layout. On ZZIC, after a successful run:
-     *
-     *  - the staged daemon at KsudStage.DEST is GONE. stage1.S calls
-     *    `stage_daemon_from("/data/system/dfreroot-ksud")` and ksud installs it,
-     *    consuming the staged copy;
-     *  - it lands at /data/adb/ksud, and /data/adb is
-     *    `drwx------ root root u:object_r:adb_data_file:s0` - uid 1000 cannot
-     *    traverse the directory, let alone read the file.
-     *
-     * So [sha256File] returns null for every candidate and the digest gate became
-     * unsatisfiable by construction - the failure AGENTS.md 3.3 names. The fix is the
-     * one that rule prescribes: the proof changes FORM, not whether it is required.
-     * The digest is still compared, and still before the privileged operation; it is
-     * simply read by something that can read it.
-     *
-     * This adds no exposure. A root shell that would lie about `sha256sum` is a root
-     * shell that could run `soft-reboot` - or anything else - directly.
-     *
-     * null on anything that is not exactly one 64-character hex digest, including a
-     * missing file, a denied read or output this build cannot account for.
-     */
-    fun sha256AsRoot(path: String): String? {
-        val out = runAsRoot("sha256sum '" + path + "'", PROBE_TIMEOUT_MS)
-        if (!out.ran) {
-            Log.i(TAG, "[DFR][SOFT_REBOOT] cannot hash $path as root: rc=${out.rc}")
+    fun prepare(context: Context): Preparation {
+        val stageLog = KsudStage.stageFromAssets(context)
+        if (!stageLog.contains("KSUD_STAGED_VERIFY=PASS")) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_STAGE=FAIL $stageLog")
+            return Preparation(null, stageLog.trim())
+        }
+        val actual = sha256File(KsudStage.DEST)
+        if (actual != KsudStage.pinnedKsudSha256()) {
+            val why = actual ?: "unreadable"
+            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_VERIFY=FAIL $why")
+            return Preparation(null, "staged helper verification failed: $why")
+        }
+        Log.i(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_READY=PASS")
+        return Preparation(Prepared(KsudStage.DEST), "pinned DFR helper staged and verified")
+    }
+
+    private fun sha256File(path: String): String? {
+        val digest = try {
+            File(path).inputStream().use { input ->
+                val md = MessageDigest.getInstance("SHA-256")
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (count > 0) md.update(buffer, 0, count)
+                }
+                md.digest()
+            }
+        } catch (_: Throwable) {
             return null
         }
-        val token = out.output.trim().split(Regex("\\s+")).firstOrNull() ?: return null
-        if (token.length != 64 || !token.all { it in "0123456789abcdefABCDEF" }) {
-            Log.i(TAG, "[DFR][SOFT_REBOOT] $path: unparsable sha256sum output")
-            return null
-        }
-        return token.lowercase()
+        return digest.joinToString("") { "%02x".format(it) }
     }
 }

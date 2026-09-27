@@ -106,22 +106,38 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         }
 
         /*
-         * Now the transport, because the digests cannot be taken without it. The
-         * first shipped version hashed the candidates from this process and refused
-         * every time with "unreadable": the chain consumes the staged copy and the
-         * daemon it installs lives under /data/adb, which is 0700 root. That made the
-         * digest gate unsatisfiable by construction (AGENTS.md 3.3). Proving the
-         * shell first and hashing through it keeps the gate and makes it reachable.
+         * Prepare the exact DFR helper in /data/system. The active DFR KernelSU
+         * module permits GRANT_ROOT only when this helper and its real parent carry
+         * the policy-owned system_server SID. Its task name is defense in depth,
+         * not the identity boundary. The module does not allowlist uid 1000 and
+         * does not expose /system/bin/su in this namespace.
          */
-        val probe = RootTransport.runAsRoot("id", RootTransport.PROBE_TIMEOUT_MS)
+        val preparation = RootTransport.prepare(context)
+        val transport = preparation.transport
+        if (transport == null) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_UNAVAILABLE ${preparation.detail}")
+            RootNotifier.notifySoftReboot(
+                context, context.getString(R.string.notif_soft_reboot_refused),
+                "the pinned DFR helper could not be staged and verified" +
+                    " (${preparation.detail}). Root itself is unaffected; the module" +
+                    " lifecycle was not re-applied."
+            )
+            return
+        }
+        val probe = transport.runAsRoot("id", RootTransport.PROBE_TIMEOUT_MS)
         if (probe.rc == RootTransport.RC_NO_TRANSPORT) {
             Log.e(TAG, "[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT ${probe.output}")
             RootNotifier.notifySoftReboot(
                 context, context.getString(R.string.notif_soft_reboot_refused),
-                "no su this app can start, from any candidate path" +
-                    " (${probe.output}). This may mean the app is not granted in the" +
-                    " KernelSU manager. Root itself is unaffected; the module" +
-                    " lifecycle was not re-applied."
+                "the pinned DFR helper could not start (${probe.output}). Root itself" +
+                    " is unaffected; the module lifecycle was not re-applied."
+            )
+            return
+        }
+        if (probe.rc == RootTransport.RC_HELPER_CHANGED) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_CHANGED ${probe.output}")
+            RootNotifier.notifySoftReboot(
+                context, context.getString(R.string.notif_soft_reboot_refused), probe.output
             )
             return
         }
@@ -129,9 +145,11 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
             Log.e(TAG, "[DFR][SOFT_REBOOT] NOT_ROOT rc=${probe.rc} ${probe.output}")
             RootNotifier.notifySoftReboot(
                 context, context.getString(R.string.notif_soft_reboot_refused),
-                "su answered but this app is not root: a KernelSU Manager grant is" +
-                    " required for a direct app su path (${probe.output}). Root itself" +
-                    " is unaffected; the module lifecycle was not re-applied."
+                "the pinned helper started but the DFR-specific KernelSU transport" +
+                    " did not grant root (rc=${probe.rc}: ${probe.output}). " +
+                    "A KernelSU Manager grant for uid 1000 is neither required nor" +
+                    " recommended. Root itself is unaffected; the module lifecycle" +
+                    " was not re-applied."
             )
             return
         }
@@ -147,7 +165,7 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          */
         for (path in arrayOf(ADB_KSUD, KsudStage.DEST)) {
             inputs.candidates.add(
-                SoftRebootPolicy.Candidate(path, RootTransport.sha256AsRoot(path))
+                SoftRebootPolicy.Candidate(path, transport.sha256AsRoot(path))
             )
         }
 
@@ -215,8 +233,15 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
                 "sha256sum \"\$p\" 2>/dev/null | cut -d' ' -f1 | " +
                 "grep -qx '" + pinned + "' || exit " + RC_DIGEST_CHANGED + "; " +
                 "exec \"\$p\" soft-reboot"
-        val outcome = RootTransport.runAsRoot(verifyAndExec, TRANSPORT_TIMEOUT_MS)
+        val outcome = transport.runAsRoot(verifyAndExec, TRANSPORT_TIMEOUT_MS)
         when {
+            outcome.rc == RootTransport.RC_HELPER_CHANGED -> {
+                Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_CHANGED ${outcome.output}")
+                RootNotifier.notifySoftReboot(
+                    context, context.getString(R.string.notif_soft_reboot_refused),
+                    outcome.output + ". Nothing was executed; root is unaffected."
+                )
+            }
             outcome.rc == RC_DIGEST_CHANGED -> {
                 /*
                  * The binary at that path is no longer the pinned daemon. Nothing

@@ -787,8 +787,8 @@ the `dfreroot` staging contract, byte-identical to it:
 
 ```text
 app/src/main/assets/ksud
-SHA-256  14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a
-size     6,670,272
+SHA-256  f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c
+size     6,675,136
 ```
 
 Verified from the bytes, not from the build log: it contains
@@ -988,8 +988,8 @@ The implementation makes four decisions that future reviews must preserve:
   `dfm1` after that result, and never treats isolated `dfm3` as final success.
 
 Host target/profile and contract-shape tests pass. The generated daemon is
-`6,670,272` bytes with SHA-256
-`14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a`,
+`6,675,136` bytes with SHA-256
+`f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c`,
 and all three DFR pins carry that identity. Gate I remains **PENDING PHYSICAL
 ACCEPTANCE** until the offline/build gates pass and the final same-boot
 Enforcing state is observed on ZZIC.
@@ -1845,3 +1845,38 @@ invalidated it before `opt_in` was ever consulted. Step 7 requires a **valid**
 qualification for the installed build, the box then unticked, and a full boot that
 starts nothing — the `"Auto Root is not opted in"` path. Different code, different
 evidence, still owed.
+
+### Ninth investigation — paired Apply Modules transport implemented, physical result owed
+
+The v9 notification action tried `/system/bin/su`, `/debug_ramdisk/su`,
+`/sbin/su` and bare `su`; every start failed with `ENOENT`. Termux simultaneously
+showed `/system/bin/su` and could use it. `/proc/<system_server>/root/system/bin/su`
+was absent, closing the PATH ambiguity: the processes see different mount
+namespaces.
+
+The pinned KernelSU source explains the split. sucompat intercepts
+`/system/bin/su` only after `ksu_is_allow_uid_for_current(uid)` passes. The DFR app
+is uid 1000 in `u:r:system_server:s0`; a Manager grant would therefore target the
+shared platform uid, not one app, and is not an acceptable fix.
+
+RMGLabs-Payloads PR #3 added a DFR-profile-only `KSU_IOCTL_GRANT_ROOT` permission.
+It requires uid/euid 1000 and the policy-owned `system_server` SID for both helper
+and real parent. Mutable task names are not authority; `dfreroot-ksud` remains an
+additional contract check only. The normal allowlist and sucompat paths are
+unchanged, and workflow guards reject a build that widens uid 1000 or trusts the
+parent `comm`.
+
+The manual exact-port build published the paired helper:
+
+```text
+ksud-pa3q-S938BXXUCZZIC-dfreroot-v3.3.0
+sha256=f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c
+```
+
+DFReroot now stages and verifies that helper, invokes
+`debug su --global-mnt`, probes `id`, hashes candidate daemons through the root
+shell and re-checks the chosen daemon in the same shell immediately before
+`exec ... soft-reboot`. This is an implementation result, not a physical PASS.
+The final APK still owes proof that `system_server` can execute the staged helper
+under enforcing SELinux, that the ioctl returns uid 0, and that the soft-reboot
+handoff reaches the expected dispatch outcome without changing `boot_id`.
