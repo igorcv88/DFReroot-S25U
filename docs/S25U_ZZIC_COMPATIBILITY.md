@@ -957,7 +957,7 @@ inferred from a nearby firmware.
 | G4 — Write safety | **physical PASS** | system remained operational after `enforcing=0`, KernelSU late-load completed and root worked |
 | H — Installer / packages.xml | **physical PASS** | injected key survived framework restart; write-path fixes regression-tested |
 | I — Automatic safe end state | **physical PASS** | `v2.0.5-zzic`, boot `62e8538c…`: the closeout ran unaided to a same-boot `POST_ROOT_COMPLETE`, and the operator independently read `Enforcing` / sysfs `1`, `su` in `u:r:ksu:s0`, and the pinned daemon installed at `/data/adb/ksud`. See the fourth physical run below |
-| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **UNVERIFIED (ships disabled)** | the boot receiver/service, the pure scheduling policy and the shared coordinator exist and are host-tested; no automatic attempt has run on hardware, and the feature cannot be enabled without a verified manual completion on the same build plus an explicit opt-in. Record: `docs/AUTO_ROOT.md` |
+| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **PARTIALLY ACCEPTED (still ships disabled)** | `2.0.6-zzic`, boot `2e447aaf…`: the service completed an unattended attempt after a full reboot. Its own per-boot journal — written by `DfrAutoRootService` and by nothing else — read `phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id` as a valid post-root record, with `Enforcing` / sysfs `1` and `su` in `u:r:ksu:s0`. That is the positive path only. The gate also covers boundaries one successful boot cannot speak for — a framework restart must trigger nothing, the next full boot exactly one attempt, opting out nothing at all — and those are **untested**, so this is not a promotion to PASS (AGENTS.md section 8). It ships OFF: a verified manual completion on the exact build plus an explicit opt-in remain required. See the fifth physical run below |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
 remaining blocker to calling the automated flow complete is the post-root
@@ -1027,9 +1027,11 @@ This promotes nothing. What it adds to the evidence record is negative:
 - no gate is weakened, no override exists, and the automatic PASS is the same
   conjunction as the manual one.
 
-`AUTO_ROOT_FULL_BOOT` stays UNVERIFIED until the acceptance sequence in
-`docs/AUTO_ROOT.md` is executed on ZZIC, which must happen **after** Gate I passes
-manually.
+`AUTO_ROOT_FULL_BOOT` is **partially accepted** as of the fifth physical run below,
+executed after Gate I passed manually, in that order. The run proves the positive
+path; steps 5-7 of `docs/AUTO_ROOT.md` — the boundaries a single successful boot
+cannot speak for — remain untested, and the gate is not promoted to PASS until they
+are.
 
 ### Third physical run — `v2.0.5-zzic`, displaced by a pre-existing KernelSU
 
@@ -1596,3 +1598,68 @@ collapsed into a single indicator.
 `StageReceiver` reports `LIBEXP_LOADED=PASS|FAIL` as its own boundary (§23),
 distinct from `NATIVE_LIBRARY_DISCOVERABLE`: the library existing on disk and a
 successful `dlopen` inside the network_stack domain are different facts.
+
+
+### Fifth physical run — `2.0.6-zzic`, unattended after a full reboot
+
+The acceptance run for `AUTO_ROOT_FULL_BOOT`. Nothing was pressed: the device was
+rebooted, unlocked, and root was present.
+
+```text
+boot_id=2e447aaf-dc02-4cb7-851c-d79f73f94282
+```
+
+`/data/system/dfreroot-autoroot-journal`:
+
+```text
+boot_id=2e447aaf-dc02-4cb7-851c-d79f73f94282
+phase=COMPLETE
+attempts=1
+native_started=1
+```
+
+`/data/system/dfreroot-post-root`:
+
+```text
+state=POST_ROOT_COMPLETE
+boot_id=2e447aaf-dc02-4cb7-851c-d79f73f94282
+ksu_version=32601
+uapi_version=2
+runtime_mode=late-load
+selinux=1
+```
+
+Operator-verified in the same boot: `getenforce` → `Enforcing`,
+`/sys/fs/selinux/enforce` → `1`, `id` → `uid=0(root) … context=u:r:ksu:s0`,
+`/proc/uptime` → 380 s.
+
+**Why this promotes the gate and a working `su` would not have.** The journal is
+written by `DfrAutoRootService` and by no other code path — `MainActivity` never
+touches it. So `phase=COMPLETE` on this `boot_id` is the only artefact that
+distinguishes "the automatic service ran the chain" from "the chain ran". Root
+being present after a cold boot proves the chain ran (KernelSU is late-loaded and
+does not survive a kernel restart); it does not, on its own, say which caller
+started it.
+
+**`attempts=1` is the load-bearing detail for the two risks this audit had
+flagged.** It means the *first* `AutoRootPolicy.evaluate()` already allowed: at the
+first broadcast `sys.boot_completed` was 1, no marker existed, SELinux read 1 and a
+NetworkStack process was visible. No readiness poll was ever recorded, so the
+10-minute readiness budget and the 12-poll backstop were nowhere near binding, and
+the CONTROLLER arrived well inside even the 30 s manual deadline.
+
+**What this run does NOT establish.** Whether `LOCKED_BOOT_COMPLETED` (pre-unlock)
+or `BOOT_COMPLETED` (post-unlock) drove it. Had the LOCKED broadcast driven it with
+`sys.boot_completed` still 0, the journal would read `attempts≥2`; it reads 1. So
+the question of whether `/data/system` is readable by this app before the user
+unlocks remains open, and the run is not evidence either way. It degrades safely —
+a pre-unlock read failure only loses the earlier of two triggers.
+
+**Evidence that was lost, and why.** No `[DFR][*]` line survived in logcat. This
+firmware defaults to a **128 KiB** ring buffer per log buffer (`logcat -g`), which
+`system_server` saturates in seconds; the whole boot-time trace had rotated out
+before a root shell existed to read it. `persist.logd.size=16M` is silently out of
+range on this build — `logcat -G 16M` answers `MAX log buffer size is 5 MiB` — so
+`5M` is the value that can be honoured at boot. This is why the verdict is now also
+posted as a notification: the two `/data/system` records plus the notification are
+the evidence channels that do not depend on the log buffer.

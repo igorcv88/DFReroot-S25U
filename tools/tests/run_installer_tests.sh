@@ -40,3 +40,15 @@ javac -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/AwaitBox.java \
     tools/tests/RunHandoffTest.java
 java -cp "$OUT" RunHandoffTest
+
+# "Apply Modules (Soft Reboot)" precheck: boot scoping, the same-boot post-root
+# requirement, the per-boot dispatch lock and the digest-not-path choice of which
+# ksud to invoke. None of it is reachable on a device - it needs a notification
+# minted in a previous boot, a lock from a dispatch that already happened, and a
+# /data/adb/ksud the root manager replaced with its own build.
+javac -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/SoftRebootPolicy.java \
+    app/src/main/java/com/polygraphene/df/reroot/PostRootStatus.java \
+    app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
+    tools/tests/SoftRebootPolicyTest.java
+java -cp "$OUT" SoftRebootPolicyTest

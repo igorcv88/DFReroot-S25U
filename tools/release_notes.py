@@ -108,9 +108,16 @@ def main():
         "same-boot `POST_ROOT_COMPLETE`; the operator independently read Enforcing, sysfs "
         "`1`, `su` in `u:r:ksu:s0` and the pinned daemon installed |")
     if auto_root_present:
-        add("| AUTO_ROOT_FULL_BOOT | **NOT ACCEPTED — ships disabled** | the boot path "
-            "exists and is off: it needs a verified manual completion on this exact "
-            "build plus an explicit opt-in, and has not been accepted on hardware |")
+        add("| AUTO_ROOT_FULL_BOOT | **PARTIALLY ACCEPTED — ships disabled** | the "
+            "positive path is proven on hardware: an unattended attempt completed after "
+            "a full reboot, the service's own per-boot journal recording "
+            "`phase=COMPLETE` / `native_started=1` / `attempts=1` against the same "
+            "`boot_id` as a valid post-root record, with SELinux read back Enforcing. "
+            "The gate also covers boundaries one successful boot cannot speak for — a "
+            "framework restart must trigger nothing, the next full boot exactly one "
+            "attempt, and opting out nothing at all — and those are **untested**. It "
+            "ships OFF and still needs a verified manual completion on this exact build "
+            "plus an explicit opt-in |")
     add("")
     if not ko_ok:
         add("On the exact ZZIC target this build **will still refuse to root the device**,")

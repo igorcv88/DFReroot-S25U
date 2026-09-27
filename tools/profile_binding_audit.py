@@ -369,6 +369,9 @@ def audit():
     autoroot_policy_src = dfr_source("AutoRootPolicy.java")
     autoroot_store_src = dfr_source("AutoRootStore.kt")
     autoroot_service_src = dfr_source("DfrAutoRootService.kt")
+    soft_reboot_policy_src = dfr_source("SoftRebootPolicy.java")
+    soft_reboot_receiver_src = dfr_source("DfrSoftRebootReceiver.kt")
+    notifier_src = dfr_source("RootNotifier.kt")
     boot_receiver_src = dfr_source("DfrBootReceiver.kt")
 
     # --- the ksud that gets handed uid 0 -----------------------------------
@@ -801,6 +804,148 @@ def audit():
     if "android.permission.RECEIVE_BOOT_COMPLETED" not in manifest_code:
         fail("RECEIVE_BOOT_COMPLETED is not requested, so the boot receiver would "
              "never fire")
+    # --- the R1 correction: a pre-transaction failure does not spend the boot --
+    # `nativeStarted` is set immediately before transaction 5 and every page-cache
+    # write lives inside that call, so a failure with it false wrote provably
+    # nothing: no marker, no patched artefact, no armed hook. Recording that as
+    # FAILED_LOCKED spent the only automatic attempt on a refusal that changed
+    # nothing - the shape that matters being the hop losing a race with a slow
+    # network_stack at boot, on a device nobody is watching. It is recorded as
+    # readiness instead, and the attempt count keeps the loop finite.
+    service_code = code_only(autoroot_service_src)
+    if "!result.nativeStarted -> AutoRootPolicy.PHASE_PREFLIGHT" not in service_code:
+        fail("DfrAutoRootService no longer distinguishes a pre-transaction failure "
+             "from one that wrote to the page cache; a refusal that changed nothing "
+             "would spend the boot's only automatic attempt")
+    if "else -> AutoRootPolicy.PHASE_FAILED_LOCKED" not in service_code:
+        fail("DfrAutoRootService no longer locks the boot once transaction 5 has "
+             "been issued; a hard reboot is the only recovery boundary there")
+    if "DfrRootCoordinator.AUTOROOT_CONTROLLER_TIMEOUT_MS" not in service_code:
+        fail("the unattended path no longer passes its own CONTROLLER deadline; a "
+             "boot-time hop competes with dexopt and a button press does not")
+    coord_all = code_only(coord_src)
+    if "AUTOROOT_CONTROLLER_TIMEOUT_MS" not in coord_all:
+        fail("DfrRootCoordinator no longer defines the unattended CONTROLLER deadline")
+
+    # --- the verdict notification ------------------------------------------
+    # The only channel an unattended boot-time run has to a human: this firmware's
+    # default log buffer is 128 KiB per buffer and system_server saturates it in
+    # seconds, so the [DFR][*] trace of a boot run is gone before anyone reads it.
+    notifier_code = code_only(notifier_src)
+    if "notif_root_failed_detail" not in notifier_code \
+            or "R.string.notif_root_failed)" not in notifier_code:
+        fail("RootNotifier no longer reports a FAILED run with its own title and "
+             "reason; an unattended path that fails silently leaves the owner "
+             "believing the phone re-roots itself")
+    if "if (result.success) {" not in notifier_code or "} else {" not in notifier_code:
+        fail("RootNotifier no longer branches on the run's verdict, so success and "
+             "failure would read the same")
+    if "FAILED to post" not in notifier_src:
+        fail("RootNotifier no longer logs a failed post; a missing notification "
+             "permission would become invisible")
+    for caller, src in (("DfrAutoRootService", autoroot_service_src),
+                        ("MainActivity", dfr_source("MainActivity.kt"))):
+        if "RootNotifier.notifyRunVerdict" not in code_only(src):
+            fail("%s no longer posts the run verdict" % caller)
+    if "android.permission.POST_NOTIFICATIONS" not in manifest:
+        fail("POST_NOTIFICATIONS is not requested, so the verdict notification "
+             "would never be posted on this SDK level")
+
+    # --- Apply Modules (Soft Reboot) ---------------------------------------
+    # The operation is legitimate and its mechanism is established by reading the
+    # pinned KernelSU revision's own source: soft_reboot() daemonises into PID 1's
+    # mount namespace, then stop -> on_post_data_fs() -> start -> on_services() ->
+    # on_boot_completed(). The kernel is never restarted. What must stay true here
+    # is that it can never become a way to run the exploit again, and that it is
+    # never offered to a boot this build did not verifiably root.
+    soft_policy_code = code_only(soft_reboot_policy_src)
+    soft_receiver_code = code_only(soft_reboot_receiver_src)
+    # STRUCTURAL: no path from the notification action to the chain.
+    for banned in ("DfrRootCoordinator.run", "DirtyFrag", "StageHop",
+                   "KsudStage.stageFromAssets"):
+        if banned in soft_receiver_code:
+            fail("DfrSoftRebootReceiver references %r; the soft-reboot action must "
+                 "never be able to run the chain - it may only ask an already-rooted "
+                 "boot to re-apply modules" % banned)
+    if "PostRootStatus.evaluate" not in soft_policy_code \
+            or "if (!verdict.complete) {" not in soft_policy_code:
+        fail("SoftRebootPolicy no longer refuses on an absent or stale same-boot "
+             "post-root state; a second, looser notion of 'rooted' is how the two "
+             "drift apart")
+    for signal in ("requestBootId.equals(in.currentBootId)",
+                   "pinned.equals(actual)",
+                   "PHASE_DISPATCHED"):
+        if signal not in soft_policy_code:
+            fail("SoftRebootPolicy no longer enforces %r" % signal)
+    # The binary is chosen by digest, never by path: /data/adb/ksud was observed
+    # holding the root manager's own build rather than the pinned daemon.
+    if "pinnedKsudSha256" not in soft_policy_code:
+        fail("SoftRebootPolicy no longer compares the candidate ksud against the "
+             "pinned digest; it would hand a privileged lifecycle operation to an "
+             "unidentified binary")
+    # The transport is PROVEN before it is used. Without the `id` probe a non-zero
+    # exit is indistinguishable from never having been root, and the caller would
+    # have to guess which. RMGLabs recorded the real shape of this on the same
+    # hardware: after a late-load reporting rc=0, an app-context elevation still
+    # failed with "su: connect daemon: Permission denied", because a direct app su
+    # path needs a user-granted KernelSU Manager permission.
+    transport_code = code_only(dfr_source("RootTransport.kt"))
+    if 'runAsRoot("id"' not in transport_code or 'contains("uid=0")' not in transport_code:
+        fail("RootTransport no longer proves the shell is root before using it; a "
+             "missing grant would be indistinguishable from a failed command")
+    if "Outcome(RC_NOT_ROOT, probe.output)" not in transport_code \
+            or "if (probe.rc == RC_NO_TRANSPORT) return probe" not in transport_code:
+        fail("RootTransport no longer separates 'no su binary' from 'su answered and "
+             "we are not root'; the operator's next action differs between them - one "
+             "is a missing binary, the other a missing KernelSU Manager grant")
+    if "RootTransport.runAsRootProven(" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver invokes ksud without proving the transport first")
+    if "RootTransport.RC_NOT_ROOT ->" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer reports a missing root grant as its own "
+             "outcome")
+    if "claimSoftReboot" not in soft_receiver_code or \
+            "AutoRootStore.claimSoftReboot(bootId)" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer claims the boot before invoking ksud; "
+             "a second tap would tear userspace down during the first teardown")
+    # The persistent lock is a durable RECORD, not a mutex: two taps give two threads
+    # that can both clear the policy before either has written it. The in-process
+    # compare-and-set is what serialises them; the exclusive on-disk create covers
+    # the other case the record is for, a process restarted within the same boot.
+    # Neither alone closes the race the lock exists for.
+    if "dispatchGuard.compareAndSet(false, true)" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer serialises concurrent taps in-process; "
+             "two threads could both pass the policy and both dispatch a teardown")
+    if "if (!target.createNewFile()) {" not in code_only(autoroot_store_src):
+        fail("AutoRootStore no longer claims the soft-reboot lock exclusively; a "
+             "staged-then-renamed write is not a compare-and-set, so two claims "
+             "would both succeed")
+    # A timeout is an UNKNOWN and must not be reported as a handover (AGENTS.md 3.7):
+    # a shell that hangs before reaching ksud produces the same timeout as one that
+    # daemonised, and nothing here can tell them apart.
+    if "outcome.rc == RootTransport.RC_TIMEOUT ->" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer gives a transport timeout its own "
+             "outcome; merging it with a zero exit reports an uncertainty as a "
+             "dispatch")
+    if "notif_soft_reboot_undetermined" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer reports an undetermined soft reboot "
+             "distinctly from a dispatched one")
+    # Exit status 0 is ambiguous by construction: soft_reboot() returns Ok(()) when
+    # ensure_uapi_version_matched() fails, and daemonises on the success path.
+    if "exits 0 both when it daemonises" not in soft_reboot_receiver_src:
+        fail("DfrSoftRebootReceiver no longer records that a ksud exit status of 0 "
+             "is not evidence the soft reboot happened - it exits 0 both on the "
+             "daemonising path and when it skips the operation on a UAPI mismatch")
+    if "/data/system/dfreroot-softreboot-lock" not in autoroot_store_src:
+        fail("AutoRootStore no longer keeps the per-boot soft-reboot lock")
+    rcv2 = re.search(r"<receiver[^>]*DfrSoftRebootReceiver[^>]*/?>", manifest_code)
+    if not rcv2:
+        fail("DfrSoftRebootReceiver is not declared in the manifest")
+    elif 'android:exported="false"' not in rcv2.group(0):
+        fail("DfrSoftRebootReceiver is exported; an external component must not be "
+             "able to ask for a soft reboot")
+    else:
+        autoroot["soft_reboot_receiver_exported"] = "false"
+
     r["checks"]["auto_root"] = autoroot
 
     # stage1 must branch on the helper's intentional -E2BIG before creating the

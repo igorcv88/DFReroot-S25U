@@ -80,11 +80,33 @@ acceptance item, not an argument:
   as a failure and the boot stays locked — but "the attempt reliably happens" is a
   claim only the device can settle.
 
-The acceptance run therefore requires the whole phase sequence in one boot, and
-treats a truncated sequence as a FAIL to report. **If it truncates, the remedy is
-a foreground service** (with its notification channel), not a retry or a
-scheduler; that is the change to make before Auto Root is accepted, and it is
-listed in `docs/HANDOFF.md`.
+**The acceptance run settled it, and the answer is no foreground service.** The
+whole phase sequence completed in one boot (fifth physical run,
+`2e447aaf…`): `attempts=1`, `phase=COMPLETE`, `native_started=1`. A plain
+`startService` at boot did survive to completion on this build, so the condition
+that was to trigger the remedy did not occur.
+
+The run also closed the hosting question with a direct observation rather than an
+inference: the run log printed
+`[DFR][PROCESS] pid=2988 uid=1000 process_name=system_server` and
+`selinux_context=u:r:system_server:s0` for the app's own process. That is this
+device's `system_server`, read out of `/proc` by the code running in it — still an
+observed property of this firmware and still not something the manifest
+guarantees, but no longer an inference from two manifest attributes.
+
+**And a foreground service would now make things worse, not better.** A process
+that `system_server` hosts is not killed for memory, so the lifetime a foreground
+service buys is lifetime this host already has. What it would add is a hard
+deadline: if `startForeground()` is not called within about five seconds the
+framework raises `ForegroundServiceDidNotStartInTimeException` — inside
+`system_server`. Trading "the service might die and root might not come" for "a
+framework exception may take down `system_server`" is a worse failure mode, and
+the mandatory persistent notification plus a `foregroundServiceType` declaration
+are pure cost on top.
+
+If some future boot *does* truncate — journal stuck at `PREFLIGHT` or `STARTED`
+with no `COMPLETE`, and no root — that is when the remedy is back on the table,
+with evidence behind it. Not before.
 
 What a boot-time run definitely does need is the wakelock: the post-root wait
 polls for up to two minutes, and a suspend in the middle would produce a reported
@@ -319,21 +341,217 @@ verdict, `STARTED` is recorded before the native run, the qualification is bound
 to the pinned ksud digest, and no scheduler appears on this path. Each of those
 guards was confirmed to fail when its rule is violated.
 
-## Physical acceptance still owed
+## Physical acceptance — steps 1-4 done, 5-7 still owed
 
-Auto Root must not be accepted before Gate I passes manually. Then, in order:
+Gate I passed manually first, in that order. The acceptance run is recorded in
+`docs/S25U_ZZIC_COMPATIBILITY.md` as the fifth physical run
+(`2.0.6-zzic`, boot `2e447aaf…`): the service's own journal read
+`phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id`
+as a valid post-root record, with `Enforcing`, sysfs `1` and `su` in
+`u:r:ksu:s0`. That covers steps 1-4.
 
-1. enable Auto Root explicitly after a manual PASS on the installed build;
-2. full reboot; record the new `boot_id`;
-3. verify **exactly one** automatic attempt starts after boot readiness;
-4. require, in that same boot: `POST_ROOT_COMPLETE=PASS`,
-   `getenforce = Enforcing`, `/sys/fs/selinux/enforce = 1`, and `su` in
-   `u:r:ksu:s0`;
+What remains is the *negative* half of the sequence, which is what proves the
+scheduling rather than the chain:
+
 5. restart only the Android framework; confirm the unchanged `boot_id` triggers
-   nothing;
-6. full reboot again; confirm exactly one new attempt for the new `boot_id`;
+   nothing (`[DFR][AUTOROOT] REFUSED Auto Root already completed in this boot`);
+6. full reboot again; confirm exactly **one** new attempt for the new `boot_id`;
 7. untick the box; confirm no attempt on the next full boot.
 
-Record the outcome as `AUTO_ROOT_FULL_BOOT=PASS|FAIL`, separately from Gate I and
-separately from `POST_ROOT_LSPOSED_COMPAT`. A failure of the automatic path is
-not a failure to obtain root, and must not be reported as one.
+Steps 5 and 7 are the ones a single successful boot cannot speak for, and step 6
+is what distinguishes "it worked once" from "it works per boot".
+
+Record the outcome separately from Gate I and from `POST_ROOT_LSPOSED_COMPAT`. A
+failure of the automatic path is not a failure to obtain root, and must not be
+reported as one.
+
+### Capture the log buffer first
+
+This firmware defaults to a **128 KiB** ring buffer per log buffer, which
+`system_server` saturates in seconds. On the acceptance run every `[DFR][*]` line
+had rotated out before a root shell existed to read it. `persist.logd.size=16M` is
+out of range here — `logcat -G 16M` answers `MAX log buffer size is 5 MiB` — so set
+`5M` and verify it took effect as the first command after the boot:
+
+```sh
+su -c 'setprop persist.logd.size 5M'   # before the reboot
+su -c 'logcat -g'                      # first thing after; main should read 5 MiB
+su -c "logcat -d -b all | grep -F '[DFR]' > /sdcard/dfr-autoroot.txt"
+```
+
+The two `/data/system` records and the verdict notification do not depend on the
+buffer, and the journal alone classifies a failure:
+
+| journal | reading |
+|---|---|
+| `phase=COMPLETE` | the service ran the chain to a verified end in this boot |
+| `phase=FAILED_LOCKED`, `native_started=1` | transaction 5 was issued and the run failed after it; a hard reboot is the recovery boundary |
+| `phase=PREFLIGHT`, `attempts<12` | readiness was not reached, or an attempt failed before transaction 5; nothing was written and a later broadcast may retry |
+| `phase=PREFLIGHT`, `attempts=12` | the readiness budget for this boot is spent |
+| absent | the service never wrote anything: the receiver did not fire, or the opt-in read failed |
+
+## The verdict notification
+
+Posted by both callers once a run has already reached its verdict, never before,
+and never as a gate: `RootNotifier` logs a failed post and returns. A missing
+`POST_NOTIFICATIONS` grant must not be able to decide whether a root run counts.
+
+It exists because the acceptance run made the problem concrete — the automatic
+path was otherwise invisible, and its logcat trace was gone. The FAIL notification
+is the more important of the two: an unattended path that fails silently leaves
+the owner believing the phone re-roots itself when it does not.
+
+A Toast was considered and rejected on mechanism: Android 11+ suppresses toasts
+posted from the background, and a boot-time service has no foreground window.
+
+## Apply Modules (Soft Reboot)
+
+The success notification carries one action. It does **not** re-root anything, and
+it is not a zygote restart.
+
+### What it actually does
+
+At the KernelSU revision this pair pins
+(`932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e`), `soft_reboot()` in
+`userspace/ksud/src/init_event.rs` reads, in order:
+
+```text
+ensure_uapi_version_matched()
+daemonize_with(switch_mnt_ns(1), chdir("/"))
+reset_boot_completed()
+run_stage("emulated-soft-reboot")
+stop
+on_post_data_fs()          <- the module lifecycle, re-run
+start
+on_services()
+wait_for_boot_completed()
+on_boot_completed()
+```
+
+That was read out of that revision's source, not inferred from behaviour. Two
+consequences follow directly:
+
+- **modules are re-applied.** `on_post_data_fs()` is called again, which handles
+  the module directory, `post-fs-data.d` scripts, sepolicy rules, `system.prop`
+  and the mount stages. Nothing depends on what a zygote restart happens to do.
+- **root is not lost.** The kernel is never restarted, so `kernelsu.ko` stays
+  loaded and `boot_id` is unchanged. A `su` shell that was open across the `stop`
+  dies with the rest of userspace; that is not the same thing as losing root.
+
+The unchanged `boot_id` also means the scheduling rules keep holding by
+themselves: the journal still names this boot as `COMPLETE`, so no automatic
+attempt may start, and the `/dev/df*` markers still exist, so the manual button
+refuses too. A soft reboot cannot become a second root attempt.
+
+### The trap: exit status 0 proves nothing
+
+When `ensure_uapi_version_matched()` fails, `soft_reboot()` logs and returns
+`Ok(())` — it **skips** the operation and still exits successfully. And on the
+success path it daemonises, so the parent also exits 0 immediately. Exit 0 is
+ambiguous by construction.
+
+What removes the ambiguity is evidence the precheck already demands: a valid
+same-boot post-root record asserts `uapi_version=2`, which is the very comparison
+`ensure_uapi_version_matched()` makes. Same boot, same kernel, same UAPI — so the
+skip branch cannot be the one taken. The app still reports **dispatched**, never
+applied, because `stop` kills the process that would have observed the outcome.
+
+### The precheck
+
+`SoftRebootPolicy` is pure and host-tested (24 cases,
+`tools/tests/SoftRebootPolicyTest.java`), with a negative case per element:
+
+| refusal | why |
+|---|---|
+| the request's `boot_id` is not this boot | a notification is a durable object; acting on one minted in another boot would ask an unrooted boot to re-apply modules |
+| no verified same-boot post-root state | reuses `PostRootStatus`; a second, looser notion of "rooted" is how the two drift apart |
+| a soft reboot was already dispatched in this boot | the action is trivially tappable twice, and the second tap tears userspace down during the first teardown |
+
+That last row needs a caveat, because the record alone does not deliver it: two taps
+arriving together give two threads that both read "no lock" before either writes
+one. Three things carry the guarantee between them, and none is redundant:
+
+1. an in-process compare-and-set in the receiver, before anything is read — this is
+   what actually serialises concurrent taps;
+2. the claim itself taken with `createNewFile()` (`O_CREAT|O_EXCL` underneath), so
+   exactly one caller can create the lock even across processes;
+3. the policy's check on the durable record, which covers what neither of the above
+   can — a process that restarted within the same boot, where no in-memory guard
+   survives.
+| the lock exists but is unreadable | an I/O error is not an empty lock |
+| no candidate `ksud` matches the pinned digest | see below |
+
+**The binary is chosen by digest, never by path.** On the target,
+`/data/adb/ksud` is routinely replaced by the root manager's own build: it was
+observed holding `99aaa607…` (4,892,712 bytes, byte-identical to the manager
+APK's `libksud.so`) while the pinned DFR daemon is `14fb9eaf…` (6,670,272
+bytes). Invoking whatever sits at that path would hand a privileged lifecycle
+operation to an unidentified binary. `/data/system/dfreroot-ksud` — staged and
+verified by `KsudStage` in this boot — is offered first, `/data/adb/ksud` second,
+and each is admitted only if its SHA-256 equals the pinned digest.
+
+### Structurally unable to root
+
+`DfrSoftRebootReceiver` holds no reference to `DfrRootCoordinator.run`,
+`DirtyFrag`, `StageHop` or `KsudStage.stageFromAssets`, and
+`tools/profile_binding_audit.py` fails if one appears. The action can only ask an
+already-rooted boot to re-apply modules.
+
+### What is still unproven, and will announce itself
+
+**The root transport, and it is likely to be refused.** After the chain completes,
+this app is uid 1000 in `u:r:system_server:s0`. The CONTROLLER binder it held
+exposes transactions 1-5 and no exec, by design, so nothing privileged survives the
+run and `su` is the only transport left. KernelSU grants `su` from an allowlist its
+manager maintains, and nothing about a successful root run puts this app on it.
+
+This is not a theoretical worry. RMGLabs recorded it on this exact ZZIC hardware
+(`RootMyGalaxy-20260923-193921`, its `HANDOFF.md` section 21): after a KernelSU
+late-load that reported `rc=0`, an app-context elevation still failed with
+`su: connect daemon: Permission denied`. Its own conclusion is stated plainly —
+"User-granted KernelSU Manager app permissions remain required for the direct app
+`su` path."
+
+So the transport is probed with `id` before it is used, and the refusal names which
+of two different things is missing:
+
+| logcat | meaning | what would change it |
+|---|---|---|
+| `[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT` | no `su` binary this app can even start | nothing the owner does in the manager |
+| `[DFR][SOFT_REBOOT] NOT_ROOT` | `su` answered and we are still uid 1000 | a KernelSU Manager grant — see the caveat |
+
+Both come with a notification saying root itself is unaffected and the lifecycle was
+not re-applied. The first tap is an experiment whose result, either way, is the
+evidence.
+
+**The caveat on granting it.** DFReroot runs as uid 1000, shared with the platform,
+so granting it in the KernelSU manager is not the same act as granting an ordinary
+app. Whether KernelSU keys its allowlist strictly by uid — and therefore whether
+such a grant would reach every system-uid component rather than this app alone — is
+**not established here**: the allowlist source could not be read at the pinned
+revision from this environment. Resolve that before recommending the grant. It is a
+question, not a finding.
+
+**And the fallbacks RMGLabs uses are not available here.** Its working path on this
+device selects among Shizuku, an app helper, an authorised app `su`, or a paired
+Local ADB session, and its soft-reboot handoff stages a script and an accepted
+marker under `/data/local/tmp` (`chmod 0666`). DFReroot cannot port any of that:
+AGENTS.md 3.6 forbids any source shipped inside DFReroot from referencing a
+world-writable `/data/local/tmp` path at all, by mechanism, and
+`tools/profile_binding_audit.py` enforces it. That asymmetry is permanent and
+deliberate — a world-writable handoff is the exact shape an execution override
+takes — so DFReroot has fewer routes to a root shell than RMGLabs, not more.
+
+**One RMGLabs design change that does not transfer.** It moved Apply Modules off a
+broadcast receiver and into a foreground service, because holding a broadcast open
+with `goAsync` was too short-lived for the work. That is a correct fix for an
+ordinary app, whose process becomes killable the moment `onReceive` returns. Here
+the components are hosted in `system_server` (observed: `pid=2988`,
+`process_name=system_server`, `u:r:system_server:s0`), which is not killed for
+memory, and the same observation is what retired the foreground service for the boot
+path. The raw worker thread is sound for this host and would not be for theirs.
+
+**A soft-reboot failure specific to this firmware.** A bad `stop`/`start`, a
+metamodule mount that does not come back, a service that does not restart. That is
+a post-root failure in its own right and must never authorise another exploit run;
+the structural rule above is what guarantees it cannot.

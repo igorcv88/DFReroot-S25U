@@ -41,6 +41,24 @@ object DfrRootCoordinator {
     const val CONTROLLER_TIMEOUT_MS = 30_000L
 
     /**
+     * The same deadline for an UNATTENDED run, deliberately longer.
+     *
+     * The hop needs network_stack to be up, to have an IApplicationThread the AMS
+     * lookup can reach, and to dlopen libexp.so. A button press happens on an idle
+     * device minutes into a session; a boot trigger competes with everything else
+     * a fresh boot is doing, including dexopt and the I/O storm around it. The
+     * readiness preflight only establishes that a process with the NetworkStack uid
+     * exists - it cannot establish how fast that process will answer.
+     *
+     * Nothing is weakened by waiting: the deadline expiring is a refusal either
+     * way, and it expires BEFORE transaction 5, so a slower deadline cannot make a
+     * write happen that a faster one would have prevented. On the accepted boot the
+     * controller arrived well inside 30s, so this is margin, not a fix for an
+     * observed failure.
+     */
+    const val AUTOROOT_CONTROLLER_TIMEOUT_MS = 90_000L
+
+    /**
      * Deadline for the same-boot POST_ROOT_COMPLETE record. Nothing about this
      * is a retry budget: when it expires the run has failed and a hard reboot is
      * the recovery boundary.
@@ -157,19 +175,29 @@ object DfrRootCoordinator {
      * [who] names the caller ("ui" / "autoroot") and appears in the refusal the
      * other one gets while this run is in flight.
      */
-    fun run(context: Context, who: String, host: Host): Result {
+    fun run(
+        context: Context,
+        who: String,
+        host: Host,
+        controllerTimeoutMs: Long = CONTROLLER_TIMEOUT_MS,
+    ): Result {
         val held = guard.tryAcquire(who)
         if (held != null) {
             return refused("a run owned by '$held' is already in progress")
         }
         try {
-            return runOwned(context, who, host)
+            return runOwned(context, who, host, controllerTimeoutMs)
         } finally {
             guard.release()
         }
     }
 
-    private fun runOwned(context: Context, who: String, host: Host): Result {
+    private fun runOwned(
+        context: Context,
+        who: String,
+        host: Host,
+        controllerTimeoutMs: Long,
+    ): Result {
         host.phase(Phase.PREFLIGHT)
         val bootId = readBootId()
         if (bootId.isEmpty()) {
@@ -267,9 +295,9 @@ object DfrRootCoordinator {
         try {
             host.log(StageHop.hopToNetworkStack(context))
             host.phase(Phase.WAIT_CONTROLLER)
-            val c = awaitController(CONTROLLER_TIMEOUT_MS, host)
+            val c = awaitController(controllerTimeoutMs, host)
             if (c == null) {
-                host.log("[x] no CONTROLLER within ${CONTROLLER_TIMEOUT_MS / 1000}s " +
+                host.log("[x] no CONTROLLER within ${controllerTimeoutMs / 1000}s " +
                     "(hop failed or network_stack too slow; see logcat)\n")
                 return refused("no CONTROLLER binder from network_stack", bootId)
             }

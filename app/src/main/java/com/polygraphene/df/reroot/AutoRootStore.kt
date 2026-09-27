@@ -63,6 +63,16 @@ object AutoRootStore {
     const val JOURNAL_PATH = "/data/system/dfreroot-autoroot-journal"
 
     /**
+     * Per-boot soft-reboot lock: a soft reboot was already dispatched in the boot
+     * it names.
+     *
+     * Separate from the journal on purpose. The journal answers "did the CHAIN run
+     * in this boot", and a soft reboot must not be able to change that answer in
+     * either direction: it neither counts as a root attempt nor clears one.
+     */
+    const val SOFT_REBOOT_LOCK_PATH = "/data/system/dfreroot-softreboot-lock"
+
+    /**
      * null only when the record is genuinely ABSENT.
      *
      * A record that exists and cannot be read comes back as
@@ -239,4 +249,63 @@ object AutoRootStore {
                      nativeStarted: Boolean): Boolean =
         write(JOURNAL_PATH,
             AutoRootPolicy.formatJournal(bootId, phase, attempts, nativeStarted)) == null
+
+    fun softRebootLock(): String? = read(SOFT_REBOOT_LOCK_PATH)
+
+    /**
+     * Claim this boot's single soft-reboot dispatch, exclusively.
+     *
+     * Written BEFORE ksud is invoked, because a lock written afterwards would not
+     * be there to stop the second tap - and the second tap is the one that tears
+     * userspace down while the first teardown is in flight.
+     *
+     * ## Why this is not [write]
+     *
+     * [write] stages a temporary file and renames it, which is atomic for a
+     * concurrent READER but is not a compare-and-set: two threads that both found
+     * no lock would both write one and both dispatch, which is exactly the race the
+     * lock exists to prevent. The claim therefore goes through `createNewFile()` -
+     * `O_CREAT|O_EXCL` underneath, so exactly one caller can create it - and the
+     * loser is told it lost.
+     *
+     * A lock from an EARLIER boot is not a claim on this one, so it is removed
+     * first; that removal is itself racy in principle, but the winner of the
+     * subsequent exclusive create is still unique, which is the property that
+     * matters.
+     *
+     * The body is written after the file exists, so a loser reading it between the
+     * create and the write sees an empty file. That parses as unreadable and
+     * refuses - the fail-closed direction.
+     *
+     * Returns null on success or the reason it failed.
+     */
+    fun claimSoftReboot(bootId: String): String? = try {
+        val target = File(SOFT_REBOOT_LOCK_PATH)
+        if (!target.createNewFile()) {
+            val existing = read(SOFT_REBOOT_LOCK_PATH)
+            if (existing != null && existing.contains("boot_id=$bootId")) {
+                return "a soft reboot was already claimed in this boot"
+            }
+            // Another boot's lock. Drop it and claim exclusively.
+            if (!target.delete() || !target.createNewFile()) {
+                return "could not take the soft-reboot lock exclusively"
+            }
+        }
+        try {
+            Os.chmod(target.absolutePath, 384) // 0600
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT] cannot chmod the lock", t)
+        }
+        FileOutputStream(target).use { out ->
+            out.write(SoftRebootPolicy.formatLock(bootId, System.currentTimeMillis())
+                .toByteArray())
+            out.flush()
+            out.fd.sync()
+        }
+        fsyncDir(target.parentFile ?: throw IllegalStateException("lock has no parent"))
+        null
+    } catch (t: Throwable) {
+        Log.e(TAG, "[DFR][SOFT_REBOOT] cannot claim the lock", t)
+        "${t.javaClass.simpleName}: ${t.message}"
+    }
 }

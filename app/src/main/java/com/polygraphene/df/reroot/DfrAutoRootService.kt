@@ -204,28 +204,60 @@ class DfrAutoRootService : Service() {
                 return ok
             }
         }
-        val result = DfrRootCoordinator.run(context, "autoroot", host)
-        val phase = if (result.success) {
-            AutoRootPolicy.PHASE_COMPLETE
-        } else {
-            AutoRootPolicy.PHASE_FAILED_LOCKED
-        }
+        val result = DfrRootCoordinator.run(
+            context, "autoroot", host, DfrRootCoordinator.AUTOROOT_CONTROLLER_TIMEOUT_MS
+        )
         /*
-         * A failed attempt locks the boot even when nothing was written (a
-         * refusal before the hop, say). That is deliberate: this service gets one
-         * attempt per boot, and "it failed early, so try again" is how an
-         * unattended loop starts. The operator can still run it by hand.
+         * What a failure costs depends on whether transaction 5 was issued, and
+         * that distinction is not a softening of the one-attempt rule - it is the
+         * rule stated precisely.
+         *
+         * `nativeStarted` is set immediately before `c.transact(5, ...)` and every
+         * page-cache write lives inside that call, so `nativeStarted == false`
+         * means provably nothing was written: no marker, no patched libc, no
+         * staged handoff. The states that made a retry dangerous - a half-patched
+         * artefact, an armed hook, a kernel left mid-oops - cannot exist.
+         *
+         * Writing FAILED_LOCKED there spent the boot on a refusal that changed
+         * nothing. The worst case is the one this audit found: the hop losing a
+         * race with a slow network_stack at boot burns the only attempt, on a
+         * device where the operator may not be watching. So a pre-transaction
+         * failure is recorded as what it actually is - readiness not achieved -
+         * and it consumes one of MAX_ATTEMPTS_PER_BOOT rather than the whole boot.
+         * The loop stays finite because the attempt count is what bounds it.
+         *
+         * Once transaction 5 has been issued, nothing changes: FAILED_LOCKED, and
+         * a hard reboot is the recovery boundary.
+         *
+         * This can overwrite the STARTED that beforeNativeRun() wrote a moment
+         * earlier, and that is sound rather than a loosening: STARTED is written
+         * before the transaction precisely because a process that dies in between
+         * must leave the pessimistic record behind, while a process that survives
+         * to here KNOWS whether the transaction was issued and is using strictly
+         * better evidence than the record it replaces.
          */
+        val phase = when {
+            result.success -> AutoRootPolicy.PHASE_COMPLETE
+            !result.nativeStarted -> AutoRootPolicy.PHASE_PREFLIGHT
+            else -> AutoRootPolicy.PHASE_FAILED_LOCKED
+        }
         AutoRootStore.journalPhase(
             bootId, phase, attemptNo, result.nativeStarted
         )
+        // The verdict, where a human can see it. Never a gate: see RootNotifier.
+        try {
+            RootNotifier.notifyRunVerdict(context, result, "autoroot")
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][AUTOROOT] cannot post the verdict notification: $t")
+        }
         if (result.success) {
             Log.i(TAG, "[DFR][AUTOROOT] AUTO_ROOT_RESULT=SUCCESS boot_id=$bootId" +
                 " selinux=${result.liveSelinux}")
         } else {
             Log.e(TAG, "[DFR][AUTOROOT] AUTO_ROOT_RESULT=FAIL boot_id=$bootId" +
                 " native=${result.nativeResult} post_root=${result.postRootComplete}" +
-                " selinux=${result.liveSelinux} reason=${result.reason}")
+                " selinux=${result.liveSelinux} phase=$phase" +
+                " native_started=${result.nativeStarted} reason=${result.reason}")
         }
     }
 
