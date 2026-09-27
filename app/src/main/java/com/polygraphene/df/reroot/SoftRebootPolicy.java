@@ -153,6 +153,14 @@ public final class SoftRebootPolicy {
          * Idempotent per boot. A second soft reboot issued while the first is
          * tearing userspace down is the one way a well-behaved button becomes a
          * boot loop, and the notification's action is trivially tappable twice.
+         *
+         * This check alone does NOT serialise two concurrent taps: it reads a
+         * durable record, so two threads that arrive together both see no lock. The
+         * caller closes that with an in-process compare-and-set before it gets here,
+         * and the claim it writes afterwards is taken exclusively
+         * (`AutoRootStore.claimSoftReboot`). What this check covers is the case the
+         * record exists for - a process that restarted within the same boot, where
+         * no in-memory guard survives.
          */
         if (AutoRootPolicy.RECORD_UNREADABLE.equals(in.lockRecord)) {
             return refuse("the soft-reboot lock exists but could not be read;"

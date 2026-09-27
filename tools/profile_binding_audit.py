@@ -907,6 +907,28 @@ def audit():
             "AutoRootStore.claimSoftReboot(bootId)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer claims the boot before invoking ksud; "
              "a second tap would tear userspace down during the first teardown")
+    # The persistent lock is a durable RECORD, not a mutex: two taps give two threads
+    # that can both clear the policy before either has written it. The in-process
+    # compare-and-set is what serialises them; the exclusive on-disk create covers
+    # the other case the record is for, a process restarted within the same boot.
+    # Neither alone closes the race the lock exists for.
+    if "dispatchGuard.compareAndSet(false, true)" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer serialises concurrent taps in-process; "
+             "two threads could both pass the policy and both dispatch a teardown")
+    if "if (!target.createNewFile()) {" not in code_only(autoroot_store_src):
+        fail("AutoRootStore no longer claims the soft-reboot lock exclusively; a "
+             "staged-then-renamed write is not a compare-and-set, so two claims "
+             "would both succeed")
+    # A timeout is an UNKNOWN and must not be reported as a handover (AGENTS.md 3.7):
+    # a shell that hangs before reaching ksud produces the same timeout as one that
+    # daemonised, and nothing here can tell them apart.
+    if "outcome.rc == RootTransport.RC_TIMEOUT ->" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer gives a transport timeout its own "
+             "outcome; merging it with a zero exit reports an uncertainty as a "
+             "dispatch")
+    if "notif_soft_reboot_undetermined" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer reports an undetermined soft reboot "
+             "distinctly from a dispatched one")
     # Exit status 0 is ambiguous by construction: soft_reboot() returns Ok(()) when
     # ensure_uapi_version_matched() fails, and daemonises on the success path.
     if "exits 0 both when it daemonises" not in soft_reboot_receiver_src:

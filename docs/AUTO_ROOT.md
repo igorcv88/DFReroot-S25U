@@ -466,6 +466,18 @@ applied, because `stop` kills the process that would have observed the outcome.
 | the request's `boot_id` is not this boot | a notification is a durable object; acting on one minted in another boot would ask an unrooted boot to re-apply modules |
 | no verified same-boot post-root state | reuses `PostRootStatus`; a second, looser notion of "rooted" is how the two drift apart |
 | a soft reboot was already dispatched in this boot | the action is trivially tappable twice, and the second tap tears userspace down during the first teardown |
+
+That last row needs a caveat, because the record alone does not deliver it: two taps
+arriving together give two threads that both read "no lock" before either writes
+one. Three things carry the guarantee between them, and none is redundant:
+
+1. an in-process compare-and-set in the receiver, before anything is read — this is
+   what actually serialises concurrent taps;
+2. the claim itself taken with `createNewFile()` (`O_CREAT|O_EXCL` underneath), so
+   exactly one caller can create the lock even across processes;
+3. the policy's check on the durable record, which covers what neither of the above
+   can — a process that restarted within the same boot, where no in-memory guard
+   survives.
 | the lock exists but is unreadable | an I/O error is not an empty lock |
 | no candidate `ksud` matches the pinned digest | see below |
 

@@ -957,7 +957,7 @@ inferred from a nearby firmware.
 | G4 — Write safety | **physical PASS** | system remained operational after `enforcing=0`, KernelSU late-load completed and root worked |
 | H — Installer / packages.xml | **physical PASS** | injected key survived framework restart; write-path fixes regression-tested |
 | I — Automatic safe end state | **physical PASS** | `v2.0.5-zzic`, boot `62e8538c…`: the closeout ran unaided to a same-boot `POST_ROOT_COMPLETE`, and the operator independently read `Enforcing` / sysfs `1`, `su` in `u:r:ksu:s0`, and the pinned daemon installed at `/data/adb/ksud`. See the fourth physical run below |
-| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **physical PASS (still ships disabled)** | `2.0.6-zzic`, boot `2e447aaf…`: the service completed an unattended attempt after a full reboot. Its own per-boot journal — written by `DfrAutoRootService` and by nothing else — read `phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id` as a valid post-root record, with `Enforcing` / sysfs `1` and `su` in `u:r:ksu:s0`. It still ships OFF: a verified manual completion on the exact build plus an explicit opt-in remain required. See the fifth physical run below |
+| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **PARTIALLY ACCEPTED (still ships disabled)** | `2.0.6-zzic`, boot `2e447aaf…`: the service completed an unattended attempt after a full reboot. Its own per-boot journal — written by `DfrAutoRootService` and by nothing else — read `phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id` as a valid post-root record, with `Enforcing` / sysfs `1` and `su` in `u:r:ksu:s0`. That is the positive path only. The gate also covers boundaries one successful boot cannot speak for — a framework restart must trigger nothing, the next full boot exactly one attempt, opting out nothing at all — and those are **untested**, so this is not a promotion to PASS (AGENTS.md section 8). It ships OFF: a verified manual completion on the exact build plus an explicit opt-in remain required. See the fifth physical run below |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
 remaining blocker to calling the automated flow complete is the post-root
@@ -1027,8 +1027,11 @@ This promotes nothing. What it adds to the evidence record is negative:
 - no gate is weakened, no override exists, and the automatic PASS is the same
   conjunction as the manual one.
 
-`AUTO_ROOT_FULL_BOOT` was promoted by the fifth physical run below, executed
-after Gate I passed manually, exactly in that order.
+`AUTO_ROOT_FULL_BOOT` is **partially accepted** as of the fifth physical run below,
+executed after Gate I passed manually, in that order. The run proves the positive
+path; steps 5-7 of `docs/AUTO_ROOT.md` — the boundaries a single successful boot
+cannot speak for — remain untested, and the gate is not promoted to PASS until they
+are.
 
 ### Third physical run — `v2.0.5-zzic`, displaced by a pre-existing KernelSU
 

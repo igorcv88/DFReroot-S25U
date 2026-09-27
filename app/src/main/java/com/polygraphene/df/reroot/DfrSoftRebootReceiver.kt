@@ -67,6 +67,21 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
     }
 
     private fun dispatch(context: Context, requestBootId: String) {
+        /*
+         * Two taps in quick succession give two receiver threads, and both could
+         * clear the policy before either had written the lock. The persistent lock
+         * alone cannot stop that: it is a durable record, not a mutex. So the
+         * in-process race is closed here, first, and the exclusive on-disk claim
+         * below covers the other case the persistent record is for - a process that
+         * restarted within the same boot.
+         *
+         * Never released. One dispatch per process, and the persistent lock keeps
+         * the guarantee across a restart.
+         */
+        if (!dispatchGuard.compareAndSet(false, true)) {
+            Log.i(TAG, "[DFR][SOFT_REBOOT] REFUSED a dispatch is already in flight")
+            return
+        }
         val bootId = DfrRootCoordinator.readBootId()
         val inputs = SoftRebootPolicy.Inputs()
         inputs.currentBootId = bootId
@@ -149,11 +164,35 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
                         " re-applied."
                 )
             }
-            outcome.rc == RootTransport.RC_TIMEOUT || outcome.ran -> {
+            outcome.rc == RootTransport.RC_TIMEOUT -> {
                 /*
-                 * Both of these mean "handed over", and neither means "applied".
-                 * A timeout here is the EXPECTED shape of success: the command
-                 * tears down the userspace this process lives in.
+                 * UNDETERMINED, and kept apart from a dispatch (AGENTS.md 3.7).
+                 *
+                 * An earlier version merged this with a zero exit on the theory
+                 * that a timeout is the expected shape of success, since the
+                 * command tears down the userspace this process lives in. That was
+                 * a collapse: a shell that hangs before reaching ksud produces the
+                 * same timeout and nothing was handed over at all. Reporting it as
+                 * dispatched would turn an uncertainty into a claim.
+                 *
+                 * The lock is deliberately NOT released. If the command did reach
+                 * ksud, a retry would be the second teardown the lock exists to
+                 * prevent, and nothing here can tell the two apart. The recovery is
+                 * an ordinary full reboot, which re-applies the module lifecycle
+                 * through `post-fs-data` anyway - not a retry of this action.
+                 */
+                Log.e(TAG, "[DFR][SOFT_REBOOT] UNDETERMINED the shell outlived" +
+                    " ${TRANSPORT_TIMEOUT_MS}ms: ${outcome.output}")
+                RootNotifier.notifySoftReboot(
+                    context, context.getString(R.string.notif_soft_reboot_undetermined),
+                    context.getString(R.string.notif_soft_reboot_undetermined_detail)
+                )
+            }
+            outcome.ran -> {
+                /*
+                 * Handed over, and that is all this means - never "applied": the
+                 * command daemonises and then kills the process that would have
+                 * observed the outcome.
                  */
                 Log.i(TAG, "[DFR][SOFT_REBOOT] DISPATCHED rc=${outcome.rc}")
                 RootNotifier.notifySoftReboot(
@@ -188,6 +227,15 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
 
     companion object {
         const val TAG = "DFReroot"
+
+        /**
+         * One dispatch per process, decided by a compare-and-set.
+         *
+         * The on-disk lock is a durable record and cannot serialise two threads
+         * that raced past the policy together; this can, and it runs before any of
+         * them reads anything.
+         */
+        private val dispatchGuard = java.util.concurrent.atomic.AtomicBoolean(false)
 
         const val ACTION_APPLY_MODULES =
             "com.polygraphene.df.reroot.action.APPLY_MODULES_SOFT_REBOOT"

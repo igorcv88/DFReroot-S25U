@@ -72,8 +72,15 @@ check("I — automatic safe end state | physical PASS" in release_notes,
 # load-bearing: the gate is proven, and proving it is not the same as arming it -
 # a build that shipped with the box pre-ticked would root unattended on a device
 # whose owner never ran the manual qualification.
-check("AUTO_ROOT_FULL_BOOT | physical PASS" in release_notes,
-      "generated release notes carry the Auto Root field result")
+# One successful boot proves the positive path and nothing about the boundaries the
+# gate also covers (a framework restart triggering nothing, exactly one attempt per
+# boot, opting out suppressing the next). AGENTS.md section 8 forbids promoting a
+# gate without evidence for EVERY boundary it covers, so the notes must say
+# partially accepted until steps 5-7 are run - not "physical PASS".
+check("AUTO_ROOT_FULL_BOOT | **PARTIALLY ACCEPTED" in release_notes,
+      "generated release notes keep Auto Root partially accepted, not promoted")
+check("untested" in release_notes,
+      "generated release notes name the untested Auto Root boundaries")
 check("ships disabled" in release_notes,
       "generated release notes still say Auto Root ships off")
 
