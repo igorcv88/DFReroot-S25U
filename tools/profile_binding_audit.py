@@ -915,10 +915,15 @@ def audit():
     if "dispatchGuard.compareAndSet(false, true)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer serialises concurrent taps in-process; "
              "two threads could both pass the policy and both dispatch a teardown")
-    if "if (!target.createNewFile()) {" not in code_only(autoroot_store_src):
-        fail("AutoRootStore no longer claims the soft-reboot lock exclusively; a "
-             "staged-then-renamed write is not a compare-and-set, so two claims "
-             "would both succeed")
+    store_claim = code_only(autoroot_store_src)
+    if "var claimed = target.createNewFile()" not in store_claim \
+            or "claimed = target.delete() && target.createNewFile()" not in store_claim \
+            or store_claim.count("if (!claimed) {") != 2 \
+            or 'return "could not take the soft-reboot lock exclusively"' \
+                not in store_claim:
+        fail("AutoRootStore no longer claims the soft-reboot lock exclusively through "
+             "createNewFile() (O_CREAT|O_EXCL); a staged-then-renamed write is not a "
+             "compare-and-set, so two concurrent claims would both succeed")
     # A timeout is an UNKNOWN and must not be reported as a handover (AGENTS.md 3.7):
     # a shell that hangs before reaching ksud produces the same timeout as one that
     # daemonised, and nothing here can tell them apart.
@@ -945,6 +950,60 @@ def audit():
              "able to ask for a soft reboot")
     else:
         autoroot["soft_reboot_receiver_exported"] = "false"
+
+    # --- Kotlin that no compiler in this environment will ever see -----------
+    # There is no Kotlin compiler, SDK or Gradle here, so the signed release run is
+    # the first thing that compiles this app - which means a syntax rule costs a
+    # whole runner to discover. It already did: `claimSoftReboot` was written with an
+    # expression body (`= try { ... }`) containing early `return`s, which Kotlin
+    # prohibits, and :app:compileReleaseKotlin failed on it.
+    #
+    # This is the narrow static check for that exact rule. It is deliberately scoped
+    # to the shapes an expression body actually takes in this codebase (`= try {`,
+    # `= run {`, `= when {`, `= if (`), because a general Kotlin parser here would be
+    # a new thing to be wrong about.
+    expr_body = re.compile(
+        r"^[ \t]*(?:private |internal |protected |public |override )*"
+        r"fun\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)\s*(?::[^=]+)?=\s*"
+        r"(try|run|when|if)\b")
+    kotlin_bodies = {}
+    for name in ("AutoRootStore.kt", "DfrAutoRootService.kt", "DfrRootCoordinator.kt",
+                 "DfrSoftRebootReceiver.kt", "RootNotifier.kt", "RootTransport.kt",
+                 "MainActivity.kt", "KsudStage.kt", "StageHop.kt", "Diagnostics.kt",
+                 "StageReceiver.kt", "DfrBootReceiver.kt", "TerminalActivity.kt"):
+        try:
+            kotlin_bodies[name] = dfr_source(name)
+        except Exception:
+            continue
+    offenders = []
+    for name, src in kotlin_bodies.items():
+        kt_lines = code_only(src).split("\n")
+        head = 0
+        while head < len(kt_lines):
+            if not expr_body.match(kt_lines[head]):
+                head += 1
+                continue
+            # Brace-match forward from the function's opening line.
+            depth = 0
+            started = False
+            cur = head
+            while cur < len(kt_lines):
+                depth += kt_lines[cur].count("{") - kt_lines[cur].count("}")
+                if kt_lines[cur].count("{"):
+                    started = True
+                if started and depth <= 0:
+                    break
+                if cur > head and re.match(r"^[ \t]*return\b", kt_lines[cur]):
+                    offenders.append("%s:%d" % (name, cur + 1))
+                cur += 1
+            head = max(cur, head + 1)
+    if offenders:
+        fail("expression-bodied Kotlin function contains a `return`, which the "
+             "compiler prohibits (`Returns are prohibited for functions with an "
+             "expression body`): %s. Nothing here can compile Kotlin, so this costs "
+             "a signed release run to find. Use a block body." % ", ".join(offenders))
+    r["checks"]["kotlin_expression_bodies"] = "%d file(s), no return inside one" % \
+        len(kotlin_bodies)
 
     r["checks"]["auto_root"] = autoroot
 
