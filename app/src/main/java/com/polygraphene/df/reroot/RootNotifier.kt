@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.drawable.Icon
 import android.util.Log
 
 /**
@@ -115,9 +116,16 @@ object RootNotifier {
                 null
             }
             if (pending != null) {
+                /*
+                 * An explicit Icon rather than null. Notification.Action.Builder has
+                 * a second, deprecated (int, ...) overload, so a bare null leans on
+                 * overload resolution against a platform type - and nothing in this
+                 * environment can compile Kotlin to confirm which one it picks.
+                 */
                 b.addAction(
                     Notification.Action.Builder(
-                        null, context.getString(R.string.notif_apply_modules), pending
+                        Icon.createWithResource(context, R.drawable.ic_terminal),
+                        context.getString(R.string.notif_apply_modules), pending
                     ).build()
                 )
             }

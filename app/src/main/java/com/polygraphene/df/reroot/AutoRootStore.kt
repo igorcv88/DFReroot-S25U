@@ -279,33 +279,46 @@ object AutoRootStore {
      *
      * Returns null on success or the reason it failed.
      */
-    fun claimSoftReboot(bootId: String): String? = try {
-        val target = File(SOFT_REBOOT_LOCK_PATH)
-        if (!target.createNewFile()) {
-            val existing = read(SOFT_REBOOT_LOCK_PATH)
-            if (existing != null && existing.contains("boot_id=$bootId")) {
-                return "a soft reboot was already claimed in this boot"
+    fun claimSoftReboot(bootId: String): String? {
+        /*
+         * A BLOCK body, not an expression body. Kotlin prohibits `return` inside an
+         * expression body, and the early refusals below are returns - the first
+         * version of this function was `= try { ... }` and failed the release build
+         * at `compileReleaseKotlin`. There is no Kotlin compiler in the environment
+         * this repository is developed in, so the shape is guarded statically
+         * instead: tools/profile_binding_audit.py rejects a `return` inside any
+         * expression-bodied function in the app's Kotlin.
+         */
+        return try {
+            val target = File(SOFT_REBOOT_LOCK_PATH)
+            var claimed = target.createNewFile()
+            if (!claimed) {
+                val existing = read(SOFT_REBOOT_LOCK_PATH)
+                if (existing != null && existing.contains("boot_id=$bootId")) {
+                    return "a soft reboot was already claimed in this boot"
+                }
+                // Another boot's lock. Drop it and claim exclusively.
+                claimed = target.delete() && target.createNewFile()
             }
-            // Another boot's lock. Drop it and claim exclusively.
-            if (!target.delete() || !target.createNewFile()) {
+            if (!claimed) {
                 return "could not take the soft-reboot lock exclusively"
             }
-        }
-        try {
-            Os.chmod(target.absolutePath, 384) // 0600
+            try {
+                Os.chmod(target.absolutePath, 384) // 0600
+            } catch (t: Throwable) {
+                Log.e(TAG, "[DFR][SOFT_REBOOT] cannot chmod the lock", t)
+            }
+            FileOutputStream(target).use { out ->
+                out.write(SoftRebootPolicy.formatLock(bootId, System.currentTimeMillis())
+                    .toByteArray())
+                out.flush()
+                out.fd.sync()
+            }
+            fsyncDir(target.parentFile ?: throw IllegalStateException("lock has no parent"))
+            null
         } catch (t: Throwable) {
-            Log.e(TAG, "[DFR][SOFT_REBOOT] cannot chmod the lock", t)
+            Log.e(TAG, "[DFR][SOFT_REBOOT] cannot claim the lock", t)
+            "${t.javaClass.simpleName}: ${t.message}"
         }
-        FileOutputStream(target).use { out ->
-            out.write(SoftRebootPolicy.formatLock(bootId, System.currentTimeMillis())
-                .toByteArray())
-            out.flush()
-            out.fd.sync()
-        }
-        fsyncDir(target.parentFile ?: throw IllegalStateException("lock has no parent"))
-        null
-    } catch (t: Throwable) {
-        Log.e(TAG, "[DFR][SOFT_REBOOT] cannot claim the lock", t)
-        "${t.javaClass.simpleName}: ${t.message}"
     }
 }

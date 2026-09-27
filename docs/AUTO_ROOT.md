@@ -390,6 +390,38 @@ buffer, and the journal alone classifies a failure:
 | `phase=PREFLIGHT`, `attempts=12` | the readiness budget for this boot is spent |
 | absent | the service never wrote anything: the receiver did not fire, or the opt-in read failed |
 
+## A Kotlin rule that cost a release run
+
+`claimSoftReboot` was first written with an **expression body** containing early
+returns:
+
+```kotlin
+fun claimSoftReboot(bootId: String): String? = try {
+    ...
+    return "a soft reboot was already claimed in this boot"   // prohibited
+    ...
+}
+```
+
+Kotlin rejects that — *"Returns are prohibited for functions with an expression
+body"* — and `:app:compileReleaseKotlin` failed on it in the release workflow. The
+fix is a block body; the point worth keeping is why it got that far.
+
+**There is no Kotlin compiler, Android SDK or Gradle in the environment this
+repository is developed in.** The signed release run is the first thing that
+compiles this app, so a syntax rule costs a whole runner to discover — on the one
+workflow the owner is allowed to spend. `tools/profile_binding_audit.py` therefore
+checks this rule statically: it brace-matches every expression-bodied function in
+the app's Kotlin and fails on a `return` inside one. That check was verified to fail
+against the exact shape that broke the build.
+
+The same reasoning retired a second unverifiable construct in the same change: the
+notification action was built with a bare `null` for `Notification.Action.Builder`'s
+`Icon` parameter, which leans on overload resolution against a platform type when a
+deprecated `(int, ...)` overload also exists. It now passes an explicit
+`Icon.createWithResource`, because nothing here can confirm which overload Kotlin
+would have picked.
+
 ## The verdict notification
 
 Posted by both callers once a run has already reached its verdict, never before,
