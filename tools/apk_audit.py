@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from elf64 import ELF64  # noqa: E402
 
 NATIVE_LIB = "lib/arm64-v8a/libexp.so"
+VERIFIED_EXEC = "lib/arm64-v8a/libdfr_verified_exec.so"
 REQUIRED_JNI = [
     "JNI_OnLoad",
     "Java_org_lsposed_lspromise_DirtyFrag_patchMod",
@@ -57,6 +58,7 @@ def audit(apk_path):
         r["native_lib_present"] = False
         return r
     r["native_lib_present"] = True
+    r["verified_exec_present"] = VERIFIED_EXEC in names
 
     data = zf.read(NATIVE_LIB)
     r["libexp"] = {
@@ -88,7 +90,28 @@ def audit(apk_path):
     finally:
         os.unlink(tmp)
 
-    ok = (r["libexp"]["machine_ok"] and r["libexp"]["jni_all_present"])
+    if r["verified_exec_present"]:
+        launcher = zf.read(VERIFIED_EXEC)
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            tf.write(launcher)
+            launcher_tmp = tf.name
+        try:
+            le = ELF64(launcher_tmp)
+            r["verified_exec"] = {
+                "path": VERIFIED_EXEC,
+                "size": len(launcher),
+                "sha256": hashlib.sha256(launcher).hexdigest(),
+                "elf_type": le.type_name,
+                "machine": le.machine_name,
+                "machine_ok": le.e_machine == 0xB7,
+            }
+        finally:
+            os.unlink(launcher_tmp)
+    else:
+        r["verified_exec"] = {"path": VERIFIED_EXEC, "machine_ok": False}
+
+    ok = (r["libexp"]["machine_ok"] and r["libexp"]["jni_all_present"]
+          and r["verified_exec_present"] and r["verified_exec"]["machine_ok"])
     r["status"] = "PASS" if ok else "FAIL"
     return r
 
@@ -119,6 +142,16 @@ def human(r):
     L.append("  JNI symbols :")
     for name, present in lx["jni_symbols"].items():
         L.append("      %-52s %s" % (name, "OK" if present else "MISSING"))
+    ve = r["verified_exec"]
+    if r["verified_exec_present"]:
+        L.append("verified exec:")
+        L.append("  size        : %d" % ve["size"])
+        L.append("  sha256      : %s" % ve["sha256"])
+        L.append("  elf         : %s" % ve["elf_type"])
+        L.append("  machine     : %s (%s)" %
+                 (ve["machine"], "OK" if ve["machine_ok"] else "WRONG-ARCH"))
+    else:
+        L.append("verified exec : MISSING (%s)" % VERIFIED_EXEC)
     L.append("status        : %s" % r["status"])
     return "\n".join(L)
 

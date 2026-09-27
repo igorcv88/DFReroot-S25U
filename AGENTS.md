@@ -302,10 +302,12 @@ and the pinned daemon at different times on this device, so the window is real. 
 comparison is therefore repeated inside the shell that `exec`s, and a mismatch exits
 with a status the app recognises instead of running anything.
 
-Where a window cannot be closed without an unverifiable mechanism, **name it**:
-`sha256sum` and `exec` each open the path, and closing that gap needs a private copy
-or a `/proc/self/fd` exec, neither of which this environment can validate. Written
-down beats quietly assumed.
+The staged helper now closes that window with a packaged, root-owned launcher. It
+opens the helper once, hashes that file descriptor, rewinds it and calls
+`execveat(fd, "", ..., AT_EMPTY_PATH)` on the same descriptor. A replacement of
+the pathname after `open(2)` therefore cannot change the launched bytes. The host
+test also proves that this form retains `dfreroot-ksud` as the task `comm`, so the
+paired module's defense-in-depth name check remains intact.
 
 ### 3.6 No execution override, under any name
 

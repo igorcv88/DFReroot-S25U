@@ -1873,10 +1873,14 @@ ksud-pa3q-S938BXXUCZZIC-dfreroot-v3.3.0
 sha256=f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c
 ```
 
-DFReroot now stages and verifies that helper, invokes
-`debug su --global-mnt`, probes `id`, hashes candidate daemons through the root
-shell and re-checks the chosen daemon in the same shell immediately before
-`exec ... soft-reboot`. This is an implementation result, not a physical PASS.
+DFReroot now stages and verifies that helper. A packaged, root-owned launcher
+opens it once, hashes the open file description, rewinds it and uses
+`execveat(AT_EMPTY_PATH)` on that same descriptor before `debug su --global-mnt`.
+This binds the digest to the bytes actually launched instead of to a mutable
+pathname, while retaining the `dfreroot-ksud` task name checked by the paired
+module. The root shell probes `id`, hashes candidate daemons and re-checks the
+chosen daemon in the same shell immediately before `exec ... soft-reboot`.
+This is an implementation result, not a physical PASS.
 The final APK still owes proof that `system_server` can execute the staged helper
 under enforcing SELinux, that the ioctl returns uid 0, and that the soft-reboot
 handoff reaches the expected dispatch outcome without changing `boot_id`.

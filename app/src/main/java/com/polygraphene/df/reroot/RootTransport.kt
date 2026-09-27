@@ -28,6 +28,8 @@ object RootTransport {
     const val RC_NO_TRANSPORT = -1
     const val RC_TIMEOUT = -2
     const val RC_HELPER_CHANGED = -3
+    private const val VERIFIED_EXEC_DIGEST_MISMATCH = 65
+    private const val VERIFIED_EXEC_NAME = "libdfr_verified_exec.so"
     const val OUTPUT_CAP = 8192
     const val PROBE_TIMEOUT_MS = 5_000L
 
@@ -42,7 +44,10 @@ object RootTransport {
         val ready: Boolean get() = transport != null
     }
 
-    class Prepared internal constructor(private val helperPath: String) {
+    class Prepared internal constructor(
+        private val helperPath: String,
+        private val verifiedExecPath: String,
+    ) {
 
         fun runAsRoot(command: String, timeoutMs: Long): Outcome {
             val actual = sha256File(helperPath)
@@ -56,8 +61,22 @@ object RootTransport {
                 )
             }
 
+            /*
+             * The Java digest above is an early diagnostic, not the execution
+             * authority. The root-owned packaged launcher opens helperPath once,
+             * hashes that file descriptor against the pin, then executes the SAME
+             * descriptor with execveat(AT_EMPTY_PATH). Replacing the pathname at
+             * any point after open cannot replace the bytes that are launched.
+             */
             val proc = try {
-                ProcessBuilder(helperPath, "debug", "su", "--global-mnt")
+                ProcessBuilder(
+                    verifiedExecPath,
+                    pinned,
+                    helperPath,
+                    "debug",
+                    "su",
+                    "--global-mnt",
+                )
                     .redirectErrorStream(true)
                     .start()
             } catch (t: Throwable) {
@@ -118,6 +137,10 @@ object RootTransport {
                     } catch (_: Throwable) {
                     }
                     Outcome(RC_TIMEOUT, output)
+                } else if (proc.exitValue() == VERIFIED_EXEC_DIGEST_MISMATCH &&
+                    output.contains("DFR_VERIFIED_EXEC_DIGEST_MISMATCH")
+                ) {
+                    Outcome(RC_HELPER_CHANGED, output)
                 } else {
                     Outcome(proc.exitValue(), output)
                 }
@@ -162,8 +185,18 @@ object RootTransport {
             Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_VERIFY=FAIL $why")
             return Preparation(null, "staged helper verification failed: $why")
         }
+        val nativeDir = context.applicationInfo.nativeLibraryDir
+        val verifiedExec = File(nativeDir, VERIFIED_EXEC_NAME)
+        if (!verifiedExec.isFile || !verifiedExec.canExecute()) {
+            val why = "verified-fd launcher missing or not executable: ${verifiedExec.path}"
+            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_LAUNCHER=FAIL $why")
+            return Preparation(null, why)
+        }
         Log.i(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_READY=PASS")
-        return Preparation(Prepared(KsudStage.DEST), "pinned DFR helper staged and verified")
+        return Preparation(
+            Prepared(KsudStage.DEST, verifiedExec.path),
+            "pinned DFR helper staged; verified-fd launcher ready",
+        )
     }
 
     private fun sha256File(path: String): String? {

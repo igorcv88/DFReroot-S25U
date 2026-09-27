@@ -21,3 +21,11 @@ cd app/src/main/jni
 "$BIN/aarch64-linux-android30-clang" splicehelper.c -o splicehelper \
     -nodefaultlibs -nostartfiles -ffreestanding -static
 "$BIN/llvm-strip" splicehelper
+
+# RootTransport must execute the exact file description it hashed, not reopen a
+# mutable pathname.  Package the tiny static execveat launcher as a native
+# library-shaped file so Android extracts it into the root-owned app code tree.
+mkdir -p ../jniLibs/arm64-v8a
+"$BIN/aarch64-linux-android30-clang" dfr_verified_exec.c sha256.c \
+    -std=gnu17 -static -o ../jniLibs/arm64-v8a/libdfr_verified_exec.so
+"$BIN/llvm-strip" ../jniLibs/arm64-v8a/libdfr_verified_exec.so

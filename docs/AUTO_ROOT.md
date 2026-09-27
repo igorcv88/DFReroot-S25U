@@ -656,7 +656,13 @@ parent `comm` as authority.
 
 The app stages the exact hash-pinned DFR ksud at
 `/data/system/dfreroot-ksud`, verifies the bytes after writing, re-verifies the
-helper before every invocation, and starts:
+helper before every invocation, and starts it through the packaged
+`libdfr_verified_exec.so` launcher. The launcher opens the mutable path exactly
+once, hashes that file descriptor, rewinds it, and executes the same descriptor
+with `execveat(AT_EMPTY_PATH)`. A rename or replacement after the open cannot
+change the bytes that run; `execveat` also preserves the opened file's
+`dfreroot-ksud` task name for the paired module's defense-in-depth check. The
+effective command remains:
 
 ```text
 dfreroot-ksud debug su --global-mnt

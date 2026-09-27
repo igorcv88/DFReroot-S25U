@@ -891,6 +891,13 @@ def audit():
     # kernel module restricts that ioctl to a helper and real parent carrying the
     # policy-owned system_server SID; the helper task name is defense in depth.
     transport_code = code_only(dfr_source("RootTransport.kt"))
+    verified_exec_path = os.path.join(JNI_DIR, "dfr_verified_exec.c")
+    try:
+        with open(verified_exec_path, encoding="utf-8") as f:
+            verified_exec_code = code_only(f.read())
+    except OSError as ex:
+        fail("cannot read dfr_verified_exec.c: %s" % ex)
+        verified_exec_code = ""
     if "fun sha256AsRoot(path: String): String? {" not in transport_code \
             or "sha256sum '" not in transport_code \
             or 'val prefix = "DFR_SHA256="' not in transport_code:
@@ -899,12 +906,26 @@ def audit():
              "traverse")
     for signal in ('KsudStage.stageFromAssets(context)',
                    'stageLog.contains("KSUD_STAGED_VERIFY=PASS")',
-                   'ProcessBuilder(helperPath, "debug", "su", "--global-mnt")',
+                   'ProcessBuilder(',
+                   'verifiedExecPath',
+                   'VERIFIED_EXEC_NAME = "libdfr_verified_exec.so"',
                    'actual != KsudStage.pinnedKsudSha256()',
                    'transport=pinned-dfr-ksud'):
         if signal not in transport_code:
             fail("RootTransport no longer carries the pinned DFR helper transport "
                  "invariant %r" % signal)
+    for signal in ('dfr_sha256_fd_hex(fd, actual)',
+                   '__NR_execveat, fd',
+                   'AT_EMPTY_PATH',
+                   '&argv[2]'):
+        if signal not in verified_exec_code:
+            fail("verified launcher no longer binds the helper digest to the file "
+                 "description passed to execveat: missing %r" % signal)
+    if verified_exec_code.count("open(path, O_RDONLY)") != 1:
+        fail("verified launcher must open the mutable helper path exactly once")
+    if "DFR_VERIFIED_EXEC_DIGEST_MISMATCH" not in transport_code:
+        fail("RootTransport no longer maps the launcher's bound digest refusal to "
+             "PINNED_TRANSPORT_CHANGED")
     if "SU_CANDIDATES" in transport_code or 'ProcessBuilder("su"' in transport_code \
             or 'ProcessBuilder("/system/bin/su"' in transport_code:
         fail("RootTransport fell back to namespace-dependent su probing; ZZIC proved "

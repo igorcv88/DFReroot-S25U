@@ -92,20 +92,26 @@ void dfr_sha256_hex(const uint8_t digest[32], char hexout[65]) {
 int dfr_sha256_file_hex(const char *path, char hexout[65]) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return -1;
-    dfr_sha256_ctx c;
-    dfr_sha256_init(&c);
-    uint8_t buf[8192];
-    ssize_t n;
-    while ((n = read(fd, buf, sizeof(buf))) > 0)
-        dfr_sha256_update(&c, buf, (size_t)n);
+    int rc = dfr_sha256_fd_hex(fd, hexout);
     /* close(2) can succeed and still overwrite errno; callers of this function
      * classify the failure BY errno (EACCES is a policy denial, anything else
      * is a fault), so preserve the read's errno across the close. */
     {
         int saved = errno;
         close(fd);
-        if (n < 0) { errno = saved; return -1; }
+        errno = saved;
     }
+    return rc;
+}
+
+int dfr_sha256_fd_hex(int fd, char hexout[65]) {
+    dfr_sha256_ctx c;
+    dfr_sha256_init(&c);
+    uint8_t buf[8192];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0)
+        dfr_sha256_update(&c, buf, (size_t)n);
+    if (n < 0) return -1;
     uint8_t digest[32];
     dfr_sha256_final(&c, digest);
     dfr_sha256_hex(digest, hexout);

@@ -1129,10 +1129,12 @@ kernelsu/ksud-pa3q-S938BXXUCZZIC-dfreroot-v3.3.0
 sha256 f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c
 ```
 
-The app-side implementation is on branch
-`fix/apply-modules-functional-transport`: `RootTransport.prepare()` stages and
-verifies the pinned helper, starts `debug su --global-mnt`, probes `id`, hashes
-the installed daemon through that shell and preserves the same-shell
+The app-side implementation stages and verifies the pinned helper, then routes
+the launch through the root-owned packaged `libdfr_verified_exec.so`. That
+launcher opens the helper once, hashes the open file description and executes
+that same descriptor with `execveat(AT_EMPTY_PATH)`, closing the pathname
+replacement window while retaining the `dfreroot-ksud` task name. The resulting
+root shell probes `id`, hashes the installed daemon and preserves the same-shell
 digest-before-exec gate.
 
 The generated binary is now imported as `app/src/main/assets/ksud`; its exact
