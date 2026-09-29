@@ -26,25 +26,29 @@
  * /data (observed: a root shell on this device reports u:r:ksu:s0 and runs the
  * same file that system_server is refused).
  *
- * ## What the device answered, and what is still missing
+ * ## What the device answered, and what the answer changed
  *
- * The first build to try this rebooted the device instead of refusing. The
- * cause was not the fork and not ksud: /data/system/dfreroot-softreboot-lock
- * is created before the daemon is ever invoked, and the boot that rebooted
- * left none, so nothing was executed. What the probe had gained was one
- * privileged syscall - the magic supercall that asks the kernel for the driver
- * fd - and this firmware has no handler for it: the paired module is built
- * CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y, so the syscall dispatcher never installs
- * and only sucompat kprobes are registered. That call is gone; see
- * dfr_su_core.c for the full reading and the rule that keeps it gone.
+ * The first build to try this rebooted the device instead of refusing. Three
+ * rounds of reasoning named causes they could not evidence. Samsung's
+ * /sys/class/sec/sec_hw_param/extra_info then produced the panic record and
+ * settled it: the magic supercall WORKED - "ksu fd installed: 96 for pid
+ * 16452" - and the kernel died 152 us later at
+ * allowed_for_su+0x12c/0x248 [kernelsu], on a put_cred() that
+ * CONFIG_KSU_SAMSUNG_KDP makes an illegal write. The transport was not the
+ * fault; the module it asked was.
  *
- * What remains is the fd itself. The kernel installs one on the sucompat `su`
- * execve path, which its pre-filter gates on the uid allowlist rather than on
- * the predicate the DFR patch adds - and allowlisting uid 1000 is the wrong
- * boundary, since it is the shared platform uid. So today this transport scans
- * for an fd it will not find, refuses at DFR_SU_STEP_DRIVER_FD, and executes
- * nothing. Closing that is a module-side change: the fd install has to accept
- * the same caller allowed_for_su() already accepts.
+ * So the supercall is back, under the condition AGENTS.md 3.6.1 sets: it may
+ * be issued only when a complete post-root record for the CURRENT boot says
+ * the loaded module carries the fix (transport_fix=kdp-cred-1). That evidence
+ * lives in /data/system/dfreroot-post-root, which this layer does not read, so
+ * supercall_allowed arrives as a parameter and the refusing value is the one
+ * this layer would otherwise have to invent. With it 0, the child refuses at
+ * DFR_SU_STEP_SUPERCALL_GATED having asked the kernel nothing.
+ *
+ * "The fd was missing" is deliberately NOT a second condition that can stand
+ * in for the marker. That reasoning - the scan found nothing, so ask - is what
+ * panicked the device, and dfr_su_core.c is written so the call cannot be
+ * reached by it.
  */
 #ifndef DFR_SU_CORE_H
 #define DFR_SU_CORE_H
@@ -62,6 +66,8 @@ enum dfr_su_step {
     DFR_SU_STEP_FORK,
     DFR_SU_STEP_COMM,       /* prctl(PR_SET_NAME) */
     DFR_SU_STEP_DRIVER_FD,  /* the KernelSU driver fd was not installed */
+    DFR_SU_STEP_SUPERCALL_GATED, /* no fd, and the module's fix marker did not
+                                  * authorise asking the kernel for one */
     DFR_SU_STEP_GRANT,      /* the grant ioctl was refused */
     DFR_SU_STEP_NOT_ROOT,   /* the ioctl returned success without uid 0 */
     DFR_SU_STEP_MNT_NS,     /* could not enter init's mount namespace */
@@ -79,7 +85,14 @@ enum dfr_su_step {
  */
 struct dfr_su_ops {
     int (*set_comm)(const char *comm);        /* 0, or -1 with errno */
-    int (*driver_fd)(int *fd_out);            /* 0, or -1 with errno */
+    /*
+     * 0, or -1 with errno. supercall_allowed is threaded in rather than decided
+     * here: the evidence that authorises the supercall is a post-root record
+     * this layer cannot read, and AGENTS.md 3.6.1 requires the default to be
+     * the refusing one. An implementation that ignores the flag and calls
+     * anyway is the bug this parameter exists to make visible.
+     */
+    int (*driver_fd)(int *fd_out, int supercall_allowed);
     int (*grant_root)(int driver_fd);         /* 0, or -1 with errno */
     int (*current_uid)(void);
     int (*enter_init_mnt_ns)(void);           /* 0, or -1 with errno */
@@ -111,12 +124,19 @@ struct dfr_su_result {
  * hung probe shell is housekeeping, and killing a task that may already be
  * ksud mid-soft-reboot is not.
  *
+ * supercall_allowed is a parameter for a stronger reason: it is the gate of
+ * AGENTS.md 3.6.1, and the evidence behind it (a post-root record naming
+ * transport_fix, for the current boot) lives where this layer cannot see it.
+ * A default computed here would be a default computed without evidence, which
+ * is the one thing the rule forbids. 0 means the child refuses at
+ * DFR_SU_STEP_SUPERCALL_GATED rather than asking the kernel for a driver fd.
+ *
  * Returns 0 when the child was started and reaped normally, -1 otherwise; the
  * verdict is always in res->step, which the caller must read either way.
  */
 int dfr_su_spawn(const struct dfr_su_ops *ops, const char *comm,
                  char *const argv[], const char *pinned_hex,
-                 long timeout_ms, int kill_on_timeout,
+                 long timeout_ms, int kill_on_timeout, int supercall_allowed,
                  char *out, size_t out_cap, struct dfr_su_result *res);
 
 /* Stable, greppable token for a result: the app logs it verbatim, and the

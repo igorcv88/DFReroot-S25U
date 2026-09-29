@@ -41,6 +41,45 @@ public final class PostRootStatusTest {
         refused(record(boot) + "selinux=1\n", boot, 1, "duplicate key is refused");
         refused(record(boot) + "extra=value\n", boot, 1, "unknown key is refused");
         refused(null, boot, 1, "absent record is refused");
+
+        /*
+         * transport_fix: optional to PARSE, required to ACT.
+         *
+         * The previous pair writes no such line and still roots this device
+         * correctly, so a record without it must stay complete - requiring it
+         * here would refuse a good post-root state and break the chain on every
+         * device that has not rebuilt. What it gates is one question, asked by
+         * supercallAllowed(), and there the default is no.
+         */
+        String fixed = record(boot) + "transport_fix="
+                + PostRootStatus.EXPECTED_TRANSPORT_FIX + "\n";
+        expect(PostRootStatus.evaluate(fixed, boot, 1).complete,
+                "a record carrying the fix marker still parses as complete");
+        expect(PostRootStatus.EXPECTED_TRANSPORT_FIX.equals(
+                        PostRootStatus.evaluate(fixed, boot, 1).transportFix),
+                "the marker is reported back to the caller");
+        expect(PostRootStatus.evaluate(record(boot), boot, 1).complete
+                        && PostRootStatus.evaluate(record(boot), boot, 1).transportFix == null,
+                "a record from the previous pair is complete with no marker");
+
+        expect(PostRootStatus.supercallAllowed(PostRootStatus.evaluate(fixed, boot, 1)),
+                "the supercall is allowed only with the exact marker");
+        expect(!PostRootStatus.supercallAllowed(
+                        PostRootStatus.evaluate(record(boot), boot, 1)),
+                "no marker means no supercall");
+        expect(!PostRootStatus.supercallAllowed(PostRootStatus.evaluate(
+                        record(boot) + "transport_fix=kdp-cred-0\n", boot, 1)),
+                "an unknown marker means no supercall");
+        expect(!PostRootStatus.supercallAllowed(PostRootStatus.evaluate(
+                        fixed, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 1)),
+                "the marker from another boot means no supercall");
+        expect(!PostRootStatus.supercallAllowed(
+                        PostRootStatus.evaluate(fixed, boot, 0)),
+                "a marker with SELinux not enforcing means no supercall");
+        expect(!PostRootStatus.supercallAllowed(null), "a null verdict means no supercall");
+        refused(record(boot) + "transport_fix=a\ntransport_fix=b\n", boot, 1,
+                "a duplicated marker is refused outright");
+
         System.out.println("PostRootStatusTest: " + checks + "/" + checks + " passed");
     }
 }

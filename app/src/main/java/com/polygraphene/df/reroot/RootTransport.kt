@@ -27,8 +27,10 @@ import java.security.MessageDigest
  *
  * So the grant is taken **before** any exec, natively, in
  * `app/src/main/jni/dfr_su_core.c`; read its header for the full argument and
- * for the one thing still unknown (whether the kernel gates the driver-fd
- * install by the same predicate). Granting uid 1000 in KernelSU Manager remains
+ * for the panic record that settled how the driver fd may be obtained. The
+ * kernel does **not** gate the driver-fd install by that predicate — it checks
+ * only two magics — so the gate is ours: [prepare] takes `supercallAllowed`,
+ * and nothing below it decides that flag (AGENTS.md 3.6.1). Granting uid 1000 in KernelSU Manager remains
  * the wrong boundary and is not used here: it would grant the shared platform
  * uid, not one app.
  */
@@ -72,6 +74,7 @@ object RootTransport {
         comm: String,
         command: String,
         timeoutMs: Long,
+        supercallAllowed: Boolean,
     ): Array<String>?
 
     private external fun nativeExecPinnedDaemon(
@@ -80,6 +83,7 @@ object RootTransport {
         pinnedHex: String,
         arg: String,
         timeoutMs: Long,
+        supercallAllowed: Boolean,
     ): Array<String>?
 
     class Outcome(val rc: Int, val output: String) {
@@ -93,7 +97,17 @@ object RootTransport {
         val ready: Boolean get() = transport != null
     }
 
-    class Prepared internal constructor(private val stagedHelperPath: String) {
+    /**
+     * @param supercallAllowed AGENTS.md 3.6.1's gate, decided by the caller
+     *   from [PostRootStatus.supercallAllowed] and never here. When false the
+     *   native side refuses at `DFR_SU_STEP=SUPERCALL_GATED` instead of asking
+     *   the kernel for a driver fd — which is the call that, against a module
+     *   without `transport_fix=kdp-cred-1`, panicked this device.
+     */
+    class Prepared internal constructor(
+        private val stagedHelperPath: String,
+        private val supercallAllowed: Boolean,
+    ) {
 
         /**
          * Run one command as root.
@@ -106,7 +120,9 @@ object RootTransport {
         fun runAsRoot(command: String, timeoutMs: Long): Outcome =
             interpret(
                 if (!libraryLoaded) null
-                else nativeRunRootShell(TRANSPORT_COMM, command, timeoutMs)
+                else nativeRunRootShell(
+                    TRANSPORT_COMM, command, timeoutMs, supercallAllowed
+                )
             )
 
         /**
@@ -127,7 +143,9 @@ object RootTransport {
             }
             return interpret(
                 if (!libraryLoaded) null
-                else nativeExecPinnedDaemon(TRANSPORT_COMM, path, pinned, arg, timeoutMs)
+                else nativeExecPinnedDaemon(
+                    TRANSPORT_COMM, path, pinned, arg, timeoutMs, supercallAllowed
+                )
             )
         }
 
@@ -194,7 +212,13 @@ object RootTransport {
         }
     }
 
-    fun prepare(context: Context): Preparation {
+    /**
+     * @param supercallAllowed must come from [PostRootStatus.supercallAllowed]
+     *   on a verdict evaluated for the CURRENT boot. There is deliberately no
+     *   default: a default would be a decision taken without the evidence the
+     *   rule requires, and the only safe one is the refusing one anyway.
+     */
+    fun prepare(context: Context, supercallAllowed: Boolean): Preparation {
         /*
          * Staging still happens, and still must verify: the chain consumes
          * /data/system/dfreroot-ksud with a rename, so this is where a boot that
@@ -219,8 +243,12 @@ object RootTransport {
         }
         Log.i(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_READY=PASS")
         return Preparation(
-            Prepared(KsudStage.DEST),
-            "pinned DFR daemon staged; native fork-and-grant transport ready",
+            Prepared(KsudStage.DEST, supercallAllowed),
+            "pinned DFR daemon staged; native fork-and-grant transport ready" +
+                if (supercallAllowed) " (driver-fd supercall permitted by the" +
+                    " module's transport_fix marker)"
+                else " (driver-fd supercall withheld: no transport_fix marker" +
+                    " for this boot)",
         )
     }
 

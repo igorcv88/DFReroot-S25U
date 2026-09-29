@@ -334,33 +334,92 @@ Distinct from 3.6, and learned the expensive way: that rule forbids an override
 that lets a run proceed unproven. This one forbids a *diagnostic* whose failure
 mode is worse than the thing it is diagnosing.
 
-The soft-reboot transport asked the kernel for KernelSU's driver descriptor with
-the magic supercall the pinned daemon uses,
-`syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)`. On this firmware it did
-not return an error: the device rebooted and root was lost. It never had a
-handler to answer it either — the paired module is built
-`CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y`, so `ksu_patch_text()` returns
-`-EOPNOTSUPP`, the syscall dispatcher never installs, and only sucompat kprobes
-are registered. The call reached a heavily patched Samsung `sys_reboot`.
+**Read the history of this rule before trusting any causal claim in it.** The
+soft-reboot transport rebooted the device on its first physical run, and this
+section twice named a cause it could not evidence — first "no supercall handler
+exists", then "the magic reboot reaches the real `sys_reboot`". Samsung's
+`/sys/class/sec/sec_hw_param/extra_info` then produced the panic record, and it
+refuted both:
 
-So: **no source that ships inside this app may name the reboot syscall**, and
-`tools/profile_binding_audit.py` rejects it by mechanism rather than by
-spelling, exactly as it does for 3.6. "Only when the fd is missing" is not a
-safeguard; it is the condition under which the call was already made.
+```text
+"RR":"KP" "TASK":"dfreroot-ksud" "PANIC":"synchronous external abort"
+"PC":"allowed_for_su+0x12c/0x248 [kernelsu]"
+[61.884299] KernelSU: ksu fd installed: 96 for pid 16452
+[61.884451] Internal error: synchronous external abort: 0000000096000010 [#1]
+```
 
-The general rule behind it, for the next syscall someone is tempted to try: a
-probe is only a probe if its worst outcome is a refusal. When the worst outcome
-is a reboot, a corrupted file or a lost root session, it is an *operation*, and
-it needs the evidence an operation needs — not the casual reach of a diagnostic.
+The supercall **worked**: the driver fd was installed for our forked child, task
+name and all. 152 µs later the kernel died inside `allowed_for_su()` — the
+paired module's DFR predicate — while handling the grant. `panic_on_oops=1` and
+`panic=-1` turned that oops into an immediate reboot with no log, which is why
+three rounds of reasoning had nothing to stand on.
 
-And when such a thing does fire, what makes it diagnosable is a record written
-*before* it. The only reason the reboot was traced to the probe rather than to
-ksud is that `/data/system/dfreroot-softreboot-lock` — created before the daemon
-is ever invoked — was absent afterwards. Reasoning from an absence works once.
-`AutoRootStore.traceSoftReboot()` now writes the positive record, fsync'd,
-before each privileged step — and a record that cannot be written is a refusal,
-not a logged inconvenience. Proceeding without it would rebuild the very
-condition the record exists to end.
+So the reboot syscall is not what broke the device. Asking a **broken module**
+for the grant is. The owner's decision, made in the open, is therefore not a
+ban but a condition:
+
+> The driver-fd supercall may be issued **only** when a complete record for the
+> **current boot** says the loaded module carries the fix
+> (`transport_fix=kdp-cred-1`, published by the paired module's ksud and
+> checked by `PostRootStatus.supercallAllowed()`). Absent, stale, unknown or
+> unreadable marker is a refusal. There is no unconditional form of this call,
+> and "the fd was missing" is not a second condition that can stand in for the
+> first — that was the reasoning that panicked the device.
+
+Two properties keep that honest, and both are load-bearing:
+
+- **The marker is required to act, never to parse.** The previous pair writes
+  no `transport_fix` line and still roots this device correctly, so
+  `PostRootStatus.evaluate()` must keep accepting a record without it. Making
+  it a required key would refuse a good post-root state and break the chain on
+  every device that has not rebuilt. `tools/tests/PostRootStatusTest.java`
+  asserts both halves.
+- **The evidence comes from a layer that can see it.** `dfr_su_core.c` takes
+  `supercall_allowed` as a parameter and never decides it: the record lives
+  where the native transport cannot read it, and a default has to be the
+  refusing one.
+
+The call is now in the tree, and `tools/profile_binding_audit.py` therefore
+proves the gate rather than the absence. Four properties, because the call is
+one edit away from being unguarded if any one of them lapses:
+
+1. exactly one shipped source — `app/src/main/jni/dfr_su_core.c` — may name
+   `__NR_reboot`, `SYS_reboot` or either magic. A gate enforced in one file is
+   a gate a second file defeats (3.2, in its native habitat);
+2. in that file the name appears exactly once, and only *after* the
+   `/proc/self/fd` scan and *inside* the `if (!supercall_allowed)` refusal's
+   shadow. A missing fd must never promote itself into permission;
+3. the flag is threaded, not derived: `struct dfr_su_ops.driver_fd` takes
+   `supercall_allowed`, and nothing in the native layer assigns it;
+4. `DfrSoftRebootReceiver` derives it from `PostRootStatus.supercallAllowed()`
+   *before* building the transport, and passes it in.
+
+`DFR_SU_STEP_SUPERCALL_GATED` is a step of its own for 3.7's reason: "this task
+holds no driver fd" and "we were not permitted to ask for one" send the next
+physical run to different places, and a log that collapses them sends it
+nowhere. Whoever removes the call again replaces this guard with one that
+proves its absence — the exchange runs in both directions, and never to
+nothing.
+
+**What survives, and is the actual rule:** a probe is only a probe if its worst
+outcome is a refusal. When the worst outcome is a reboot, a corrupted file or a
+lost root session, it is an *operation*, and it needs an operation's evidence —
+not the casual reach of a diagnostic. This transport's first privileged step
+took the device down, and nothing in the app could say why.
+
+**And what made it knowable in the end was evidence, not reasoning.** Two things
+paid off, and both belong in the next investigation:
+
+- `/data/system/dfreroot-softreboot-lock`, written before the daemon is ever
+  invoked, proved by its absence that ksud had not run. Reasoning from an
+  absence works once, which is why `AutoRootStore.traceSoftReboot()` now writes
+  the positive record, fsync'd, before each privileged step — and a record that
+  cannot be written is a refusal, not a logged inconvenience.
+- **`/sys/class/sec/sec_hw_param/extra_info` survives a panic on this firmware
+  even at `ro.debug_level=0x4f4c` (LOW), and names `PC`, `LR`, the faulting task
+  and the panic string.** `/proc/reset_summary`, `/proc/reset_history` and
+  `extrc_info` carry the surrounding kernel log. Read them FIRST after any
+  unexplained reboot; `pstore` and `logcat -L` are empty here and prove nothing.
 
 ### 3.7 Signals are never collapsed
 

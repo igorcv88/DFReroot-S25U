@@ -1981,11 +1981,27 @@ daemon's own bytes. The causal link is circumstantial — no kernel log survived
 but the cost asymmetry is not: every test of it costs a reboot and a root
 session.
 
-It could not have worked here in any case. The paired module is built
-`CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y`, so `ksu_patch_text()` returns
-`-EOPNOTSUPP`, the syscall dispatcher never installs, and the fallback path
-registers sucompat kprobes only. There is no supercall handler on this build to
-answer it, so the call reached the real, heavily patched Samsung `sys_reboot`.
+**That paragraph's original sequel was wrong, and is corrected here.** It said
+the call could not have worked because `CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y`
+leaves no supercall handler. Reading the KernelSU source at the pinned SHA
+(`932014ab…`, `kernel/supercall/supercall.c`) shows otherwise:
+
+- `ksu_supercalls_init()` is called unconditionally from `kernelsu_init()` and
+  registers a kprobe on `__arm64_sys_reboot`. It is independent of the syscall
+  dispatcher and of `NO_PATCH_TEXT`, so the handler **was** present;
+- `reboot_handler_pre()` performs **no permission check at all** — it compares
+  the two magics, queues a `task_work` that calls `ksu_install_fd()`, and
+  returns 0. So the driver fd is available to any caller, including a
+  `system_server` child;
+- returning 0 does not suppress the syscall, so the real Samsung
+  `__arm64_sys_reboot` runs afterwards **by design**, not for want of a handler;
+- KernelSU treats that syscall as one these callers normally may not make:
+  `ksu_handle_setresuid()` whitelists `__NR_reboot` in the task's seccomp cache
+  for the manager and for allowlisted uids only.
+
+So the cause of the reboot is **UNEXPLAINED**, not "an unhandled supercall". The
+removal stands on the observation alone: it happened, ksud did not run, and no
+pre-reboot log survives to say more.
 
 The supercall is removed, and AGENTS.md 3.6.1 now forbids naming the reboot
 syscall in any source that ships inside this app, enforced by mechanism.
@@ -2001,6 +2017,117 @@ the uid allowlist, not on the `allowed_for_su()` predicate the DFR patch
 extends. Allowlisting uid 1000 remains the wrong boundary: it is the shared
 platform uid.
 
-`SOFT_REBOOT_TRANSPORT` therefore stays `BLOCKED`, and the blocker is now
-precise and module-side: **the fd install has to accept the caller
-`allowed_for_su()` already accepts.** Nothing app-side closes it.
+**The module-side blocker stated here was also wrong.** It read: "the fd install
+has to accept the caller `allowed_for_su()` already accepts". It already does —
+the install is ungated, and `KSU_IOCTL_GRANT_ROOT` is gated by `allowed_for_su()`,
+which the DFR patch already extends to this caller. No module change is needed
+for either step.
+
+What is actually missing is a **non-destructive way to trigger the install**.
+The only trigger in the source is the magic reboot, which AGENTS.md 3.6.1 now
+forbids until the reboot is explained. `SOFT_REBOOT_TRANSPORT` therefore stays
+`BLOCKED` on that, and the shape of any module change is different from what was
+written here: not widening an authorization, but adding a trigger that does not
+fall through to `sys_reboot`.
+
+### The panic record named it — 2026-09-29 (the reboot, explained)
+
+Samsung keeps a panic summary that survives `panic=-1` even at
+`ro.debug_level=0x4f4c` (LOW), where `pstore` and `logcat -L` are empty. It
+ends the investigation:
+
+```text
+$ cat /sys/class/sec/sec_hw_param/extra_info
+"RR":"KP","RWC":"559","KTIME":"61.884533","CPU":"3","TASK":"dfreroot-ksud",
+"FAULT":"pgd=0000000000000000 VA=0000000000000000 ...",
+"PANIC":"synchronous external abort",
+"PC":"allowed_for_su+0x12c/0x248 [kernelsu]",
+"LR":"allowed_for_su+0x11c/0x248 [kernelsu]"
+
+$ cat /sys/class/sec/sec_hw_param/extrc_info      (kernel log at the panic)
+[61.884299] [3: dfreroot-ksud:16452] KernelSU: ksu fd installed: 96 for pid 16452
+[61.884311] [3: dfreroot-ksud:16452] KernelSU: [16452] install ksu fd: 96
+[61.884451] [3: dfreroot-ksud:16452] Internal error: synchronous external abort:
+            0000000096000010 [#1] PREEMPT SMP
+```
+
+`/proc/reset_summary` states the same verdict in words: `UPLOAD CAUSE =
+0xc8000000 = KERNEL PANIC ( panic_msg = synchronous external abort: Fatal
+exception  PC = allowed_for_su+0x12c/0x248 [kernelsu] )`.
+
+**`SUPERCALL_DESTRUCTIVE = REFUTED`.** The magic reboot did exactly what it was
+supposed to: `ksu fd installed: 96`, for a task named `dfreroot-ksud` — the
+forked `system_server` child this transport creates, with the `prctl` name the
+paired module's contract asks for. The fd install works for this caller, as the
+source said it would.
+
+**`GRANT_PANICS_ON_KDP = CONFIRMED`.** 152 µs later the kernel took a
+synchronous external abort (ESR `0x96000010`: EC `0x25`, ISS `0x10` — SEA not on
+a translation-table walk) with the PC inside `allowed_for_su()`, which is where
+the DFR predicate is inlined. `panic_on_oops=1` and `panic=-1` made that an
+immediate reboot with no log, which is why three earlier rounds of reasoning had
+nothing to stand on and two of them guessed wrong.
+
+**The cause is a missing KDP wrapper in the paired module.** The predicate added
+by `apply-v330-staged-daemon-hotfix.py` reads the real parent's credentials as:
+
+```c
+parent_cred = get_task_cred(parent);
+parent_is_system_server = is_system_server(parent_cred);
+put_cred(parent_cred);
+```
+
+The only other `get_task_cred()` in the module, in `kernel/hook/tp_marker.c`, had
+its `put_cred()` replaced with `ksu_put_cred()` by the Samsung KDP patch —
+because with `CONFIG_KSU_SAMSUNG_KDP=y` a `struct cred` is hypervisor-protected
+read-only and its refcount must go through `kdp_usecount_dec_and_test()`. The
+DFR predicate was written afterwards and kept the raw `put_cred()`. Touching
+that refcount is a write to a stage-2 read-only page, which is precisely a
+synchronous external abort.
+
+This is a **bug**, not an authorization boundary: the fix changes how a
+credential is read, not who may pass. Reading the parent's SID under the RCU
+lock already held — `__task_cred(parent)`, no reference taken — is both
+KDP-safe and smaller than what is there now.
+
+**Consequences for the record.** Two verdicts written earlier in this file were
+attributions without evidence and are withdrawn: the supercall is not
+destructive, and this firmware is not the reason it looked that way. The
+standing verdicts are the two above.
+
+### The supercall restored, under the marker — 2026-09-29
+
+The owner's decision, taken in the open, is the condition now in AGENTS.md
+3.6.1 rather than a ban: the driver-fd supercall may be issued only when a
+complete post-root record **for the current boot** carries
+`transport_fix=kdp-cred-1`. The app implements it as follows, and none of it
+rests on the app's own judgement about the module:
+
+| Layer | What it does | Why it cannot decide the gate |
+|---|---|---|
+| `DfrSoftRebootReceiver.kt` | `PostRootStatus.supercallAllowed(evaluate(record, bootId, selinux))` | the only layer that can read `/data/system/dfreroot-post-root` |
+| `RootTransport.prepare(context, supercallAllowed)` | carries the flag into `Prepared` | no default parameter: a default is a decision without evidence |
+| `dfr_su_jni.c` | passes the `jboolean` through | marshalling only, by AGENTS.md 5 |
+| `dfr_su_core.c` | scan `/proc/self/fd`; refuse with `EPERM` if withheld; only then `syscall(__NR_reboot, …)` | the record is not visible from here at all |
+
+`SUPERCALL_GATE_MARKER_REQUIRED = ENFORCED`, by four checks in
+`tools/profile_binding_audit.py` and five host-test cases in
+`tools/tests/su_core_test.c`. Each guard was mutation-verified: ungating the
+branch, moving the call ahead of the gate, dropping the receiver's derivation,
+deriving it after the transport is built, and naming the magic in a second
+shipped file each produce a named FAIL.
+
+`DFR_SU_STEP_SUPERCALL_GATED` is a distinct verdict from
+`DFR_SU_STEP_DRIVER_FD`, per AGENTS.md 3.7: "this task holds no driver fd" and
+"we were not permitted to ask for one" are different facts, and only the second
+is the marker's doing.
+
+**What this does not claim.** Nothing here says the chain now works
+end to end. The paired module that publishes the marker is the one fixed by
+`apply-v330-dfr-kdp-cred-fix.py` in RMGLabs-Payloads, and until a build of that
+pair is installed on the device, every record on this firmware lacks the marker
+and every run refuses at `SUPERCALL_GATED` having asked the kernel nothing.
+That is the gate working, and it is also the only state this repository has
+evidence for. Repinning the new ksud digest in `KsudStage.kt`,
+`target_profile.c` and `tools/zzic_profile.json` remains open and is what a
+physical run needs next.

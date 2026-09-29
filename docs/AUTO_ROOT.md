@@ -693,14 +693,47 @@ unstripped): the driver fd comes from
 version/UAPI read-back.
 
 The implementation is `app/src/main/jni/dfr_su_core.c`, reached through
-`libdfrsu.so`, which the app **loads** rather than executes. Whether the fd
-install itself is gated by the same `allowed_for_su()` the DFR patch extends is
-kernel-side and still unread, so this is source-complete and physically
-unverified — not "about to work". What it buys is that the next physical run
-answers a question instead of repeating one: every step refuses on its own
-(`DFR_SU_STEP=DRIVER_FD`, `GRANT`, `NOT_ROOT`, `MNT_NS`, `EXEC`, `DIGEST`,
-`TIMEOUT`), so the notification names the boundary that said no. The acceptance
-run is therefore: tap the action once and capture the `DFR_SU_STEP=` token.
+`libdfrsu.so`, which the app **loads** rather than executes.
+
+**Two things this paragraph used to say are now settled, and neither the way it
+guessed.** It asked whether the kernel gates the fd install by the same
+`allowed_for_su()` the DFR patch extends, and named a physical tap as the way to
+find out. Reading `kernel/supercall/supercall.c` at the pinned SHA answered it
+offline: `reboot_handler_pre()` performs **no permission check at all**, so the
+install is open to any caller, and `KSU_IOCTL_GRANT_ROOT` is gated by
+`allowed_for_su()`, which the patch already extends here. No module change
+authorizes anything that is missing.
+
+**And the reboot is explained, so the supercall is back — under a condition.**
+Samsung's `/sys/class/sec/sec_hw_param/extra_info` produced the panic record:
+the supercall *worked* (`ksu fd installed: 96`), and the kernel died 152 µs
+later at `allowed_for_su+0x12c`, on a `put_cred()` that
+`CONFIG_KSU_SAMSUNG_KDP` makes an illegal write. Asking a **broken module** for
+the grant is what took the device down. AGENTS.md 3.6.1 therefore states the
+owner's decision as a condition: the supercall may be issued only when a
+complete post-root record **for the current boot** carries
+`transport_fix=kdp-cred-1`, published by the fixed paired module's ksud.
+
+The transport still scans `/proc/self/fd` for `[ksu_driver]` first, and asks
+only when the marker permits. "The fd was missing" is deliberately not a second
+condition that can stand in for the marker — that reasoning is what panicked
+the device.
+
+**So a tap is still not an acceptance run, for a new reason.** The pair
+installed on this device is the broken one, so no record carries the marker and
+a tap refuses at `DFR_SU_STEP=SUPERCALL_GATED` having asked the kernel nothing.
+That outcome is already known, so a run costs an install to re-learn it. What
+moves this forward is building and installing the fixed pair
+(`apply-v330-dfr-kdp-cred-fix.py` in RMGLabs-Payloads) and repinning the new
+ksud digest; only then does a tap reach the supercall at all.
+
+The step vocabulary stays as it is, because it is what makes any future run
+legible: `DRIVER_FD`, `SUPERCALL_GATED`, `GRANT`, `NOT_ROOT`, `MNT_NS`, `EXEC`,
+`DIGEST`, `TIMEOUT`, each refusing on its own, with
+`/data/system/dfreroot-softreboot-trace` written before each privileged step.
+`DRIVER_FD` and `SUPERCALL_GATED` are kept apart on purpose (AGENTS.md 3.7):
+one says this task holds no driver fd, the other says we were not permitted to
+ask for one.
 
 **One RMGLabs design change that does not transfer.** It moved Apply Modules off a
 broadcast receiver and into a foreground service, because holding a broadcast open
