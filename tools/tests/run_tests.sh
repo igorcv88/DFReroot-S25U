@@ -13,6 +13,15 @@ trap 'rm -rf "$OUT"' EXIT
     "$JNI/sha256.c"
 "$OUT/test_tp"
 
+# The Apply Modules transport hashes and execs one fd with execveat. Prove the
+# mismatch refusal and the task name required by the paired module on the host.
+sh tools/tests/test_verified_exec.sh
+
+# The soft-reboot root transport: the fork, the two channels, the deadline and
+# one negative case per privileged step, with KernelSU faked. The device half
+# cannot run here, which is exactly why the steps are behind an interface.
+sh tools/tests/test_su_core.sh
+
 # The JNI payload holds every fail-closed gate; syntax-check it here too so a
 # typo in one costs a second on any host instead of a whole signed NDK build.
 sh tools/tests/exp_syntax_check.sh
@@ -32,9 +41,3 @@ python3 tools/tests/test_derive_symvers.py
 # Assembly/native/UI ordering cannot run on the host, so guard the exact
 # branch/order shape that keeps finit_module errors and dfm3 fail-closed.
 python3 tools/tests/test_post_root_contract.py
-
-# The one privileged shell in this repository: the digest re-check that decides
-# whether ksud is exec'd. Composed in Kotlin (which nothing here compiles) and run by
-# a root shell (which nothing here reaches) - but the shell logic itself is testable,
-# so it is tested, against scratch files and with the exec replaced by an echo.
-sh tools/tests/test_soft_reboot_shell.sh

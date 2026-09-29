@@ -25,6 +25,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from elf64 import ELF64  # noqa: E402
 
 NATIVE_LIB = "lib/arm64-v8a/libexp.so"
+# The soft-reboot root transport. It is a JNI library the app LOADS, not a
+# binary anything executes: the device refused an execve from
+# u:r:system_server:s0 of a file under /data, for apk_data_file and
+# system_data_file alike.
+SU_TRANSPORT = "lib/arm64-v8a/libdfrsu.so"
+# ...which is why the old standalone launcher must NOT be packaged any more.
+# Its presence would mean a build went back to a shape the device refuses.
+RETIRED_EXEC = "lib/arm64-v8a/libdfr_verified_exec.so"
+REQUIRED_SU_JNI = [
+    "Java_com_polygraphene_df_reroot_RootTransport_nativeRunRootShell",
+    "Java_com_polygraphene_df_reroot_RootTransport_nativeExecPinnedDaemon",
+]
 REQUIRED_JNI = [
     "JNI_OnLoad",
     "Java_org_lsposed_lspromise_DirtyFrag_patchMod",
@@ -55,8 +67,12 @@ def audit(apk_path):
     if NATIVE_LIB not in names:
         r["status"] = "MISSING_NATIVE_LIB"
         r["native_lib_present"] = False
+        r["su_transport_present"] = SU_TRANSPORT in names
+        r["retired_exec_present"] = RETIRED_EXEC in names
         return r
     r["native_lib_present"] = True
+    r["su_transport_present"] = SU_TRANSPORT in names
+    r["retired_exec_present"] = RETIRED_EXEC in names
 
     data = zf.read(NATIVE_LIB)
     r["libexp"] = {
@@ -88,7 +104,37 @@ def audit(apk_path):
     finally:
         os.unlink(tmp)
 
-    ok = (r["libexp"]["machine_ok"] and r["libexp"]["jni_all_present"])
+    if r["su_transport_present"]:
+        transport = zf.read(SU_TRANSPORT)
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            tf.write(transport)
+            transport_tmp = tf.name
+        try:
+            te = ELF64(transport_tmp)
+            exported = {s.name for s in te.dynsyms()
+                        if not s.is_undef and s.name
+                        and s.bind_name in ("GLOBAL", "WEAK")}
+            entries = {name: (name in exported) for name in REQUIRED_SU_JNI}
+            r["su_transport"] = {
+                "path": SU_TRANSPORT,
+                "size": len(transport),
+                "sha256": hashlib.sha256(transport).hexdigest(),
+                "elf_type": te.type_name,
+                "machine": te.machine_name,
+                "machine_ok": te.e_machine == 0xB7,
+                "jni_symbols": entries,
+                "jni_all_present": all(entries.values()),
+            }
+        finally:
+            os.unlink(transport_tmp)
+    else:
+        r["su_transport"] = {"path": SU_TRANSPORT, "machine_ok": False,
+                             "jni_all_present": False, "jni_symbols": {}}
+
+    ok = (r["libexp"]["machine_ok"] and r["libexp"]["jni_all_present"]
+          and r["su_transport_present"] and r["su_transport"]["machine_ok"]
+          and r["su_transport"]["jni_all_present"]
+          and not r["retired_exec_present"])
     r["status"] = "PASS" if ok else "FAIL"
     return r
 
@@ -119,6 +165,21 @@ def human(r):
     L.append("  JNI symbols :")
     for name, present in lx["jni_symbols"].items():
         L.append("      %-52s %s" % (name, "OK" if present else "MISSING"))
+    st = r["su_transport"]
+    if r["su_transport_present"]:
+        L.append("su transport:")
+        L.append("  size        : %d" % st["size"])
+        L.append("  sha256      : %s" % st["sha256"])
+        L.append("  elf         : %s" % st["elf_type"])
+        L.append("  machine     : %s (%s)" %
+                 (st["machine"], "OK" if st["machine_ok"] else "WRONG-ARCH"))
+        for name, present in st["jni_symbols"].items():
+            L.append("      %-52s %s" % (name, "OK" if present else "MISSING"))
+    else:
+        L.append("su transport  : MISSING (%s)" % SU_TRANSPORT)
+    L.append("retired exec  : %s" %
+             ("PRESENT - the refuted shape is back in the APK (%s)" % RETIRED_EXEC
+              if r["retired_exec_present"] else "absent, as required"))
     L.append("status        : %s" % r["status"])
     return "\n".join(L)
 

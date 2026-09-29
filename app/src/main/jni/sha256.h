@@ -24,6 +24,9 @@ void dfr_sha256_init(dfr_sha256_ctx *c);
 void dfr_sha256_update(dfr_sha256_ctx *c, const void *data, size_t len);
 void dfr_sha256_final(dfr_sha256_ctx *c, uint8_t out[32]);
 
+/* Hash from the current offset to EOF without closing fd. */
+int dfr_sha256_fd_hex(int fd, char hexout[65]);
+
 /* Convenience: hash a file, write lowercase hex (65 bytes incl NUL) to hexout.
  * Returns 0 on success, -1 if the file cannot be read. */
 int dfr_sha256_file_hex(const char *path, char hexout[65]);

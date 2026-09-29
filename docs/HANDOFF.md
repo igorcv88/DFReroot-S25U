@@ -74,9 +74,9 @@ The exact DFR ksud has now been generated and repinned in this branch:
 
 ```text
 asset      app/src/main/assets/ksud
-source     RMGLabs-Payloads a14a33162e59412457a0dd33423e3ef2004e3ae3
-sha256     14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a
-size       6670272
+source     RMGLabs-Payloads exact-port dfreroot workflow, 2026-09-27
+sha256     f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c
+size       6675136
 ```
 
 PRs #21, #22 and #24 are merged. #24 also added the fail-closed Auto Root path
@@ -152,18 +152,76 @@ The remaining sequence is:
    Root, via `buildMatches`, before `opt_in` is consulted, so "nothing ran after the
    update" is not evidence for it. It needs a valid qualification for the installed
    build, the box unticked, and the `"Auto Root is not opted in"` path;
-3. tap **Apply Modules (Soft Reboot)** once and record which way it goes. The first
-   tap on `2.0.7-zzic` refused for a reason that was this repository's bug, not the
-   transport: the digest gate hashed candidates this app cannot read at all (sixth
-   physical run in the dossier). That is fixed — the digest now comes through the
-   root shell — so the next tap actually reaches the transport question. Expect a
-   refusal there too: RMGLabs recorded `su: connect daemon: Permission denied` in app
-   context on this exact hardware after a late-load reporting `rc=0`, and its own
-   conclusion is that a direct app `su` path needs a user-granted KernelSU Manager
-   permission. `NOT_ROOT` and `NO_ROOT_TRANSPORT` are different answers and the
-   refusal names which one. Do **not** grant DFReroot in the manager yet — it is uid
-   1000, shared with the platform, and whether KernelSU keys its allowlist strictly
-   by uid is an open question recorded in `docs/AUTO_ROOT.md`;
+3. **Apply Modules (Soft Reboot) is blocked, and re-running it buys nothing.** The
+   tenth physical run refuted the exec the transport is built on: a process at
+   `u:r:system_server:s0` — which is every component of this app, because the
+   manifest sets `android:process="system"` — cannot `execve` the packaged
+   launcher, labelled `apk_data_file`. The former `system_data_file` target was
+   not tested and stays `UNVERIFIED`; the compatibility record carries the one
+   command that would settle it, and the redesign below does not wait on it.
+   Reproduced outside the app with
+   `runcon u:r:system_server:s0 <launcher>` → `Permission denied`, while the same
+   launcher runs from `u:r:ksu:s0`. The evidence table is in
+   `docs/S25U_ZZIC_COMPATIBILITY.md`, "The exec proof came back negative".
+   Staging and verification are unaffected: `PINNED_TRANSPORT_READY=PASS` still
+   holds, and root itself is untouched by the refusal.
+   What closes it is a redesign, now implemented (`app/src/main/jni/dfr_su_core.c`,
+   loaded as `libdfrsu.so`): obtain root **before** any exec.
+   The module reads `current`, so `fork()` inside `system_server` already carries
+   the uid, the caller SID and the real-parent SID it requires; `prctl(PR_SET_NAME,
+   "dfreroot-ksud")` supplies the contract's task name, which that module
+   deliberately treats as defense in depth rather than authority. After the grant
+   the task is uid 0 in the KernelSU domain, and the pinned daemon can be opened,
+   hashed and `execveat`-ed on the same descriptor from there.
+   **The first build of that redesign rebooted the device (eleventh run), and
+   the panic record has since named the cause.** Samsung's
+   `/sys/class/sec/sec_hw_param/extra_info` survives `panic=-1` at debug level
+   LOW: `PC = allowed_for_su+0x12c [kernelsu]`, task `dfreroot-ksud`,
+   synchronous external abort, 152 µs after `ksu fd installed: 96`. The
+   supercall worked; the grant panicked, because the paired module's DFR
+   predicate calls plain `put_cred()` on a KDP-protected credential instead of
+   the `ksu_put_cred()` wrapper the Samsung patch uses everywhere else. That is
+   a module bug with a small fix (read the parent SID under the RCU lock already
+   held, taking no reference). The owner has since decided the policy
+   (AGENTS.md 3.6.1): the transport's driver-fd request is gated, not banned —
+   allowed only behind `transport_fix=kdp-cred-1` in a same-boot post-root
+   record. **All three pieces now exist.** RMGLabs-Payloads carries the module
+   fix and publishes the marker (PR #4, with PR #5 making that patch
+   applicable, atomic and self-verifying — #4 as merged refuses on every real
+   tree). `PostRootStatus` accepts the marker (optional to parse, so the
+   previous pair keeps working) and exposes `supercallAllowed()`. And the
+   native transport now issues the supercall behind that flag:
+   `DfrSoftRebootReceiver` derives it, `RootTransport.prepare(context,
+   supercallAllowed)` carries it, `dfr_su_jni.c` marshals it, and
+   `dfr_su_core.c` scans `/proc/self/fd` first and refuses with `EPERM` —
+   surfaced as the distinct `DFR_SU_STEP=SUPERCALL_GATED` — when it is
+   withheld. `tools/profile_binding_audit.py` proves the gate instead of the
+   absence, and each of its four checks was mutation-verified.
+   The daemon was never reached on the eleventh run, proven by the absent
+   soft-reboot lock.
+   The client mechanics were read first-hand out of the pinned daemon's own
+   unstripped bytes rather than guessed: the driver fd comes from
+   `syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)` and the grant is
+   `ioctl(fd, _IO('K', 1))`. Whether the kernel gates the fd install is
+   settled: `kernel/supercall/supercall.c` at
+   `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e` (`KSU_REPO`/`KSU_TAG_SHA` in
+   RMGLabs-Payloads `.github/workflows/build-zzic-exact-port.yml`) shows it is
+   not gated at all — `reboot_handler_pre()` checks only the two magics — which
+   is exactly why the gate has to be ours.
+
+   **What a tap does today, and the one thing that is left.** On this device
+   the installed pair is still the broken one, so no record carries the marker,
+   so every tap refuses at `DFR_SU_STEP=SUPERCALL_GATED` having asked the
+   kernel nothing. That is the gate working, and it is the only state this
+   repository has evidence for. To get past it: build the pair from
+   RMGLabs-Payloads `main` once PR #5 lands, install it, then repin the new
+   ksud digest in `KsudStage.kt`, `app/src/main/jni/target_profile.c` and
+   `tools/zzic_profile.json` (the two must agree — AGENTS.md 3.10). Only after
+   a boot whose post-root record carries `transport_fix=kdp-cred-1` does a tap
+   reach the supercall at all.
+   `/data/system/dfreroot-softreboot-trace` records each phase before it runs,
+   fsync'd, so a teardown can never again leave nothing to read. Do **not**
+   grant uid 1000 in KernelSU Manager as a shortcut;
 4. only then consider `POST_ROOT_LSPOSED_COMPAT`.
 
 Before any of that, the log buffer — and the answer is now known.
@@ -325,8 +383,8 @@ DFR-specific ksud:
 ```text
 asset      app/src/main/assets/ksud
 staging    /data/system/dfreroot-ksud
-sha256     14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a
-size       6670272
+sha256     f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c
+size       6675136
 ```
 
 The ksud is generated by `igorcv88/RMGLabs-Payloads` using
@@ -1114,6 +1172,38 @@ root functional
 + preserve the exact ZZIC LSPosed/DEFEX compatibility patch in the rebuilt pair
 + separately validate Zygisk Next + LSPosed under final SELinux Enforcing
 ```
+
+## Apply Modules implementation checkpoint — 2026-09-27
+
+The namespace failure is now understood from the pinned KernelSU source:
+sucompat checks the uid allowlist before intercepting `/system/bin/su`, while the
+DFR app runs as shared uid 1000 inside `system_server`. Granting that uid in the
+Manager would widen authority to the platform uid and is prohibited.
+
+RMGLabs-Payloads PR #3 implemented and merged a DFR-only transport. Its kernel
+side requires uid/euid 1000 plus the policy-owned `u:r:system_server:s0` SID on
+both helper and real parent; `dfreroot-ksud` is only a defense-in-depth task-name
+check. Normal sucompat and the allowlist are unchanged. The exact-port manual
+workflow published:
+
+```text
+kernelsu/ksud-pa3q-S938BXXUCZZIC-dfreroot-v3.3.0
+sha256 f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c
+```
+
+The app-side implementation stages and verifies the pinned helper, then routes
+the launch through the root-owned packaged `libdfr_verified_exec.so`. That
+launcher opens the helper once, hashes the open file description and executes
+that same descriptor with `execveat(AT_EMPTY_PATH)`, closing the pathname
+replacement window while retaining the `dfreroot-ksud` task name. The resulting
+root shell probes `id`, hashes the installed daemon and preserves the same-shell
+digest-before-exec gate.
+
+The generated binary is now imported as `app/src/main/assets/ksud`; its exact
+size and SHA-256 are pinned in `KsudStage.kt`, `target_profile.c` and
+`tools/zzic_profile.json`. Physical acceptance remains required; source
+completion is not a claim that SELinux permits executing the staged helper on
+ZZIC.
 
 After that exact sequence passes physically, the next code target is the
 DFReroot-owned Auto Root receiver/service plan above: explicit post-manual-PASS

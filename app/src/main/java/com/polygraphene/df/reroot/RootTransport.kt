@@ -1,228 +1,272 @@
 package com.polygraphene.df.reroot
 
+import android.content.Context
 import android.util.Log
-import java.util.concurrent.TimeUnit
+import java.io.File
+import java.security.MessageDigest
 
 /**
- * The only place this app asks for a root shell, and the only place it hashes a
- * file on disk.
+ * Post-root command transport for the DFR-specific KernelSU pair.
  *
- * Deliberately tiny, and deliberately NOT used anywhere in the root chain: the
- * chain obtains its own privilege through the Dirty Frag primitive and never
- * shells out. This exists for the one operation that happens AFTER root already
- * exists and cannot be done any other way - asking the resident KernelSU daemon
- * to re-apply the module lifecycle.
+ * ## Why this does not execute a helper to obtain root
  *
- * ## Why a `su` shell at all
+ * The first shape of this transport executed the pinned daemon and let it ask
+ * the paired module for root. The device refused it: a process at
+ * `u:r:system_server:s0` — which is every component of this app, because the
+ * manifest sets `android:process="system"` — cannot `execve` a file under
+ * `/data`. Proven for `apk_data_file` and for `system_data_file`, reproduced
+ * outside the app with `runcon`; the evidence table is in
+ * `docs/S25U_ZZIC_COMPATIBILITY.md`, "The exec proof came back negative".
  *
- * After the chain completes, this app is still uid 1000 in
- * `u:r:system_server:s0`. The CONTROLLER binder it held during the run exposes
- * transactions 1-5 (the three patch stages, the orphan helper and runAll) and
- * nothing else - there is no exec transaction, by design. So there is no
- * privileged channel left over from the run, and `su` is the transport KernelSU
- * itself provides.
+ * What that refutes is the shape, not the authorization boundary. The paired
+ * module's predicate reads `current`: uid and euid 1000, the policy-owned
+ * `u:r:system_server:s0` SID on the caller **and** its real parent, and the
+ * `dfreroot-ksud` task name as a documented defense-in-depth check rather than
+ * as authority. A `fork()` of a thread in this process satisfies the first
+ * three with nothing executed, and `prctl(PR_SET_NAME)` supplies the fourth.
  *
- * **This is unproven on the target.** KernelSU grants `su` from an allowlist its
- * manager maintains, and nothing establishes that this app is on it. A denial is
- * therefore an expected outcome, not a defect, and it must arrive as a named
- * refusal the operator can read rather than as silence.
+ * So the grant is taken **before** any exec, natively, in
+ * `app/src/main/jni/dfr_su_core.c`; read its header for the full argument and
+ * for the panic record that settled how the driver fd may be obtained. The
+ * kernel does **not** gate the driver-fd install by that predicate — it checks
+ * only two magics — so the gate is ours: [prepare] takes `supercallAllowed`,
+ * and nothing below it decides that flag (AGENTS.md 3.6.1). Granting uid 1000 in KernelSU Manager remains
+ * the wrong boundary and is not used here: it would grant the shared platform
+ * uid, not one app.
  */
 object RootTransport {
 
     const val TAG = "DFReroot"
-
-    /** Exit status used when the shell could not be started at all. */
     const val RC_NO_TRANSPORT = -1
-
-    /** Exit status used when the shell was started but outlived its deadline. */
     const val RC_TIMEOUT = -2
 
+    /**
+     * The task name the paired module checks. Mutable, and therefore never the
+     * identity boundary — the SID is. It is still set exactly, because the
+     * module refuses without it.
+     */
+    private const val TRANSPORT_COMM = "dfreroot-ksud"
 
-    /** Output is diagnostic, not data: enough to read, bounded so it cannot grow. */
     const val OUTPUT_CAP = 8192
-
-    /** `id` either answers immediately or there is nothing to answer it. */
     const val PROBE_TIMEOUT_MS = 5_000L
 
     /**
-     * Where a root shell might be, absolute paths first.
-     *
-     * The bare name is last on purpose: it depends on this process's PATH, which is
-     * the variable that made the first field failure ambiguous. Nothing here grants
-     * anything - each candidate either starts or does not, and a shell that starts
-     * still has to answer `id` with uid=0 before it is used.
+     * The bytes at the chosen path stopped matching the pinned digest, so
+     * nothing was executed. Kept distinct from every other refusal: it is the
+     * gate working, not a fault in reaching the daemon.
      */
-    val SU_CANDIDATES = listOf(
-        "/system/bin/su",
-        "/debug_ramdisk/su",
-        "/sbin/su",
-        "su",
-    )
+    const val RC_DIGEST_CHANGED = 91
+
+    private var libraryError: String? = null
+
+    private val libraryLoaded: Boolean by lazy {
+        try {
+            System.loadLibrary("dfrsu")
+            true
+        } catch (t: Throwable) {
+            libraryError = "${t.javaClass.simpleName}: ${t.message}"
+            Log.e(TAG, "[DFR][SOFT_REBOOT] TRANSPORT_LIBRARY=FAIL $libraryError")
+            false
+        }
+    }
+
+    private external fun nativeRunRootShell(
+        comm: String,
+        command: String,
+        timeoutMs: Long,
+        supercallAllowed: Boolean,
+    ): Array<String>?
+
+    private external fun nativeExecPinnedDaemon(
+        comm: String,
+        path: String,
+        pinnedHex: String,
+        arg: String,
+        timeoutMs: Long,
+        supercallAllowed: Boolean,
+    ): Array<String>?
 
     class Outcome(val rc: Int, val output: String) {
-        /**
-         * True only when a shell ran and exited 0.
-         *
-         * Never read this as "the command did what it was asked": `ksud
-         * soft-reboot` exits 0 both when it daemonises successfully and when it
-         * skips the whole operation on a UAPI mismatch. What the exit status
-         * establishes is narrower - that a root shell existed and the binary ran.
-         */
         val ran: Boolean get() = rc == 0
     }
 
+    class Preparation internal constructor(
+        val transport: Prepared?,
+        val detail: String,
+    ) {
+        val ready: Boolean get() = transport != null
+    }
+
     /**
-     * Run one command as root, bounded.
-     *
-     * The argv is passed to `su -c` as a single string because that is the only
-     * form every su implementation accepts. Callers pass paths this app chose,
-     * never operator input, so there is nothing to quote-escape - and the one
-     * caller that exists passes a path a digest comparison already accepted.
+     * @param supercallAllowed AGENTS.md 3.6.1's gate, decided by the caller
+     *   from [PostRootStatus.supercallAllowed] and never here. When false the
+     *   native side refuses at `DFR_SU_STEP=SUPERCALL_GATED` instead of asking
+     *   the kernel for a driver fd — which is the call that, against a module
+     *   without `transport_fix=kdp-cred-1`, panicked this device.
      */
-    fun runAsRoot(command: String, timeoutMs: Long): Outcome {
-        /*
-         * Every candidate is tried before concluding there is no transport, and the
-         * bare name is tried LAST.
+    class Prepared internal constructor(
+        private val stagedHelperPath: String,
+        private val supercallAllowed: Boolean,
+    ) {
+
+        /**
+         * Run one command as root.
          *
-         * The first version used `ProcessBuilder("su", ...)` alone, which resolves
-         * through this process's PATH. On the target that produced:
-         *
-         *   Cannot run program "su": error=2, No such file or directory
-         *
-         * ENOENT, from the app inside system_server, while `su` works from Termux.
-         * Two causes fit that observation and they have different remedies: the uid
-         * is not on KernelSU's allowlist so nothing resolves `su` for it, or `su`
-         * lives somewhere this process's PATH does not list. Which one it is could
-         * not be established - the KernelSU sources that would settle it are not at
-         * the paths tried for the pinned revision from this environment.
-         *
-         * Rather than assert one, the ambiguity is removed from the code: absolute
-         * paths are attempted, so ENOENT from all of them no longer has "the PATH
-         * was wrong" as a live explanation. Absence of evidence was about to become
-         * a conclusion, which is the one move this repository forbids.
+         * The shell is `/system/bin/sh`, executed *after* the grant, from the
+         * domain KernelSU's own profile installs — not from
+         * `u:r:system_server:s0`, which cannot execute it from `/data` and has
+         * no business executing the daemon either way.
          */
-        var last: Throwable? = null
-        var p: Process? = null
-        for (su in SU_CANDIDATES) {
-            try {
-                /*
-                 * redirectErrorStream so there is ONE pipe to drain. Two pipes and a
-                 * single reader is the classic deadlock, and here it would be worse
-                 * than a hang: a chatty failure that filled the 64 KiB pipe buffer
-                 * before waitFor() returned would come back as RC_TIMEOUT, which this
-                 * caller reads as "dispatched". A failure must never be able to
-                 * present itself as a successful handover.
-                 */
-                p = ProcessBuilder(su, "-c", command).redirectErrorStream(true).start()
-                Log.i(TAG, "[DFR][SOFT_REBOOT] su transport = $su")
-                break
-            } catch (t: Throwable) {
-                last = t
-                Log.i(TAG, "[DFR][SOFT_REBOOT] $su unusable: ${t.javaClass.simpleName}")
+        fun runAsRoot(command: String, timeoutMs: Long): Outcome =
+            interpret(
+                if (!libraryLoaded) null
+                else nativeRunRootShell(
+                    TRANSPORT_COMM, command, timeoutMs, supercallAllowed
+                )
+            )
+
+        /**
+         * Execute the pinned daemon, binding the digest to the bytes that run.
+         *
+         * The native side opens [path] once, hashes that file description and
+         * hands the same descriptor to `execveat(AT_EMPTY_PATH)`. This closes
+         * the window the previous shell form documented and accepted: there, a
+         * `sha256sum` and an `exec` were two lookups of a mutable name, and
+         * `/data/adb/ksud` is a name observed holding different bytes at
+         * different times on this device (AGENTS.md 3.5.1).
+         */
+        fun execPinnedDaemon(path: String, arg: String, timeoutMs: Long): Outcome {
+            val pinned = KsudStage.pinnedKsudSha256()
+            if (pinned == null || pinned.length != 64) {
+                // A NULL pin is a refusal, never a pass (AGENTS.md 2).
+                return Outcome(RC_NO_TRANSPORT, "no pinned ksud digest to compare against")
             }
+            return interpret(
+                if (!libraryLoaded) null
+                else nativeExecPinnedDaemon(
+                    TRANSPORT_COMM, path, pinned, arg, timeoutMs, supercallAllowed
+                )
+            )
         }
-        /*
-         * Bound to a val before anything else touches it. The drain thread below
-         * captures it, and Kotlin will not smart-cast a captured `var` from
-         * Process? to Process - a detail no compiler in this environment would
-         * catch before a release run.
+
+        /**
+         * The staged copy this build verified. Kept only so a caller can name
+         * it as a candidate; it is not executed to obtain root any more.
          */
-        val proc = p
-        if (proc == null) {
-            val why = last?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "unknown"
-            Log.e(TAG, "[DFR][SOFT_REBOOT] no root transport after " +
-                "${SU_CANDIDATES.size} candidate(s): $why")
-            return Outcome(RC_NO_TRANSPORT,
-                "none of ${SU_CANDIDATES.joinToString(", ")} could be started ($why)")
+        fun stagedHelperPath(): String = stagedHelperPath
+
+        fun sha256AsRoot(path: String): String? {
+            val outcome = runAsRoot(
+                "sha256sum '" + path + "' 2>/dev/null | cut -d' ' -f1 | " +
+                    "sed 's/^/DFR_SHA256=/'",
+                PROBE_TIMEOUT_MS,
+            )
+            if (!outcome.ran) {
+                Log.i(TAG, "[DFR][SOFT_REBOOT] cannot hash $path as root: rc=${outcome.rc}")
+                return null
+            }
+            val prefix = "DFR_SHA256="
+            val token = outcome.output.lineSequence()
+                .map { it.trim() }
+                .firstOrNull { it.startsWith(prefix) }
+                ?.removePrefix(prefix)
+                ?: return null
+            if (token.length != 64 || !token.all { it in "0123456789abcdefABCDEF" }) {
+                Log.i(TAG, "[DFR][SOFT_REBOOT] $path: unparsable sha256sum output")
+                return null
+            }
+            return token.lowercase()
         }
-        /*
-         * Drained concurrently and capped. The command may daemonise and keep the
-         * write end open, so the reader can outlive the deadline; it is a daemon
-         * thread and holds nothing the caller needs.
+
+        /**
+         * Map one native verdict to one outcome.
+         *
+         * Every refusal keeps the step that produced it in the output, because
+         * that token is the only diagnostic a physical run leaves behind: which
+         * boundary refused is the whole question this transport is now asking
+         * of the device (AGENTS.md 3.7).
          */
-        val sink = StringBuilder()
-        val drain = Thread({
-            try {
-                proc.inputStream.bufferedReader().use { r ->
-                    val buf = CharArray(4096)
-                    while (true) {
-                        val n = r.read(buf)
-                        if (n <= 0) break
-                        if (sink.length < OUTPUT_CAP) {
-                            synchronized(sink) { sink.append(buf, 0, n) }
-                        }
+        private fun interpret(packed: Array<String>?): Outcome {
+            if (packed == null || packed.size != 2) {
+                val why = libraryError ?: "the native transport returned nothing"
+                Log.e(TAG, "[DFR][SOFT_REBOOT] TRANSPORT_UNAVAILABLE $why")
+                return Outcome(RC_NO_TRANSPORT, why)
+            }
+            val token = packed[0]
+            val output = packed[1].trim()
+            Log.i(TAG, "[DFR][SOFT_REBOOT] transport=dfr-fork-grant $token")
+            val detail = if (output.isEmpty()) token else "$token: $output"
+            return when {
+                token.startsWith("DFR_SU_STEP=OK") -> {
+                    val exit = token.substringAfter("exit=", "").toIntOrNull()
+                    if (exit == null) {
+                        Outcome(RC_NO_TRANSPORT, "unparsable transport verdict: $token")
+                    } else {
+                        Outcome(exit, output)
                     }
                 }
-            } catch (_: Throwable) {
-                // The pipe closing under us is the normal end of a soft reboot.
+                token.startsWith("DFR_SU_STEP=DIGEST") -> Outcome(RC_DIGEST_CHANGED, detail)
+                token.startsWith("DFR_SU_STEP=TIMEOUT") -> Outcome(RC_TIMEOUT, output)
+                else -> Outcome(RC_NO_TRANSPORT, detail)
             }
-        }, "dfr-root-transport-reader")
-        drain.isDaemon = true
-        drain.start()
-        return try {
-            val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
-            // Give the reader a moment to catch up, then take whatever it has.
-            try {
-                drain.join(500L)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-            }
-            val out = synchronized(sink) { sink.toString().trim() }
-            if (!finished) {
-                /*
-                 * A soft reboot tears userspace down, so a command that is still
-                 * running at the deadline is ambiguous, not failed. The caller
-                 * says so rather than claiming either outcome.
-                 */
-                try {
-                    proc.destroy()
-                } catch (_: Throwable) {
-                }
-                Outcome(RC_TIMEOUT, out)
-            } else {
-                Outcome(proc.exitValue(), out)
-            }
-        } catch (t: Throwable) {
-            Outcome(RC_NO_TRANSPORT, "${t.javaClass.simpleName}: ${t.message}")
         }
     }
 
     /**
-     * SHA-256 of a file THROUGH the root shell, or null when it cannot be taken.
-     *
-     * This app cannot hash the candidates itself, and that is not a permission
-     * oversight to work around - it is the layout. On ZZIC, after a successful run:
-     *
-     *  - the staged daemon at KsudStage.DEST is GONE. stage1.S calls
-     *    `stage_daemon_from("/data/system/dfreroot-ksud")` and ksud installs it,
-     *    consuming the staged copy;
-     *  - it lands at /data/adb/ksud, and /data/adb is
-     *    `drwx------ root root u:object_r:adb_data_file:s0` - uid 1000 cannot
-     *    traverse the directory, let alone read the file.
-     *
-     * So [sha256File] returns null for every candidate and the digest gate became
-     * unsatisfiable by construction - the failure AGENTS.md 3.3 names. The fix is the
-     * one that rule prescribes: the proof changes FORM, not whether it is required.
-     * The digest is still compared, and still before the privileged operation; it is
-     * simply read by something that can read it.
-     *
-     * This adds no exposure. A root shell that would lie about `sha256sum` is a root
-     * shell that could run `soft-reboot` - or anything else - directly.
-     *
-     * null on anything that is not exactly one 64-character hex digest, including a
-     * missing file, a denied read or output this build cannot account for.
+     * @param supercallAllowed must come from [PostRootStatus.supercallAllowed]
+     *   on a verdict evaluated for the CURRENT boot. There is deliberately no
+     *   default: a default would be a decision taken without the evidence the
+     *   rule requires, and the only safe one is the refusing one anyway.
      */
-    fun sha256AsRoot(path: String): String? {
-        val out = runAsRoot("sha256sum '" + path + "'", PROBE_TIMEOUT_MS)
-        if (!out.ran) {
-            Log.i(TAG, "[DFR][SOFT_REBOOT] cannot hash $path as root: rc=${out.rc}")
+    fun prepare(context: Context, supercallAllowed: Boolean): Preparation {
+        /*
+         * Staging still happens, and still must verify: the chain consumes
+         * /data/system/dfreroot-ksud with a rename, so this is where a boot that
+         * already rooted gets a pinned copy back as a candidate. What changed is
+         * that nothing executes it to become root.
+         */
+        val stageLog = KsudStage.stageFromAssets(context)
+        if (!stageLog.contains("KSUD_STAGED_VERIFY=PASS")) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_STAGE=FAIL $stageLog")
+            return Preparation(null, stageLog.trim())
+        }
+        val actual = sha256File(KsudStage.DEST)
+        if (actual != KsudStage.pinnedKsudSha256()) {
+            val why = actual ?: "unreadable"
+            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_VERIFY=FAIL $why")
+            return Preparation(null, "staged helper verification failed: $why")
+        }
+        if (!libraryLoaded) {
+            val why = libraryError ?: "libdfrsu.so did not load"
+            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_LIBRARY=FAIL $why")
+            return Preparation(null, "the native root transport is unavailable ($why)")
+        }
+        Log.i(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_READY=PASS")
+        return Preparation(
+            Prepared(KsudStage.DEST, supercallAllowed),
+            "pinned DFR daemon staged; native fork-and-grant transport ready" +
+                if (supercallAllowed) " (driver-fd supercall permitted by the" +
+                    " module's transport_fix marker)"
+                else " (driver-fd supercall withheld: no transport_fix marker" +
+                    " for this boot)",
+        )
+    }
+
+    private fun sha256File(path: String): String? {
+        val digest = try {
+            File(path).inputStream().use { input ->
+                val md = MessageDigest.getInstance("SHA-256")
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (count > 0) md.update(buffer, 0, count)
+                }
+                md.digest()
+            }
+        } catch (_: Throwable) {
             return null
         }
-        val token = out.output.trim().split(Regex("\\s+")).firstOrNull() ?: return null
-        if (token.length != 64 || !token.all { it in "0123456789abcdefABCDEF" }) {
-            Log.i(TAG, "[DFR][SOFT_REBOOT] $path: unparsable sha256sum output")
-            return null
-        }
-        return token.lowercase()
+        return digest.joinToString("") { "%02x".format(it) }
     }
 }

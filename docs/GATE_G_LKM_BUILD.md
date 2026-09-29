@@ -269,8 +269,11 @@ reimplement any of it, and must not depend on the standalone
 require a world-writable path this repository forbids (§3.6).
 
 The DFReroot-profile ZZIC `ksud` is now built, bundled and pinned:
-SHA-256 `14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a`,
+SHA-256 `f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c`,
 staged at `/data/system/dfreroot-ksud`, with pre- and post-write identity checks.
+Its Apply Modules launch is additionally bound to the verified open file
+description: the packaged launcher hashes one fd and passes that same fd to
+`execveat(AT_EMPTY_PATH)`, so a later pathname replacement cannot run.
 The branch now implements automatic restoration of SELinux to `Enforcing`
 after a live KernelSU control proof, strict sysfs read-back, a second live
 control proof and same-boot completion publication. It remains physically

@@ -30,6 +30,14 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    packaging {
+        jniLibs {
+            // RootTransport executes the verified-fd launcher from the
+            // root-owned extracted native directory. A zip-backed library has
+            // no executable filesystem path for ProcessBuilder.
+            useLegacyPackaging = true
+        }
+    }
 
     defaultConfig {
         applicationId = "com.polygraphene.df.reroot"

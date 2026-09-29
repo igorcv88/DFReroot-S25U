@@ -38,6 +38,8 @@ sys.path.insert(0, HERE)
 import ko_audit  # noqa: E402
 PROFILE_C = os.path.join(ROOT, "app", "src", "main", "jni", "target_profile.c")
 JNI_DIR = os.path.join(ROOT, "app", "src", "main", "jni")
+DFR_JAVA_DIR = os.path.join(ROOT, "app", "src", "main", "java",
+                            "com", "polygraphene", "df", "reroot")
 PROFILE_JSON = os.path.join(HERE, "zzic_profile.json")
 EXP_C = os.path.join(ROOT, "app", "src", "main", "jni", "exp.c")
 
@@ -917,58 +919,251 @@ def audit():
         fail("SoftRebootPolicy no longer compares the candidate ksud against the "
              "pinned digest; it would hand a privileged lifecycle operation to an "
              "unidentified binary")
-    # The digest gate must stay REACHABLE. The first shipped version hashed the
-    # candidates from this process and refused every single time with "unreadable":
-    # the chain consumes the staged daemon (stage1.S calls
-    # stage_daemon_from("/data/system/dfreroot-ksud")) and the daemon it installs
-    # lives under /data/adb, observed as drwx------ root root on ZZIC, which uid 1000
-    # cannot traverse. That is the unsatisfiable-by-construction gate AGENTS.md 3.3
-    # names, and the rule's own remedy applies: the proof changes FORM, not whether
-    # it is required. So the digest is taken THROUGH the proven root shell.
+    # The digest gate must stay reachable, but the root transport must not depend
+    # on /system/bin/su. The target proved that path exists in Termux's KernelSU
+    # namespace and is absent from system_server's mount namespace. Nor may the
+    # shared platform uid be granted in the manager. The DFR-specific pair instead
+    # stages the exact pinned helper and invokes its debug-su ioctl path; the paired
+    # kernel module restricts that ioctl to a helper and real parent carrying the
+    # policy-owned system_server SID; the helper task name is defense in depth.
     transport_code = code_only(dfr_source("RootTransport.kt"))
-    # The full signature, not the name: `fun sha256AsRoot` is a substring of
-    # `fun sha256AsRootUnused`, and a guard that a rename survives is not a guard.
+    su_core_path = os.path.join(JNI_DIR, "dfr_su_core.c")
+    su_jni_path = os.path.join(JNI_DIR, "dfr_su_jni.c")
+    verified_exec_path = os.path.join(JNI_DIR, "dfr_verified_exec_core.c")
+    sources = {}
+    for label, path in (("dfr_su_core.c", su_core_path),
+                        ("dfr_su_jni.c", su_jni_path),
+                        ("dfr_verified_exec_core.c", verified_exec_path)):
+        try:
+            with open(path, encoding="utf-8") as f:
+                sources[label] = code_only(f.read())
+        except OSError as ex:
+            fail("cannot read %s: %s" % (label, ex))
+            sources[label] = ""
+    su_core_code = sources["dfr_su_core.c"]
+    su_jni_code = sources["dfr_su_jni.c"]
+    verified_exec_code = sources["dfr_verified_exec_core.c"]
+
     if "fun sha256AsRoot(path: String): String? {" not in transport_code \
-            or "sha256sum '" not in transport_code:
+            or "sha256sum '" not in transport_code \
+            or 'val prefix = "DFR_SHA256="' not in transport_code:
         fail("RootTransport no longer takes the candidate digest through the root "
-             "shell; this app cannot read any candidate, so a local hash makes the "
-             "digest gate unsatisfiable by construction")
-    # The first field failure was ENOENT on a bare `su`, which PATH alone could
-    # explain - so absolute paths are tried first and the bare name last. Without
-    # that, "no transport" and "wrong PATH" are the same observation, and the next
-    # tap's answer would be worth nothing.
-    # Read the literal out and check its SHAPE, not one pair of offsets: a guard
-    # that only compares `"su"` against `"/system/bin/su"` passes a list that puts
-    # the bare name second, which is the failure it exists to prevent.
-    su_list = re.search(r"val SU_CANDIDATES = listOf\((.*?)\)",
-                        transport_code, re.S)
-    if su_list is None:
-        fail("RootTransport no longer declares SU_CANDIDATES as a listOf literal; "
-             "the audit cannot tell which order the candidates are tried in, and an "
-             "unordered probe makes ENOENT indistinguishable from a wrong PATH")
-    su_candidates = ([] if su_list is None
-                     else re.findall(r'"([^"]*)"', su_list.group(1)))
-    if su_list is not None and len(su_candidates) < 2:
-        fail("RootTransport tries fewer than two su candidates; with only the bare "
-             "name, ENOENT and a PATH that does not list where su lives are the same "
-             "observation")
-    if su_candidates and su_candidates[-1] != "su":
-        fail("RootTransport does not try the bare `su` last (last candidate is "
-             + repr(su_candidates[-1]) + "); the bare name is the one that depends "
-             "on PATH, so it must come after every absolute path")
-    for cand in su_candidates[:-1]:
-        if not cand.startswith("/"):
-            fail("RootTransport tries the PATH-dependent candidate " + repr(cand)
-                 + " before the end of SU_CANDIDATES; every candidate but the last "
-                   "must be an absolute path, or a successful probe proves nothing "
-                   "about where su actually lives")
-    if su_candidates and "/system/bin/su" not in su_candidates:
-        fail("RootTransport no longer probes /system/bin/su, the conventional "
-             "absolute path on this firmware")
+             "shell; the installed daemon is under /data/adb, which uid 1000 cannot "
+             "traverse")
+    for signal in ('KsudStage.stageFromAssets(context)',
+                   'stageLog.contains("KSUD_STAGED_VERIFY=PASS")',
+                   'actual != KsudStage.pinnedKsudSha256()',
+                   'System.loadLibrary("dfrsu")',
+                   'nativeExecPinnedDaemon(',
+                   'transport=dfr-fork-grant'):
+        if signal not in transport_code:
+            fail("RootTransport no longer carries the DFR transport invariant %r"
+                 % signal)
+
+    # The refuted shape, by mechanism rather than by spelling. system_server
+    # cannot execve a file under /data - proven for apk_data_file and
+    # system_data_file - so a transport that starts a process from a pathname
+    # the app controls is the failure this rewrite exists to remove.
+    if "ProcessBuilder" in transport_code:
+        fail("RootTransport is starting a process from the app's own domain "
+             "again; u:r:system_server:s0 cannot execve anything under /data, "
+             "which is what refuted the previous transport")
+    if "libdfr_verified_exec.so" in transport_code:
+        fail("RootTransport still names the retired standalone launcher; it is "
+             "not packaged, because the device refuses to execute it")
+    if "SU_CANDIDATES" in transport_code or '"/system/bin/su"' in transport_code:
+        fail("RootTransport fell back to namespace-dependent su probing; ZZIC "
+             "proved that system_server cannot resolve those paths")
+
+    # The grant must precede the exec, and every step of it must be nameable.
+    # A transport that reports one undifferentiated failure tells the next
+    # physical run nothing about which boundary refused (AGENTS.md 3.7).
+    # The driver-fd supercall, and the gate that is now the only thing standing
+    # between it and the panic it caused.
+    #
+    # This used to assert the call's ABSENCE by mechanism. The panic record
+    # retired that reasoning: the supercall worked - the fd was installed for
+    # this transport's own forked child - and the kernel died 152 us later in
+    # the paired module's predicate, on a put_cred() that
+    # CONFIG_KSU_SAMSUNG_KDP refuses. Asking a BROKEN module for the grant is
+    # what breaks the device, so AGENTS.md 3.6.1 states the owner's decision as
+    # a condition, and this guard proves the condition instead of the absence.
+    #
+    # Four properties, because the call is one edit away from being unguarded
+    # if any one of them lapses:
+    #   1. exactly one shipped source may name the supercall at all;
+    #   2. in that file the name appears only under the supercall_allowed
+    #      branch - never on a path a missing fd can reach on its own, which is
+    #      the reasoning that panicked the device;
+    #   3. the flag is threaded, not decided: no layer below the caller may
+    #      compute it, and the ops signature must carry it;
+    #   4. the caller derives it from PostRootStatus.supercallAllowed() on a
+    #      verdict for the current boot.
+    SUPERCALL_TOKENS = ("__NR_reboot", "SYS_reboot", "0xdeadbeef", "0xcafebabe")
+    SUPERCALL_OWNER = "dfr_su_core.c"
+    shipped = []
+    for name in sorted(os.listdir(JNI_DIR)):
+        if name.endswith((".c", ".h", ".S", ".inc")):
+            shipped.append(os.path.join(JNI_DIR, name))
+    for name in sorted(os.listdir(DFR_JAVA_DIR)):
+        if name.endswith((".kt", ".java")):
+            shipped.append(os.path.join(DFR_JAVA_DIR, name))
+    supercall_owner_code = None
+    supercall_header_code = None
+    for path in shipped:
+        try:
+            with open(path, encoding="utf-8") as f:
+                code = code_only(f.read())
+        except OSError as ex:
+            fail("cannot read %s: %s" % (path, ex))
+            continue
+        base = os.path.basename(path)
+        if base == SUPERCALL_OWNER:
+            supercall_owner_code = code
+            continue
+        if base == "dfr_su_core.h":
+            supercall_header_code = code
+        for forbidden in SUPERCALL_TOKENS:
+            if forbidden in code:
+                fail("%s names %r: the driver-fd supercall is gated in %s and "
+                     "nowhere else, because a gate enforced in one file is a "
+                     "gate a second file defeats (AGENTS.md 3.6.1)"
+                     % (base, forbidden, SUPERCALL_OWNER))
+
+    if supercall_owner_code is None:
+        fail("%s is missing; the supercall gate has no owner to prove"
+             % SUPERCALL_OWNER)
+    else:
+        # The ops entry must carry the flag. A one-argument driver_fd is a
+        # driver_fd that decides for itself.
+        header = supercall_header_code or ""
+        if "int (*driver_fd)(int *fd_out, int supercall_allowed);" not in header:
+            fail("struct dfr_su_ops.driver_fd no longer takes "
+                 "supercall_allowed; the gate would then be decided in the one "
+                 "layer that cannot read the evidence (AGENTS.md 3.6.1)")
+        if "DFR_SU_STEP_SUPERCALL_GATED" not in header:
+            fail("DFR_SU_STEP_SUPERCALL_GATED is gone; a withheld supercall "
+                 "would then be indistinguishable from a kernel refusal "
+                 "(AGENTS.md 3.7)")
+
+        # The call site itself. Everything from the refusing branch to the
+        # syscall must be one unbroken sequence, so the name can only be
+        # reached with the flag set.
+        gate = supercall_owner_code.find("if (!supercall_allowed) {")
+        call = supercall_owner_code.find("syscall(__NR_reboot")
+        scan = supercall_owner_code.find("real_scan_driver_fd(fd_out) == 0")
+        if gate < 0 or call < 0 or scan < 0:
+            fail("%s no longer has the scan-then-gate-then-supercall shape; "
+                 "the call must be unreachable without the flag"
+                 % SUPERCALL_OWNER)
+        elif not (scan < gate < call):
+            fail("%s issues the supercall outside the supercall_allowed "
+                 "branch, or before the scan. 'the fd was missing' is not a "
+                 "second condition that can stand in for the marker - that is "
+                 "exactly the reasoning that panicked this device "
+                 "(AGENTS.md 3.6.1)" % SUPERCALL_OWNER)
+        if supercall_owner_code.count("syscall(__NR_reboot") != 1:
+            fail("%s names the supercall more than once; only the gated call "
+                 "site may exist" % SUPERCALL_OWNER)
+        # Nothing in the native layer may synthesise the flag.
+        for bad in ("supercall_allowed = 1", "supercall_allowed = true",
+                    "supercall_allowed || ", "|| supercall_allowed"):
+            if bad in supercall_owner_code:
+                fail("%s derives supercall_allowed (%r) instead of taking it "
+                     "as a parameter; the evidence lives in a record this "
+                     "layer cannot read (AGENTS.md 3.6.1)"
+                     % (SUPERCALL_OWNER, bad))
+
+    # The caller, which is the only layer that can read the marker. Kotlin that
+    # needs an Android runtime cannot be unit-tested here, so the invoked shape
+    # is asserted statically (AGENTS.md 5).
+    transport_kt_code = code_only(dfr_source("RootTransport.kt"))
+    if "fun prepare(context: Context, supercallAllowed: Boolean)" not in \
+            transport_kt_code:
+        fail("RootTransport.prepare no longer takes supercallAllowed; a "
+             "default here would be a decision taken without the evidence "
+             "AGENTS.md 3.6.1 requires")
+    derives_gate = "PostRootStatus.supercallAllowed(" in soft_receiver_code
+    if not derives_gate:
+        fail("DfrSoftRebootReceiver no longer derives the supercall gate from "
+             "PostRootStatus.supercallAllowed(); the driver-fd supercall must "
+             "not be issued on any weaker evidence (AGENTS.md 3.6.1)")
+    if "RootTransport.prepare(context, supercallAllowed)" not in \
+            soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer passes the derived gate into the "
+             "transport")
+
+    # A breadcrumb written before a privileged step is worthless if failing to
+    # write it lets the step happen anyway.
+    if "private fun refuseWithoutTrace(" not in soft_receiver_code \
+            or "AutoRootStore.traceSoftReboot(bootId, phase) ?: return false" \
+            not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer refuses when the pre-operation "
+             "trace cannot be persisted; that rebuilds the undiagnosable "
+             "teardown the trace exists to prevent")
+    for signal in ('DFR_KSU_DRIVER_LINK "[ksu_driver]"',
+                   '__NR_getdents64',
+                   'DFR_KSU_IOCTL_GRANT_ROOT 0x4b01u',
+                   'ops->current_uid() != 0',
+                   'DFR_SU_STEP_NOT_ROOT',
+                   'dfr_verified_execveat(argv[0], pinned_hex'):
+        if signal not in su_core_code:
+            fail("the native transport no longer carries the grant-before-exec "
+                 "invariant %r" % signal)
+    # The whole sequence, not just one pair. The grant must come before the
+    # credential is checked, before the namespace switch that needs it, and
+    # before either exec - and the check must come before the execs too, because
+    # a returned success is not evidence of root (AGENTS.md 3.5).
+    order = ("ops->driver_fd(&driver_fd, supercall_allowed)",
+             "ops->grant_root(driver_fd)",
+             "ops->current_uid() != 0", "ops->enter_init_mnt_ns()",
+             "dfr_verified_execveat(argv[0], pinned_hex", "execv(argv[0], argv)")
+    positions = [su_core_code.find(signal) for signal in order]
+    if any(at < 0 for at in positions):
+        fail("the native transport lost a step of the grant-before-exec "
+             "sequence: %r" % [s for s, at in zip(order, positions) if at < 0])
+    elif positions != sorted(positions):
+        fail("the native transport performs the grant-before-exec sequence out "
+             "of order; obtaining root after an exec is the shape the device "
+             "refused, and executing before the uid check trusts a boolean")
+    try:
+        with open(os.path.join(JNI_DIR, "dfr_su_core.h"), encoding="utf-8") as f:
+            su_header_code = code_only(f.read())
+    except OSError as ex:
+        fail("cannot read dfr_su_core.h: %s" % ex)
+        su_header_code = ""
+    for step in ("DFR_SU_STEP_DRIVER_FD", "DFR_SU_STEP_GRANT",
+                 "DFR_SU_STEP_NOT_ROOT", "DFR_SU_STEP_MNT_NS",
+                 "DFR_SU_STEP_DIGEST", "DFR_SU_STEP_TIMEOUT"):
+        if step not in su_header_code or step not in su_core_code:
+            fail("refusal step %s is declared but never reported; a step that "
+                 "cannot be observed is not a diagnostic" % step)
+    # Kotlin that needs an Android runtime cannot be unit-tested here, so the
+    # JNI file's thinness is asserted statically (AGENTS.md 5).
+    for signal in ('dfr_su_spawn(&dfr_su_real_ops', 'DFR_SU_SHELL "/system/bin/sh"'):
+        if signal not in su_jni_code:
+            fail("the JNI transport no longer routes through the tested core: "
+                 "missing %r" % signal)
+    if "ksu_is_allow_uid" in su_core_code or "1000" in su_jni_code:
+        fail("the transport must not reason about uid 1000 itself; the paired "
+             "module owns that predicate and a manager grant for the shared "
+             "platform uid is not an acceptable remedy")
+
+    for signal in ('dfr_sha256_fd_hex(fd, actual)',
+                   '__NR_execveat, fd',
+                   'AT_EMPTY_PATH'):
+        if signal not in verified_exec_code:
+            fail("verified exec no longer binds the digest to the file "
+                 "description passed to execveat: missing %r" % signal)
+    if verified_exec_code.count("open(path, O_RDONLY | O_CLOEXEC)") != 1:
+        fail("verified exec must open the mutable pathname exactly once")
+    if "RC_DIGEST_CHANGED" not in transport_code:
+        fail("RootTransport no longer maps the bound-digest refusal to a "
+             "distinct outcome")
     if "token.length != 64" not in transport_code:
         fail("RootTransport no longer validates the sha256sum output; anything that "
              "is not exactly one 64-character digest must read as 'could not tell'")
-    if "RootTransport.sha256AsRoot(path)" not in soft_receiver_code:
+    if "transport.sha256AsRoot(path)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer hashes the candidates through root")
     if "sha256File" in soft_receiver_code:
         fail("DfrSoftRebootReceiver hashes a candidate from this process again; every "
@@ -979,21 +1174,42 @@ def audit():
     if "SoftRebootPolicy.precheck(inputs)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer runs the unprivileged precheck first; a "
              "stale notification would ask for a root shell before being refused")
-    if soft_receiver_code.index("SoftRebootPolicy.precheck(inputs)") > \
-            soft_receiver_code.index('RootTransport.runAsRoot("id"'):
+    if "RootTransport.prepare(context, supercallAllowed)" not in \
+            soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer prepares the pinned transport")
+    elif soft_receiver_code.index("SoftRebootPolicy.precheck(inputs)") > \
+            soft_receiver_code.index("RootTransport.prepare(context, supercallAllowed)"):
         fail("DfrSoftRebootReceiver asks for a root shell before the unprivileged "
              "precheck has had a chance to refuse")
-    # And the two transport failures stay separate values (AGENTS.md 3.7): no su
-    # binary at all, versus su answered and we are still uid 1000. RMGLabs recorded
-    # the second on this exact hardware ("su: connect daemon: Permission denied")
-    # after a late-load reporting rc=0, and its conclusion is that a direct app su
-    # path needs a user-granted KernelSU Manager permission.
+    # The gate must be derived BEFORE the transport is built with it. Deriving
+    # it afterwards would mean a Prepared carrying a value nothing computed.
+    # Guarded on derives_gate: a missing derivation is already reported above,
+    # and indexing for it here would raise instead of producing a verdict - an
+    # audit that crashes is an audit that gates nothing.
+    elif derives_gate and \
+            soft_receiver_code.index("PostRootStatus.supercallAllowed(") > \
+            soft_receiver_code.index(
+                "RootTransport.prepare(context, supercallAllowed)"):
+        fail("DfrSoftRebootReceiver builds the transport before deriving the "
+             "supercall gate")
+    # Keep transport creation, helper identity drift and a started-but-unprivileged
+    # helper as separate facts (AGENTS.md 3.7).
     if "NO_ROOT_TRANSPORT" not in soft_receiver_code \
+            or "DIGEST_CHANGED at" not in soft_receiver_code \
             or "NOT_ROOT rc=" not in soft_receiver_code \
             or 'probe.output.contains("uid=0")' not in soft_receiver_code:
-        fail("DfrSoftRebootReceiver no longer separates 'no su binary' from 'su "
-             "answered and we are not root'; the operator's next action differs - one "
-             "is a missing binary, the other a missing KernelSU Manager grant")
+        fail("DfrSoftRebootReceiver collapses transport absence, daemon identity "
+             "drift or a refused grant into one outcome")
+    if "KernelSU Manager grant for uid" not in soft_receiver_code \
+            or "1000 is neither required nor" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver again recommends a broad KernelSU grant for the "
+             "shared platform uid")
+    transport_source = dfr_source("RootTransport.kt")
+    for claim in ("policy-owned", "`u:r:system_server:s0` SID",
+                  "defense-in-depth check rather than", "as authority"):
+        if claim not in transport_source:
+            fail("RootTransport no longer documents the immutable SELinux identity "
+                 "boundary: missing %r" % claim)
     # SoftRebootPolicy keeps both entry points: precheck for what needs no privilege,
     # evaluate for the full decision including the digest.
     if "public static Decision precheck(" not in soft_policy_code \
@@ -1031,26 +1247,41 @@ def audit():
     if "notif_soft_reboot_undetermined" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer reports an undetermined soft reboot "
              "distinctly from a dispatched one")
-    # The digest must be re-checked in the SAME shell that execs. Hashing a path and
-    # then executing that path binds the claim to a NAME, not to bytes (AGENTS.md
-    # 3.5), and /data/adb/ksud is documented to change: it has held the root manager's
-    # build and the pinned daemon at different times on this device. Between the
-    # candidate hash and the call there is another hash, a policy evaluation and a
-    # lock write with an fsync.
-    for signal in ('grep -qx \'" + pinned + "\'',
-                   'exec \\"\\$p\\" soft-reboot',
-                   "RC_DIGEST_CHANGED"):
+    # A dispatch that may take userspace down with it must leave a durable trail
+    # BEFORE it does. The build that rebooted this device was diagnosable only by
+    # an absence; reasoning from an absence works once.
+    for phase in ('"PREPARE"', '"PROBE_ENTER"', '"EXEC_ENTER path='):
+        if "refuseWithoutTrace(context, bootId, %s" % phase not in soft_receiver_code:
+            fail("DfrSoftRebootReceiver no longer records phase %s before acting; "
+                 "a teardown would again leave nothing to read" % phase)
+    probe_trace = soft_receiver_code.find(
+        'refuseWithoutTrace(context, bootId, "PROBE_ENTER")')
+    probe_call = soft_receiver_code.find('transport.runAsRoot("id"')
+    if probe_trace < 0 or probe_call < 0 or probe_trace > probe_call:
+        fail("the soft-reboot trace is written after the first privileged call; "
+             "it exists to survive that call, so it must precede it")
+
+    # The digest must be bound to the bytes that run, in the call that runs them.
+    # Hashing a path and then executing that path binds the claim to a NAME, not to
+    # bytes (AGENTS.md 3.5.1), and /data/adb/ksud is documented to change: it has
+    # held the root manager's build and the pinned daemon at different times on this
+    # device. Between the candidate hash and the call there is another hash, a policy
+    # evaluation and a lock write with an fsync.
+    for signal in ('transport.execPinnedDaemon(',
+                   '"soft-reboot"',
+                   "RootTransport.RC_DIGEST_CHANGED"):
         if signal not in soft_receiver_code:
-            fail("DfrSoftRebootReceiver no longer re-verifies the digest inside the "
-                 "shell that execs ksud (%s missing); the path can change between the "
-                 "check and the call" % signal)
-    if "outcome.rc == RC_DIGEST_CHANGED ->" not in soft_receiver_code:
-        fail("DfrSoftRebootReceiver no longer reports a digest that changed between "
-             "the check and the call as its own outcome")
-    # grep -qx, not grep -q: a digest that merely CONTAINS the pinned one is not it.
-    if "grep -q '" in soft_receiver_code:
-        fail("DfrSoftRebootReceiver matches the pinned digest with grep -q rather than "
-             "grep -qx; a superstring of the digest would pass")
+            fail("DfrSoftRebootReceiver no longer execs ksud through the transport "
+                 "that hashes the descriptor it launches (%s missing); a pathname "
+                 "can change between the check and the call" % signal)
+    if "outcome.rc == RootTransport.RC_DIGEST_CHANGED ->" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer reports a daemon whose bytes are not "
+             "the pinned ones as its own outcome")
+    # A shell between the decision and the exec would reopen the pathname, which is
+    # the window the descriptor-bound exec exists to close.
+    if "sha256sum" in soft_receiver_code and "exec \\\"" in soft_receiver_code:
+        fail("DfrSoftRebootReceiver went back to hashing and exec'ing a pathname in "
+             "a shell; that is two lookups of a mutable name")
     # Exit status 0 is ambiguous by construction: soft_reboot() returns Ok(()) when
     # ensure_uapi_version_matched() fails, and daemonises on the success path.
     if "exits 0 both when it daemonises" not in soft_reboot_receiver_src:

@@ -787,8 +787,8 @@ the `dfreroot` staging contract, byte-identical to it:
 
 ```text
 app/src/main/assets/ksud
-SHA-256  14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a
-size     6,670,272
+SHA-256  f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c
+size     6,675,136
 ```
 
 Verified from the bytes, not from the build log: it contains
@@ -988,8 +988,8 @@ The implementation makes four decisions that future reviews must preserve:
   `dfm1` after that result, and never treats isolated `dfm3` as final success.
 
 Host target/profile and contract-shape tests pass. The generated daemon is
-`6,670,272` bytes with SHA-256
-`14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a`,
+`6,675,136` bytes with SHA-256
+`f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c`,
 and all three DFR pins carry that identity. Gate I remains **PENDING PHYSICAL
 ACCEPTANCE** until the offline/build gates pass and the final same-boot
 Enforcing state is observed on ZZIC.
@@ -1974,11 +1974,11 @@ and nothing else will do. `BUILD_MISMATCH: …` on that run would mean the quali
 had gone stale again and the boundary was never reached — the same trap as the seventh
 run, but now legible instead of silent.
 
-#### The `su` path, captured at last — and what it retires
+#### The `su` path, captured — and what the ninth investigation then settled
 
-§3.5.1 and the seventh run both left an ambiguity open on purpose: `ENOENT` from
-`ProcessBuilder("su")` inside `system_server` fit two causes with different remedies,
-and the path of the `su` that works in Termux had never been read. It has now:
+§3.5.1 and the seventh run left an ambiguity open on purpose: `ENOENT` from
+`ProcessBuilder("su")` inside `system_server` fit more than one cause, and the path of
+the `su` that works in Termux had never been read. It was read here:
 
 ```text
 $ command -v su
@@ -1995,36 +1995,318 @@ Four facts, and one of them retires an assumption this dossier carried:
 
 1. **The `su` Termux resolves is Termux's own shim**, at
    `/data/data/com.termux/files/usr/bin/su` — inside another app's private data
-   directory. So "`su` works from Termux" never meant "a root binary sits somewhere
-   on a `PATH`": it meant a shim ran and found something. The same shim is what
-   printed `No su program found on this device` in the rootless boot above, i.e. it
-   **executed** and reported; it did not fail to exist. Every earlier inference that
-   read "su works in Termux" as evidence about a reachable binary was reading a
-   wrapper's success as its target's location.
+   directory. So "`su` works from Termux" never meant "a root binary sits somewhere on
+   a `PATH`": it meant a shim ran and searched. The same shim is what printed
+   `No su program found on this device` in the rootless boot, i.e. it **executed** and
+   reported; it did not fail to exist. Every earlier inference that read "su works in
+   Termux" as evidence about a reachable binary was reading a wrapper's success as its
+   target's location. AGENTS.md §3.5.1 carries the general rule.
 2. **That shim is not a candidate and must never become one.** It lives under another
    app's uid in a directory DFReroot cannot traverse, and its existence depends on a
    third-party app being installed. Adding it would make the chain depend on Termux,
    which §3.6 rules out by name.
-3. **`/system/bin/su` does exist**, `-rwxr-xr-x root root`, and `/debug_ramdisk/su`
-   and `/sbin/su` do not. Its mtime `Sep 27 14:22` is the minute the manual run above
+3. **`/system/bin/su` exists**, `-rwxr-xr-x root root`, while `/debug_ramdisk/su` and
+   `/sbin/su` do not. Its mtime `Sep 27 14:22` is the minute the manual run above
    established root, so it is **created by the chain**, not shipped by the firmware —
-   it does not exist in a boot where root was never obtained. This is why the probe
-   order matters: `/system/bin/su` is the only conventional path that is ever real on
-   this device, and it is real only after a successful run.
+   it does not exist in a boot where root was never obtained. A transport built on it
+   would need root to obtain root.
 4. **Its size, 6670272 bytes, equals the pinned `ksud` asset's exactly** (`[*] ksud
-   asset 6670272 bytes`), which is consistent with `su` being the multicall daemon
-   under another name. Consistent is not identical: **no digest of
-   `/system/bin/su` was taken**, and equal size is not byte identity (§3.5). It is
-   recorded as a lead, not a finding, and nothing may rest on it until
-   `sha256sum /system/bin/su` is compared against `14fb9eaf…`.
+   asset 6670272 bytes`), consistent with `su` being the multicall daemon under another
+   name. Consistent is not identical: **no digest of `/system/bin/su` was taken**, and
+   equal size is not byte identity (§3.5). It is a lead, not a finding, and nothing may
+   rest on it until `sha256sum /system/bin/su` is compared against `14fb9eaf…`.
 
-What this settles about the two causes: the binary exists at a path `v2.0.9`'s
-`SU_CANDIDATES` already probes first, so the next tap **is** diagnostic where the v8
-tap was not — v8 tried the bare name only, and its `ENOENT` is fully explained by
-`/system/bin/su` not being on that process's `PATH`. The allowlist question is still
-**open**, and so is a third possibility this dossier had not named: a binary created
-by ksud may be visible only in the mount namespace it was created in, so
-`system_server` can get `ENOENT` on a path a root shell lists. The next tap
-discriminates by errno — `ENOENT` on the absolute path means the namespace or the
-lookup, `EACCES` means policy, a started process at uid 1000 means the allowlist — and
-until one of those is observed, none of the three may be asserted.
+**The cause was then settled, and not by this run.** At the time this was written the
+`2.0.8` tap's `ENOENT` was explained by `PATH` alone (it probed the bare name only) and
+three candidate causes were left open — the lookup, the mount namespace, or the
+allowlist. The **ninth investigation below closed it**: `/proc/<system_server>/root`
+does not contain `/system/bin/su` at all while Termux can use it, so the two processes
+see **different mount namespaces**. That is why the transport is now native rather than
+better at probing paths, and why `tools/profile_binding_audit.py` fails if a
+`SU_CANDIDATES` list reappears instead of merely checking its order.
+
+### Ninth investigation — paired Apply Modules transport implemented, physical result owed
+
+The v9 notification action tried `/system/bin/su`, `/debug_ramdisk/su`,
+`/sbin/su` and bare `su`; every start failed with `ENOENT`. Termux simultaneously
+showed `/system/bin/su` and could use it. `/proc/<system_server>/root/system/bin/su`
+was absent, closing the PATH ambiguity: the processes see different mount
+namespaces.
+
+The pinned KernelSU source explains the split. sucompat intercepts
+`/system/bin/su` only after `ksu_is_allow_uid_for_current(uid)` passes. The DFR app
+is uid 1000 in `u:r:system_server:s0`; a Manager grant would therefore target the
+shared platform uid, not one app, and is not an acceptable fix.
+
+RMGLabs-Payloads PR #3 added a DFR-profile-only `KSU_IOCTL_GRANT_ROOT` permission.
+It requires uid/euid 1000 and the policy-owned `system_server` SID for both helper
+and real parent. Mutable task names are not authority; `dfreroot-ksud` remains an
+additional contract check only. The normal allowlist and sucompat paths are
+unchanged, and workflow guards reject a build that widens uid 1000 or trusts the
+parent `comm`.
+
+The manual exact-port build published the paired helper:
+
+```text
+ksud-pa3q-S938BXXUCZZIC-dfreroot-v3.3.0
+sha256=f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c
+```
+
+DFReroot now stages and verifies that helper. A packaged, root-owned launcher
+opens it once, hashes the open file description, rewinds it and uses
+`execveat(AT_EMPTY_PATH)` on that same descriptor before `debug su --global-mnt`.
+This binds the digest to the bytes actually launched instead of to a mutable
+pathname, while retaining the `dfreroot-ksud` task name checked by the paired
+module. The root shell probes `id`, hashes candidate daemons and re-checks the
+chosen daemon in the same shell immediately before `exec ... soft-reboot`.
+This is an implementation result, not a physical PASS.
+The final APK still owes proof that `system_server` can execute the staged helper
+under enforcing SELinux, that the ioctl returns uid 0, and that the soft-reboot
+handoff reaches the expected dispatch outcome without changing `boot_id`.
+
+### The exec proof came back negative — 2026-09-29 (tenth physical run)
+
+The paragraph above ends by naming the proof the build still owed: that
+`system_server` can execute the staged helper under enforcing SELinux. The
+device answered, and the answer is **no**.
+
+```text
+[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT
+  IOException: Cannot run program ".../lib/arm64/libdfr_verified_exec.so":
+  error=13, Permission denied
+```
+
+`SYSTEM_SERVER_EXEC_APK_DATA_FILE = REFUTED`. The verdict is named after the type
+that was actually executed, because SELinux decides `execute_no_trans` per target
+type: this run tested `apk_data_file` (the packaged launcher) and nothing else.
+`SYSTEM_SERVER_EXEC_SYSTEM_DATA_FILE` — the former target, `/data/system/
+dfreroot-ksud` — is `UNVERIFIED`, and an absent test is not a refusal any more than
+it is a pass. What would settle it is one command, with a file of that label that
+the run can remove again:
+
+```sh
+su -c 'cp /system/bin/toybox /data/system/dfr-exectest &&
+       chcon u:object_r:system_data_file:s0 /data/system/dfr-exectest &&
+       chmod 755 /data/system/dfr-exectest &&
+       runcon u:r:system_server:s0 /data/system/dfr-exectest true; echo rc=$?;
+       rm -f /data/system/dfr-exectest'
+```
+
+The redesign below does not wait on that answer, because it removes the exec from
+`system_server` altogether; the question matters only to anyone tempted to move the
+artefact to a different label and try again.
+
+Four observations fix the verdict that was tested, and none of them rests on an
+absent log line:
+
+| observation | what it rules out |
+|---|---|
+| `PINNED_TRANSPORT_LAUNCHER` passed, i.e. `isFile()` and `canExecute()` (`access(X_OK)`) both true, and `ls -Zl` shows `-rwxr-xr-x system system u:object_r:apk_data_file:s0` | a missing file, a lost `x` bit, a DAC refusal |
+| `su -c "<launcher>"` from `u:r:ksu:s0` prints `DFR_VERIFIED_EXEC_USAGE` | a broken ELF, a bad interpreter, a `noexec` mount on `/data` |
+| `runcon u:r:system_server:s0 <launcher>` → `Permission denied`, reproduced from a root shell with no app involved | the app, the `ProcessBuilder` argv, the receiver thread |
+| `dmesg`: `audit_lost=5545 audit_rate_limit=5 audit_backlog_limit=64` | "no `avc:` line appeared" meaning anything at all — the audit backlog is saturated and dropping records |
+
+The denial is bound to the **domain**, not to the artefact: the same file runs
+from `u:r:ksu:s0` and is refused from `u:r:system_server:s0`. `app/src/main/
+AndroidManifest.xml` sets `android:process="system"`, so every component of this
+app — `DfrSoftRebootReceiver` included — runs inside `system_server` at that
+second context. Commit 3f801f2 moved the exec target from `system_data_file`
+(`/data/system/dfreroot-ksud`) to `apk_data_file` (the packaged launcher). That
+did not fix anything, and the evidence here does not say it could not have: it
+says the executing domain never changed, and that the type it moved *to* is
+refused. Whether the type it moved *from* is refused as well is the `UNVERIFIED`
+question above.
+
+**This refutes the transport's shape, not its authorization boundary.** The
+paired module's `dfr_system_server_child_transport()` requires the caller to
+*hold* the `system_server` SID, which is to say it requires an `execve` out of
+`system_server` with no domain transition — precisely what the policy forbids for
+`/data`. Contract and policy are incompatible as long as root is obtained *after*
+an exec. Obtaining it *before* one is not blocked by the same rule: the module
+reads `current`, so a plain `fork()` of the app's thread already satisfies uid,
+caller SID and real-parent SID with nothing executed, and `escape_with_root_
+profile()` then calls `setup_selinux(profile->selinux_domain)` — observed on this
+device as `u:r:ksu:s0`, a domain that does execute the same file, per the second
+row of the table above.
+
+That redesign is not implemented here. It needs the KernelSU v3.3.0 UAPI at
+`932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e` (the `ksu fd` seen installed in
+`dmesg`, and the grant ioctl on it), which is not in this repository. Until it
+is read first-hand, `SOFT_REBOOT_TRANSPORT` stays `BLOCKED` and no code here
+claims otherwise.
+
+### The supercall rebooted the device — 2026-09-29 (eleventh physical run)
+
+The grant-before-exec transport shipped and was tapped once. The device did a
+full reboot and lost root; Auto Root re-rooted it on the next boot, which is why
+the session that produced this evidence had root at all.
+
+**`KSU_DRIVER_FD_SUPERCALL = DESTRUCTIVE_ON_ZZIC`**, and the daemon was never
+reached. What proves the second half is an absence, and it is worth stating
+exactly because a later run will not have this luxury:
+
+| record | state after the reboot | what it means |
+|---|---|---|
+| `/data/system/dfreroot-softreboot-lock` | **absent** | created with `createNewFile()` before ksud is invoked, and only replaced by a newer claim — so no dispatch was ever claimed |
+| `/data/system/dfreroot-post-root` | present, **current** boot_id | Auto Root ran after the reboot and completed; the root in hand is the new one |
+| `/sys/fs/pstore/`, `logcat -L` | empty | no pre-reboot log survives on this device |
+| `/proc/last_kmsg` | bootloader (ABL) log only | `reboot_reason = 0x4`; not a kernel log, so it names nothing about the cause |
+
+With the daemon excluded, the teardown happened inside the probe, and the probe
+had gained exactly one privileged syscall over the previous build: the magic
+supercall that asks for the KernelSU driver fd,
+`syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)`, read out of the pinned
+daemon's own bytes. The causal link is circumstantial — no kernel log survived —
+but the cost asymmetry is not: every test of it costs a reboot and a root
+session.
+
+**That paragraph's original sequel was wrong, and is corrected here.** It said
+the call could not have worked because `CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y`
+leaves no supercall handler. Reading the KernelSU source at the pinned SHA
+(`932014ab…`, `kernel/supercall/supercall.c`) shows otherwise:
+
+- `ksu_supercalls_init()` is called unconditionally from `kernelsu_init()` and
+  registers a kprobe on `__arm64_sys_reboot`. It is independent of the syscall
+  dispatcher and of `NO_PATCH_TEXT`, so the handler **was** present;
+- `reboot_handler_pre()` performs **no permission check at all** — it compares
+  the two magics, queues a `task_work` that calls `ksu_install_fd()`, and
+  returns 0. So the driver fd is available to any caller, including a
+  `system_server` child;
+- returning 0 does not suppress the syscall, so the real Samsung
+  `__arm64_sys_reboot` runs afterwards **by design**, not for want of a handler;
+- KernelSU treats that syscall as one these callers normally may not make:
+  `ksu_handle_setresuid()` whitelists `__NR_reboot` in the task's seccomp cache
+  for the manager and for allowlisted uids only.
+
+So the cause of the reboot is **UNEXPLAINED**, not "an unhandled supercall". The
+removal stands on the observation alone: it happened, ksud did not run, and no
+pre-reboot log survives to say more.
+
+The supercall is removed, and AGENTS.md 3.6.1 now forbids naming the reboot
+syscall in any source that ships inside this app, enforced by mechanism.
+
+**What this leaves.** `init_driver_fd` in the same bytes tries the safe half
+first: scan `/proc/self/fd` for a link containing `[ksu_driver]`. That half
+stays, and on this firmware it finds nothing, so the transport refuses at
+`DFR_SU_STEP_DRIVER_FD` and executes nothing. `dmesg` shows where the fd does
+come from here — `sys_execve su found` immediately before `ksu fd installed` —
+i.e. the sucompat interception, whose Samsung pre-filter
+(`samsung_sucompat_should_redirect`) gates on `ksu_is_allow_uid_for_current()`,
+the uid allowlist, not on the `allowed_for_su()` predicate the DFR patch
+extends. Allowlisting uid 1000 remains the wrong boundary: it is the shared
+platform uid.
+
+**The module-side blocker stated here was also wrong.** It read: "the fd install
+has to accept the caller `allowed_for_su()` already accepts". It already does —
+the install is ungated, and `KSU_IOCTL_GRANT_ROOT` is gated by `allowed_for_su()`,
+which the DFR patch already extends to this caller. No module change is needed
+for either step.
+
+What is actually missing is a **non-destructive way to trigger the install**.
+The only trigger in the source is the magic reboot, which AGENTS.md 3.6.1 now
+forbids until the reboot is explained. `SOFT_REBOOT_TRANSPORT` therefore stays
+`BLOCKED` on that, and the shape of any module change is different from what was
+written here: not widening an authorization, but adding a trigger that does not
+fall through to `sys_reboot`.
+
+### The panic record named it — 2026-09-29 (the reboot, explained)
+
+Samsung keeps a panic summary that survives `panic=-1` even at
+`ro.debug_level=0x4f4c` (LOW), where `pstore` and `logcat -L` are empty. It
+ends the investigation:
+
+```text
+$ cat /sys/class/sec/sec_hw_param/extra_info
+"RR":"KP","RWC":"559","KTIME":"61.884533","CPU":"3","TASK":"dfreroot-ksud",
+"FAULT":"pgd=0000000000000000 VA=0000000000000000 ...",
+"PANIC":"synchronous external abort",
+"PC":"allowed_for_su+0x12c/0x248 [kernelsu]",
+"LR":"allowed_for_su+0x11c/0x248 [kernelsu]"
+
+$ cat /sys/class/sec/sec_hw_param/extrc_info      (kernel log at the panic)
+[61.884299] [3: dfreroot-ksud:16452] KernelSU: ksu fd installed: 96 for pid 16452
+[61.884311] [3: dfreroot-ksud:16452] KernelSU: [16452] install ksu fd: 96
+[61.884451] [3: dfreroot-ksud:16452] Internal error: synchronous external abort:
+            0000000096000010 [#1] PREEMPT SMP
+```
+
+`/proc/reset_summary` states the same verdict in words: `UPLOAD CAUSE =
+0xc8000000 = KERNEL PANIC ( panic_msg = synchronous external abort: Fatal
+exception  PC = allowed_for_su+0x12c/0x248 [kernelsu] )`.
+
+**`SUPERCALL_DESTRUCTIVE = REFUTED`.** The magic reboot did exactly what it was
+supposed to: `ksu fd installed: 96`, for a task named `dfreroot-ksud` — the
+forked `system_server` child this transport creates, with the `prctl` name the
+paired module's contract asks for. The fd install works for this caller, as the
+source said it would.
+
+**`GRANT_PANICS_ON_KDP = CONFIRMED`.** 152 µs later the kernel took a
+synchronous external abort (ESR `0x96000010`: EC `0x25`, ISS `0x10` — SEA not on
+a translation-table walk) with the PC inside `allowed_for_su()`, which is where
+the DFR predicate is inlined. `panic_on_oops=1` and `panic=-1` made that an
+immediate reboot with no log, which is why three earlier rounds of reasoning had
+nothing to stand on and two of them guessed wrong.
+
+**The cause is a missing KDP wrapper in the paired module.** The predicate added
+by `apply-v330-staged-daemon-hotfix.py` reads the real parent's credentials as:
+
+```c
+parent_cred = get_task_cred(parent);
+parent_is_system_server = is_system_server(parent_cred);
+put_cred(parent_cred);
+```
+
+The only other `get_task_cred()` in the module, in `kernel/hook/tp_marker.c`, had
+its `put_cred()` replaced with `ksu_put_cred()` by the Samsung KDP patch —
+because with `CONFIG_KSU_SAMSUNG_KDP=y` a `struct cred` is hypervisor-protected
+read-only and its refcount must go through `kdp_usecount_dec_and_test()`. The
+DFR predicate was written afterwards and kept the raw `put_cred()`. Touching
+that refcount is a write to a stage-2 read-only page, which is precisely a
+synchronous external abort.
+
+This is a **bug**, not an authorization boundary: the fix changes how a
+credential is read, not who may pass. Reading the parent's SID under the RCU
+lock already held — `__task_cred(parent)`, no reference taken — is both
+KDP-safe and smaller than what is there now.
+
+**Consequences for the record.** Two verdicts written earlier in this file were
+attributions without evidence and are withdrawn: the supercall is not
+destructive, and this firmware is not the reason it looked that way. The
+standing verdicts are the two above.
+
+### The supercall restored, under the marker — 2026-09-29
+
+The owner's decision, taken in the open, is the condition now in AGENTS.md
+3.6.1 rather than a ban: the driver-fd supercall may be issued only when a
+complete post-root record **for the current boot** carries
+`transport_fix=kdp-cred-1`. The app implements it as follows, and none of it
+rests on the app's own judgement about the module:
+
+| Layer | What it does | Why it cannot decide the gate |
+|---|---|---|
+| `DfrSoftRebootReceiver.kt` | `PostRootStatus.supercallAllowed(evaluate(record, bootId, selinux))` | the only layer that can read `/data/system/dfreroot-post-root` |
+| `RootTransport.prepare(context, supercallAllowed)` | carries the flag into `Prepared` | no default parameter: a default is a decision without evidence |
+| `dfr_su_jni.c` | passes the `jboolean` through | marshalling only, by AGENTS.md 5 |
+| `dfr_su_core.c` | scan `/proc/self/fd`; refuse with `EPERM` if withheld; only then `syscall(__NR_reboot, …)` | the record is not visible from here at all |
+
+`SUPERCALL_GATE_MARKER_REQUIRED = ENFORCED`, by four checks in
+`tools/profile_binding_audit.py` and five host-test cases in
+`tools/tests/su_core_test.c`. Each guard was mutation-verified: ungating the
+branch, moving the call ahead of the gate, dropping the receiver's derivation,
+deriving it after the transport is built, and naming the magic in a second
+shipped file each produce a named FAIL.
+
+`DFR_SU_STEP_SUPERCALL_GATED` is a distinct verdict from
+`DFR_SU_STEP_DRIVER_FD`, per AGENTS.md 3.7: "this task holds no driver fd" and
+"we were not permitted to ask for one" are different facts, and only the second
+is the marker's doing.
+
+**What this does not claim.** Nothing here says the chain now works
+end to end. The paired module that publishes the marker is the one fixed by
+`apply-v330-dfr-kdp-cred-fix.py` in RMGLabs-Payloads, and until a build of that
+pair is installed on the device, every record on this firmware lacks the marker
+and every run refuses at `SUPERCALL_GATED` having asked the kernel nothing.
+That is the gate working, and it is also the only state this repository has
+evidence for. Repinning the new ksud digest in `KsudStage.kt`,
+`target_profile.c` and `tools/zzic_profile.json` remains open and is what a
+physical run needs next.

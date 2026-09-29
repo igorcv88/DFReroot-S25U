@@ -106,22 +106,66 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         }
 
         /*
-         * Now the transport, because the digests cannot be taken without it. The
-         * first shipped version hashed the candidates from this process and refused
-         * every time with "unreadable": the chain consumes the staged copy and the
-         * daemon it installs lives under /data/adb, which is 0700 root. That made the
-         * digest gate unsatisfiable by construction (AGENTS.md 3.3). Proving the
-         * shell first and hashing through it keeps the gate and makes it reachable.
+         * Prepare the exact DFR helper in /data/system. The active DFR KernelSU
+         * module permits GRANT_ROOT only when this helper and its real parent carry
+         * the policy-owned system_server SID. Its task name is defense in depth,
+         * not the identity boundary. The module does not allowlist uid 1000 and
+         * does not expose /system/bin/su in this namespace.
          */
-        val probe = RootTransport.runAsRoot("id", RootTransport.PROBE_TIMEOUT_MS)
+        if (refuseWithoutTrace(context, bootId, "PREPARE")) return
+        /*
+         * AGENTS.md 3.6.1's gate, decided here because this is the only layer
+         * that can read the evidence. The driver-fd supercall itself is not
+         * what took this device down - the panic record shows the fd installed
+         * and the kernel dying 152 us later inside the paired module's
+         * predicate, on a put_cred() that CONFIG_KSU_SAMSUNG_KDP refuses. So
+         * the question is whether the module that would service the grant
+         * carries the fix, and the only thing that can answer it is that
+         * module's own ksud, through transport_fix=kdp-cred-1 in a record for
+         * THIS boot. Absent, stale, unknown or unreadable is false, and false
+         * makes the native side refuse at SUPERCALL_GATED having asked nothing.
+         *
+         * inputs.postRootRecord is reused rather than re-read: the precheck
+         * above has already accepted this boot on the strength of it, and a
+         * second read could disagree with the decision already taken.
+         */
+        val supercallAllowed = PostRootStatus.supercallAllowed(
+            PostRootStatus.evaluate(inputs.postRootRecord, bootId, inputs.liveSelinux)
+        )
+        Log.i(
+            TAG,
+            "[DFR][SOFT_REBOOT] SUPERCALL_GATE=" +
+                (if (supercallAllowed) "PERMITTED" else "WITHHELD") +
+                " expected=${PostRootStatus.EXPECTED_TRANSPORT_FIX}"
+        )
+        val preparation = RootTransport.prepare(context, supercallAllowed)
+        val transport = preparation.transport
+        if (transport == null) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_UNAVAILABLE ${preparation.detail}")
+            RootNotifier.notifySoftReboot(
+                context, context.getString(R.string.notif_soft_reboot_refused),
+                "the pinned DFR helper could not be staged and verified" +
+                    " (${preparation.detail}). Root itself is unaffected; the module" +
+                    " lifecycle was not re-applied."
+            )
+            return
+        }
+        /*
+         * The first privileged thing this build does. A teardown between this
+         * line and the next trace is a teardown caused by the transport itself,
+         * which is precisely the ambiguity that cost a cycle when a probe
+         * rebooted the device and left nothing behind.
+         */
+        if (refuseWithoutTrace(context, bootId, "PROBE_ENTER")) return
+        val probe = transport.runAsRoot("id", RootTransport.PROBE_TIMEOUT_MS)
+        AutoRootStore.traceSoftReboot(bootId, "PROBE_RETURNED rc=${probe.rc}")
         if (probe.rc == RootTransport.RC_NO_TRANSPORT) {
             Log.e(TAG, "[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT ${probe.output}")
             RootNotifier.notifySoftReboot(
                 context, context.getString(R.string.notif_soft_reboot_refused),
-                "no su this app can start, from any candidate path" +
-                    " (${probe.output}). This may mean the app is not granted in the" +
-                    " KernelSU manager. Root itself is unaffected; the module" +
-                    " lifecycle was not re-applied."
+                "the DFR root transport could not start (${probe.output}). The step" +
+                    " named there is the boundary that refused. Root itself is" +
+                    " unaffected; the module lifecycle was not re-applied."
             )
             return
         }
@@ -129,9 +173,11 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
             Log.e(TAG, "[DFR][SOFT_REBOOT] NOT_ROOT rc=${probe.rc} ${probe.output}")
             RootNotifier.notifySoftReboot(
                 context, context.getString(R.string.notif_soft_reboot_refused),
-                "su answered but this app is not root: a KernelSU Manager grant is" +
-                    " required for a direct app su path (${probe.output}). Root itself" +
-                    " is unaffected; the module lifecycle was not re-applied."
+                "the DFR-specific KernelSU transport did not grant root" +
+                    " (rc=${probe.rc}: ${probe.output}). The step in that message is" +
+                    " the boundary that refused. A KernelSU Manager grant for uid" +
+                    " 1000 is neither required nor recommended. Root itself is" +
+                    " unaffected; the module lifecycle was not re-applied."
             )
             return
         }
@@ -147,7 +193,7 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          */
         for (path in arrayOf(ADB_KSUD, KsudStage.DEST)) {
             inputs.candidates.add(
-                SoftRebootPolicy.Candidate(path, RootTransport.sha256AsRoot(path))
+                SoftRebootPolicy.Candidate(path, transport.sha256AsRoot(path))
             )
         }
 
@@ -178,46 +224,36 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         }
 
         /*
-         * Re-verify the digest in the SAME shell that execs it.
+         * Bind the digest to the bytes that run, in the call that runs them.
          *
-         * Hashing a path and then executing that path binds the claim to a NAME,
-         * not to bytes (AGENTS.md 3.5), and this particular name is documented to
-         * change: /data/adb/ksud has held the root manager's build and the pinned
-         * daemon at different times on this device. Between the candidate hash
-         * above and this call there were another hash, a policy evaluation and a
-         * lock write with an fsync - easily seconds. A replacement landing in that
-         * window would have this execute bytes nothing checked.
+         * Hashing a path and then executing that path binds the claim to a NAME
+         * (AGENTS.md 3.5.1), and this particular name is documented to change:
+         * /data/adb/ksud has held the root manager's build and the pinned daemon
+         * at different times on this device. Between the candidate hash above and
+         * this call there were another hash, a policy evaluation and a lock write
+         * with an fsync - easily seconds.
          *
-         * So the comparison happens again, inside the privileged shell, immediately
-         * before `exec`, and a mismatch exits with a code this build recognises
-         * instead of running anything. The app still chooses WHICH path to try from
-         * the first hash; the shell is what binds the choice to the bytes it runs.
-         *
-         * The residual window is now the gap between `sha256sum` opening the path
-         * and `exec` opening it again - two syscalls in one shell. Closing that
-         * completely means executing a private copy, or an `exec` of a
-         * /proc/self/fd path held open across the hash. Both change HOW ksud is
-         * invoked, and nothing in this environment can verify that ksud behaves
-         * identically when started from a copied path or an fd - a privileged
-         * mechanism this repository cannot test is a worse trade than a two-syscall
-         * window that is now named. Revisit if ksud is ever shown path-independent.
+         * The previous form closed most of that with `sha256sum && exec` inside
+         * one privileged shell, and documented the two-syscall remainder as
+         * accepted because nothing here could verify that ksud behaves identically
+         * when started from a descriptor. The transport rewrite settled that
+         * question by testing it: tools/tests/test_verified_exec.sh proves
+         * execveat(AT_EMPTY_PATH) preserves the daemon's own basename as the task
+         * comm, which is the only property of a path-started ksud the paired
+         * module reads. So the window is now closed rather than named: one open,
+         * one hash of that open file description, one execveat on the same
+         * descriptor. A replacement landing after the open cannot change the bytes
+         * that run.
          */
-        val pinned = KsudStage.pinnedKsudSha256()
-        /*
-         * No command substitution: `$(` inside a Kotlin string literal is a template
-         * start the compiler may or may not accept as a literal `$`, and nothing here
-         * compiles Kotlin to settle it. `grep -qx` against the pinned digest does the
-         * same job with only `$p` to escape, and it matches the WHOLE line, so a
-         * digest that merely contains the pinned one cannot pass.
-         */
-        val verifyAndExec =
-            "p='" + decision.binaryPath + "'; " +
-                "sha256sum \"\$p\" 2>/dev/null | cut -d' ' -f1 | " +
-                "grep -qx '" + pinned + "' || exit " + RC_DIGEST_CHANGED + "; " +
-                "exec \"\$p\" soft-reboot"
-        val outcome = RootTransport.runAsRoot(verifyAndExec, TRANSPORT_TIMEOUT_MS)
+        if (refuseWithoutTrace(context, bootId, "EXEC_ENTER path=${decision.binaryPath}")) {
+            return
+        }
+        val outcome = transport.execPinnedDaemon(
+            decision.binaryPath, "soft-reboot", TRANSPORT_TIMEOUT_MS
+        )
+        AutoRootStore.traceSoftReboot(bootId, "EXEC_RETURNED rc=${outcome.rc}")
         when {
-            outcome.rc == RC_DIGEST_CHANGED -> {
+            outcome.rc == RootTransport.RC_DIGEST_CHANGED -> {
                 /*
                  * The binary at that path is no longer the pinned daemon. Nothing
                  * was executed, and the lock stays claimed: this boot has spent its
@@ -226,13 +262,13 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
                 Log.e(TAG, "[DFR][SOFT_REBOOT] DIGEST_CHANGED at ${decision.binaryPath}")
                 RootNotifier.notifySoftReboot(
                     context, context.getString(R.string.notif_soft_reboot_refused),
-                    "the binary at ${decision.binaryPath} stopped matching the pinned" +
-                        " digest between the check and the call, so nothing was run." +
+                    "the bytes at ${decision.binaryPath} are not the pinned daemon," +
+                        " so the descriptor was closed and nothing was run." +
                         " Root is unaffected; a full reboot re-applies modules."
                 )
             }
             outcome.rc == RootTransport.RC_NO_TRANSPORT -> {
-                // The shell worked seconds ago; losing it here is a real anomaly.
+                // The transport worked seconds ago; losing it here is a real anomaly.
                 Log.e(TAG, "[DFR][SOFT_REBOOT] TRANSPORT_LOST ${outcome.output}")
                 RootNotifier.notifySoftReboot(
                     context, context.getString(R.string.notif_soft_reboot_failed),
@@ -286,6 +322,29 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         }
     }
 
+    /**
+     * Write the pre-operation breadcrumb, or refuse the operation.
+     *
+     * The phases AFTER a step are ordinary telemetry and a failure there only
+     * logs: the step already happened, and refusing would not unhappen it. The
+     * phases BEFORE one are the record that has to outlive a teardown, so
+     * failing to persist one is a refusal - proceeding would rebuild exactly the
+     * undiagnosable reboot this whole mechanism came from.
+     *
+     * Returns true when the caller must stop.
+     */
+    private fun refuseWithoutTrace(context: Context, bootId: String, phase: String): Boolean {
+        val failure = AutoRootStore.traceSoftReboot(bootId, phase) ?: return false
+        Log.e(TAG, "[DFR][SOFT_REBOOT] REFUSED no durable trace for $phase: $failure")
+        RootNotifier.notifySoftReboot(
+            context, context.getString(R.string.notif_soft_reboot_refused),
+            "the dispatch record could not be written ($failure), so a failure" +
+                " here would leave nothing to diagnose. Nothing was attempted;" +
+                " root is unaffected."
+        )
+        return true
+    }
+
     private fun readPostRoot(): String? {
         val f = java.io.File(PostRootStatus.PATH)
         val exists = try {
@@ -318,15 +377,6 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
 
         /** KernelSU's own daemon path, offered as a candidate but never trusted. */
         const val ADB_KSUD = "/data/adb/ksud"
-
-        /**
-         * Exit status the privileged shell uses when the re-check fails.
-         *
-         * Arbitrary but distinguishable: ksud's own exits are 0 or its error codes,
-         * and this must not be mistaken for either. A collision would read as a
-         * generic ksud failure, which is the safe direction.
-         */
-        const val RC_DIGEST_CHANGED = 91
 
         /**
          * Short on purpose. A successful dispatch daemonises and then kills this
