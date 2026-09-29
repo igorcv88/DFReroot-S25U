@@ -2,7 +2,7 @@
 
 **Read `AGENTS.md` first.** This file is the authoritative record of the Auto
 Root path: what is implemented, what each refusal is for, and the physical
-acceptance behind it — steps 1-7 done; the soft-reboot tap and
+acceptance behind it — steps 1-6 done; step 7, the soft-reboot tap and
 `POST_ROOT_LSPOSED_COMPAT` are what remain owed. The gate matrix in
 `docs/S25U_ZZIC_COMPATIBILITY.md` still wins on what is *proven*; the plan this
 implements is in `docs/HANDOFF.md`.
@@ -342,7 +342,7 @@ verdict, `STARTED` is recorded before the native run, the qualification is bound
 to the pinned ksud digest, and no scheduler appears on this path. Each of those
 guards was confirmed to fail when its rule is violated.
 
-## Physical acceptance — steps 1-7 done, `AUTO_ROOT_FULL_BOOT` accepted
+## Physical acceptance — steps 1-6 done, step 7 still owed
 
 Gate I passed manually first, in that order. The acceptance run is recorded in
 `docs/S25U_ZZIC_COMPATIBILITY.md` as the fifth physical run
@@ -367,26 +367,47 @@ dossier):
    `attempts=1` / `native_started=1` on the new `boot_id`, and the second broadcast of
    that boot logged `REFUSED Auto Root already completed in this boot` — the
    one-attempt-per-boot rule observed rather than inferred.
-7. **done** — eighth physical run in the dossier, boot `0e8eaa2f…` on `2.0.8-zzic`.
-   The qualification was valid for the installed build (`20008` / `2.0.8-zzic` against
-   an app at exactly those values), so `buildMatches()` had nothing to invalidate and
-   `opt_in=0` was the only refusal left. The boot's **only** `[DFR]` line was
-   `[DFR][AUTOROOT] not opted in for this build; nothing to do`, from pid 3007
-   (`system_server`) — the opt-in path by name, reached by a receiver that did fire.
-   Root was absent; a manual run then recovered it without the journal ever naming
-   that boot, so manual and automatic do not share the per-boot budget.
+7. **still owed** — and the eighth physical run explains why a run that looked like it
+   closed this did not. Untick the box and confirm no attempt on the next full boot.
 
-Step 7 was the one a successful boot could not speak for, and it had a trap that cost
-one cycle: updating the app also stops Auto Root, but through a **different** refusal.
-A version bump invalidates the qualification (`buildMatches`) before `opt_in` is
-consulted, so "nothing ran after the update" is **not** evidence for step 7 — it needs
-a valid qualification for the installed build, the box then unticked, and the
-`"Auto Root is not opted in"` path taken. The eighth run is that; the attempt before it
-was not, and both are recorded so the distinction survives.
+Step 7 has two traps, and the second was only found in review:
 
-`AUTO_ROOT_FULL_BOOT` is therefore **ACCEPTED**. It still ships OFF and still requires
-a verified manual completion on the exact build plus an explicit opt-in: acceptance
-says the refusals behave as specified, not that anything may run unasked.
+- **A version bump stops Auto Root too, through a different refusal.** `buildMatches`
+  invalidates the qualification before `opt_in` is consulted, so "nothing ran after the
+  update" is not evidence. It needs a qualification valid for the installed build.
+- **The old log line could not tell the two apart.** `DfrBootReceiver` printed
+  `not opted in for this build; nothing to do` for the entire false branch of
+  `isOptedIn()` — a conjunction of `state=QUALIFIED`, `opt_in=1` and `buildMatches`
+  passing. Six distinct facts, one message: no record, unreadable record, not
+  qualified, version bump, changed `ksud` digest, firmware change, opt-out. Reading it
+  as the opt-out was reading a collapsed signal as a specific one, which is what §3.7
+  forbids — and the collapse was in the app, not in the prose.
+
+**The receiver now logs a classified verdict**, `AutoRootPolicy.optInVerdict()`:
+
+| verdict | fact |
+|---|---|
+| `NO_QUALIFICATION_RECORD` | the chain has never completed here |
+| `QUALIFICATION_UNREADABLE` | the file exists and could not be read — not the same fact as absent |
+| `NOT_QUALIFIED` | present and readable, but malformed or another state |
+| `BUILD_MISMATCH: <what diverged>` | qualified for a different build, daemon or firmware |
+| `OPTED_OUT` | qualified for **this** build and deliberately switched off |
+| `OPTED_IN` | an attempt may start |
+
+The check order is load-bearing: the build comparison runs **before** the flag, so
+`OPTED_OUT` **implies** `buildMatches()` passed. That implication is the whole value of
+the verdict, and it is asserted four ways in `AutoRootPolicyTest` and once statically in
+`tools/profile_binding_audit.py`, because reversing two lines would restore the
+ambiguity without any compiler noticing.
+
+So the observation step 7 needs, on a build carrying the verdict, is exactly:
+
+```text
+[DFR][AUTOROOT] no automatic attempt: OPTED_OUT
+```
+
+`BUILD_MISMATCH: …` on that run means the qualification went stale and the boundary was
+never reached — the same trap as before, but now legible instead of silent.
 
 Record the outcome separately from Gate I and from `POST_ROOT_LSPOSED_COMPAT`. A
 failure of the automatic path is not a failure to obtain root, and must not be

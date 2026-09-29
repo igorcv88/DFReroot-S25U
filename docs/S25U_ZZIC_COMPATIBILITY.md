@@ -957,7 +957,7 @@ inferred from a nearby firmware.
 | G4 — Write safety | **physical PASS** | system remained operational after `enforcing=0`, KernelSU late-load completed and root worked |
 | H — Installer / packages.xml | **physical PASS** | injected key survived framework restart; write-path fixes regression-tested |
 | I — Automatic safe end state | **physical PASS** | `v2.0.5-zzic`, boot `62e8538c…`: the closeout ran unaided to a same-boot `POST_ROOT_COMPLETE`, and the operator independently read `Enforcing` / sysfs `1`, `su` in `u:r:ksu:s0`, and the pinned daemon installed at `/data/adb/ksud`. See the fourth physical run below |
-| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **ACCEPTED (still ships disabled)** | `2.0.6-zzic`, boot `2e447aaf…`: the service completed an unattended attempt after a full reboot. Its own per-boot journal — written by `DfrAutoRootService` and by nothing else — read `phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id` as a valid post-root record, with `Enforcing` / sysfs `1` and `su` in `u:r:ksu:s0`. The three boundaries one successful boot cannot speak for are each now observed: a framework restart triggers nothing (seventh run, two observations, with the caveat recorded there), the next full boot makes exactly one attempt (`2.0.8-zzic`, boot `7d1cea20…`, the boot's second broadcast refused in the log), and opting out suppresses the next boot (eighth run, boot `0e8eaa2f…`: a qualification valid at `20008`, `opt_in=0`, and the boot's **only** `[DFR]` line being `not opted in for this build` from `system_server` — the `opt_in` refusal by name, not the `buildMatches` one an update produces; a manual run then recovered root without the journal ever naming that boot). Ships OFF regardless: a verified manual completion on the exact build plus an explicit opt-in remain required. See the fifth, seventh and eighth physical runs below |
+| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **PARTIALLY ACCEPTED (still ships disabled)** | `2.0.6-zzic`, boot `2e447aaf…`: the service completed an unattended attempt after a full reboot, its own per-boot journal reading `phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id` as a valid post-root record, with `Enforcing` / sysfs `1` and `su` in `u:r:ksu:s0`. Of the three boundaries one successful boot cannot speak for: a framework restart triggers nothing (**done**, seventh run, two observations), the next full boot makes exactly one attempt (**done**, boot `7d1cea20…`, the boot's second broadcast refused in the log), and opting out suppresses the next boot (**still untested**). Step 7 was briefly promoted on the eighth run and is **withdrawn**: the refusal that run observed was logged by a line the receiver emitted for six different facts, so it did not identify the opt-out. The receiver now logs a classified verdict and the observation to make is `OPTED_OUT`. See the fifth, seventh and eighth physical runs below |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
 remaining blocker to calling the automated flow complete is the post-root
@@ -1027,15 +1027,13 @@ This promotes nothing. What it adds to the evidence record is negative:
 - no gate is weakened, no override exists, and the automatic PASS is the same
   conjunction as the manual one.
 
-`AUTO_ROOT_FULL_BOOT` is **accepted** as of the eighth physical run below. The fifth
-run, executed after Gate I passed manually in that order, proves the positive path;
-steps 5-7 of `docs/AUTO_ROOT.md` — the boundaries a single successful boot cannot
-speak for — are covered by the seventh and eighth runs, each with its own recorded
-observation rather than an inference from the positive path.
-
-Acceptance is not a default. The gate ships **OFF** and stays behind a verified manual
-completion on the exact installed build plus an explicit opt-in; what was promoted is
-the claim that the three refusals behave as specified, not permission to run unasked.
+`AUTO_ROOT_FULL_BOOT` is **partially accepted**. The fifth run, executed after Gate I
+passed manually in that order, proves the positive path. Steps 5 and 6 of
+`docs/AUTO_ROOT.md` are covered by the seventh run. **Step 7 is not**, and was briefly
+promoted on the eighth run before that promotion was withdrawn — see the eighth run for
+why, and for the code change that makes the observation obtainable at all. The gate is
+not promoted to PASS until step 7 is observed on a build whose receiver logs
+`OPTED_OUT`.
 
 ### Third physical run — `v2.0.5-zzic`, displaced by a pre-existing KernelSU
 
@@ -1851,7 +1849,7 @@ qualification for the installed build, the box then unticked, and a full boot th
 starts nothing — the `"Auto Root is not opted in"` path. Different code, different
 evidence, still owed.
 
-### Eighth physical run — `v2.0.8-zzic`, step 7 closes `AUTO_ROOT_FULL_BOOT`
+### Eighth physical run — `v2.0.8-zzic`, a step-7 promotion made and withdrawn
 
 The boundary the previous seven runs could not speak for. Unlike the attempt this
 dossier rejected one entry above, the qualification on disk was **valid for the
@@ -1866,13 +1864,18 @@ opt_in=0
 opt_in_boot_id=7d1cea20-f2d7-4285-b6d1-53511a11f3a4
 version_code=20008
 version_name=2.0.8-zzic
+ksud_sha256=14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a
 device_fingerprint=samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCZZIC_OXMCZZIC:user/release-keys
+boot_id=6ae7dd04-93b9-4ccf-bb95-69bafd7d1d78
 ```
 
-`version_code=20008` / `version_name=2.0.8-zzic` against an installed app at exactly
-those values. **That is what makes this run evidence for step 7 and the previous one
-not**: `buildMatches()` had nothing to invalidate, so the refusal that follows can only
-be the opt-in one.
+Recorded in full, all four `buildMatches` fields included, because an excerpt that drops
+one of them cannot be checked against the comparison it is offered as evidence for.
+
+`version_code=20008` / `version_name=2.0.8-zzic`, and the app was believed to be at
+exactly those values. That belief is where this run's claim came apart — see below: the
+installed `versionCode` was never read back, and the log line the run then produced
+could not have distinguished the outcome anyway.
 
 Full reboot. New boot `0e8eaa2f-6c23-42a2-9d50-4b63a850a3dc`, and the **complete**
 `[DFR]` output of that boot, captured before anything was pressed, was one line:
@@ -1881,16 +1884,17 @@ Full reboot. New boot `0e8eaa2f-6c23-42a2-9d50-4b63a850a3dc`, and the **complete
 09-27 14:21:18.971  3007  3007 I DFReroot: [DFR][AUTOROOT] not opted in for this build; nothing to do
 ```
 
-Three things are load-bearing in that line and each is stated separately, per §3.7:
+Two things that line does establish, and one it was wrongly read as establishing:
 
-- it is the **`opt_in` refusal**, by name — not `buildMatches`, not a marker verdict,
-  not a journal refusal. The discriminator step 7 needs is the message itself;
 - pid `3007` is `system_server`, so the receiver **did** fire and **did** reach the
   policy. This is not the "never fired" ambiguity that weakened step 5's first
   observation;
 - it is the **only** `[DFR]` line in the boot. A grep of both `main` and `system` over
   the whole boot returned exactly this one line, so nothing else in the chain ran —
-  the refusal is not one entry in a sequence that continued anyway.
+  the refusal is not one entry in a sequence that continued anyway;
+- it is **not** an identification of the `opt_in` refusal, although this dossier first
+  said it was. The message text is the same for every reason the conjunction can be
+  false. See the withdrawal below.
 
 Root was correspondingly absent, checked from an unprivileged shell:
 
@@ -1920,11 +1924,55 @@ manual run writes **no** auto-root journal, so the two owners do not share the
 per-boot budget — which is the second half of what step 7 asks, and the half that
 would silently rot if only the refusal were recorded.
 
-**Therefore `AUTO_ROOT_FULL_BOOT` is promoted to ACCEPTED**, steps 1–7 each with its
-own observation in this file. What that does **not** change: the gate still ships
-**OFF**, and a verified manual completion on the exact installed build plus an
-explicit opt-in remain required before it can do anything. Promotion records that the
-boundaries behave as specified; it grants no default.
+**That promotion was made, and is withdrawn. The log line does not identify the
+opt-out.** It was caught in review, it is correct, and the failure is worth more than
+the promotion was.
+
+`DfrBootReceiver` emitted `not opted in for this build; nothing to do` for the **whole**
+false branch of `AutoRootStore.isOptedIn()`, and that method is a conjunction:
+
+```java
+STATE_QUALIFIED.equals(q.get("state"))
+        && "1".equals(q.get("opt_in"))
+        && buildMatches(q, versionCode, versionName, ksudSha256, deviceFingerprint) == null
+```
+
+So the same line stands for six different facts: no record, an unreadable record, a
+record that is not `QUALIFIED`, a `versionCode`/`versionName` bump, a changed `ksud`
+digest, a firmware change — **and** a deliberate opt-out. Reading it as the opt-out is
+reading a collapsed signal as a specific one, which is the §3.7 failure this repository
+is built to catch, and it was in the app's own code rather than in a document.
+
+What the run does still establish, and it is not nothing: the receiver **fired**,
+reached the policy, and the chain did not run. What it cannot establish on the log alone
+is which element refused. Three of the four `buildMatches` fields *are* independently
+corroborated in that same boot — the manual run printed `ksud sha256 14fb9eaf…`, equal
+to the record's, and `TARGET_FINGERPRINT` string-identical to the record's
+`device_fingerprint` — but the installed `versionCode` was never read back in that boot.
+It is inferred from the record having been written by the installed app, and an
+inference is what §2 calls missing evidence. (The excerpt above also omitted
+`ksud_sha256` when first written here, which is its own record-keeping defect and is
+fixed.)
+
+**The fix is in the app, not in the wording.** `AutoRootPolicy.optInVerdict()` now
+returns one value per fact — `NO_QUALIFICATION_RECORD`, `QUALIFICATION_UNREADABLE`,
+`NOT_QUALIFIED`, `BUILD_MISMATCH: <what diverged>`, `OPTED_OUT`, `OPTED_IN` — and the
+receiver logs it. The check order inside it is load-bearing and asserted four ways in
+`AutoRootPolicyTest` plus once statically in `tools/profile_binding_audit.py`: the build
+comparison runs **before** the flag, so `OPTED_OUT` *implies* `buildMatches()` passed.
+That implication is the entire value of the verdict, and reversing the two lines would
+silently restore the ambiguity.
+
+So step 7 is **still owed**, and it is now obtainable: on a build carrying the verdict,
+the observation to capture is
+
+```text
+[DFR][AUTOROOT] no automatic attempt: OPTED_OUT
+```
+
+and nothing else will do. `BUILD_MISMATCH: …` on that run would mean the qualification
+had gone stale again and the boundary was never reached — the same trap as the seventh
+run, but now legible instead of silent.
 
 #### The `su` path, captured at last — and what it retires
 

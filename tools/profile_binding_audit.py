@@ -766,8 +766,42 @@ def audit():
                  % forbidden)
     if "ACTION_BOOT_COMPLETED" not in boot_receiver_src:
         fail("DfrBootReceiver no longer compares the broadcast action")
-    if "isOptedIn" not in boot_receiver_src:
-        fail("DfrBootReceiver starts the service without an opt-in")
+    # The receiver must gate on the CLASSIFIED verdict and log it. A boolean here
+    # is what made an observed refusal useless as evidence: one line stood for an
+    # absent record, an unreadable one, a version bump, a changed ksud digest, a
+    # firmware change and a deliberate opt-out alike, so step 7's acceptance run
+    # could not tell which boundary it had just exercised. Kotlin needing an
+    # Android runtime is why this is a static check (AGENTS.md section 5).
+    if "AutoRootStore.optInVerdict()" not in boot_receiver_src \
+            or "AutoRootPolicy.OPT_IN_OK" not in boot_receiver_src:
+        fail("DfrBootReceiver no longer gates on the classified opt-in verdict; a "
+             "bare boolean cannot say WHICH boundary refused, and the boot log is "
+             "the only record an unattended acceptance run leaves behind")
+    if "$verdict" not in boot_receiver_src:
+        fail("DfrBootReceiver decides on the verdict but does not log it; a refusal "
+             "nobody can read is the same as no refusal for acceptance purposes")
+    if "not opted in for this build" in boot_receiver_src:
+        fail("DfrBootReceiver is back to the collapsed refusal message, which reads "
+             "as an opt-out for six different facts")
+    # The ordering implication inside the policy: OPTED_OUT must mean the build
+    # comparison PASSED, or an observed OPTED_OUT proves nothing about the opt-out
+    # boundary. Host-tested four ways too; checked here because a reordering is a
+    # one-line edit that no compiler complains about.
+    verdict_fn = re.search(r"public static String optInVerdict\(.*?\n    \}",
+                           autoroot_policy_src, re.S)
+    if verdict_fn is None:
+        fail("AutoRootPolicy.optInVerdict is gone; DfrBootReceiver's classified "
+             "refusal has nothing behind it")
+    else:
+        body = verdict_fn.group(0)
+        if "OPT_IN_BUILD_MISMATCH" not in body or "OPT_IN_OPTED_OUT" not in body:
+            fail("AutoRootPolicy.optInVerdict no longer distinguishes a build "
+                 "mismatch from a deliberate opt-out")
+        elif body.index("OPT_IN_BUILD_MISMATCH") > body.index("OPT_IN_OPTED_OUT"):
+            fail("AutoRootPolicy.optInVerdict checks the opt-in flag before the "
+                 "build comparison, so OPTED_OUT no longer implies buildMatches "
+                 "passed; an observed OPTED_OUT would stop being evidence that the "
+                 "opt-out boundary was the one exercised")
     manifest_path = os.path.join(ROOT, "app", "src", "main", "AndroidManifest.xml")
     try:
         with open(manifest_path, encoding="utf-8") as f:

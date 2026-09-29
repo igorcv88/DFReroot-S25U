@@ -186,6 +186,18 @@ object AutoRootStore {
     )
 
     /**
+     * The classified reason no automatic attempt starts, for the log.
+     *
+     * Separate from [isOptedIn] because a boolean cannot say WHICH boundary
+     * refused, and the boot log is the only record an acceptance run leaves
+     * behind (AGENTS.md section 3.7).
+     */
+    fun optInVerdict(): String = AutoRootPolicy.optInVerdict(
+        qualification(), versionCode(), versionName(),
+        KsudStage.pinnedKsudSha256(), deviceFingerprint()
+    )
+
+    /**
      * Record that a MANUAL run ended in verified same-boot completion.
      *
      * Returns the line to show the operator, always - success or failure. Opt-in

@@ -72,21 +72,19 @@ check("I — automatic safe end state | physical PASS" in release_notes,
 # load-bearing: the gate is proven, and proving it is not the same as arming it -
 # a build that shipped with the box pre-ticked would root unattended on a device
 # whose owner never ran the manual qualification.
-# The gate is promoted only because all three boundaries a successful boot cannot
-# speak for now have their own observation in the dossier (framework restart triggers
-# nothing; exactly one attempt per boot; opting out suppresses the next). AGENTS.md
-# section 8 forbids promoting a gate without evidence for EVERY boundary it covers,
-# which is why this assertion moved only after the eighth physical run.
-check("AUTO_ROOT_FULL_BOOT | **ACCEPTED" in release_notes,
-      "generated release notes carry the promoted Auto Root state")
-check("PARTIALLY ACCEPTED" not in release_notes,
-      "generated release notes no longer carry the superseded partial state")
-# The half that must never drift: promoted is not armed. A build shipping with the box
-# pre-ticked would root unattended on a device whose owner never ran the manual
-# qualification, and the notes are where an owner reads which it is.
+# AGENTS.md section 8 forbids promoting a gate without evidence for EVERY boundary it
+# covers. Step 7 (opting out suppresses the next boot) has none: the run that looked
+# like it had one was refused by a log line the receiver emitted for six different
+# facts, so it identified nothing. The notes must keep saying partially accepted until
+# an OPTED_OUT verdict is observed on hardware.
+check("AUTO_ROOT_FULL_BOOT | **PARTIALLY ACCEPTED" in release_notes,
+      "generated release notes keep Auto Root partially accepted, not promoted")
+check("untested" in release_notes,
+      "generated release notes name the untested Auto Root boundary")
+# The half that must never drift either way: partial or promoted, it ships off. A build
+# shipping with the box pre-ticked would root unattended on a device whose owner never
+# ran the manual qualification, and the notes are where an owner reads which it is.
 check("ships disabled" in release_notes,
       "generated release notes still say Auto Root ships off")
-check("Acceptance is not arming" in release_notes,
-      "generated release notes state that promotion is not permission to run unasked")
 
 print(f"test_post_root_contract: {len(checks)}/{len(checks)} passed")

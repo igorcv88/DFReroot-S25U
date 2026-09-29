@@ -256,15 +256,70 @@ public final class AutoRootPolicy {
                 currentBootId.trim());
     }
 
-    /** Whether a record exists, parses, and carries opt_in=1 for this build. */
+    /*
+     * The distinct reasons no automatic attempt starts. They are separate values
+     * because they are separate facts (AGENTS.md section 3.7), and collapsing them
+     * cost a real acceptance run: the boot receiver used to log one line for the
+     * whole false branch of isOptedIn(), so an observed refusal could not be told
+     * apart from a version bump, a changed daemon digest, a firmware update, an
+     * unreadable file or a record that never existed. A reader of the log had to
+     * GUESS which boundary had just been exercised, and a guess is not evidence -
+     * so step 7 of docs/AUTO_ROOT.md, which needs exactly OPT_IN_OPTED_OUT and
+     * nothing else, could not be closed by any log the app was capable of writing.
+     */
+    /** Opted in for this exact build: an automatic attempt may start. */
+    public static final String OPT_IN_OK = "OPTED_IN";
+    /** No qualification file at all - the chain has never completed here. */
+    public static final String OPT_IN_NO_RECORD = "NO_QUALIFICATION_RECORD";
+    /** The file exists but could not be read. Not the same fact as absent. */
+    public static final String OPT_IN_UNREADABLE = "QUALIFICATION_UNREADABLE";
+    /** Present and readable, but not a QUALIFIED record (malformed, or another state). */
+    public static final String OPT_IN_NOT_QUALIFIED = "NOT_QUALIFIED";
+    /** Qualified, but for a different build, daemon or firmware. Carries the reason. */
+    public static final String OPT_IN_BUILD_MISMATCH = "BUILD_MISMATCH";
+    /** Qualified for THIS build and deliberately switched off. The step-7 observation. */
+    public static final String OPT_IN_OPTED_OUT = "OPTED_OUT";
+
+    /**
+     * Why no automatic attempt starts, or {@link #OPT_IN_OK} when one may.
+     *
+     * The order of the checks is load-bearing and must not be "simplified": the
+     * build comparison runs BEFORE the opt-in flag, so OPT_IN_OPTED_OUT implies
+     * buildMatches() passed. That implication is the whole value of the verdict -
+     * it is what makes an observed OPTED_OUT evidence that the opt-out boundary
+     * itself was exercised, rather than evidence that something refused first and
+     * the flag was never consulted. Reverse the order and the log goes back to
+     * being unable to tell the two apart.
+     */
+    public static String optInVerdict(String qualificationRecord, int versionCode,
+                                      String versionName, String ksudSha256,
+                                      String deviceFingerprint) {
+        if (RECORD_UNREADABLE.equals(qualificationRecord)) return OPT_IN_UNREADABLE;
+        if (qualificationRecord == null || qualificationRecord.trim().isEmpty()) {
+            return OPT_IN_NO_RECORD;
+        }
+        Map<String, String> q = parse(qualificationRecord, QUALIFICATION_KEYS);
+        if (q == null) return OPT_IN_NOT_QUALIFIED;
+        if (!STATE_QUALIFIED.equals(q.get("state"))) return OPT_IN_NOT_QUALIFIED;
+        String mismatch = buildMatches(q, versionCode, versionName, ksudSha256,
+                deviceFingerprint);
+        if (mismatch != null) return OPT_IN_BUILD_MISMATCH + ": " + mismatch;
+        if (!"1".equals(q.get("opt_in"))) return OPT_IN_OPTED_OUT;
+        return OPT_IN_OK;
+    }
+
+    /**
+     * Whether a record exists, parses, and carries opt_in=1 for this build.
+     *
+     * Expressed through optInVerdict() on purpose: two independent copies of this
+     * conjunction is how the log and the decision drift apart, and a log that
+     * disagrees with the decision it describes is worse than no log.
+     */
     public static boolean isOptedIn(String qualificationRecord, int versionCode,
                                     String versionName, String ksudSha256,
                                     String deviceFingerprint) {
-        Map<String, String> q = parse(qualificationRecord, QUALIFICATION_KEYS);
-        if (q == null) return false;
-        return STATE_QUALIFIED.equals(q.get("state"))
-                && "1".equals(q.get("opt_in"))
-                && buildMatches(q, versionCode, versionName, ksudSha256, deviceFingerprint) == null;
+        return OPT_IN_OK.equals(optInVerdict(qualificationRecord, versionCode,
+                versionName, ksudSha256, deviceFingerprint));
     }
 
     /** Whether a record exists and parses, regardless of the opt-in flag. */
