@@ -22,10 +22,12 @@ cd app/src/main/jni
     -nodefaultlibs -nostartfiles -ffreestanding -static
 "$BIN/llvm-strip" splicehelper
 
-# RootTransport must execute the exact file description it hashed, not reopen a
-# mutable pathname.  Package the tiny static execveat launcher as a native
-# library-shaped file so Android extracts it into the root-owned app code tree.
-mkdir -p ../jniLibs/arm64-v8a
-"$BIN/aarch64-linux-android30-clang" dfr_verified_exec.c sha256.c \
-    -std=gnu17 -static -o ../jniLibs/arm64-v8a/libdfr_verified_exec.so
-"$BIN/llvm-strip" ../jniLibs/arm64-v8a/libdfr_verified_exec.so
+# The execveat launcher is NOT packaged any more.  It was a standalone binary
+# for system_server to execute, and the device refused exactly that: a process
+# at u:r:system_server:s0 cannot execve a file under /data, proven for
+# apk_data_file and system_data_file alike.  Shipping it would ship 439 KB that
+# cannot run.  Its core now links into libdfrsu.so, which is built by CMake and
+# called inside a forked child that has already been granted root; the
+# standalone main() survives only as the host test harness in
+# tools/tests/test_verified_exec.sh.
+rm -f ../jniLibs/arm64-v8a/libdfr_verified_exec.so

@@ -7,7 +7,8 @@ OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 
 "$CC" -std=gnu17 -Wall -Wextra -I app/src/main/jni \
-    app/src/main/jni/dfr_verified_exec.c app/src/main/jni/sha256.c \
+    app/src/main/jni/dfr_verified_exec.c \
+    app/src/main/jni/dfr_verified_exec_core.c app/src/main/jni/sha256.c \
     -o "$OUT/dfr_verified_exec"
 "$CC" -static tools/tests/verified_exec_target.c -o "$OUT/dfreroot-ksud"
 

@@ -152,14 +152,39 @@ The remaining sequence is:
    Root, via `buildMatches`, before `opt_in` is consulted, so "nothing ran after the
    update" is not evidence for it. It needs a valid qualification for the installed
    build, the box unticked, and the `"Auto Root is not opted in"` path;
-3. install the rebuilt DFR pair, then tap **Apply Modules (Soft Reboot)** once. The
-   old direct-`su` experiment is closed: all candidate paths returned `ENOENT`
-   because `system_server` does not see KernelSU's authorised sucompat namespace.
-   The new paired transport stages the exact DFR helper, invokes
-   `debug su --global-mnt`, and authorises it only when helper and real parent carry
-   the policy-owned `system_server` SID. Do **not** grant uid 1000 in KernelSU
-   Manager. Capture `PINNED_TRANSPORT_READY=PASS`, the root `id`, the chosen daemon
-   digest and `DISPATCHED` or the separately named `UNDETERMINED` result;
+3. **Apply Modules (Soft Reboot) is blocked, and re-running it buys nothing.** The
+   tenth physical run refuted the exec the transport is built on: a process at
+   `u:r:system_server:s0` — which is every component of this app, because the
+   manifest sets `android:process="system"` — cannot `execve` the packaged
+   launcher, labelled `apk_data_file`. The former `system_data_file` target was
+   not tested and stays `UNVERIFIED`; the compatibility record carries the one
+   command that would settle it, and the redesign below does not wait on it.
+   Reproduced outside the app with
+   `runcon u:r:system_server:s0 <launcher>` → `Permission denied`, while the same
+   launcher runs from `u:r:ksu:s0`. The evidence table is in
+   `docs/S25U_ZZIC_COMPATIBILITY.md`, "The exec proof came back negative".
+   Staging and verification are unaffected: `PINNED_TRANSPORT_READY=PASS` still
+   holds, and root itself is untouched by the refusal.
+   What closes it is a redesign, now implemented (`app/src/main/jni/dfr_su_core.c`,
+   loaded as `libdfrsu.so`): obtain root **before** any exec.
+   The module reads `current`, so `fork()` inside `system_server` already carries
+   the uid, the caller SID and the real-parent SID it requires; `prctl(PR_SET_NAME,
+   "dfreroot-ksud")` supplies the contract's task name, which that module
+   deliberately treats as defense in depth rather than authority. After the grant
+   the task is uid 0 in the KernelSU domain, and the pinned daemon can be opened,
+   hashed and `execveat`-ed on the same descriptor from there.
+   The client mechanics were read first-hand out of the pinned daemon's own
+   unstripped bytes rather than guessed: the driver fd comes from
+   `syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)` and the grant is
+   `ioctl(fd, _IO('K', 1))`. What those bytes cannot say is whether the KERNEL
+   gates the fd install by the same `allowed_for_su()` the DFR patch extends;
+   reading `kernel/supercall/*` at `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e`
+   (`KSU_REPO`/`KSU_TAG_SHA` in RMGLabs-Payloads
+   `.github/workflows/build-zzic-exact-port.yml`) would settle it offline.
+   Until then the next acceptance run is one tap, and its value is the
+   `DFR_SU_STEP=` token in the refusal: every step refuses on its own, so the
+   device names the boundary. Do **not** grant uid 1000 in KernelSU Manager as
+   a shortcut;
 4. only then consider `POST_ROOT_LSPOSED_COMPAT`.
 
 Before any of that, the log buffer — and the answer is now known.

@@ -129,15 +129,9 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
             Log.e(TAG, "[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT ${probe.output}")
             RootNotifier.notifySoftReboot(
                 context, context.getString(R.string.notif_soft_reboot_refused),
-                "the pinned DFR helper could not start (${probe.output}). Root itself" +
-                    " is unaffected; the module lifecycle was not re-applied."
-            )
-            return
-        }
-        if (probe.rc == RootTransport.RC_HELPER_CHANGED) {
-            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_CHANGED ${probe.output}")
-            RootNotifier.notifySoftReboot(
-                context, context.getString(R.string.notif_soft_reboot_refused), probe.output
+                "the DFR root transport could not start (${probe.output}). The step" +
+                    " named there is the boundary that refused. Root itself is" +
+                    " unaffected; the module lifecycle was not re-applied."
             )
             return
         }
@@ -145,11 +139,11 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
             Log.e(TAG, "[DFR][SOFT_REBOOT] NOT_ROOT rc=${probe.rc} ${probe.output}")
             RootNotifier.notifySoftReboot(
                 context, context.getString(R.string.notif_soft_reboot_refused),
-                "the pinned helper started but the DFR-specific KernelSU transport" +
-                    " did not grant root (rc=${probe.rc}: ${probe.output}). " +
-                    "A KernelSU Manager grant for uid 1000 is neither required nor" +
-                    " recommended. Root itself is unaffected; the module lifecycle" +
-                    " was not re-applied."
+                "the DFR-specific KernelSU transport did not grant root" +
+                    " (rc=${probe.rc}: ${probe.output}). The step in that message is" +
+                    " the boundary that refused. A KernelSU Manager grant for uid" +
+                    " 1000 is neither required nor recommended. Root itself is" +
+                    " unaffected; the module lifecycle was not re-applied."
             )
             return
         }
@@ -196,53 +190,32 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         }
 
         /*
-         * Re-verify the digest in the SAME shell that execs it.
+         * Bind the digest to the bytes that run, in the call that runs them.
          *
-         * Hashing a path and then executing that path binds the claim to a NAME,
-         * not to bytes (AGENTS.md 3.5), and this particular name is documented to
-         * change: /data/adb/ksud has held the root manager's build and the pinned
-         * daemon at different times on this device. Between the candidate hash
-         * above and this call there were another hash, a policy evaluation and a
-         * lock write with an fsync - easily seconds. A replacement landing in that
-         * window would have this execute bytes nothing checked.
+         * Hashing a path and then executing that path binds the claim to a NAME
+         * (AGENTS.md 3.5.1), and this particular name is documented to change:
+         * /data/adb/ksud has held the root manager's build and the pinned daemon
+         * at different times on this device. Between the candidate hash above and
+         * this call there were another hash, a policy evaluation and a lock write
+         * with an fsync - easily seconds.
          *
-         * So the comparison happens again, inside the privileged shell, immediately
-         * before `exec`, and a mismatch exits with a code this build recognises
-         * instead of running anything. The app still chooses WHICH path to try from
-         * the first hash; the shell is what binds the choice to the bytes it runs.
-         *
-         * The residual window is now the gap between `sha256sum` opening the path
-         * and `exec` opening it again - two syscalls in one shell. Closing that
-         * completely means executing a private copy, or an `exec` of a
-         * /proc/self/fd path held open across the hash. Both change HOW ksud is
-         * invoked, and nothing in this environment can verify that ksud behaves
-         * identically when started from a copied path or an fd - a privileged
-         * mechanism this repository cannot test is a worse trade than a two-syscall
-         * window that is now named. Revisit if ksud is ever shown path-independent.
+         * The previous form closed most of that with `sha256sum && exec` inside
+         * one privileged shell, and documented the two-syscall remainder as
+         * accepted because nothing here could verify that ksud behaves identically
+         * when started from a descriptor. The transport rewrite settled that
+         * question by testing it: tools/tests/test_verified_exec.sh proves
+         * execveat(AT_EMPTY_PATH) preserves the daemon's own basename as the task
+         * comm, which is the only property of a path-started ksud the paired
+         * module reads. So the window is now closed rather than named: one open,
+         * one hash of that open file description, one execveat on the same
+         * descriptor. A replacement landing after the open cannot change the bytes
+         * that run.
          */
-        val pinned = KsudStage.pinnedKsudSha256()
-        /*
-         * No command substitution: `$(` inside a Kotlin string literal is a template
-         * start the compiler may or may not accept as a literal `$`, and nothing here
-         * compiles Kotlin to settle it. `grep -qx` against the pinned digest does the
-         * same job with only `$p` to escape, and it matches the WHOLE line, so a
-         * digest that merely contains the pinned one cannot pass.
-         */
-        val verifyAndExec =
-            "p='" + decision.binaryPath + "'; " +
-                "sha256sum \"\$p\" 2>/dev/null | cut -d' ' -f1 | " +
-                "grep -qx '" + pinned + "' || exit " + RC_DIGEST_CHANGED + "; " +
-                "exec \"\$p\" soft-reboot"
-        val outcome = transport.runAsRoot(verifyAndExec, TRANSPORT_TIMEOUT_MS)
+        val outcome = transport.execPinnedDaemon(
+            decision.binaryPath, "soft-reboot", TRANSPORT_TIMEOUT_MS
+        )
         when {
-            outcome.rc == RootTransport.RC_HELPER_CHANGED -> {
-                Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_CHANGED ${outcome.output}")
-                RootNotifier.notifySoftReboot(
-                    context, context.getString(R.string.notif_soft_reboot_refused),
-                    outcome.output + ". Nothing was executed; root is unaffected."
-                )
-            }
-            outcome.rc == RC_DIGEST_CHANGED -> {
+            outcome.rc == RootTransport.RC_DIGEST_CHANGED -> {
                 /*
                  * The binary at that path is no longer the pinned daemon. Nothing
                  * was executed, and the lock stays claimed: this boot has spent its
@@ -251,13 +224,13 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
                 Log.e(TAG, "[DFR][SOFT_REBOOT] DIGEST_CHANGED at ${decision.binaryPath}")
                 RootNotifier.notifySoftReboot(
                     context, context.getString(R.string.notif_soft_reboot_refused),
-                    "the binary at ${decision.binaryPath} stopped matching the pinned" +
-                        " digest between the check and the call, so nothing was run." +
+                    "the bytes at ${decision.binaryPath} are not the pinned daemon," +
+                        " so the descriptor was closed and nothing was run." +
                         " Root is unaffected; a full reboot re-applies modules."
                 )
             }
             outcome.rc == RootTransport.RC_NO_TRANSPORT -> {
-                // The shell worked seconds ago; losing it here is a real anomaly.
+                // The transport worked seconds ago; losing it here is a real anomaly.
                 Log.e(TAG, "[DFR][SOFT_REBOOT] TRANSPORT_LOST ${outcome.output}")
                 RootNotifier.notifySoftReboot(
                     context, context.getString(R.string.notif_soft_reboot_failed),
@@ -343,15 +316,6 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
 
         /** KernelSU's own daemon path, offered as a candidate but never trusted. */
         const val ADB_KSUD = "/data/adb/ksud"
-
-        /**
-         * Exit status the privileged shell uses when the re-check fails.
-         *
-         * Arbitrary but distinguishable: ksud's own exits are 0 or its error codes,
-         * and this must not be mistaken for either. A collision would read as a
-         * generic ksud failure, which is the safe direction.
-         */
-        const val RC_DIGEST_CHANGED = 91
 
         /**
          * Short on purpose. A successful dispatch daemonises and then kills this

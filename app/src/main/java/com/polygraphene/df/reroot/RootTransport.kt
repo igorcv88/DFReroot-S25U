@@ -4,34 +4,83 @@ import android.content.Context
 import android.util.Log
 import java.io.File
 import java.security.MessageDigest
-import java.util.concurrent.TimeUnit
 
 /**
  * Post-root command transport for the DFR-specific KernelSU pair.
  *
- * The app is physically hosted by `system_server` on ZZIC. That mount namespace
- * does not contain `/system/bin/su`, even though KernelSU exposes it inside an
- * authorised Termux namespace. Granting this package in KernelSU Manager would
- * also be the wrong boundary: the package shares uid 1000 with the platform.
+ * ## Why this does not execute a helper to obtain root
  *
- * The DFR-specific KernelSU module therefore accepts `KSU_IOCTL_GRANT_ROOT` only
- * when both the helper and its real parent carry the policy-owned
- * `u:r:system_server:s0` SID. The `dfreroot-ksud` task name is an additional
- * contract check, not the identity boundary. Normal sucompat and the uid
- * allowlist are unchanged. This class stages the already hash-pinned ksud asset,
- * executes its `debug su --global-mnt` entry point, and sends one controlled
- * command to the resulting root shell.
+ * The first shape of this transport executed the pinned daemon and let it ask
+ * the paired module for root. The device refused it: a process at
+ * `u:r:system_server:s0` — which is every component of this app, because the
+ * manifest sets `android:process="system"` — cannot `execve` a file under
+ * `/data`. Proven for `apk_data_file` and for `system_data_file`, reproduced
+ * outside the app with `runcon`; the evidence table is in
+ * `docs/S25U_ZZIC_COMPATIBILITY.md`, "The exec proof came back negative".
+ *
+ * What that refutes is the shape, not the authorization boundary. The paired
+ * module's predicate reads `current`: uid and euid 1000, the policy-owned
+ * `u:r:system_server:s0` SID on the caller **and** its real parent, and the
+ * `dfreroot-ksud` task name as a documented defense-in-depth check rather than
+ * as authority. A `fork()` of a thread in this process satisfies the first
+ * three with nothing executed, and `prctl(PR_SET_NAME)` supplies the fourth.
+ *
+ * So the grant is taken **before** any exec, natively, in
+ * `app/src/main/jni/dfr_su_core.c`; read its header for the full argument and
+ * for the one thing still unknown (whether the kernel gates the driver-fd
+ * install by the same predicate). Granting uid 1000 in KernelSU Manager remains
+ * the wrong boundary and is not used here: it would grant the shared platform
+ * uid, not one app.
  */
 object RootTransport {
 
     const val TAG = "DFReroot"
     const val RC_NO_TRANSPORT = -1
     const val RC_TIMEOUT = -2
-    const val RC_HELPER_CHANGED = -3
-    private const val VERIFIED_EXEC_DIGEST_MISMATCH = 65
-    private const val VERIFIED_EXEC_NAME = "libdfr_verified_exec.so"
+
+    /**
+     * The task name the paired module checks. Mutable, and therefore never the
+     * identity boundary — the SID is. It is still set exactly, because the
+     * module refuses without it.
+     */
+    private const val TRANSPORT_COMM = "dfreroot-ksud"
+
     const val OUTPUT_CAP = 8192
     const val PROBE_TIMEOUT_MS = 5_000L
+
+    /**
+     * The bytes at the chosen path stopped matching the pinned digest, so
+     * nothing was executed. Kept distinct from every other refusal: it is the
+     * gate working, not a fault in reaching the daemon.
+     */
+    const val RC_DIGEST_CHANGED = 91
+
+    private var libraryError: String? = null
+
+    private val libraryLoaded: Boolean by lazy {
+        try {
+            System.loadLibrary("dfrsu")
+            true
+        } catch (t: Throwable) {
+            libraryError = "${t.javaClass.simpleName}: ${t.message}"
+            Log.e(TAG, "[DFR][SOFT_REBOOT] TRANSPORT_LIBRARY=FAIL $libraryError")
+            false
+        }
+    }
+
+    private external fun nativeRunRootShell(
+        comm: String,
+        command: String,
+        timeoutMs: Long,
+    ): Array<String>?
+
+    private external fun nativeExecPinnedDaemon(
+        comm: String,
+        path: String,
+        pinnedHex: String,
+        arg: String,
+        timeoutMs: Long,
+    ): Array<String>?
 
     class Outcome(val rc: Int, val output: String) {
         val ran: Boolean get() = rc == 0
@@ -44,110 +93,49 @@ object RootTransport {
         val ready: Boolean get() = transport != null
     }
 
-    class Prepared internal constructor(
-        private val helperPath: String,
-        private val verifiedExecPath: String,
-    ) {
+    class Prepared internal constructor(private val stagedHelperPath: String) {
 
-        fun runAsRoot(command: String, timeoutMs: Long): Outcome {
-            val actual = sha256File(helperPath)
+        /**
+         * Run one command as root.
+         *
+         * The shell is `/system/bin/sh`, executed *after* the grant, from the
+         * domain KernelSU's own profile installs — not from
+         * `u:r:system_server:s0`, which cannot execute it from `/data` and has
+         * no business executing the daemon either way.
+         */
+        fun runAsRoot(command: String, timeoutMs: Long): Outcome =
+            interpret(
+                if (!libraryLoaded) null
+                else nativeRunRootShell(TRANSPORT_COMM, command, timeoutMs)
+            )
+
+        /**
+         * Execute the pinned daemon, binding the digest to the bytes that run.
+         *
+         * The native side opens [path] once, hashes that file description and
+         * hands the same descriptor to `execveat(AT_EMPTY_PATH)`. This closes
+         * the window the previous shell form documented and accepted: there, a
+         * `sha256sum` and an `exec` were two lookups of a mutable name, and
+         * `/data/adb/ksud` is a name observed holding different bytes at
+         * different times on this device (AGENTS.md 3.5.1).
+         */
+        fun execPinnedDaemon(path: String, arg: String, timeoutMs: Long): Outcome {
             val pinned = KsudStage.pinnedKsudSha256()
-            if (actual != pinned) {
-                val why = actual ?: "unreadable"
-                Log.e(TAG, "[DFR][SOFT_REBOOT] staged helper changed: $why")
-                return Outcome(
-                    RC_HELPER_CHANGED,
-                    "staged helper no longer matches the pinned digest (found $why)",
-                )
+            if (pinned == null || pinned.length != 64) {
+                // A NULL pin is a refusal, never a pass (AGENTS.md 2).
+                return Outcome(RC_NO_TRANSPORT, "no pinned ksud digest to compare against")
             }
-
-            /*
-             * The Java digest above is an early diagnostic, not the execution
-             * authority. The root-owned packaged launcher opens helperPath once,
-             * hashes that file descriptor against the pin, then executes the SAME
-             * descriptor with execveat(AT_EMPTY_PATH). Replacing the pathname at
-             * any point after open cannot replace the bytes that are launched.
-             */
-            val proc = try {
-                ProcessBuilder(
-                    verifiedExecPath,
-                    pinned,
-                    helperPath,
-                    "debug",
-                    "su",
-                    "--global-mnt",
-                )
-                    .redirectErrorStream(true)
-                    .start()
-            } catch (t: Throwable) {
-                val why = "${t.javaClass.simpleName}: ${t.message}"
-                Log.e(TAG, "[DFR][SOFT_REBOOT] pinned helper could not start: $why")
-                return Outcome(RC_NO_TRANSPORT, why)
-            }
-            Log.i(TAG, "[DFR][SOFT_REBOOT] transport=pinned-dfr-ksud path=$helperPath")
-
-            val sink = StringBuilder()
-            val drain = Thread({
-                try {
-                    proc.inputStream.bufferedReader().use { reader ->
-                        val buffer = CharArray(4096)
-                        while (true) {
-                            val count = reader.read(buffer)
-                            if (count <= 0) break
-                            synchronized(sink) {
-                                val remaining = OUTPUT_CAP - sink.length
-                                if (remaining > 0) {
-                                    sink.append(buffer, 0, minOf(count, remaining))
-                                }
-                            }
-                        }
-                    }
-                } catch (_: Throwable) {
-                    // A successful soft reboot closes the pipe with userspace.
-                }
-            }, "dfr-root-transport-reader")
-            drain.isDaemon = true
-            drain.start()
-
-            try {
-                proc.outputStream.bufferedWriter().use { writer ->
-                    writer.write(command)
-                    writer.newLine()
-                    writer.write("exit")
-                    writer.newLine()
-                    writer.flush()
-                }
-            } catch (t: Throwable) {
-                // The helper may have refused and closed stdin. waitFor below owns
-                // the verdict and captures its diagnostic output.
-                Log.i(TAG, "[DFR][SOFT_REBOOT] helper stdin closed: ${t.javaClass.simpleName}")
-            }
-
-            return try {
-                val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
-                try {
-                    drain.join(500L)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                }
-                val output = synchronized(sink) { sink.toString().trim() }
-                if (!finished) {
-                    try {
-                        proc.destroy()
-                    } catch (_: Throwable) {
-                    }
-                    Outcome(RC_TIMEOUT, output)
-                } else if (proc.exitValue() == VERIFIED_EXEC_DIGEST_MISMATCH &&
-                    output.contains("DFR_VERIFIED_EXEC_DIGEST_MISMATCH")
-                ) {
-                    Outcome(RC_HELPER_CHANGED, output)
-                } else {
-                    Outcome(proc.exitValue(), output)
-                }
-            } catch (t: Throwable) {
-                Outcome(RC_NO_TRANSPORT, "${t.javaClass.simpleName}: ${t.message}")
-            }
+            return interpret(
+                if (!libraryLoaded) null
+                else nativeExecPinnedDaemon(TRANSPORT_COMM, path, pinned, arg, timeoutMs)
+            )
         }
+
+        /**
+         * The staged copy this build verified. Kept only so a caller can name
+         * it as a candidate; it is not executed to obtain root any more.
+         */
+        fun stagedHelperPath(): String = stagedHelperPath
 
         fun sha256AsRoot(path: String): String? {
             val outcome = runAsRoot(
@@ -171,9 +159,48 @@ object RootTransport {
             }
             return token.lowercase()
         }
+
+        /**
+         * Map one native verdict to one outcome.
+         *
+         * Every refusal keeps the step that produced it in the output, because
+         * that token is the only diagnostic a physical run leaves behind: which
+         * boundary refused is the whole question this transport is now asking
+         * of the device (AGENTS.md 3.7).
+         */
+        private fun interpret(packed: Array<String>?): Outcome {
+            if (packed == null || packed.size != 2) {
+                val why = libraryError ?: "the native transport returned nothing"
+                Log.e(TAG, "[DFR][SOFT_REBOOT] TRANSPORT_UNAVAILABLE $why")
+                return Outcome(RC_NO_TRANSPORT, why)
+            }
+            val token = packed[0]
+            val output = packed[1].trim()
+            Log.i(TAG, "[DFR][SOFT_REBOOT] transport=dfr-fork-grant $token")
+            val detail = if (output.isEmpty()) token else "$token: $output"
+            return when {
+                token.startsWith("DFR_SU_STEP=OK") -> {
+                    val exit = token.substringAfter("exit=", "").toIntOrNull()
+                    if (exit == null) {
+                        Outcome(RC_NO_TRANSPORT, "unparsable transport verdict: $token")
+                    } else {
+                        Outcome(exit, output)
+                    }
+                }
+                token.startsWith("DFR_SU_STEP=DIGEST") -> Outcome(RC_DIGEST_CHANGED, detail)
+                token.startsWith("DFR_SU_STEP=TIMEOUT") -> Outcome(RC_TIMEOUT, output)
+                else -> Outcome(RC_NO_TRANSPORT, detail)
+            }
+        }
     }
 
     fun prepare(context: Context): Preparation {
+        /*
+         * Staging still happens, and still must verify: the chain consumes
+         * /data/system/dfreroot-ksud with a rename, so this is where a boot that
+         * already rooted gets a pinned copy back as a candidate. What changed is
+         * that nothing executes it to become root.
+         */
         val stageLog = KsudStage.stageFromAssets(context)
         if (!stageLog.contains("KSUD_STAGED_VERIFY=PASS")) {
             Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_STAGE=FAIL $stageLog")
@@ -185,17 +212,15 @@ object RootTransport {
             Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_VERIFY=FAIL $why")
             return Preparation(null, "staged helper verification failed: $why")
         }
-        val nativeDir = context.applicationInfo.nativeLibraryDir
-        val verifiedExec = File(nativeDir, VERIFIED_EXEC_NAME)
-        if (!verifiedExec.isFile || !verifiedExec.canExecute()) {
-            val why = "verified-fd launcher missing or not executable: ${verifiedExec.path}"
-            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_LAUNCHER=FAIL $why")
-            return Preparation(null, why)
+        if (!libraryLoaded) {
+            val why = libraryError ?: "libdfrsu.so did not load"
+            Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_LIBRARY=FAIL $why")
+            return Preparation(null, "the native root transport is unavailable ($why)")
         }
         Log.i(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_READY=PASS")
         return Preparation(
-            Prepared(KsudStage.DEST, verifiedExec.path),
-            "pinned DFR helper staged; verified-fd launcher ready",
+            Prepared(KsudStage.DEST),
+            "pinned DFR daemon staged; native fork-and-grant transport ready",
         )
     }
 
