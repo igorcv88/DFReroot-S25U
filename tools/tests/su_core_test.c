@@ -220,6 +220,20 @@ int main(void)
         printf("skip   unreadable case (running as root)\n");
     }
 
+    /*
+     * The real driver-fd lookup, which is no longer privileged and therefore
+     * runs here. It must find nothing on a host with no KernelSU, and it must
+     * say so by returning an error rather than by handing back a stale fd - a
+     * grant ioctl sent to an arbitrary descriptor is not a refusal.
+     */
+    {
+        int fd = 12345;
+
+        check(dfr_su_real_ops.driver_fd(&fd) == -1 && fd == 12345,
+              "the real driver-fd lookup finds none here and leaves fd_out "
+              "untouched");
+    }
+
     reset();
     check(run(NULL, NULL, 5000, 1, out, sizeof(out), &res) == -1 &&
               res.step == DFR_SU_STEP_INTERNAL,

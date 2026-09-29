@@ -26,17 +26,25 @@
  * /data (observed: a root shell on this device reports u:r:ksu:s0 and runs the
  * same file that system_server is refused).
  *
- * ## What is not yet known
+ * ## What the device answered, and what is still missing
  *
- * The client mechanics below were read out of the pinned daemon's own
- * unstripped bytes, not guessed: the driver fd comes from
- * syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd) and the grant is
- * ioctl(fd, _IO('K', 1)). What those bytes cannot say is whether the KERNEL
- * gates the fd install by the same allowed_for_su() the DFR patch extends, or
- * by manager/allowlist identity that a system_server child does not have. If it
- * is the latter, this refuses at DFR_SU_STEP_DRIVER_FD and nothing is executed.
- * That is the point of naming every step: one physical run then says which
- * boundary refused, instead of "the transport failed".
+ * The first build to try this rebooted the device instead of refusing. The
+ * cause was not the fork and not ksud: /data/system/dfreroot-softreboot-lock
+ * is created before the daemon is ever invoked, and the boot that rebooted
+ * left none, so nothing was executed. What the probe had gained was one
+ * privileged syscall - the magic supercall that asks the kernel for the driver
+ * fd - and this firmware has no handler for it: the paired module is built
+ * CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y, so the syscall dispatcher never installs
+ * and only sucompat kprobes are registered. That call is gone; see
+ * dfr_su_core.c for the full reading and the rule that keeps it gone.
+ *
+ * What remains is the fd itself. The kernel installs one on the sucompat `su`
+ * execve path, which its pre-filter gates on the uid allowlist rather than on
+ * the predicate the DFR patch adds - and allowlisting uid 1000 is the wrong
+ * boundary, since it is the shared platform uid. So today this transport scans
+ * for an fd it will not find, refuses at DFR_SU_STEP_DRIVER_FD, and executes
+ * nothing. Closing that is a module-side change: the fd install has to accept
+ * the same caller allowed_for_su() already accepts.
  */
 #ifndef DFR_SU_CORE_H
 #define DFR_SU_CORE_H

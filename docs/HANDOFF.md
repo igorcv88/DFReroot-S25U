@@ -173,6 +173,16 @@ The remaining sequence is:
    deliberately treats as defense in depth rather than authority. After the grant
    the task is uid 0 in the KernelSU domain, and the pinned daemon can be opened,
    hashed and `execveat`-ed on the same descriptor from there.
+   **The first build of that redesign rebooted the device (eleventh run).** The
+   magic supercall it used to obtain KernelSU's driver fd is removed and now
+   forbidden by AGENTS.md 3.6.1; the daemon was never reached, proven by the
+   absent soft-reboot lock. The transport keeps the safe half of the daemon's
+   own lookup (scan `/proc/self/fd` for `[ksu_driver]`), finds nothing on this
+   firmware, and refuses at `DFR_SU_STEP_DRIVER_FD` without executing anything.
+   The blocker is now module-side and precise: the kernel installs that fd only
+   on the sucompat `su` execve path, whose Samsung pre-filter gates on the uid
+   allowlist rather than on `allowed_for_su()`. Nothing app-side closes it, and
+   allowlisting uid 1000 is not the remedy.
    The client mechanics were read first-hand out of the pinned daemon's own
    unstripped bytes rather than guessed: the driver fd comes from
    `syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)` and the grant is
@@ -181,10 +191,10 @@ The remaining sequence is:
    reading `kernel/supercall/*` at `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e`
    (`KSU_REPO`/`KSU_TAG_SHA` in RMGLabs-Payloads
    `.github/workflows/build-zzic-exact-port.yml`) would settle it offline.
-   Until then the next acceptance run is one tap, and its value is the
-   `DFR_SU_STEP=` token in the refusal: every step refuses on its own, so the
-   device names the boundary. Do **not** grant uid 1000 in KernelSU Manager as
-   a shortcut;
+   A tap is now safe and still refuses: it reports `DFR_SU_STEP=DRIVER_FD`, and
+   `/data/system/dfreroot-softreboot-trace` records each phase before it runs,
+   fsync'd, so a teardown can never again leave nothing to read. Do **not**
+   grant uid 1000 in KernelSU Manager as a shortcut;
 4. only then consider `POST_ROOT_LSPOSED_COMPAT`.
 
 Before any of that, the log buffer — and the answer is now known.

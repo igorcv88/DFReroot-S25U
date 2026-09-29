@@ -38,6 +38,8 @@ sys.path.insert(0, HERE)
 import ko_audit  # noqa: E402
 PROFILE_C = os.path.join(ROOT, "app", "src", "main", "jni", "target_profile.c")
 JNI_DIR = os.path.join(ROOT, "app", "src", "main", "jni")
+DFR_JAVA_DIR = os.path.join(ROOT, "app", "src", "main", "java",
+                            "com", "polygraphene", "df", "reroot")
 PROFILE_JSON = os.path.join(HERE, "zzic_profile.json")
 EXP_C = os.path.join(ROOT, "app", "src", "main", "jni", "exp.c")
 
@@ -942,7 +944,46 @@ def audit():
     # The grant must precede the exec, and every step of it must be nameable.
     # A transport that reports one undifferentiated failure tells the next
     # physical run nothing about which boundary refused (AGENTS.md 3.7).
-    for signal in ('__NR_reboot', '0xdeadbeefu', '0xcafebabeu',
+    # The magic supercall that asks the kernel for the driver fd rebooted this
+    # device instead of refusing, and had no handler to answer it anyway
+    # (CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y leaves the syscall dispatcher
+    # uninstalled). Rejected by mechanism, not by spelling: no source shipped in
+    # this app may name the reboot syscall at all, because a destructive probe
+    # guarded by a condition is one edit away from being unguarded.
+    # Every source the app ships, not just the two files that happened to hold
+    # the call: an invariant checked in one file is an invariant one new file
+    # defeats. The assembly include is covered too - it carried an unused
+    # .equ SYS_reboot, which is a ready-made argument waiting for a caller.
+    shipped = []
+    for name in sorted(os.listdir(JNI_DIR)):
+        if name.endswith((".c", ".h", ".S", ".inc")):
+            shipped.append(os.path.join(JNI_DIR, name))
+    for name in sorted(os.listdir(DFR_JAVA_DIR)):
+        if name.endswith((".kt", ".java")):
+            shipped.append(os.path.join(DFR_JAVA_DIR, name))
+    for path in shipped:
+        try:
+            with open(path, encoding="utf-8") as f:
+                code = code_only(f.read())
+        except OSError as ex:
+            fail("cannot read %s: %s" % (path, ex))
+            continue
+        for forbidden in ("__NR_reboot", "SYS_reboot", "0xdeadbeef", "0xcafebabe"):
+            if forbidden in code:
+                fail("%s names %r: the KernelSU magic supercall rebooted this "
+                     "device and must not come back"
+                     % (os.path.basename(path), forbidden))
+
+    # A breadcrumb written before a privileged step is worthless if failing to
+    # write it lets the step happen anyway.
+    if "private fun refuseWithoutTrace(" not in soft_receiver_code \
+            or "AutoRootStore.traceSoftReboot(bootId, phase) ?: return false" \
+            not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer refuses when the pre-operation "
+             "trace cannot be persisted; that rebuilds the undiagnosable "
+             "teardown the trace exists to prevent")
+    for signal in ('DFR_KSU_DRIVER_LINK "[ksu_driver]"',
+                   '__NR_getdents64',
                    'DFR_KSU_IOCTL_GRANT_ROOT 0x4b01u',
                    'ops->current_uid() != 0',
                    'DFR_SU_STEP_NOT_ROOT',
@@ -1074,6 +1115,20 @@ def audit():
     if "notif_soft_reboot_undetermined" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer reports an undetermined soft reboot "
              "distinctly from a dispatched one")
+    # A dispatch that may take userspace down with it must leave a durable trail
+    # BEFORE it does. The build that rebooted this device was diagnosable only by
+    # an absence; reasoning from an absence works once.
+    for phase in ('"PREPARE"', '"PROBE_ENTER"', '"EXEC_ENTER path='):
+        if "refuseWithoutTrace(context, bootId, %s" % phase not in soft_receiver_code:
+            fail("DfrSoftRebootReceiver no longer records phase %s before acting; "
+                 "a teardown would again leave nothing to read" % phase)
+    probe_trace = soft_receiver_code.find(
+        'refuseWithoutTrace(context, bootId, "PROBE_ENTER")')
+    probe_call = soft_receiver_code.find('transport.runAsRoot("id"')
+    if probe_trace < 0 or probe_call < 0 or probe_trace > probe_call:
+        fail("the soft-reboot trace is written after the first privileged call; "
+             "it exists to survive that call, so it must precede it")
+
     # The digest must be bound to the bytes that run, in the call that runs them.
     # Hashing a path and then executing that path binds the claim to a NAME, not to
     # bytes (AGENTS.md 3.5.1), and /data/adb/ksud is documented to change: it has

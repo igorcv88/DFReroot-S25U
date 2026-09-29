@@ -328,6 +328,40 @@ editing the device's SELinux policy, making the chain depend on KernelSU,
 requiring the user to disable a root manager's namespace features, or removing a
 validation because it fails.
 
+### 3.6.1 A probe may not be able to break the device
+
+Distinct from 3.6, and learned the expensive way: that rule forbids an override
+that lets a run proceed unproven. This one forbids a *diagnostic* whose failure
+mode is worse than the thing it is diagnosing.
+
+The soft-reboot transport asked the kernel for KernelSU's driver descriptor with
+the magic supercall the pinned daemon uses,
+`syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)`. On this firmware it did
+not return an error: the device rebooted and root was lost. It never had a
+handler to answer it either — the paired module is built
+`CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y`, so `ksu_patch_text()` returns
+`-EOPNOTSUPP`, the syscall dispatcher never installs, and only sucompat kprobes
+are registered. The call reached a heavily patched Samsung `sys_reboot`.
+
+So: **no source that ships inside this app may name the reboot syscall**, and
+`tools/profile_binding_audit.py` rejects it by mechanism rather than by
+spelling, exactly as it does for 3.6. "Only when the fd is missing" is not a
+safeguard; it is the condition under which the call was already made.
+
+The general rule behind it, for the next syscall someone is tempted to try: a
+probe is only a probe if its worst outcome is a refusal. When the worst outcome
+is a reboot, a corrupted file or a lost root session, it is an *operation*, and
+it needs the evidence an operation needs — not the casual reach of a diagnostic.
+
+And when such a thing does fire, what makes it diagnosable is a record written
+*before* it. The only reason the reboot was traced to the probe rather than to
+ksud is that `/data/system/dfreroot-softreboot-lock` — created before the daemon
+is ever invoked — was absent afterwards. Reasoning from an absence works once.
+`AutoRootStore.traceSoftReboot()` now writes the positive record, fsync'd,
+before each privileged step — and a record that cannot be written is a refusal,
+not a logged inconvenience. Proceeding without it would rebuild the very
+condition the record exists to end.
+
 ### 3.7 Signals are never collapsed
 
 Separate facts get separate values:
