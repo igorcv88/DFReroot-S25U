@@ -29,20 +29,54 @@
 extern char **environ;
 
 /*
- * The KernelSU client mechanics, read out of the pinned daemon's own
- * unstripped bytes (ksud-pa3q-S938BXXUCZZIC-dfreroot-v3.3.0):
+ * How the driver fd is obtained - and the half of it this app must never use.
  *
- *   ksucalls::init_driver_fd  syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)
- *   cli::run (the su path)    ioctl(fd, _IO('K', 1))   then exec
+ * The pinned daemon's own unstripped bytes (ksucalls::init_driver_fd) do two
+ * things in order: scan /proc/self/fd for a link containing "[ksu_driver]",
+ * and, only if none is there, issue a magic supercall
+ * syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd).
  *
- * The magic reboot is safe on a kernel without the hook: sys_reboot rejects an
- * unknown magic1 with EINVAL and reboots nothing. It is not safe to guess at
- * these numbers, which is why they were taken from the binary that the pinned
- * kernel actually answers rather than from memory of upstream.
+ * ## The supercall is forbidden here, by evidence
+ *
+ * The first build to issue it did not get a refusal: tapping Apply Modules
+ * rebooted the device and dropped root. The durable proof that ksud was NOT
+ * what did it is the absent /data/system/dfreroot-softreboot-lock - that file
+ * is created before the daemon is ever invoked, and the boot that rebooted
+ * left none. So the teardown happened inside the probe, and the supercall was
+ * the only privileged syscall the probe had gained.
+ *
+ * It also had no chance of working on this firmware. The paired module is
+ * built with CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y, so ksu_patch_text() returns
+ * -EOPNOTSUPP, the syscall dispatcher never installs, and the module falls back
+ * to registering sucompat kprobes only - there is no supercall handler to
+ * answer. The call therefore reached the real sys_reboot on a heavily patched
+ * Samsung kernel, which is not a place to send an unrecognised magic on a
+ * device someone depends on.
+ *
+ * So the scan stays and the supercall is gone. tools/profile_binding_audit.py
+ * rejects its return by mechanism - no source shipped in this app may name
+ * __NR_reboot at all - because "we only call it when X" is exactly the kind of
+ * qualification that decays into calling it.
  */
-#define DFR_KSU_REBOOT_MAGIC1 0xdeadbeefu
-#define DFR_KSU_REBOOT_MAGIC2 0xcafebabeu
+#define DFR_KSU_DRIVER_LINK "[ksu_driver]"
+
+/*
+ * The grant itself, read from the same bytes (cli::run, the su path): an ioctl
+ * on a descriptor the kernel installed. Unlike the supercall above it is inert
+ * without that descriptor - there is nothing to send it to - so it stays.
+ */
 #define DFR_KSU_IOCTL_GRANT_ROOT 0x4b01u /* _IO('K', 1) */
+
+/* Matches the kernel's struct linux_dirent64 without pulling in a header that
+ * does not expose it. getdents64 is used directly because this runs between
+ * fork() and exec(), where opendir/readdir would allocate. */
+struct dfr_dirent64 {
+    unsigned long long d_ino;
+    long long d_off;
+    unsigned short d_reclen;
+    unsigned char d_type;
+    char d_name[];
+};
 
 struct dfr_su_child_status {
     int step;
@@ -61,21 +95,83 @@ static int real_set_comm(const char *comm)
 #endif
 }
 
-static int real_driver_fd(int *fd_out)
+static int dfr_parse_fd(const char *name, int *out)
 {
-    int fd = -1;
+    int value = 0;
 
-    /* The kernel writes the installed descriptor back through the fourth
-     * argument. A kernel that does not carry the hook leaves it untouched and
-     * returns EINVAL, which is a refusal, not a reboot. */
-    syscall(__NR_reboot, DFR_KSU_REBOOT_MAGIC1, DFR_KSU_REBOOT_MAGIC2, 0, &fd);
-    if (fd < 0) {
-        if (errno == 0) {
-            errno = ENOTTY;
-        }
+    if (!*name) {
         return -1;
     }
-    *fd_out = fd;
+    for (; *name; name++) {
+        if (*name < '0' || *name > '9') {
+            return -1;
+        }
+        value = value * 10 + (*name - '0');
+        if (value > 65535) {
+            return -1;
+        }
+    }
+    *out = value;
+    return 0;
+}
+
+/*
+ * Find a KernelSU driver fd this task already holds.
+ *
+ * Nothing here can create one: that is the kernel's to install, and the only
+ * path this firmware is known to take runs through the sucompat interception
+ * of `su`, gated by the uid allowlist rather than by the predicate the DFR
+ * patch adds. So on this firmware this returns -1 today, the transport refuses
+ * at DFR_SU_STEP_DRIVER_FD, and nothing is executed - which is the correct
+ * outcome for missing authority, and infinitely better than the teardown the
+ * supercall caused.
+ */
+static int real_driver_fd(int *fd_out)
+{
+    char buf[4096];
+    char link[256];
+    int dir_fd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int found = -1;
+
+    if (dir_fd < 0) {
+        return -1;
+    }
+    for (;;) {
+        long n = syscall(__NR_getdents64, dir_fd, buf, sizeof(buf));
+        long off;
+
+        if (n <= 0) {
+            break;
+        }
+        for (off = 0; off < n;) {
+            struct dfr_dirent64 *ent = (struct dfr_dirent64 *)(void *)(buf + off);
+            ssize_t len;
+            int candidate = -1;
+
+            off += ent->d_reclen;
+            if (dfr_parse_fd(ent->d_name, &candidate) != 0 || candidate == dir_fd) {
+                continue;
+            }
+            len = readlinkat(dir_fd, ent->d_name, link, sizeof(link) - 1);
+            if (len <= 0) {
+                continue;
+            }
+            link[len] = '\0';
+            if (strstr(link, DFR_KSU_DRIVER_LINK)) {
+                found = candidate;
+                break;
+            }
+        }
+        if (found >= 0) {
+            break;
+        }
+    }
+    close(dir_fd);
+    if (found < 0) {
+        errno = ENOTTY;
+        return -1;
+    }
+    *fd_out = found;
     return 0;
 }
 

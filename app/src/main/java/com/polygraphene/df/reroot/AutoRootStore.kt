@@ -252,6 +252,34 @@ object AutoRootStore {
 
     fun softRebootLock(): String? = read(SOFT_REBOOT_LOCK_PATH)
 
+    /** Breadcrumb for a dispatch that may take userspace down with it. */
+    const val SOFT_REBOOT_TRACE_PATH = "/data/system/dfreroot-softreboot-trace"
+
+    /**
+     * Record how far the transport got, before it gets further.
+     *
+     * A build that rebooted this device took a whole cycle to diagnose, and the
+     * only thing that made it diagnosable at all was a file that was ABSENT: the
+     * lock, which is written before ksud is invoked, proved the daemon never ran.
+     * Reasoning from an absence works once. This writes the positive record -
+     * atomically and fsync'd by [write], because a trace that dies in the page
+     * cache with the userspace it was tracing is no trace.
+     *
+     * Telemetry only. Nothing reads it to decide anything; every permission is
+     * still re-derived from the records that own that job.
+     */
+    fun traceSoftReboot(bootId: String, phase: String) {
+        val failure = write(
+            SOFT_REBOOT_TRACE_PATH,
+            "boot_id=$bootId\nphase=$phase\n"
+        )
+        if (failure != null) {
+            Log.i(TAG, "[DFR][SOFT_REBOOT] could not record phase=$phase: $failure")
+        }
+    }
+
+    fun softRebootTrace(): String? = read(SOFT_REBOOT_TRACE_PATH)
+
     /**
      * Claim this boot's single soft-reboot dispatch, exclusively.
      *

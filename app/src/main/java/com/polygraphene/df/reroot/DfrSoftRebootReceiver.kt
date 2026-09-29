@@ -112,6 +112,7 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          * not the identity boundary. The module does not allowlist uid 1000 and
          * does not expose /system/bin/su in this namespace.
          */
+        AutoRootStore.traceSoftReboot(bootId, "PREPARE")
         val preparation = RootTransport.prepare(context)
         val transport = preparation.transport
         if (transport == null) {
@@ -124,7 +125,15 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
             )
             return
         }
+        /*
+         * The first privileged thing this build does. A teardown between this
+         * line and the next trace is a teardown caused by the transport itself,
+         * which is precisely the ambiguity that cost a cycle when a probe
+         * rebooted the device and left nothing behind.
+         */
+        AutoRootStore.traceSoftReboot(bootId, "PROBE_ENTER")
         val probe = transport.runAsRoot("id", RootTransport.PROBE_TIMEOUT_MS)
+        AutoRootStore.traceSoftReboot(bootId, "PROBE_RETURNED rc=${probe.rc}")
         if (probe.rc == RootTransport.RC_NO_TRANSPORT) {
             Log.e(TAG, "[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT ${probe.output}")
             RootNotifier.notifySoftReboot(
@@ -211,9 +220,11 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          * descriptor. A replacement landing after the open cannot change the bytes
          * that run.
          */
+        AutoRootStore.traceSoftReboot(bootId, "EXEC_ENTER path=${decision.binaryPath}")
         val outcome = transport.execPinnedDaemon(
             decision.binaryPath, "soft-reboot", TRANSPORT_TIMEOUT_MS
         )
+        AutoRootStore.traceSoftReboot(bootId, "EXEC_RETURNED rc=${outcome.rc}")
         when {
             outcome.rc == RootTransport.RC_DIGEST_CHANGED -> {
                 /*

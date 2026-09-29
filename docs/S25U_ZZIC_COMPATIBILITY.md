@@ -1955,3 +1955,52 @@ That redesign is not implemented here. It needs the KernelSU v3.3.0 UAPI at
 `dmesg`, and the grant ioctl on it), which is not in this repository. Until it
 is read first-hand, `SOFT_REBOOT_TRANSPORT` stays `BLOCKED` and no code here
 claims otherwise.
+
+### The supercall rebooted the device — 2026-09-29 (eleventh physical run)
+
+The grant-before-exec transport shipped and was tapped once. The device did a
+full reboot and lost root; Auto Root re-rooted it on the next boot, which is why
+the session that produced this evidence had root at all.
+
+**`KSU_DRIVER_FD_SUPERCALL = DESTRUCTIVE_ON_ZZIC`**, and the daemon was never
+reached. What proves the second half is an absence, and it is worth stating
+exactly because a later run will not have this luxury:
+
+| record | state after the reboot | what it means |
+|---|---|---|
+| `/data/system/dfreroot-softreboot-lock` | **absent** | created with `createNewFile()` before ksud is invoked, and only replaced by a newer claim — so no dispatch was ever claimed |
+| `/data/system/dfreroot-post-root` | present, **current** boot_id | Auto Root ran after the reboot and completed; the root in hand is the new one |
+| `/sys/fs/pstore/`, `logcat -L` | empty | no pre-reboot log survives on this device |
+| `/proc/last_kmsg` | bootloader (ABL) log only | `reboot_reason = 0x4`; not a kernel log, so it names nothing about the cause |
+
+With the daemon excluded, the teardown happened inside the probe, and the probe
+had gained exactly one privileged syscall over the previous build: the magic
+supercall that asks for the KernelSU driver fd,
+`syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)`, read out of the pinned
+daemon's own bytes. The causal link is circumstantial — no kernel log survived —
+but the cost asymmetry is not: every test of it costs a reboot and a root
+session.
+
+It could not have worked here in any case. The paired module is built
+`CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y`, so `ksu_patch_text()` returns
+`-EOPNOTSUPP`, the syscall dispatcher never installs, and the fallback path
+registers sucompat kprobes only. There is no supercall handler on this build to
+answer it, so the call reached the real, heavily patched Samsung `sys_reboot`.
+
+The supercall is removed, and AGENTS.md 3.6.1 now forbids naming the reboot
+syscall in any source that ships inside this app, enforced by mechanism.
+
+**What this leaves.** `init_driver_fd` in the same bytes tries the safe half
+first: scan `/proc/self/fd` for a link containing `[ksu_driver]`. That half
+stays, and on this firmware it finds nothing, so the transport refuses at
+`DFR_SU_STEP_DRIVER_FD` and executes nothing. `dmesg` shows where the fd does
+come from here — `sys_execve su found` immediately before `ksu fd installed` —
+i.e. the sucompat interception, whose Samsung pre-filter
+(`samsung_sucompat_should_redirect`) gates on `ksu_is_allow_uid_for_current()`,
+the uid allowlist, not on the `allowed_for_su()` predicate the DFR patch
+extends. Allowlisting uid 1000 remains the wrong boundary: it is the shared
+platform uid.
+
+`SOFT_REBOOT_TRANSPORT` therefore stays `BLOCKED`, and the blocker is now
+precise and module-side: **the fd install has to accept the caller
+`allowed_for_su()` already accepts.** Nothing app-side closes it.
