@@ -21,6 +21,9 @@
 static int failures;
 static int fake_uid;
 static int fail_step;
+/* Whether the fake driver_fd op should behave like the real one: refuse with
+ * EPERM when the supercall is not authorised. */
+static int fake_fd_needs_supercall;
 
 static void check(int ok, const char *what)
 {
@@ -40,9 +43,17 @@ static int fake_set_comm(const char *comm)
     return 0;
 }
 
-static int fake_driver_fd(int *fd_out)
+static int fake_driver_fd(int *fd_out, int supercall_allowed)
 {
     if (fail_step == DFR_SU_STEP_DRIVER_FD) {
+        /* ENOTTY, not EPERM: this stands for "the scan found nothing and the
+         * supercall was allowed but produced nothing", which must NOT be
+         * reported as the gate. */
+        errno = ENOTTY;
+        return -1;
+    }
+    if (fake_fd_needs_supercall && !supercall_allowed) {
+        /* Exactly what real_driver_fd() does when the marker withheld it. */
         errno = EPERM;
         return -1;
     }
@@ -83,14 +94,27 @@ static void reset(void)
 {
     fake_uid = 0;
     fail_step = -1;
+    fake_fd_needs_supercall = 0;
 }
 
+static int run_gated(char *const argv[], const char *pinned, long timeout_ms,
+                     int kill_on_timeout, int supercall_allowed, char *out,
+                     size_t cap, struct dfr_su_result *res)
+{
+    return dfr_su_spawn(&fake_ops, "dfreroot-ksud", argv, pinned, timeout_ms,
+                        kill_on_timeout, supercall_allowed, out, cap, res);
+}
+
+/*
+ * The existing cases all run with the supercall permitted, because they are
+ * about the steps AFTER the fd is obtained. The gate has its own cases below.
+ */
 static int run(char *const argv[], const char *pinned, long timeout_ms,
                int kill_on_timeout, char *out, size_t cap,
                struct dfr_su_result *res)
 {
-    return dfr_su_spawn(&fake_ops, "dfreroot-ksud", argv, pinned, timeout_ms,
-                        kill_on_timeout, out, cap, res);
+    return run_gated(argv, pinned, timeout_ms, kill_on_timeout, 1, out, cap,
+                     res);
 }
 
 int main(void)
@@ -229,10 +253,68 @@ int main(void)
     {
         int fd = 12345;
 
-        check(dfr_su_real_ops.driver_fd(&fd) == -1 && fd == 12345,
-              "the real driver-fd lookup finds none here and leaves fd_out "
-              "untouched");
+        /*
+         * supercall_allowed = 0 on a build host is the interesting direction:
+         * it must refuse WITHOUT issuing the syscall. Passing 1 here would
+         * issue a real reboot(2) on the host, which is why this only ever
+         * asserts the gated side. The permitted side is covered by the fake
+         * op, where the syscall is not real.
+         */
+        check(dfr_su_real_ops.driver_fd(&fd, 0) == -1 && fd == 12345,
+              "the real driver-fd lookup refuses with the supercall withheld "
+              "and leaves fd_out untouched");
+        check(errno == EPERM,
+              "and it refuses with EPERM, the errno the gate reserves");
     }
+
+    /*
+     * The gate of AGENTS.md 3.6.1, both directions plus the two ways it could
+     * be mistaken for something else. A gate that cannot fail is not a gate,
+     * and a gate whose refusal is indistinguishable from a kernel refusal
+     * tells the next physical run nothing (AGENTS.md 3.7).
+     */
+    reset();
+    fake_fd_needs_supercall = 1;
+    check(run_gated(echo_argv, NULL, 5000, 1, 0, out, sizeof(out), &res) == -1 &&
+              res.step == DFR_SU_STEP_SUPERCALL_GATED,
+          "with no transport_fix marker the child refuses at SUPERCALL_GATED");
+    check(strlen(out) == 0,
+          "and nothing was executed, so nothing was captured");
+    dfr_su_status_token(&res, token, sizeof(token));
+    check(strstr(token, "DFR_SU_STEP=SUPERCALL_GATED") == token,
+          "the gated refusal renders its own token, not DRIVER_FD's");
+
+    reset();
+    fake_fd_needs_supercall = 1;
+    check(run_gated(echo_argv, NULL, 5000, 1, 1, out, sizeof(out), &res) == 0 &&
+              res.step == DFR_SU_OK,
+          "with the marker present the same run proceeds");
+
+    reset();
+    fake_fd_needs_supercall = 0;
+    check(run_gated(echo_argv, NULL, 5000, 1, 0, out, sizeof(out), &res) == 0 &&
+              res.step == DFR_SU_OK,
+          "a task that already holds the fd never reaches the gate");
+
+    /*
+     * The two failures must stay distinguishable. A driver_fd op that fails
+     * for its own reason while the supercall was withheld must still report
+     * DRIVER_FD - collapsing it into the gate would blame the marker for a
+     * kernel refusal.
+     */
+    reset();
+    fail_step = DFR_SU_STEP_DRIVER_FD;
+    check(run_gated(echo_argv, NULL, 5000, 1, 0, out, sizeof(out), &res) == -1 &&
+              res.step == DFR_SU_STEP_DRIVER_FD && res.err == ENOTTY,
+          "a non-gate driver-fd failure is not relabelled as the gate");
+
+    /*
+     * Note on what is NOT asserted here: the fake op runs in the forked child,
+     * so no variable it sets can be read back in this process. The two cases
+     * above are the propagation proof - the same run refuses or proceeds
+     * purely on the flag's value, which it could not do if the flag were
+     * dropped or overridden on the way down.
+     */
 
     reset();
     check(run(NULL, NULL, 5000, 1, out, sizeof(out), &res) == -1 &&

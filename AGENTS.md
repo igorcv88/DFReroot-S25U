@@ -379,9 +379,26 @@ Two properties keep that honest, and both are load-bearing:
   where the native transport cannot read it, and a default has to be the
   refusing one.
 
-While the app carries no supercall at all, `tools/profile_binding_audit.py`
-enforces its absence by mechanism, as it does for 3.6. Whoever reintroduces the
-call replaces that guard with one that proves the gate above — never with
+The call is now in the tree, and `tools/profile_binding_audit.py` therefore
+proves the gate rather than the absence. Four properties, because the call is
+one edit away from being unguarded if any one of them lapses:
+
+1. exactly one shipped source — `app/src/main/jni/dfr_su_core.c` — may name
+   `__NR_reboot`, `SYS_reboot` or either magic. A gate enforced in one file is
+   a gate a second file defeats (3.2, in its native habitat);
+2. in that file the name appears exactly once, and only *after* the
+   `/proc/self/fd` scan and *inside* the `if (!supercall_allowed)` refusal's
+   shadow. A missing fd must never promote itself into permission;
+3. the flag is threaded, not derived: `struct dfr_su_ops.driver_fd` takes
+   `supercall_allowed`, and nothing in the native layer assigns it;
+4. `DfrSoftRebootReceiver` derives it from `PostRootStatus.supercallAllowed()`
+   *before* building the transport, and passes it in.
+
+`DFR_SU_STEP_SUPERCALL_GATED` is a step of its own for 3.7's reason: "this task
+holds no driver fd" and "we were not permitted to ask for one" send the next
+physical run to different places, and a log that collapses them sends it
+nowhere. Whoever removes the call again replaces this guard with one that
+proves its absence — the exchange runs in both directions, and never to
 nothing.
 
 **What survives, and is the actual rule:** a probe is only a probe if its worst

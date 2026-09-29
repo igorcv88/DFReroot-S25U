@@ -113,7 +113,32 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          * does not expose /system/bin/su in this namespace.
          */
         if (refuseWithoutTrace(context, bootId, "PREPARE")) return
-        val preparation = RootTransport.prepare(context)
+        /*
+         * AGENTS.md 3.6.1's gate, decided here because this is the only layer
+         * that can read the evidence. The driver-fd supercall itself is not
+         * what took this device down - the panic record shows the fd installed
+         * and the kernel dying 152 us later inside the paired module's
+         * predicate, on a put_cred() that CONFIG_KSU_SAMSUNG_KDP refuses. So
+         * the question is whether the module that would service the grant
+         * carries the fix, and the only thing that can answer it is that
+         * module's own ksud, through transport_fix=kdp-cred-1 in a record for
+         * THIS boot. Absent, stale, unknown or unreadable is false, and false
+         * makes the native side refuse at SUPERCALL_GATED having asked nothing.
+         *
+         * inputs.postRootRecord is reused rather than re-read: the precheck
+         * above has already accepted this boot on the strength of it, and a
+         * second read could disagree with the decision already taken.
+         */
+        val supercallAllowed = PostRootStatus.supercallAllowed(
+            PostRootStatus.evaluate(inputs.postRootRecord, bootId, inputs.liveSelinux)
+        )
+        Log.i(
+            TAG,
+            "[DFR][SOFT_REBOOT] SUPERCALL_GATE=" +
+                (if (supercallAllowed) "PERMITTED" else "WITHHELD") +
+                " expected=${PostRootStatus.EXPECTED_TRANSPORT_FIX}"
+        )
+        val preparation = RootTransport.prepare(context, supercallAllowed)
         val transport = preparation.transport
         if (transport == null) {
             Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_UNAVAILABLE ${preparation.detail}")

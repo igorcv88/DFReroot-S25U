@@ -2093,6 +2093,41 @@ KDP-safe and smaller than what is there now.
 **Consequences for the record.** Two verdicts written earlier in this file were
 attributions without evidence and are withdrawn: the supercall is not
 destructive, and this firmware is not the reason it looked that way. The
-standing verdicts are the two above. Whether the app restores the supercall is
-the owner's decision and depends on the module fix landing first; until then the
-transport still refuses at `DFR_SU_STEP_DRIVER_FD` and executes nothing.
+standing verdicts are the two above.
+
+### The supercall restored, under the marker — 2026-09-29
+
+The owner's decision, taken in the open, is the condition now in AGENTS.md
+3.6.1 rather than a ban: the driver-fd supercall may be issued only when a
+complete post-root record **for the current boot** carries
+`transport_fix=kdp-cred-1`. The app implements it as follows, and none of it
+rests on the app's own judgement about the module:
+
+| Layer | What it does | Why it cannot decide the gate |
+|---|---|---|
+| `DfrSoftRebootReceiver.kt` | `PostRootStatus.supercallAllowed(evaluate(record, bootId, selinux))` | the only layer that can read `/data/system/dfreroot-post-root` |
+| `RootTransport.prepare(context, supercallAllowed)` | carries the flag into `Prepared` | no default parameter: a default is a decision without evidence |
+| `dfr_su_jni.c` | passes the `jboolean` through | marshalling only, by AGENTS.md 5 |
+| `dfr_su_core.c` | scan `/proc/self/fd`; refuse with `EPERM` if withheld; only then `syscall(__NR_reboot, …)` | the record is not visible from here at all |
+
+`SUPERCALL_GATE_MARKER_REQUIRED = ENFORCED`, by four checks in
+`tools/profile_binding_audit.py` and five host-test cases in
+`tools/tests/su_core_test.c`. Each guard was mutation-verified: ungating the
+branch, moving the call ahead of the gate, dropping the receiver's derivation,
+deriving it after the transport is built, and naming the magic in a second
+shipped file each produce a named FAIL.
+
+`DFR_SU_STEP_SUPERCALL_GATED` is a distinct verdict from
+`DFR_SU_STEP_DRIVER_FD`, per AGENTS.md 3.7: "this task holds no driver fd" and
+"we were not permitted to ask for one" are different facts, and only the second
+is the marker's doing.
+
+**What this does not claim.** Nothing here says the chain now works
+end to end. The paired module that publishes the marker is the one fixed by
+`apply-v330-dfr-kdp-cred-fix.py` in RMGLabs-Payloads, and until a build of that
+pair is installed on the device, every record on this firmware lacks the marker
+and every run refuses at `SUPERCALL_GATED` having asked the kernel nothing.
+That is the gate working, and it is also the only state this repository has
+evidence for. Repinning the new ksud digest in `KsudStage.kt`,
+`target_profile.c` and `tools/zzic_profile.json` remains open and is what a
+physical run needs next.

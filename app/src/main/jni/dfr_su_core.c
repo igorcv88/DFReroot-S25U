@@ -29,19 +29,22 @@
 extern char **environ;
 
 /*
- * How the driver fd is obtained - and the half of it this app must never use.
+ * How the driver fd is obtained, and the condition under which the second half
+ * of that is allowed to happen.
  *
  * The pinned daemon's own unstripped bytes (ksucalls::init_driver_fd) do two
  * things in order: scan /proc/self/fd for a link containing "[ksu_driver]",
  * and, only if none is there, issue a magic supercall
  * syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd).
  *
- * ## The supercall is forbidden here, by evidence
+ * ## What the device did, and what actually caused it
  *
- * The first build to issue it did not get a refusal: tapping Apply Modules
- * rebooted the device and dropped root. Two explanations were written here
- * before there was evidence for either, and both were wrong. Samsung's
- * /sys/class/sec/sec_hw_param/extra_info then produced the panic record:
+ * The first build to issue the supercall did not get a refusal: tapping Apply
+ * Modules rebooted the device and dropped root. Two explanations were written
+ * here before there was evidence for either, and both were wrong - first "no
+ * supercall handler exists", then "the magic reboot reaches the real
+ * sys_reboot". Samsung's /sys/class/sec/sec_hw_param/extra_info then produced
+ * the panic record and refuted both:
  *
  *   TASK=dfreroot-ksud  PANIC="synchronous external abort"
  *   PC=allowed_for_su+0x12c/0x248 [kernelsu]
@@ -49,23 +52,50 @@ extern char **environ;
  *   [61.884451] Internal error: synchronous external abort: 0000000096000010
  *
  * The supercall WORKED - the fd was installed for this very transport's forked
- * child. What died, 152 us later, was the grant: the paired module's DFR
- * predicate calls plain put_cred() on a credential that CONFIG_KSU_SAMSUNG_KDP
- * makes hypervisor-read-only, and that write is the external abort. With
- * panic_on_oops=1 and panic=-1 it became an instant reboot with no log.
+ * child, task name and all. What died 152 us later was the grant: the paired
+ * module's DFR predicate called plain put_cred() on a credential that
+ * CONFIG_KSU_SAMSUNG_KDP makes hypervisor-read-only, and that write is the
+ * external abort. With panic_on_oops=1 and panic=-1 it became an instant
+ * reboot with no log.
  *
- * So the call is out of this app for a reason that is no longer "it is
- * destructive": it is that the grant it leads to panics this kernel until the
- * module is fixed, and that lifting AGENTS.md 3.6.1 is the owner's decision,
- * not an agent's. Restoring it before the module fix lands reproduces the
- * panic exactly.
+ * ## So the condition is about the module, not about the syscall
  *
- * So the scan stays and the supercall is gone. tools/profile_binding_audit.py
- * rejects its return by mechanism - no source shipped in this app may name
- * __NR_reboot at all - because "we only call it when X" is exactly the kind of
- * qualification that decays into calling it.
+ * Asking a BROKEN module for the grant is what breaks the device. AGENTS.md
+ * 3.6.1 therefore states the owner's decision as a condition rather than a
+ * ban: the supercall may be issued only when a complete post-root record for
+ * the CURRENT boot says the loaded module carries the fix
+ * (transport_fix=kdp-cred-1, published by the paired module's ksud and checked
+ * by PostRootStatus.supercallAllowed()). Absent, stale, unknown or unreadable
+ * marker is a refusal.
+ *
+ * Two properties keep that honest and are why supercall_allowed is a parameter
+ * threaded down from Kotlin rather than anything decided in this file:
+ *
+ *   - the record lives at /data/system/dfreroot-post-root, which this layer
+ *     does not read and must not guess at. A default computed here would be a
+ *     default computed without evidence;
+ *   - "the fd was missing" is NOT a second condition that can stand in for the
+ *     first. That was precisely the reasoning that panicked the device - the
+ *     scan found nothing, so the code asked. The scan below therefore refuses
+ *     at DFR_SU_STEP_SUPERCALL_GATED when the flag is 0, and a missing fd never
+ *     promotes itself into permission.
+ *
+ * tools/profile_binding_audit.py no longer asserts the call's absence; it
+ * asserts this gate - that the only source naming the supercall is this file,
+ * that the name appears only under the supercall_allowed branch, and that the
+ * Kotlin caller derives the flag from PostRootStatus.supercallAllowed().
  */
 #define DFR_KSU_DRIVER_LINK "[ksu_driver]"
+
+/*
+ * The supercall's own constants, from the same unstripped bytes. They are the
+ * whole authorisation as far as the kernel is concerned: reboot_handler_pre()
+ * is a kprobe on __arm64_sys_reboot that checks only these two magics and then
+ * installs the fd via task_work. Nothing about the caller is examined here,
+ * which is exactly why the gate has to be ours.
+ */
+#define DFR_KSU_SUPERCALL_MAGIC1 0xdeadbeefu
+#define DFR_KSU_SUPERCALL_MAGIC2 0xcafebabeu
 
 /*
  * The grant itself, read from the same bytes (cli::run, the su path): an ioctl
@@ -122,18 +152,9 @@ static int dfr_parse_fd(const char *name, int *out)
     return 0;
 }
 
-/*
- * Find a KernelSU driver fd this task already holds.
- *
- * Nothing here can create one: that is the kernel's to install, and the only
- * path this firmware is known to take runs through the sucompat interception
- * of `su`, gated by the uid allowlist rather than by the predicate the DFR
- * patch adds. So on this firmware this returns -1 today, the transport refuses
- * at DFR_SU_STEP_DRIVER_FD, and nothing is executed - which is the correct
- * outcome for missing authority, and infinitely better than the teardown the
- * supercall caused.
- */
-static int real_driver_fd(int *fd_out)
+/* Scan /proc/self/fd for a link naming the KernelSU driver. Separate from the
+ * supercall on purpose: this observes, it never asks. */
+static int real_scan_driver_fd(int *fd_out)
 {
     char buf[4096];
     char link[256];
@@ -179,6 +200,68 @@ static int real_driver_fd(int *fd_out)
         return -1;
     }
     *fd_out = found;
+    return 0;
+}
+
+/*
+ * Obtain the driver fd: observe first, and ask only when the module's own
+ * marker says the module that would answer carries the KDP credential fix.
+ *
+ * The order matters and is not an optimisation. A task that already holds the
+ * fd needs nothing from the kernel, so the gated call is never reached on that
+ * path; and when the scan comes up empty, the absence is reported as the
+ * distinct DFR_SU_STEP_SUPERCALL_GATED rather than folded into
+ * DFR_SU_STEP_DRIVER_FD. Those are different facts (AGENTS.md 3.7): "this task
+ * holds no driver fd" and "we were not permitted to ask for one" send the next
+ * physical run to different places.
+ */
+static int real_driver_fd(int *fd_out, int supercall_allowed)
+{
+    int fd = -1;
+    long rc;
+
+    if (real_scan_driver_fd(fd_out) == 0) {
+        return 0;
+    }
+    if (!supercall_allowed) {
+        /*
+         * The refusing default of AGENTS.md 3.6.1. Reaching here means the
+         * post-root record did not say transport_fix=kdp-cred-1 for this boot,
+         * so the module that would service the grant is the one whose
+         * put_cred() panicked this device. Asking it is the operation that
+         * took the device down; not asking it costs one refused button press.
+         */
+        errno = EPERM;
+        return -1;
+    }
+    /*
+     * The magic supercall, exactly as the pinned daemon issues it. The kernel
+     * side is a kprobe on __arm64_sys_reboot that recognises the two magics,
+     * installs a driver fd through task_work and writes it through the fourth
+     * argument; it then returns so the real syscall runs, which for these
+     * magics is a no-op rather than a reboot. The evidence for that is the
+     * panic record: the fd was installed and the device stayed up for the
+     * 152 us it took the grant to kill it.
+     */
+    rc = syscall(__NR_reboot, (long)(unsigned int)DFR_KSU_SUPERCALL_MAGIC1,
+                 (long)(unsigned int)DFR_KSU_SUPERCALL_MAGIC2, 0L, (void *)&fd);
+    if (rc != 0) {
+        return -1;
+    }
+    /*
+     * A returned success is not evidence the fd exists (AGENTS.md 3.5). The
+     * install happens in task_work, so re-observe /proc/self/fd rather than
+     * trusting the out-parameter, and fall back to it only when the link is
+     * not there to be seen.
+     */
+    if (real_scan_driver_fd(fd_out) == 0) {
+        return 0;
+    }
+    if (fd < 0) {
+        errno = ENOTTY;
+        return -1;
+    }
+    *fd_out = fd;
     return 0;
 }
 
@@ -236,6 +319,7 @@ static void child_fail(int status_fd, int step, int err, const char *found_hex)
  */
 static void child_main(const struct dfr_su_ops *ops, const char *comm,
                        char *const argv[], const char *pinned_hex,
+                       int supercall_allowed,
                        int status_fd, int out_fd, int null_fd)
 {
     char found[65];
@@ -253,8 +337,17 @@ static void child_main(const struct dfr_su_ops *ops, const char *comm,
     if (ops->set_comm(comm) != 0) {
         child_fail(status_fd, DFR_SU_STEP_COMM, errno, NULL);
     }
-    if (ops->driver_fd(&driver_fd) != 0) {
-        child_fail(status_fd, DFR_SU_STEP_DRIVER_FD, errno, NULL);
+    if (ops->driver_fd(&driver_fd, supercall_allowed) != 0) {
+        /*
+         * EPERM from this op is the gate, not a kernel refusal: it is the one
+         * errno real_driver_fd() reserves for "the marker did not authorise
+         * asking". Keeping it a separate step is what lets a log say which of
+         * the two happened without the reader guessing.
+         */
+        child_fail(status_fd,
+                   (!supercall_allowed && errno == EPERM)
+                       ? DFR_SU_STEP_SUPERCALL_GATED : DFR_SU_STEP_DRIVER_FD,
+                   errno, NULL);
     }
     if (ops->grant_root(driver_fd) != 0) {
         child_fail(status_fd, DFR_SU_STEP_GRANT, errno, NULL);
@@ -306,7 +399,7 @@ static void set_result(struct dfr_su_result *res, int step, int err)
 
 int dfr_su_spawn(const struct dfr_su_ops *ops, const char *comm,
                  char *const argv[], const char *pinned_hex,
-                 long timeout_ms, int kill_on_timeout,
+                 long timeout_ms, int kill_on_timeout, int supercall_allowed,
                  char *out, size_t out_cap, struct dfr_su_result *res)
 {
     int status_pipe[2] = { -1, -1 };
@@ -362,7 +455,8 @@ int dfr_su_spawn(const struct dfr_su_ops *ops, const char *comm,
     if (pid == 0) {
         close(status_pipe[0]);
         close(out_pipe[0]);
-        child_main(ops, comm, argv, pinned_hex, status_pipe[1], out_pipe[1], null_fd);
+        child_main(ops, comm, argv, pinned_hex, supercall_allowed,
+                   status_pipe[1], out_pipe[1], null_fd);
         _exit(127); /* not reached */
     }
 
@@ -481,7 +575,8 @@ int dfr_su_spawn(const struct dfr_su_ops *ops, const char *comm,
 void dfr_su_status_token(const struct dfr_su_result *res, char *buf, size_t cap)
 {
     static const char *const names[] = {
-        "OK", "PIPE", "FORK", "COMM", "DRIVER_FD", "GRANT", "NOT_ROOT",
+        "OK", "PIPE", "FORK", "COMM", "DRIVER_FD",
+        "SUPERCALL_GATED", "GRANT", "NOT_ROOT",
         "MNT_NS", "EXEC", "DIGEST", "TIMEOUT", "INTERNAL"
     };
     const char *name;

@@ -185,32 +185,40 @@ The remaining sequence is:
    held, taking no reference). The owner has since decided the policy
    (AGENTS.md 3.6.1): the transport's driver-fd request is gated, not banned —
    allowed only behind `transport_fix=kdp-cred-1` in a same-boot post-root
-   record. Two of the three pieces exist: RMGLabs-Payloads PR #4 carries the
-   module fix and publishes that marker, and `PostRootStatus` accepts it
-   (optional to parse, so the previous pair keeps working) and exposes
-   `supercallAllowed()`, host-tested in both directions. **The third is not
-   written**: the native transport still requests no descriptor, so
-   `supercallAllowed()` has no caller yet, the audit still enforces absence,
-   and a tap refuses at `DFR_SU_STEP=DRIVER_FD`. Completing that piece was
-   refused by the agent sandbox and is the owner's to make or delegate. The
-   daemon was never reached, proven by the absent soft-reboot lock. The transport keeps the safe half of the daemon's
-   own lookup (scan `/proc/self/fd` for `[ksu_driver]`), finds nothing on this
-   firmware, and refuses at `DFR_SU_STEP_DRIVER_FD` without executing anything.
-   **Corrected after reading the KernelSU source at the pinned SHA:** the fd
-   install is *ungated* (`reboot_handler_pre()` checks only the two magics), and
-   the grant ioctl is gated by `allowed_for_su()`, which the DFR patch already
-   extends to this caller. No module change is needed to authorize either step.
-   What is missing is a trigger for the install that does not fall through to
-   the real `__arm64_sys_reboot`, which the existing one does by design.
+   record. **All three pieces now exist.** RMGLabs-Payloads carries the module
+   fix and publishes the marker (PR #4, with PR #5 making that patch
+   applicable, atomic and self-verifying — #4 as merged refuses on every real
+   tree). `PostRootStatus` accepts the marker (optional to parse, so the
+   previous pair keeps working) and exposes `supercallAllowed()`. And the
+   native transport now issues the supercall behind that flag:
+   `DfrSoftRebootReceiver` derives it, `RootTransport.prepare(context,
+   supercallAllowed)` carries it, `dfr_su_jni.c` marshals it, and
+   `dfr_su_core.c` scans `/proc/self/fd` first and refuses with `EPERM` —
+   surfaced as the distinct `DFR_SU_STEP=SUPERCALL_GATED` — when it is
+   withheld. `tools/profile_binding_audit.py` proves the gate instead of the
+   absence, and each of its four checks was mutation-verified.
+   The daemon was never reached on the eleventh run, proven by the absent
+   soft-reboot lock.
    The client mechanics were read first-hand out of the pinned daemon's own
    unstripped bytes rather than guessed: the driver fd comes from
    `syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)` and the grant is
-   `ioctl(fd, _IO('K', 1))`. That question — whether the kernel gates
-   the fd install — is settled: `kernel/supercall/supercall.c` at
+   `ioctl(fd, _IO('K', 1))`. Whether the kernel gates the fd install is
+   settled: `kernel/supercall/supercall.c` at
    `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e` (`KSU_REPO`/`KSU_TAG_SHA` in
    RMGLabs-Payloads `.github/workflows/build-zzic-exact-port.yml`) shows it is
-   not gated at all.
-   A tap is now safe and still refuses: it reports `DFR_SU_STEP=DRIVER_FD`, and
+   not gated at all — `reboot_handler_pre()` checks only the two magics — which
+   is exactly why the gate has to be ours.
+
+   **What a tap does today, and the one thing that is left.** On this device
+   the installed pair is still the broken one, so no record carries the marker,
+   so every tap refuses at `DFR_SU_STEP=SUPERCALL_GATED` having asked the
+   kernel nothing. That is the gate working, and it is the only state this
+   repository has evidence for. To get past it: build the pair from
+   RMGLabs-Payloads `main` once PR #5 lands, install it, then repin the new
+   ksud digest in `KsudStage.kt`, `app/src/main/jni/target_profile.c` and
+   `tools/zzic_profile.json` (the two must agree — AGENTS.md 3.10). Only after
+   a boot whose post-root record carries `transport_fix=kdp-cred-1` does a tap
+   reach the supercall at all.
    `/data/system/dfreroot-softreboot-trace` records each phase before it runs,
    fsync'd, so a teardown can never again leave nothing to read. Do **not**
    grant uid 1000 in KernelSU Manager as a shortcut;
