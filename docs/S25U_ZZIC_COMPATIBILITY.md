@@ -1884,3 +1884,51 @@ This is an implementation result, not a physical PASS.
 The final APK still owes proof that `system_server` can execute the staged helper
 under enforcing SELinux, that the ioctl returns uid 0, and that the soft-reboot
 handoff reaches the expected dispatch outcome without changing `boot_id`.
+
+### The exec proof came back negative — 2026-09-29 (tenth physical run)
+
+The paragraph above ends by naming the proof the build still owed: that
+`system_server` can execute the staged helper under enforcing SELinux. The
+device answered, and the answer is **no**.
+
+```text
+[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT
+  IOException: Cannot run program ".../lib/arm64/libdfr_verified_exec.so":
+  error=13, Permission denied
+```
+
+`SYSTEM_SERVER_EXEC_FROM_DATA = REFUTED`. Four observations fix that verdict,
+and none of them rests on an absent log line:
+
+| observation | what it rules out |
+|---|---|
+| `PINNED_TRANSPORT_LAUNCHER` passed, i.e. `isFile()` and `canExecute()` (`access(X_OK)`) both true, and `ls -Zl` shows `-rwxr-xr-x system system u:object_r:apk_data_file:s0` | a missing file, a lost `x` bit, a DAC refusal |
+| `su -c "<launcher>"` from `u:r:ksu:s0` prints `DFR_VERIFIED_EXEC_USAGE` | a broken ELF, a bad interpreter, a `noexec` mount on `/data` |
+| `runcon u:r:system_server:s0 <launcher>` → `Permission denied`, reproduced from a root shell with no app involved | the app, the `ProcessBuilder` argv, the receiver thread |
+| `dmesg`: `audit_lost=5545 audit_rate_limit=5 audit_backlog_limit=64` | "no `avc:` line appeared" meaning anything at all — the audit backlog is saturated and dropping records |
+
+The denial is bound to the **domain**, not to the artefact. `app/src/main/
+AndroidManifest.xml` sets `android:process="system"`, so every component of this
+app — `DfrSoftRebootReceiver` included — runs inside `system_server` at
+`u:r:system_server:s0`, which the policy does not give `execute_no_trans` over
+`/data`. Commit 3f801f2 moved the exec target from `system_data_file`
+(`/data/system/dfreroot-ksud`) to `apk_data_file` (the packaged launcher); it
+could not have changed this outcome, because the executing domain never changed.
+
+**This refutes the transport's shape, not its authorization boundary.** The
+paired module's `dfr_system_server_child_transport()` requires the caller to
+*hold* the `system_server` SID, which is to say it requires an `execve` out of
+`system_server` with no domain transition — precisely what the policy forbids for
+`/data`. Contract and policy are incompatible as long as root is obtained *after*
+an exec. Obtaining it *before* one is not blocked by the same rule: the module
+reads `current`, so a plain `fork()` of the app's thread already satisfies uid,
+caller SID and real-parent SID with nothing executed, and `escape_with_root_
+profile()` then calls `setup_selinux(profile->selinux_domain)` — observed on this
+device as `u:r:ksu:s0`, a domain that does execute the same file, per the second
+row of the table above.
+
+That redesign is not implemented here. It needs the KernelSU v3.3.0 UAPI at
+`932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e` (the `ksu fd` seen installed in
+`dmesg`, and the grant ioctl on it), which is not in this repository. Until it
+is read first-hand, `SOFT_REBOOT_TRANSPORT` stays `BLOCKED` and no code here
+claims otherwise.
