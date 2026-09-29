@@ -2310,3 +2310,38 @@ That is the gate working, and it is also the only state this repository has
 evidence for. Repinning the new ksud digest in `KsudStage.kt`,
 `target_profile.c` and `tools/zzic_profile.json` remains open and is what a
 physical run needs next.
+
+### The fixed pair is bundled — 2026-09-29
+
+`MARKER_PRODUCER_BUNDLED = CONFIRMED`. RMGLabs-Payloads PR #5 merged at 15:57
+UTC and exact-port run #9 built the pair from `main` at `11d5b997`, all twelve
+steps green. Its daemon is now the bundled asset:
+
+```text
+asset      app/src/main/assets/ksud
+sha256     79651c46c5d61596b56b849512d0f0f0038ea7f1b35d1911b40d386606b69afc
+size       6672576                     (previously f9ba5d98…, 6675136)
+source     RMGLabs-Payloads kernelsu/ksud-pa3q-S938BXXUCZZIC-dfreroot-v3.3.0
+```
+
+**The claim is bound to bytes, not to the workflow's grep** (AGENTS.md 3.5).
+The published file's recorded digest was re-computed from the file itself and
+agrees, and the record format literal was read out of the bundled binary at
+offset 138341:
+
+```text
+state=POST_ROOT_COMPLETE\nboot_id=…\nksu_version=…\nuapi_version=…
+\nruntime_mode=late-load\nselinux=1\ntransport_fix=kdp-cred-1\n
+```
+
+Exactly one occurrence. Every pin site moved together — the asset, `KsudStage`,
+`target_profile.c`, `tools/zzic_profile.json` and the two policy tests — and
+`profile_binding_audit.py` reports `ZZIC_KSUD_BINDING : PASS` against the new
+bytes. The DirtyFrag LKM pin (`b941d323…`) is untouched: the module rebuilt by
+that workflow is KernelSU's, a different artefact.
+
+**What this still does not claim.** The marker's *producer* is in the tree; the
+device is not running it. `SUPERCALL_GATE_OPEN` stays `UNVERIFIED` until a boot
+on this firmware completes the chain with this daemon and writes a post-root
+record carrying the marker. Until then every tap refuses at `SUPERCALL_GATED`,
+which remains the correct and only evidenced outcome.

@@ -18,7 +18,7 @@ public class SoftRebootPolicyTest {
     static final String BOOT = "2e447aaf-dc02-4cb7-851c-d79f73f94282";
     static final String OTHER_BOOT = "a9ddee12-4011-481c-a0b5-9ed50c880301";
     static final String PINNED =
-            "f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c";
+            "79651c46c5d61596b56b849512d0f0f0038ea7f1b35d1911b40d386606b69afc";
     static final String MANAGER =
             "99aaa607e9c9da6a0e898366ecf0a14dd67224ea726d952d1ce575e62d3b5c41";
     static final String STAGED = "/data/system/dfreroot-ksud";

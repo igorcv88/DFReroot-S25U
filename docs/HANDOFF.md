@@ -74,10 +74,18 @@ The exact DFR ksud has now been generated and repinned in this branch:
 
 ```text
 asset      app/src/main/assets/ksud
-source     RMGLabs-Payloads exact-port dfreroot workflow, 2026-09-27
-sha256     f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c
-size       6675136
+source     RMGLabs-Payloads exact-port dfreroot workflow, run #9, 2026-09-29
+sha256     79651c46c5d61596b56b849512d0f0f0038ea7f1b35d1911b40d386606b69afc
+size       6672576
 ```
+
+This is the **fixed pair's** daemon: run #9 built it from `main` at
+`11d5b997` (the merge of PR #5), so its module carries the KDP credential fix
+and its post-root record publishes the marker. Verified in the bundled bytes,
+not inferred from the workflow's grep — the format literal reads
+`…\nselinux=1\ntransport_fix=kdp-cred-1\n`, exactly once. The previous pin
+(`f9ba5d98…`, 6675136 bytes) belongs to the pair whose predicate panicked the
+device and is retained in the evidence record only as history.
 
 PRs #21, #22 and #24 are merged. #24 also added the fail-closed Auto Root path
 (off by default) and two release guards; the host gate set now stands at:
@@ -209,16 +217,20 @@ The remaining sequence is:
    not gated at all — `reboot_handler_pre()` checks only the two magics — which
    is exactly why the gate has to be ours.
 
-   **What a tap does today, and the one thing that is left.** On this device
-   the installed pair is still the broken one, so no record carries the marker,
-   so every tap refuses at `DFR_SU_STEP=SUPERCALL_GATED` having asked the
-   kernel nothing. That is the gate working, and it is the only state this
-   repository has evidence for. To get past it: build the pair from
-   RMGLabs-Payloads `main` once PR #5 lands, install it, then repin the new
-   ksud digest in `KsudStage.kt`, `app/src/main/jni/target_profile.c` and
-   `tools/zzic_profile.json` (the two must agree — AGENTS.md 3.10). Only after
-   a boot whose post-root record carries `transport_fix=kdp-cred-1` does a tap
-   reach the supercall at all.
+   **Where this stands, and what a tap does.** PR #5 landed, run #9 built the
+   fixed pair, and its daemon is now the bundled, pinned asset
+   (`79651c46…`) — its record format literal carries
+   `transport_fix=kdp-cred-1`, read out of the bundled bytes. So the marker's
+   *producer* is in the tree.
+
+   What is **not** yet true is that the device is running it. The pair
+   installed there is still the broken one, its post-root record carries no
+   marker, and until a boot completes the chain with the new daemon every tap
+   refuses at `DFR_SU_STEP=SUPERCALL_GATED` having asked the kernel nothing.
+   That is the gate working. The remaining sequence is: build and sign the
+   APKs (`release.yml`, one dispatch — AGENTS.md 6.1), install, run the chain
+   to establish root, and only then does a boot's record carry the marker and
+   a tap reach the supercall at all.
    `/data/system/dfreroot-softreboot-trace` records each phase before it runs,
    fsync'd, so a teardown can never again leave nothing to read. Do **not**
    grant uid 1000 in KernelSU Manager as a shortcut;
