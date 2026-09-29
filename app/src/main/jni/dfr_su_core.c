@@ -39,25 +39,26 @@ extern char **environ;
  * ## The supercall is forbidden here, by evidence
  *
  * The first build to issue it did not get a refusal: tapping Apply Modules
- * rebooted the device and dropped root. The durable proof that ksud was NOT
- * what did it is the absent /data/system/dfreroot-softreboot-lock - that file
- * is created before the daemon is ever invoked, and the boot that rebooted
- * left none. So the teardown happened inside the probe, and the supercall was
- * the only privileged syscall the probe had gained.
+ * rebooted the device and dropped root. Two explanations were written here
+ * before there was evidence for either, and both were wrong. Samsung's
+ * /sys/class/sec/sec_hw_param/extra_info then produced the panic record:
  *
- * A first version of this comment blamed a missing handler. The KernelSU
- * source at the pinned SHA refutes that, and the truth is worse for the
- * supercall rather than better: ksu_supercalls_init() registers a kprobe on
- * __arm64_sys_reboot unconditionally, and reboot_handler_pre() checks only the
- * two magics, queues the fd install as a task_work, and returns 0 - it does
- * NOT suppress the syscall. The real, heavily patched Samsung
- * __arm64_sys_reboot therefore runs afterwards BY DESIGN. KernelSU itself
- * whitelists __NR_reboot in the task's seccomp cache only for the manager and
- * for allowlisted uids, which this app is neither.
+ *   TASK=dfreroot-ksud  PANIC="synchronous external abort"
+ *   PC=allowed_for_su+0x12c/0x248 [kernelsu]
+ *   [61.884299] KernelSU: ksu fd installed: 96 for pid 16452
+ *   [61.884451] Internal error: synchronous external abort: 0000000096000010
  *
- * So what rebooted the device is unexplained, not "an unhandled supercall";
- * no pre-reboot log survives on this device to say more. The call stays out
- * until someone can say why.
+ * The supercall WORKED - the fd was installed for this very transport's forked
+ * child. What died, 152 us later, was the grant: the paired module's DFR
+ * predicate calls plain put_cred() on a credential that CONFIG_KSU_SAMSUNG_KDP
+ * makes hypervisor-read-only, and that write is the external abort. With
+ * panic_on_oops=1 and panic=-1 it became an instant reboot with no log.
+ *
+ * So the call is out of this app for a reason that is no longer "it is
+ * destructive": it is that the grant it leads to panics this kernel until the
+ * module is fixed, and that lifting AGENTS.md 3.6.1 is the owner's decision,
+ * not an agent's. Restoring it before the module fix lands reproduces the
+ * panic exactly.
  *
  * So the scan stays and the supercall is gone. tools/profile_binding_audit.py
  * rejects its return by mechanism - no source shipped in this app may name

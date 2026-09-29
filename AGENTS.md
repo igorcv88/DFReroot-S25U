@@ -334,46 +334,51 @@ Distinct from 3.6, and learned the expensive way: that rule forbids an override
 that lets a run proceed unproven. This one forbids a *diagnostic* whose failure
 mode is worse than the thing it is diagnosing.
 
-The soft-reboot transport asked the kernel for KernelSU's driver descriptor with
-the magic supercall the pinned daemon uses,
-`syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)`. On this firmware it did
-not return an error: the device rebooted and root was lost.
+**Read the history of this rule before trusting any causal claim in it.** The
+soft-reboot transport rebooted the device on its first physical run, and this
+section twice named a cause it could not evidence — first "no supercall handler
+exists", then "the magic reboot reaches the real `sys_reboot`". Samsung's
+`/sys/class/sec/sec_hw_param/extra_info` then produced the panic record, and it
+refuted both:
 
-An earlier version of this rule explained that by saying no handler existed. The
-KernelSU source at the pinned SHA refutes it, and the correction matters more
-than the rule's wording: `ksu_supercalls_init()` runs unconditionally from
-`kernelsu_init()` and registers a kprobe on `__arm64_sys_reboot`, so the handler
-was there. What it does is queue a `task_work` and `return 0` — it does **not**
-suppress the syscall, so the real, heavily patched Samsung `__arm64_sys_reboot`
-runs afterwards by design. KernelSU itself treats that syscall as one the caller
-normally may not make: `ksu_handle_setresuid()` whitelists `__NR_reboot` in the
-task's seccomp cache for the manager and for allowlisted uids only. This app is
-neither, so it was reaching for an interface outside its sanctioned caller set.
+```text
+"RR":"KP" "TASK":"dfreroot-ksud" "PANIC":"synchronous external abort"
+"PC":"allowed_for_su+0x12c/0x248 [kernelsu]"
+[61.884299] KernelSU: ksu fd installed: 96 for pid 16452
+[61.884451] Internal error: synchronous external abort: 0000000096000010 [#1]
+```
 
-What caused the reboot is still **unexplained**: no pre-reboot log survives on
-this device. What is established is that it happened, and that the daemon did
-not run.
+The supercall **worked**: the driver fd was installed for our forked child, task
+name and all. 152 µs later the kernel died inside `allowed_for_su()` — the
+paired module's DFR predicate — while handling the grant. `panic_on_oops=1` and
+`panic=-1` turned that oops into an immediate reboot with no log, which is why
+three rounds of reasoning had nothing to stand on.
 
-The ban stands on the observation, not on the explanation that was wrong: until
-someone can say why the device rebooted, the call stays out. **No source that
-ships inside this app may name the reboot syscall**, and
-`tools/profile_binding_audit.py` rejects it by mechanism rather than by
-spelling, exactly as it does for 3.6. "Only when the fd is missing" is not a
-safeguard; it is the condition under which the call was already made.
+So the reboot syscall is not what broke the device, and any ban on it rests on
+a refuted attribution. Whether that ban is lifted, and whether the app restores
+the supercall, is the repository owner's call and is **not** a change an agent
+makes on its own — the module bug has to be fixed first, or the next grant
+panics the same way.
 
-The general rule behind it, for the next syscall someone is tempted to try: a
-probe is only a probe if its worst outcome is a refusal. When the worst outcome
-is a reboot, a corrupted file or a lost root session, it is an *operation*, and
-it needs the evidence an operation needs — not the casual reach of a diagnostic.
+**What survives, and is the actual rule:** a probe is only a probe if its worst
+outcome is a refusal. When the worst outcome is a reboot, a corrupted file or a
+lost root session, it is an *operation*, and it needs an operation's evidence —
+not the casual reach of a diagnostic. This transport's first privileged step
+took the device down, and nothing in the app could say why.
 
-And when such a thing does fire, what makes it diagnosable is a record written
-*before* it. The only reason the reboot was traced to the probe rather than to
-ksud is that `/data/system/dfreroot-softreboot-lock` — created before the daemon
-is ever invoked — was absent afterwards. Reasoning from an absence works once.
-`AutoRootStore.traceSoftReboot()` now writes the positive record, fsync'd,
-before each privileged step — and a record that cannot be written is a refusal,
-not a logged inconvenience. Proceeding without it would rebuild the very
-condition the record exists to end.
+**And what made it knowable in the end was evidence, not reasoning.** Two things
+paid off, and both belong in the next investigation:
+
+- `/data/system/dfreroot-softreboot-lock`, written before the daemon is ever
+  invoked, proved by its absence that ksud had not run. Reasoning from an
+  absence works once, which is why `AutoRootStore.traceSoftReboot()` now writes
+  the positive record, fsync'd, before each privileged step — and a record that
+  cannot be written is a refusal, not a logged inconvenience.
+- **`/sys/class/sec/sec_hw_param/extra_info` survives a panic on this firmware
+  even at `ro.debug_level=0x4f4c` (LOW), and names `PC`, `LR`, the faulting task
+  and the panic string.** `/proc/reset_summary`, `/proc/reset_history` and
+  `extrc_info` carry the surrounding kernel log. Read them FIRST after any
+  unexplained reboot; `pstore` and `logcat -L` are empty here and prove nothing.
 
 ### 3.7 Signals are never collapsed
 

@@ -2029,3 +2029,70 @@ forbids until the reboot is explained. `SOFT_REBOOT_TRANSPORT` therefore stays
 `BLOCKED` on that, and the shape of any module change is different from what was
 written here: not widening an authorization, but adding a trigger that does not
 fall through to `sys_reboot`.
+
+### The panic record named it — 2026-09-29 (the reboot, explained)
+
+Samsung keeps a panic summary that survives `panic=-1` even at
+`ro.debug_level=0x4f4c` (LOW), where `pstore` and `logcat -L` are empty. It
+ends the investigation:
+
+```text
+$ cat /sys/class/sec/sec_hw_param/extra_info
+"RR":"KP","RWC":"559","KTIME":"61.884533","CPU":"3","TASK":"dfreroot-ksud",
+"FAULT":"pgd=0000000000000000 VA=0000000000000000 ...",
+"PANIC":"synchronous external abort",
+"PC":"allowed_for_su+0x12c/0x248 [kernelsu]",
+"LR":"allowed_for_su+0x11c/0x248 [kernelsu]"
+
+$ cat /sys/class/sec/sec_hw_param/extrc_info      (kernel log at the panic)
+[61.884299] [3: dfreroot-ksud:16452] KernelSU: ksu fd installed: 96 for pid 16452
+[61.884311] [3: dfreroot-ksud:16452] KernelSU: [16452] install ksu fd: 96
+[61.884451] [3: dfreroot-ksud:16452] Internal error: synchronous external abort:
+            0000000096000010 [#1] PREEMPT SMP
+```
+
+`/proc/reset_summary` states the same verdict in words: `UPLOAD CAUSE =
+0xc8000000 = KERNEL PANIC ( panic_msg = synchronous external abort: Fatal
+exception  PC = allowed_for_su+0x12c/0x248 [kernelsu] )`.
+
+**`SUPERCALL_DESTRUCTIVE = REFUTED`.** The magic reboot did exactly what it was
+supposed to: `ksu fd installed: 96`, for a task named `dfreroot-ksud` — the
+forked `system_server` child this transport creates, with the `prctl` name the
+paired module's contract asks for. The fd install works for this caller, as the
+source said it would.
+
+**`GRANT_PANICS_ON_KDP = CONFIRMED`.** 152 µs later the kernel took a
+synchronous external abort (ESR `0x96000010`: EC `0x25`, ISS `0x10` — SEA not on
+a translation-table walk) with the PC inside `allowed_for_su()`, which is where
+the DFR predicate is inlined. `panic_on_oops=1` and `panic=-1` made that an
+immediate reboot with no log, which is why three earlier rounds of reasoning had
+nothing to stand on and two of them guessed wrong.
+
+**The cause is a missing KDP wrapper in the paired module.** The predicate added
+by `apply-v330-staged-daemon-hotfix.py` reads the real parent's credentials as:
+
+```c
+parent_cred = get_task_cred(parent);
+parent_is_system_server = is_system_server(parent_cred);
+put_cred(parent_cred);
+```
+
+The only other `get_task_cred()` in the module, in `kernel/hook/tp_marker.c`, had
+its `put_cred()` replaced with `ksu_put_cred()` by the Samsung KDP patch —
+because with `CONFIG_KSU_SAMSUNG_KDP=y` a `struct cred` is hypervisor-protected
+read-only and its refcount must go through `kdp_usecount_dec_and_test()`. The
+DFR predicate was written afterwards and kept the raw `put_cred()`. Touching
+that refcount is a write to a stage-2 read-only page, which is precisely a
+synchronous external abort.
+
+This is a **bug**, not an authorization boundary: the fix changes how a
+credential is read, not who may pass. Reading the parent's SID under the RCU
+lock already held — `__task_cred(parent)`, no reference taken — is both
+KDP-safe and smaller than what is there now.
+
+**Consequences for the record.** Two verdicts written earlier in this file were
+attributions without evidence and are withdrawn: the supercall is not
+destructive, and this firmware is not the reason it looked that way. The
+standing verdicts are the two above. Whether the app restores the supercall is
+the owner's decision and depends on the module fix landing first; until then the
+transport still refuses at `DFR_SU_STEP_DRIVER_FD` and executes nothing.

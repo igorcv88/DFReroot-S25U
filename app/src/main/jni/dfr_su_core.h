@@ -33,9 +33,11 @@
  * is created before the daemon is ever invoked, and the boot that rebooted
  * left none, so nothing was executed. What the probe had gained was one
  * privileged syscall - the magic supercall that asks the kernel for the driver
- * fd. That call is gone; see dfr_su_core.c for what the KernelSU source
- * actually says about it (the handler exists, and does not suppress the real
- * syscall) and for the rule that keeps it out while the reboot is unexplained.
+ * fd. The panic record has since shown that the supercall WORKED and that the
+ * kernel died in the grant that followed, inside the paired module's own
+ * predicate; see dfr_su_core.c. The call stays out until that module bug is
+ * fixed and the owner decides on AGENTS.md 3.6.1, not because it is itself
+ * destructive.
  *
  * What remains is the fd itself, and the reason is narrower than it first
  * looked. The install is not gated - reboot_handler_pre() checks only the two

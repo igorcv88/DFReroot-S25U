@@ -173,10 +173,18 @@ The remaining sequence is:
    deliberately treats as defense in depth rather than authority. After the grant
    the task is uid 0 in the KernelSU domain, and the pinned daemon can be opened,
    hashed and `execveat`-ed on the same descriptor from there.
-   **The first build of that redesign rebooted the device (eleventh run).** The
-   magic supercall it used to obtain KernelSU's driver fd is removed and now
-   forbidden by AGENTS.md 3.6.1; the daemon was never reached, proven by the
-   absent soft-reboot lock. The transport keeps the safe half of the daemon's
+   **The first build of that redesign rebooted the device (eleventh run), and
+   the panic record has since named the cause.** Samsung's
+   `/sys/class/sec/sec_hw_param/extra_info` survives `panic=-1` at debug level
+   LOW: `PC = allowed_for_su+0x12c [kernelsu]`, task `dfreroot-ksud`,
+   synchronous external abort, 152 µs after `ksu fd installed: 96`. The
+   supercall worked; the grant panicked, because the paired module's DFR
+   predicate calls plain `put_cred()` on a KDP-protected credential instead of
+   the `ksu_put_cred()` wrapper the Samsung patch uses everywhere else. That is
+   a module bug with a small fix (read the parent SID under the RCU lock already
+   held, taking no reference). The supercall is still out of the app pending
+   that fix and the owner's call on AGENTS.md 3.6.1; the daemon was never
+   reached, proven by the absent soft-reboot lock. The transport keeps the safe half of the daemon's
    own lookup (scan `/proc/self/fd` for `[ksu_driver]`), finds nothing on this
    firmware, and refuses at `DFR_SU_STEP_DRIVER_FD` without executing anything.
    **Corrected after reading the KernelSU source at the pinned SHA:** the fd
