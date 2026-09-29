@@ -26,40 +26,45 @@ DFR_SU_STEP=DRIVER_FD errno=1
 No reboot, no panic, no lost root. The transport refused and named its boundary,
 which is the machinery working.
 
-## 2. The one inference the log supports, and it is tight
+## 2. What the verdict proves, and what it does NOT
 
-`errno=1` is `EPERM`. In `app/src/main/jni/dfr_su_core.c`:
+`errno=1` is `EPERM`. Two things follow, and one thing that looked like it
+followed does not.
 
-```c
-if (ops->driver_fd(&driver_fd, supercall_allowed) != 0) {
-    child_fail(status_fd,
-               (!supercall_allowed && errno == EPERM)
-                   ? DFR_SU_STEP_SUPERCALL_GATED : DFR_SU_STEP_DRIVER_FD,
-               errno, NULL);
-}
-```
+**Proven: the gate opened.** In `child_main()`, `SUPERCALL_GATED` is emitted
+only when `!supercall_allowed && errno == EPERM`. The verdict was `DRIVER_FD`,
+so `supercall_allowed` was TRUE — the post-root record for that boot carried
+`transport_fix=kdp-cred-1`. The whole marker pipeline (RMGLabs-Payloads #5 and
+#6, the per-boot `dfreroot-ko-loaded` evidence, `PostRootStatus`, the threading
+through `prepare()` → JNI → `dfr_su_core`) **works end to end**. That is newly
+established and should not be re-litigated.
 
-and in `real_driver_fd()` there are exactly three ways to return `-1`:
+**Proven: the syscall returned `EPERM`.**
 
-| path | errno | step it produces |
-|---|---|---|
-| gate withheld (`!supercall_allowed`) | `EPERM` | `SUPERCALL_GATED` |
-| `syscall(__NR_reboot, …)` returned non-zero | the syscall's | `DRIVER_FD` |
-| supercall returned 0 but no fd appeared | `ENOTTY` | `DRIVER_FD` |
+**NOT proven — and the first version of this note got it wrong:** that the
+supercall was refused *before the handler ran*, or that no fd was installed.
+`reboot_handler_pre()` is a **pre**-handler. It queues the fd install as
+`task_work` and returns 0 *without suppressing the syscall*, so the real
+`sys_reboot` runs afterwards and its verdict says nothing about whether the
+install happened. A failing syscall is consistent with both:
 
-The verdict was `DRIVER_FD` **with** `EPERM`. Row 1 is excluded by the step
-name, row 3 by the errno. So:
+- the call never reached the handler (filtered, or refused before it), **and**
+- the handler ran, the fd was installed, and the *real* syscall then failed.
 
-- **`supercall_allowed` was TRUE.** The post-root record for this boot carried
-  `transport_fix=kdp-cred-1`. The whole marker pipeline — RMGLabs-Payloads #5
-  and #6, the per-boot `dfreroot-ko-loaded` evidence, `PostRootStatus`,
-  the threading through `prepare()` → JNI → `dfr_su_core` — **works end to end.**
-  That is newly proven and should not be re-litigated.
-- **The supercall itself was refused with `EPERM`**, before any fd was installed.
+Those are different facts and `AGENTS.md §3.7` forbids collapsing them.
 
-Everything past that is unknown. **Do not write a cause into any file until the
-device says one.** `AGENTS.md §3.6.1` carries three previous attributions in
-this exact spot that were wrong, and the rule exists because of them.
+The code had the same defect, which is why the log could not tell them apart:
+`real_driver_fd()` returned immediately on `rc != 0` and never performed its
+post-call scan. **Fixed** — the scan after the supercall is now unconditional
+on the call's return value, the out-parameter is trusted only when the call
+reported success, and `tools/profile_binding_audit.py` asserts both statically
+(the path is unreachable from a host test, so §5's static-check rule applies).
+Both assertions were mutation-verified.
+
+**So the next run's token means more than this one's did.** On a build carrying
+that fix, `DRIVER_FD errno=1` means the syscall failed **and** no fd exists
+afterwards. That is the observation this investigation actually needs, and it
+does not exist yet.
 
 ## 3. What changed since the run that *did* install an fd
 
@@ -70,7 +75,12 @@ The eleventh run's panic record proves the supercall reached the kprobe then:
 ```
 
 Same shape of caller: a `fork()` of a system_server thread, `prctl(PR_SET_NAME)`
-to `dfreroot-ksud`. So something between those two runs changed the outcome from
+to `dfreroot-ksud`. Note the eleventh run says nothing about the *real*
+syscall's return value — nothing read it, because the fd was found and the
+chain moved on. So "the syscall used to succeed" is not among the things this
+record establishes; it may have returned `EPERM` then too. What changed may
+therefore be only the reading, not the kernel. So something between those two
+runs changed the outcome from
 "fd installed" to "EPERM". Candidates, **none verified**, listed so the next
 session tests rather than reasons:
 
@@ -97,25 +107,28 @@ session tests rather than reasons:
 Cheapest-first, and each one distinguishes candidates rather than confirming a
 guess:
 
-1. **Ask the device whether the syscall is filtered.** From a root shell on the
-   current boot, read `/proc/<system_server pid>/status` for `Seccomp` and, if
-   available, dump the filter. A one-off C or `strace` probe that calls
-   `syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)` from a
-   `u:r:system_server:s0` context and reports `errno` separates "seccomp
-   refuses it" from "the kprobe refuses it" — the kprobe does no permission
-   check at all (`reboot_handler_pre()` reads only the two magics, verified in
-   KernelSU at the pinned SHA `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e`).
-2. **Confirm the marker really is in the record**, rather than inferring it from
-   the step name. `cat /data/system/dfreroot-post-root` as root, plus
-   `cat /data/system/dfreroot-ko-loaded`. If `transport_fix=` is absent there,
-   the inference in §2 is wrong and the bug is in the step mapping instead —
-   check that first, it is one line.
+0. **Re-run Apply Modules on a build carrying the re-scan fix.** Cheapest of
+   all, and it may answer the question outright: if the transport now proceeds
+   past `DRIVER_FD`, the fd was being installed all along and the only defect
+   was the early return. If it still refuses with `DRIVER_FD errno=1`, that
+   token now genuinely means "no fd afterwards" and the list below applies.
+1. **Confirm the marker really is in the record**, rather than inferring it
+   from the step name. `cat /data/system/dfreroot-post-root` and
+   `cat /data/system/dfreroot-ko-loaded` as root. If `transport_fix=` is absent
+   there, the first inference in §2 is wrong too and the bug is in the step
+   mapping — check that first, it is one line.
+2. **Ask the device whether the syscall is filtered.** A one-off probe that
+   calls `syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)` from a
+   `u:r:system_server:s0` context and then reports **both** the errno **and**
+   whether `[ksu_driver]` appeared in `/proc/self/fd` separates "filtered
+   before the handler" from "handler ran, syscall failed". An errno-only probe
+   does not, and proposing one was the same collapse as the code's.
+   `reboot_handler_pre()` itself does no permission check at all — verified in
+   KernelSU at the pinned SHA `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e`.
 3. **Read `dmesg` for the supercall.** A `KernelSU: ksu fd installed` line for
-   this boot would mean the syscall reached the kprobe and something later
-   failed; its absence means the syscall never got there. `dmesg | grep -i ksu`.
-   Note `audit_lost` has been non-zero on this device — a missing line is not
-   proof.
-4. Only then decide whether anything in the app or the module changes.
+   the boot in question settles it directly. `dmesg | grep -i ksu`. Note
+   `audit_lost` has been non-zero on this device — a missing line is not proof.
+4. Only then decide whether anything else in the app or the module changes.
 
 ## 5. Things already settled — do not re-derive
 

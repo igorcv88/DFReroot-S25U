@@ -218,6 +218,7 @@ static int real_scan_driver_fd(int *fd_out)
 static int real_driver_fd(int *fd_out, int supercall_allowed)
 {
     int fd = -1;
+    int call_errno;
     long rc;
 
     if (real_scan_driver_fd(fd_out) == 0) {
@@ -237,32 +238,46 @@ static int real_driver_fd(int *fd_out, int supercall_allowed)
     /*
      * The magic supercall, exactly as the pinned daemon issues it. The kernel
      * side is a kprobe on __arm64_sys_reboot that recognises the two magics,
-     * installs a driver fd through task_work and writes it through the fourth
-     * argument; it then returns so the real syscall runs, which for these
-     * magics is a no-op rather than a reboot. The evidence for that is the
-     * panic record: the fd was installed and the device stayed up for the
-     * 152 us it took the grant to kill it.
+     * queues a driver-fd install through task_work and writes the fd through
+     * the fourth argument; it then returns so the real syscall runs.
      */
     rc = syscall(__NR_reboot, (long)(unsigned int)DFR_KSU_SUPERCALL_MAGIC1,
                  (long)(unsigned int)DFR_KSU_SUPERCALL_MAGIC2, 0L, (void *)&fd);
-    if (rc != 0) {
-        return -1;
-    }
+    call_errno = (rc != 0) ? errno : 0;
     /*
-     * A returned success is not evidence the fd exists (AGENTS.md 3.5). The
-     * install happens in task_work, so re-observe /proc/self/fd rather than
-     * trusting the out-parameter, and fall back to it only when the link is
-     * not there to be seen.
+     * rc is deliberately NOT a gate on the scan below, and this is the whole
+     * subtlety of the call. reboot_handler_pre() is a *pre*-handler: it queues
+     * the install and returns 0 without suppressing the syscall, so the real
+     * sys_reboot runs afterwards and its verdict says nothing about whether
+     * the install happened. A failure there can mean the call never reached
+     * the handler, or that it did and the fd is already installed. task_work
+     * runs on the return to userspace, so by the time control is back here the
+     * install has happened if it was going to.
+     *
+     * An earlier version returned immediately on rc != 0 and never looked.
+     * That collapses two different facts into one token - "filtered before the
+     * handler" and "handler installed an fd, then the syscall failed" - which
+     * is what AGENTS.md 3.7 forbids, and it would have sent the next physical
+     * run after the wrong question. Observe first, decide after.
+     *
+     * A returned success is not evidence the fd exists either (AGENTS.md 3.5),
+     * so the scan is authoritative in both directions and the out-parameter is
+     * only a fallback, trusted just when the call itself reported success.
      */
     if (real_scan_driver_fd(fd_out) == 0) {
         return 0;
     }
-    if (fd < 0) {
-        errno = ENOTTY;
-        return -1;
+    if (rc == 0 && fd >= 0) {
+        *fd_out = fd;
+        return 0;
     }
-    *fd_out = fd;
-    return 0;
+    /*
+     * No fd, by observation. Report the syscall's own errno when it failed, so
+     * the step token still names what the kernel said; ENOTTY stays the
+     * "call succeeded and produced nothing" case.
+     */
+    errno = call_errno ? call_errno : ENOTTY;
+    return -1;
 }
 
 static int real_grant_root(int driver_fd)
