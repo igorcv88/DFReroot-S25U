@@ -764,11 +764,23 @@ def audit():
     # is the "gate enforced at one entry point" failure of AGENTS.md 3.2. So
     # enumerate every assignment and require each one to be the local sample or
     # the refusing initialiser; nothing else may reach the policy's clock.
-    allowed_uptime_rhs = ("-1L", "serviceStartMs")
-    # The lookbehind keeps this on assignments to the FIELD: "q.broadcastUptimeMs
-    # = broadcastUptimeMs" is the policy input being filled from it, which is the
-    # direction this check exists to protect, not a write to it.
-    for rhs in re.findall(r"(?<![.\w])broadcastUptimeMs\s*=\s*([^\n]+)", svc_code):
+    #
+    # Constrain the RIGHT-hand side of every assignment whose target ends in
+    # this name, qualified or not. An earlier version excluded qualified writes
+    # with a lookbehind, so that "q.broadcastUptimeMs = broadcastUptimeMs" - the
+    # policy input being filled FROM the field - would not be read as a write to
+    # it. That also excluded "this.broadcastUptimeMs = receiverElapsedMs", which
+    # is a perfectly valid Kotlin write to the field, carries no mention of the
+    # extra for the next check to catch, and leaves the safe assignment in place
+    # to satisfy the one above. Reported by Codex on PR #40 and upheld: a check
+    # whose scope is decided by the spelling of the left-hand side is a check
+    # that a qualifier defeats.
+    #
+    # So allow the field itself as a source - a copy out of it cannot corrupt it
+    # - and nothing else but the local sample and the refusing initialiser.
+    allowed_uptime_rhs = ("-1L", "serviceStartMs", "broadcastUptimeMs")
+    for rhs in re.findall(r"[\w.]*\bbroadcastUptimeMs\s*=(?!=)\s*([^\n]+)",
+                          svc_code):
         if rhs.strip() not in allowed_uptime_rhs:
             fail("DfrAutoRootService assigns broadcastUptimeMs from %r; the "
                  "boot window may only carry the service's own monotonic "
