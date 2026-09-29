@@ -352,11 +352,18 @@ Additional primary references: [AOSP SystemServer phase 600](https://android.goo
 [AOSP updated-system scan flags](https://android.googlesource.com/platform/frameworks/base/+/0cd20302215515abb58c0d8b3cbe94206486a585/services/core/java/com/android/server/pm/ScanPackageUtils.java),
 [Android `persistent` manifest documentation](https://developer.android.com/guide/topics/manifest/application-element).
 
-`EARLY_TRIGGER_BEFORE_LOCKED_BOOT_COMPLETED=NO_CANDIDATE` under the present
-stock `/data/app` installation. No new early trigger or automatic soft reboot
-is enabled by this PR, and this timing question needs no release of the same
-trigger. If a candidate is later found, it first needs a marker-only physical
-timestamp and proof that the app starts before the bootanimation exits.
+`EARLY_TRIGGER_BEFORE_LOCKED_BOOT_COMPLETED=NO_PROVEN_CANDIDATE` under the
+present stock `/data/app` installation. The token deliberately does **not** say
+`NO_CANDIDATE`: the table above leaves the persisted-`JobScheduler` route
+`UNKNOWN`, and a verdict that reads as "none exists" over one undetermined
+candidate is the collapse AGENTS.md §3.7 forbids — the same shape as reading an
+`UNKNOWN` probe as an answer. Two of the three candidates are `NO-GO` for this
+package and one is unmeasured; that is the fact.
+
+No new early trigger or automatic soft reboot is enabled by this work, and this
+timing question needs no release of the same trigger. If a candidate is later
+found, it first needs a marker-only physical timestamp and proof that the app
+starts before the bootanimation exits.
 
 Before an early destructive attempt, readiness must check the same AMS
 `ProcessRecord`, non-null `mOnewayThread`/`mThread`, and `scheduleReceiver/12`

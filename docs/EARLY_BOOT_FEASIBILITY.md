@@ -17,7 +17,7 @@ A decisão operacional é concentrar as mudanças de produto no Integrated Boot 
 - `AGENTS.md` descreve explicitamente o projeto como second-stage reroot, com o caminho `system_server → NetworkStack → libexp.so`. Também exige evidência do mesmo `boot_id` e recusa diante de dados ausentes.
 - `docs/AUTO_ROOT.md` § Preflight exige `sys.boot_completed == 1` e visibilidade do NetworkStack antes de iniciar o fluxo automático. Receber `LOCKED_BOOT_COMPLETED` não significa começar a cadeia naquele instante. Logo, o Auto Root existente não pode ser descrito como concluído antes da primeira UI utilizável com base apenas no nome do broadcast.
 - `docs/S25U_ZZIC_COMPATIBILITY.md` registra Gate I como PASS físico. A matriz classifica `AUTO_ROOT_FULL_BOOT` como **PARTIALLY ACCEPTED**: execução automática, recusa de segunda tentativa e novo full boot foram observados; o teste negativo de opt-out com qualificação válida no mesmo build ainda falta.
-- `docs/HANDOFF.md` linhas iniciais chamam `AUTO_ROOT_FULL_BOOT` de PASS. Para o estado de prova, a própria regra de precedência do repositório faz a matriz de compatibilidade prevalecer. A redação do handoff está desatualizada.
+- `docs/HANDOFF.md` linhas iniciais chamavam `AUTO_ROOT_FULL_BOOT` de PASS. Para o estado de prova, a própria regra de precedência do repositório faz a matriz de compatibilidade prevalecer. **Corrigido em 2026-09-29**: o handoff agora diz *partially accepted* e nomeia o teste negativo de opt-out como o que falta.
 - `docs/AUTO_ROOT.md` linhas iniciais ainda dizem que nenhum Auto Root rodou em hardware, outra redação desatualizada diante das capturas posteriores da matriz.
 - O registro do boot `2e447aaf…` prova `POST_ROOT_COMPLETE`, versão KernelSU 32601, UAPI 2 e SELinux 1 no mesmo boot. Ele não identifica se o primeiro disparo veio de `LOCKED_BOOT_COMPLETED` ou de `BOOT_COMPLETED`; os horários de zygote e de disponibilidade de /data não foram preservados.
 - A implementação do transporte de Apply Modules descrita no handoff e em `AUTO_ROOT.md` ainda deve ser distinguida de aceitação física. A matriz registra a investigação e diz que o resultado físico é devido.
@@ -25,7 +25,18 @@ A decisão operacional é concentrar as mudanças de produto no Integrated Boot 
 
 ## Timeline física
 
-**Status: BLOCKED (sem captura do aparelho).** Não se deve preencher a tabela com horários derivados de wall-clock, de boots diferentes ou da ordem genérica do AOSP.
+> **Correção de 2026-09-29 — esta seção foi superada no mesmo dia.** O
+> `BLOCKED` abaixo descreve a rodada documental; horas depois uma captura
+> física do aparelho (`DFR_EARLYBOOT_20260929_112543.tar.gz`, SHA-256
+> `d1503ad7…`) foi registrada em `docs/AUTO_ROOT.md` § *Early Integrated Boot*,
+> com tempos monotônicos do mesmo boot para NetworkStack, `bootanim.exit`,
+> `LOCKED_BOOT_COMPLETED`, o handoff do receiver e `RUN_NATIVE`. **Aquela
+> seção é a cópia autoritativa da timeline; a tabela abaixo é histórica.**
+> Ela continua correta no que diz respeito ao pre-zygote: a captura mede a
+> janela do broadcast, e não `/data` pronta, APEX ou o primeiro zygote, que
+> permanecem não medidos.
+
+**Status na rodada documental: BLOCKED (sem captura do aparelho).** Não se deve preencher a tabela com horários derivados de wall-clock, de boots diferentes ou da ordem genérica do AOSP.
 
 | Evento | BOOTTIME_MS | boot_id | Estado |
 |---|---:|---|---|

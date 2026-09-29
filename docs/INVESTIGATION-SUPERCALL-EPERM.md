@@ -156,6 +156,12 @@ guess:
 | DirtyFrag LKM | `b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017` (untouched) |
 | merged PRs | DFReroot-S25U #35 #36 #37; RMGLabs-Payloads #4 #5 #6 |
 
-`SUPERCALL_GATE_OPEN` can now be promoted from `UNVERIFIED` — the marker
-authorised the call on this boot — but the record should say plainly that the
-syscall was then refused with `EPERM`, and name no cause.
+`SUPERCALL_GATE_OPEN` **has been promoted** from `UNVERIFIED` to `CONFIRMED`
+in `docs/S25U_ZZIC_COMPATIBILITY.md` (twelfth physical run, 2026-09-29). The
+same entry records `SUPERCALL_SYSCALL_RESULT = REFUSED_EPERM` with no cause
+named, and `DRIVER_FD_INSTALL_ON_THIS_RUN = UNDETERMINED` — the three facts
+kept apart, per AGENTS.md 3.7. `docs/HANDOFF.md` carried the collapsed reading
+("before any fd was installed") and was corrected in the same change.
+
+This file stays open on the question in §3, and the next physical run's token
+is what closes it.

@@ -2403,3 +2403,61 @@ all present — the evidence machinery the condition reads.
 
 `SUPERCALL_GATE_OPEN` remains `UNVERIFIED`. Nothing above puts this daemon on
 the device.
+
+### The gate opened and the syscall was refused — 2026-09-29 (twelfth physical run)
+
+`SUPERCALL_GATE_OPEN = CONFIRMED`, boot `30e61b44-267d-4f60-bb64-0a758f2eeedf`,
+promoted from `UNVERIFIED` above. Root itself succeeded on that boot — identity
+gates, module binding, all six patches, bootstrap, ksud,
+`POST_ROOT_COMPLETE=PASS`, `ROOT_RESULT=SUCCESS`, `AUTO_ROOT_QUALIFIED=1` — and
+Apply Modules then refused with:
+
+```text
+DFR_SU_STEP=DRIVER_FD errno=1
+```
+
+The promotion rests on which token that is, not on a log line claiming it.
+`child_main()` emits `SUPERCALL_GATED` when and only when
+`!supercall_allowed && errno == EPERM`; the verdict was `DRIVER_FD`, so
+`supercall_allowed` was true and the post-root record for that boot carried
+`transport_fix=kdp-cred-1`. The whole marker pipeline — RMGLabs-Payloads #5 and
+#6, the per-boot `dfreroot-ko-loaded` evidence, `PostRootStatus`, and the
+threading through `prepare()` → JNI → `dfr_su_core` — therefore worked end to
+end on hardware. Nothing was written, no reboot, no panic, no lost root.
+
+**`SUPERCALL_SYSCALL_RESULT = REFUSED_EPERM`, cause unrecorded.** `errno=1` is
+`EPERM` and that is the whole of what the kernel said. No cause is named here,
+by the rule of AGENTS.md 3.6.1: three earlier attributions at this exact
+boundary were wrong, and the one that was finally right came out of the panic
+record, not out of reasoning.
+
+**`DRIVER_FD_INSTALL_ON_THIS_RUN = UNDETERMINED`, and this is the point.** The
+first reading of this run said the supercall was refused *before any fd was
+installed*. That does not follow. `reboot_handler_pre()` is a **pre**-handler:
+it queues the fd install as `task_work` and returns 0 without suppressing the
+syscall, so the real `sys_reboot` runs afterwards and its verdict speaks only
+for itself. A failing syscall is equally consistent with "the call never
+reached the handler" and with "the handler ran, the fd was installed, and the
+real syscall then failed". Collapsing those is what AGENTS.md 3.7 forbids, and
+the code had the same defect: `real_driver_fd()` returned on `rc != 0` and
+never performed its post-call scan, so the build that produced this token could
+not have told the two apart even in principle.
+
+That is fixed (PR #39, `e8266cf`): the `/proc/self/fd` scan after the supercall
+is unconditional on the call's return value, the out-parameter is trusted only
+when the call reported success, and `tools/profile_binding_audit.py` asserts
+both statically — the path is unreachable from a host test, so AGENTS.md 5's
+static-check rule applies. Both assertions were mutation-verified.
+
+**So this run's token is weaker than the next one's will be.** On a build
+carrying that fix, `DRIVER_FD errno=1` means the syscall failed **and** no fd
+exists afterwards; on the build that produced the token above it means only the
+first half. The observation this question needs does not exist yet, and the
+open candidates and the ordered first moves are in
+`docs/INVESTIGATION-SUPERCALL-EPERM.md`.
+
+Pinned state for this run: ksud asset
+`d0cb516da0047b1b918f84adf8ce7a389c6285de9282cd6301514a40849af7fc` (6674552
+bytes) from RMGLabs-Payloads exact-port run #10, `main` @ `aa2d86ea`; DirtyFrag
+LKM `b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017`,
+untouched.
