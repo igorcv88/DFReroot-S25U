@@ -3,7 +3,7 @@
     android:sharedUserId="android.uid.system">
 
     <!--
-      Auto Root is driven from BOOT_COMPLETED and polls for up to two minutes
+      Auto Root is driven from locked/full boot broadcasts and polls for up to two minutes
       after the native run. WAKE_LOCK is what keeps that wait from being decided
       by a suspend: a device that slept through the post-root window would report
       a failure that never happened, after the page-cache writes.
