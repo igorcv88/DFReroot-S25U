@@ -891,13 +891,23 @@ def audit():
     # kernel module restricts that ioctl to a helper and real parent carrying the
     # policy-owned system_server SID; the helper task name is defense in depth.
     transport_code = code_only(dfr_source("RootTransport.kt"))
-    verified_exec_path = os.path.join(JNI_DIR, "dfr_verified_exec.c")
-    try:
-        with open(verified_exec_path, encoding="utf-8") as f:
-            verified_exec_code = code_only(f.read())
-    except OSError as ex:
-        fail("cannot read dfr_verified_exec.c: %s" % ex)
-        verified_exec_code = ""
+    su_core_path = os.path.join(JNI_DIR, "dfr_su_core.c")
+    su_jni_path = os.path.join(JNI_DIR, "dfr_su_jni.c")
+    verified_exec_path = os.path.join(JNI_DIR, "dfr_verified_exec_core.c")
+    sources = {}
+    for label, path in (("dfr_su_core.c", su_core_path),
+                        ("dfr_su_jni.c", su_jni_path),
+                        ("dfr_verified_exec_core.c", verified_exec_path)):
+        try:
+            with open(path, encoding="utf-8") as f:
+                sources[label] = code_only(f.read())
+        except OSError as ex:
+            fail("cannot read %s: %s" % (label, ex))
+            sources[label] = ""
+    su_core_code = sources["dfr_su_core.c"]
+    su_jni_code = sources["dfr_su_jni.c"]
+    verified_exec_code = sources["dfr_verified_exec_core.c"]
+
     if "fun sha256AsRoot(path: String): String? {" not in transport_code \
             or "sha256sum '" not in transport_code \
             or 'val prefix = "DFR_SHA256="' not in transport_code:
@@ -906,30 +916,89 @@ def audit():
              "traverse")
     for signal in ('KsudStage.stageFromAssets(context)',
                    'stageLog.contains("KSUD_STAGED_VERIFY=PASS")',
-                   'ProcessBuilder(',
-                   'verifiedExecPath',
-                   'VERIFIED_EXEC_NAME = "libdfr_verified_exec.so"',
                    'actual != KsudStage.pinnedKsudSha256()',
-                   'transport=pinned-dfr-ksud'):
+                   'System.loadLibrary("dfrsu")',
+                   'nativeExecPinnedDaemon(',
+                   'transport=dfr-fork-grant'):
         if signal not in transport_code:
-            fail("RootTransport no longer carries the pinned DFR helper transport "
+            fail("RootTransport no longer carries the DFR transport invariant %r"
+                 % signal)
+
+    # The refuted shape, by mechanism rather than by spelling. system_server
+    # cannot execve a file under /data - proven for apk_data_file and
+    # system_data_file - so a transport that starts a process from a pathname
+    # the app controls is the failure this rewrite exists to remove.
+    if "ProcessBuilder" in transport_code:
+        fail("RootTransport is starting a process from the app's own domain "
+             "again; u:r:system_server:s0 cannot execve anything under /data, "
+             "which is what refuted the previous transport")
+    if "libdfr_verified_exec.so" in transport_code:
+        fail("RootTransport still names the retired standalone launcher; it is "
+             "not packaged, because the device refuses to execute it")
+    if "SU_CANDIDATES" in transport_code or '"/system/bin/su"' in transport_code:
+        fail("RootTransport fell back to namespace-dependent su probing; ZZIC "
+             "proved that system_server cannot resolve those paths")
+
+    # The grant must precede the exec, and every step of it must be nameable.
+    # A transport that reports one undifferentiated failure tells the next
+    # physical run nothing about which boundary refused (AGENTS.md 3.7).
+    for signal in ('__NR_reboot', '0xdeadbeefu', '0xcafebabeu',
+                   'DFR_KSU_IOCTL_GRANT_ROOT 0x4b01u',
+                   'ops->current_uid() != 0',
+                   'DFR_SU_STEP_NOT_ROOT',
+                   'dfr_verified_execveat(argv[0], pinned_hex'):
+        if signal not in su_core_code:
+            fail("the native transport no longer carries the grant-before-exec "
                  "invariant %r" % signal)
+    # The whole sequence, not just one pair. The grant must come before the
+    # credential is checked, before the namespace switch that needs it, and
+    # before either exec - and the check must come before the execs too, because
+    # a returned success is not evidence of root (AGENTS.md 3.5).
+    order = ("ops->driver_fd(&driver_fd)", "ops->grant_root(driver_fd)",
+             "ops->current_uid() != 0", "ops->enter_init_mnt_ns()",
+             "dfr_verified_execveat(argv[0], pinned_hex", "execv(argv[0], argv)")
+    positions = [su_core_code.find(signal) for signal in order]
+    if any(at < 0 for at in positions):
+        fail("the native transport lost a step of the grant-before-exec "
+             "sequence: %r" % [s for s, at in zip(order, positions) if at < 0])
+    elif positions != sorted(positions):
+        fail("the native transport performs the grant-before-exec sequence out "
+             "of order; obtaining root after an exec is the shape the device "
+             "refused, and executing before the uid check trusts a boolean")
+    try:
+        with open(os.path.join(JNI_DIR, "dfr_su_core.h"), encoding="utf-8") as f:
+            su_header_code = code_only(f.read())
+    except OSError as ex:
+        fail("cannot read dfr_su_core.h: %s" % ex)
+        su_header_code = ""
+    for step in ("DFR_SU_STEP_DRIVER_FD", "DFR_SU_STEP_GRANT",
+                 "DFR_SU_STEP_NOT_ROOT", "DFR_SU_STEP_MNT_NS",
+                 "DFR_SU_STEP_DIGEST", "DFR_SU_STEP_TIMEOUT"):
+        if step not in su_header_code or step not in su_core_code:
+            fail("refusal step %s is declared but never reported; a step that "
+                 "cannot be observed is not a diagnostic" % step)
+    # Kotlin that needs an Android runtime cannot be unit-tested here, so the
+    # JNI file's thinness is asserted statically (AGENTS.md 5).
+    for signal in ('dfr_su_spawn(&dfr_su_real_ops', 'DFR_SU_SHELL "/system/bin/sh"'):
+        if signal not in su_jni_code:
+            fail("the JNI transport no longer routes through the tested core: "
+                 "missing %r" % signal)
+    if "ksu_is_allow_uid" in su_core_code or "1000" in su_jni_code:
+        fail("the transport must not reason about uid 1000 itself; the paired "
+             "module owns that predicate and a manager grant for the shared "
+             "platform uid is not an acceptable remedy")
+
     for signal in ('dfr_sha256_fd_hex(fd, actual)',
                    '__NR_execveat, fd',
-                   'AT_EMPTY_PATH',
-                   '&argv[2]'):
+                   'AT_EMPTY_PATH'):
         if signal not in verified_exec_code:
-            fail("verified launcher no longer binds the helper digest to the file "
+            fail("verified exec no longer binds the digest to the file "
                  "description passed to execveat: missing %r" % signal)
-    if verified_exec_code.count("open(path, O_RDONLY)") != 1:
-        fail("verified launcher must open the mutable helper path exactly once")
-    if "DFR_VERIFIED_EXEC_DIGEST_MISMATCH" not in transport_code:
-        fail("RootTransport no longer maps the launcher's bound digest refusal to "
-             "PINNED_TRANSPORT_CHANGED")
-    if "SU_CANDIDATES" in transport_code or 'ProcessBuilder("su"' in transport_code \
-            or 'ProcessBuilder("/system/bin/su"' in transport_code:
-        fail("RootTransport fell back to namespace-dependent su probing; ZZIC proved "
-             "that system_server cannot resolve those paths")
+    if verified_exec_code.count("open(path, O_RDONLY | O_CLOEXEC)") != 1:
+        fail("verified exec must open the mutable pathname exactly once")
+    if "RC_DIGEST_CHANGED" not in transport_code:
+        fail("RootTransport no longer maps the bound-digest refusal to a "
+             "distinct outcome")
     if "token.length != 64" not in transport_code:
         fail("RootTransport no longer validates the sha256sum output; anything that "
              "is not exactly one 64-character digest must read as 'could not tell'")
@@ -953,18 +1022,18 @@ def audit():
     # Keep transport creation, helper identity drift and a started-but-unprivileged
     # helper as separate facts (AGENTS.md 3.7).
     if "NO_ROOT_TRANSPORT" not in soft_receiver_code \
-            or "PINNED_TRANSPORT_CHANGED" not in soft_receiver_code \
+            or "DIGEST_CHANGED at" not in soft_receiver_code \
             or "NOT_ROOT rc=" not in soft_receiver_code \
             or 'probe.output.contains("uid=0")' not in soft_receiver_code:
-        fail("DfrSoftRebootReceiver collapses transport absence, helper identity "
-             "drift or an ioctl permission refusal into one outcome")
-    if "KernelSU Manager grant for uid 1000 is neither required nor" \
-            not in soft_receiver_code or '" recommended.' not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver collapses transport absence, daemon identity "
+             "drift or a refused grant into one outcome")
+    if "KernelSU Manager grant for uid" not in soft_receiver_code \
+            or "1000 is neither required nor" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver again recommends a broad KernelSU grant for the "
              "shared platform uid")
     transport_source = dfr_source("RootTransport.kt")
     for claim in ("policy-owned", "`u:r:system_server:s0` SID",
-                  "task name is an additional", "not the identity boundary"):
+                  "defense-in-depth check rather than", "as authority"):
         if claim not in transport_source:
             fail("RootTransport no longer documents the immutable SELinux identity "
                  "boundary: missing %r" % claim)
@@ -1005,26 +1074,27 @@ def audit():
     if "notif_soft_reboot_undetermined" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer reports an undetermined soft reboot "
              "distinctly from a dispatched one")
-    # The digest must be re-checked in the SAME shell that execs. Hashing a path and
-    # then executing that path binds the claim to a NAME, not to bytes (AGENTS.md
-    # 3.5), and /data/adb/ksud is documented to change: it has held the root manager's
-    # build and the pinned daemon at different times on this device. Between the
-    # candidate hash and the call there is another hash, a policy evaluation and a
-    # lock write with an fsync.
-    for signal in ('grep -qx \'" + pinned + "\'',
-                   'exec \\"\\$p\\" soft-reboot',
-                   "RC_DIGEST_CHANGED"):
+    # The digest must be bound to the bytes that run, in the call that runs them.
+    # Hashing a path and then executing that path binds the claim to a NAME, not to
+    # bytes (AGENTS.md 3.5.1), and /data/adb/ksud is documented to change: it has
+    # held the root manager's build and the pinned daemon at different times on this
+    # device. Between the candidate hash and the call there is another hash, a policy
+    # evaluation and a lock write with an fsync.
+    for signal in ('transport.execPinnedDaemon(',
+                   '"soft-reboot"',
+                   "RootTransport.RC_DIGEST_CHANGED"):
         if signal not in soft_receiver_code:
-            fail("DfrSoftRebootReceiver no longer re-verifies the digest inside the "
-                 "shell that execs ksud (%s missing); the path can change between the "
-                 "check and the call" % signal)
-    if "outcome.rc == RC_DIGEST_CHANGED ->" not in soft_receiver_code:
-        fail("DfrSoftRebootReceiver no longer reports a digest that changed between "
-             "the check and the call as its own outcome")
-    # grep -qx, not grep -q: a digest that merely CONTAINS the pinned one is not it.
-    if "grep -q '" in soft_receiver_code:
-        fail("DfrSoftRebootReceiver matches the pinned digest with grep -q rather than "
-             "grep -qx; a superstring of the digest would pass")
+            fail("DfrSoftRebootReceiver no longer execs ksud through the transport "
+                 "that hashes the descriptor it launches (%s missing); a pathname "
+                 "can change between the check and the call" % signal)
+    if "outcome.rc == RootTransport.RC_DIGEST_CHANGED ->" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer reports a daemon whose bytes are not "
+             "the pinned ones as its own outcome")
+    # A shell between the decision and the exec would reopen the pathname, which is
+    # the window the descriptor-bound exec exists to close.
+    if "sha256sum" in soft_receiver_code and "exec \\\"" in soft_receiver_code:
+        fail("DfrSoftRebootReceiver went back to hashing and exec'ing a pathname in "
+             "a shell; that is two lookups of a mutable name")
     # Exit status 0 is ambiguous by construction: soft_reboot() returns Ok(()) when
     # ensure_uapi_version_matched() fails, and daemonises on the success path.
     if "exits 0 both when it daemonises" not in soft_reboot_receiver_src:

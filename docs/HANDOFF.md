@@ -165,18 +165,26 @@ The remaining sequence is:
    `docs/S25U_ZZIC_COMPATIBILITY.md`, "The exec proof came back negative".
    Staging and verification are unaffected: `PINNED_TRANSPORT_READY=PASS` still
    holds, and root itself is untouched by the refusal.
-   What closes it is a redesign, not another run: obtain root **before** any exec.
+   What closes it is a redesign, now implemented (`app/src/main/jni/dfr_su_core.c`,
+   loaded as `libdfrsu.so`): obtain root **before** any exec.
    The module reads `current`, so `fork()` inside `system_server` already carries
    the uid, the caller SID and the real-parent SID it requires; `prctl(PR_SET_NAME,
    "dfreroot-ksud")` supplies the contract's task name, which that module
    deliberately treats as defense in depth rather than authority. After the grant
    the task is uid 0 in the KernelSU domain, and the pinned daemon can be opened,
    hashed and `execveat`-ed on the same descriptor from there.
-   Blocked on reading the KernelSU v3.3.0 UAPI at
-   `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e` (`KSU_REPO`/`KSU_TAG_SHA` in
-   RMGLabs-Payloads `.github/workflows/build-zzic-exact-port.yml`): the `ksu fd`
-   and the grant ioctl on it must be read first-hand, never guessed. Do **not**
-   grant uid 1000 in KernelSU Manager as a shortcut;
+   The client mechanics were read first-hand out of the pinned daemon's own
+   unstripped bytes rather than guessed: the driver fd comes from
+   `syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)` and the grant is
+   `ioctl(fd, _IO('K', 1))`. What those bytes cannot say is whether the KERNEL
+   gates the fd install by the same `allowed_for_su()` the DFR patch extends;
+   reading `kernel/supercall/*` at `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e`
+   (`KSU_REPO`/`KSU_TAG_SHA` in RMGLabs-Payloads
+   `.github/workflows/build-zzic-exact-port.yml`) would settle it offline.
+   Until then the next acceptance run is one tap, and its value is the
+   `DFR_SU_STEP=` token in the refusal: every step refuses on its own, so the
+   device names the boundary. Do **not** grant uid 1000 in KernelSU Manager as
+   a shortcut;
 4. only then consider `POST_ROOT_LSPOSED_COMPAT`.
 
 Before any of that, the log buffer — and the answer is now known.

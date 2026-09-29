@@ -567,37 +567,31 @@ via `su -c "sha256sum '<path>'"`, and anything that is not exactly one
 This adds no exposure. A root shell that would lie about `sha256sum` is a root shell
 that could run `soft-reboot`, or anything else, directly.
 
-**And the digest is re-checked in the shell that execs.** Hashing a path and then
-executing that path binds the claim to a *name*, not to bytes (AGENTS.md 3.5) — and
+**And the digest is bound to the bytes that run.** Hashing a path and then
+executing that path binds the claim to a *name*, not to bytes (AGENTS.md 3.5.1) — and
 this name is documented to change. Between the candidate hash and the call there is
 another hash, a policy evaluation and a lock write with an fsync; a replacement
-landing in that window would have the app execute bytes nothing checked. So the
-comparison happens again, inside the privileged shell, immediately before `exec`:
+landing in that window would have the app execute bytes nothing checked.
 
-```sh
-p='/data/adb/ksud'; sha256sum "$p" | cut -d' ' -f1 | grep -qx '<pinned>' || exit 91
-exec "$p" soft-reboot
-```
+An earlier form closed most of that with `sha256sum … && exec "$p" soft-reboot`
+inside one privileged shell, and wrote down the remaining two-syscall window as
+accepted, because nothing here could verify that ksud behaves identically when
+started from a descriptor. The transport rewrite settled that by testing it:
+`tools/tests/test_verified_exec.sh` proves `execveat(AT_EMPTY_PATH)` keeps the
+opened file's basename as the task comm, which is the only property of a
+path-started ksud the paired module reads. So the window is closed rather than
+named — one `open`, one hash of that file description, one `execveat` on the same
+descriptor — and `RootTransport.RC_DIGEST_CHANGED` is still its own outcome:
+nothing ran, and the lock stays claimed, because a retry would race the same
+replacement.
 
-`grep -qx`, not `grep -q`: a digest that merely *contains* the pinned one is not the
-pinned one. Exit 91 is reported as its own outcome — nothing ran, and the lock stays
-claimed, because a retry would race the same replacement.
-
-**The residual window, named rather than hidden.** `sha256sum` opens the path and
-`exec` opens it again: two syscalls in one shell. Closing that completely means
-executing a private copy, or `exec`ing a `/proc/self/fd` path held open across the
-hash. Both change *how* ksud is invoked, and nothing in this environment can verify
-that ksud behaves identically started from a copied path or an fd — `soft_reboot()`
-itself does not reference its own path, but that is one file of its source, not a
-proof. A privileged mechanism this repository cannot test is a worse trade than a
-two-syscall window that is written down. Revisit if ksud is ever shown
-path-independent.
-
-That shell is the only place here where a digest decides whether a privileged binary
-runs, it is composed in Kotlin nothing here compiles, and it is run by a shell
-nothing here reaches — so `tools/tests/test_soft_reboot_shell.sh` drives the shell
-itself against scratch files, with the `exec` replaced by an echo, and asserts the
-receiver still composes those exact fragments.
+The digest comparison is the one place here where bytes decide whether a
+privileged binary runs, and it is exercised with no device from two sides:
+`tools/tests/test_verified_exec.sh` for the descriptor binding and the comm, and
+`tools/tests/test_su_core.sh` for what the transport does with each verdict,
+including a daemon that is missing, unreadable, or simply not the pinned bytes.
+It replaces `tools/tests/test_soft_reboot_shell.sh`, which drove a shell string
+that no longer exists; its cases were carried over rather than dropped.
 
 **Order matters, and it is guarded.** `SoftRebootPolicy.precheck()` runs everything
 decidable without privilege — boot scoping, the same-boot post-root record, SELinux,
@@ -687,7 +681,7 @@ negative". `PINNED_TRANSPORT_READY=PASS` is still reached — staging and
 verification are unaffected — and root itself is untouched, so a repeat attempt
 costs an install and returns the same `NO_ROOT_TRANSPORT`.
 
-What replaces the sequence above is a redesign, not another attempt: take the
+What replaces the sequence above is a redesign, now implemented: take the
 grant **before** any exec. The paired module reads `current`, so a `fork()` inside
 `system_server` already carries the uid, the caller SID and the real-parent SID it
 requires, with nothing executed; `prctl(PR_SET_NAME, "dfreroot-ksud")` supplies the
@@ -696,9 +690,17 @@ KernelSU client mechanics are read out of the pinned daemon's own bytes (it ship
 unstripped): the driver fd comes from
 `syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)` and the grant is
 `ioctl(fd, _IO('K', 1))` on it, with `ioctl(fd, 0x80004b02, &info)` for the
-version/UAPI read-back. Whether the fd install itself is gated by the same
-`allowed_for_su()` the DFR patch extends is kernel-side and still unread; until it
-is, this stays BLOCKED rather than "about to work".
+version/UAPI read-back.
+
+The implementation is `app/src/main/jni/dfr_su_core.c`, reached through
+`libdfrsu.so`, which the app **loads** rather than executes. Whether the fd
+install itself is gated by the same `allowed_for_su()` the DFR patch extends is
+kernel-side and still unread, so this is source-complete and physically
+unverified — not "about to work". What it buys is that the next physical run
+answers a question instead of repeating one: every step refuses on its own
+(`DFR_SU_STEP=DRIVER_FD`, `GRANT`, `NOT_ROOT`, `MNT_NS`, `EXEC`, `DIGEST`,
+`TIMEOUT`), so the notification names the boundary that said no. The acceptance
+run is therefore: tap the action once and capture the `DFR_SU_STEP=` token.
 
 **One RMGLabs design change that does not transfer.** It moved Apply Modules off a
 broadcast receiver and into a foreground service, because holding a broadcast open
