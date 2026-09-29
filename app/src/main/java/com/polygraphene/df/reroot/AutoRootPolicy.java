@@ -54,14 +54,11 @@ public final class AutoRootPolicy {
      * "never schedule an infinite retry loop" is a property of this number plus
      * the service's single thread, not of a scheduler's good behaviour.
      *
-     * It has to be large enough for a real boot. LOCKED_BOOT_COMPLETED arrives
-     * well before `sys.boot_completed` is 1, so the first polls always fail;
-     * with a cap of 3 the readiness window closed after about a minute and any
-     * slower boot was skipped entirely. The time budget in DfrAutoRootService is
-     * meant to be what binds, and this number is only the backstop that keeps
-     * the loop finite.
+     * The early path polls frequently while NetworkStack is starting. Keep the
+     * cap above the ten-minute time budget even at the capped poll interval;
+     * it remains a second finite bound across service restarts.
      */
-    public static final int MAX_ATTEMPTS_PER_BOOT = 12;
+    public static final int MAX_ATTEMPTS_PER_BOOT = 240;
 
     /**
      * What the store passes when a record EXISTS but could not be read.
@@ -533,13 +530,14 @@ public final class AutoRootPolicy {
             return refuse("initial /sys/fs/selinux/enforce is " + in.liveSelinux
                     + ", expected 1 (unreadable reads as -1 and also refuses)");
         }
-        if (!in.bootCompleted) {
-            return waitAndRetry("sys.boot_completed is not 1 yet");
-        }
         if (in.networkStack == PROCESS_ABSENT) {
             return waitAndRetry("NETWORKSTACK_PROCESS_FOUND=0 (not running yet)");
         }
         if (in.networkStack == PROCESS_UNKNOWN) {
+            if (!in.bootCompleted) {
+                return waitAndRetry("NetworkStack readiness is unknown before"
+                        + " sys.boot_completed; waiting for positive process evidence");
+            }
             /*
              * Deliberately NOT a refusal, and deliberately not silent either.
              * Whether a process with the NetworkStack uid is visible in /proc
