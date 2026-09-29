@@ -24,6 +24,7 @@ class MainActivity : Activity() {
     private lateinit var log: TextView
     private lateinit var autoRoot: CheckBox
     private lateinit var autoRootState: TextView
+    private lateinit var earlyBootProbeState: TextView
 
     private var runDialogLog: TextView? = null
     private var runDialogScroll: ScrollView? = null
@@ -42,6 +43,7 @@ class MainActivity : Activity() {
         log = findViewById(R.id.log)
         autoRoot = findViewById(R.id.autoRoot)
         autoRootState = findViewById(R.id.autoRootState)
+        earlyBootProbeState = findViewById(R.id.earlyBootProbeState)
 
         status.text = myIdentity()
         updateChip()
@@ -62,13 +64,21 @@ class MainActivity : Activity() {
             append(AutoRootStore.setOptIn(autoRoot.isChecked))
             refreshAutoRoot()
         }
+        findViewById<Button>(R.id.btnArmEarlyBootProbe).setOnClickListener {
+            runBg {
+                append(DfrEarlyBootProbe.arm(applicationContext))
+                runOnUiThread { refreshEarlyBootProbe() }
+            }
+        }
         refreshAutoRoot()
+        refreshEarlyBootProbe()
     }
 
     override fun onResume() {
         super.onResume()
         updateChip()
         refreshAutoRoot()
+        refreshEarlyBootProbe()
     }
 
     /**
@@ -87,6 +97,10 @@ class MainActivity : Activity() {
             optedIn -> getString(R.string.auto_root_armed)
             else -> getString(R.string.auto_root_qualified)
         }
+    }
+
+    private fun refreshEarlyBootProbe() {
+        earlyBootProbeState.text = DfrEarlyBootProbe.armState()
     }
 
     private fun runDfAll() {

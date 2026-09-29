@@ -378,10 +378,10 @@ So the reboot syscall is not what broke the device. Asking a **broken module**
 for the grant is. The owner's decision, made in the open, is therefore not a
 ban but a condition:
 
-> The driver-fd supercall may be issued **only** when a complete record for the
+> The KernelSU transport/grant path may be reached **only** when a complete record for the
 > **current boot** says the loaded module carries the fix
 > (`transport_fix=kdp-cred-1`, published by the paired module's ksud and
-> checked by `PostRootStatus.supercallAllowed()`). Absent, stale, unknown or
+> checked by `PostRootStatus.transportFixAllowed()`). Absent, stale, unknown or
 > unreadable marker is a refusal. There is no unconditional form of this call,
 > and "the fd was missing" is not a second condition that can stand in for the
 > first — that was the reasoning that panicked the device.
@@ -395,7 +395,7 @@ Two properties keep that honest, and both are load-bearing:
   every device that has not rebuilt. `tools/tests/PostRootStatusTest.java`
   asserts both halves.
 - **The evidence comes from a layer that can see it.** `dfr_su_core.c` takes
-  `supercall_allowed` as a parameter and never decides it: the record lives
+  `transport_fix_allowed` as a parameter and never decides it: the record lives
   where the native transport cannot read it, and a default has to be the
   refusing one.
 
@@ -406,18 +406,17 @@ one edit away from being unguarded if any one of them lapses:
 1. exactly one shipped source — `app/src/main/jni/dfr_su_core.c` — may name
    `__NR_reboot`, `SYS_reboot` or either magic. A gate enforced in one file is
    a gate a second file defeats (3.2, in its native habitat);
-2. in that file the name appears exactly once, and only *after* the
-   `/proc/self/fd` scan and *inside* the `if (!supercall_allowed)` refusal's
-   shadow. A missing fd must never promote itself into permission;
-3. the flag is threaded, not derived: `struct dfr_su_ops.driver_fd` takes
-   `supercall_allowed`, and nothing in the native layer assigns it;
-4. `DfrSoftRebootReceiver` derives it from `PostRootStatus.supercallAllowed()`
+2. `child_main()` checks `transport_fix_allowed` before driver-fd acquisition,
+   so even an inherited `[ksu_driver]` descriptor cannot bypass the marker;
+3. the same gate dominates `grant_root()`, and the native layer never derives
+   or promotes the flag from fd availability;
+4. `DfrSoftRebootReceiver` derives it from `PostRootStatus.transportFixAllowed()`
    *before* building the transport, and passes it in.
 
-`DFR_SU_STEP_SUPERCALL_GATED` is a step of its own for 3.7's reason: "this task
-holds no driver fd" and "we were not permitted to ask for one" send the next
-physical run to different places, and a log that collapses them sends it
-nowhere. Whoever removes the call again replaces this guard with one that
+`DFR_SU_STEP_TRANSPORT_FIX_GATED` is a step of its own for 3.7's reason: "the
+paired transport/grant predicate was not authorised" and "no driver fd was
+obtained after an authorised request" send the next physical run to different
+places. Whoever removes the call again replaces this guard with one that
 proves its absence — the exchange runs in both directions, and never to
 nothing.
 
@@ -430,8 +429,9 @@ took the device down, and nothing in the app could say why.
 **And what made it knowable in the end was evidence, not reasoning.** Two things
 paid off, and both belong in the next investigation:
 
-- `/data/system/dfreroot-softreboot-lock`, written before the daemon is ever
-  invoked, proved by its absence that ksud had not run. Reasoning from an
+- `/data/system/dfreroot-softreboot-lock`, written as `phase=CLAIMED` before the
+  daemon is ever invoked, proves only that the one attempt was spent — never
+  that ksud ran. Its absence in the old run proved no durable claim was taken. Reasoning from an
   absence works once, which is why `AutoRootStore.traceSoftReboot()` now writes
   the positive record, fsync'd, before each privileged step — and a record that
   cannot be written is a refusal, not a logged inconvenience.

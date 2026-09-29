@@ -63,8 +63,9 @@ object AutoRootStore {
     const val JOURNAL_PATH = "/data/system/dfreroot-autoroot-journal"
 
     /**
-     * Per-boot soft-reboot lock: a soft reboot was already dispatched in the boot
-     * it names.
+     * Per-boot soft-reboot lock: this boot's one lifecycle attempt was claimed.
+     * It does not claim that ksud received the command; execution evidence lives
+     * in the separate soft-reboot trace.
      *
      * Separate from the journal on purpose. The journal answers "did the CHAIN run
      * in this boot", and a soft reboot must not be able to change that answer in
@@ -264,7 +265,7 @@ object AutoRootStore {
 
     fun softRebootLock(): String? = read(SOFT_REBOOT_LOCK_PATH)
 
-    /** Breadcrumb for a dispatch that may take userspace down with it. */
+    /** Breadcrumb for an attempt that may take userspace down with it. */
     const val SOFT_REBOOT_TRACE_PATH = "/data/system/dfreroot-softreboot-trace"
 
     /**
@@ -300,7 +301,7 @@ object AutoRootStore {
     fun softRebootTrace(): String? = read(SOFT_REBOOT_TRACE_PATH)
 
     /**
-     * Claim this boot's single soft-reboot dispatch, exclusively.
+     * Claim/spend this boot's single soft-reboot attempt, exclusively.
      *
      * Written BEFORE ksud is invoked, because a lock written afterwards would not
      * be there to stop the second tap - and the second tap is the one that tears
@@ -356,7 +357,12 @@ object AutoRootStore {
                 Log.e(TAG, "[DFR][SOFT_REBOOT] cannot chmod the lock", t)
             }
             FileOutputStream(target).use { out ->
-                out.write(SoftRebootPolicy.formatLock(bootId, System.currentTimeMillis())
+                val claimedAtMs = try {
+                    System.currentTimeMillis()
+                } catch (t: Throwable) {
+                    -1L
+                }
+                out.write(SoftRebootPolicy.formatLock(bootId, claimedAtMs)
                     .toByteArray())
                 out.flush()
                 out.fd.sync()

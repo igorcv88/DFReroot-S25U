@@ -1,5 +1,21 @@
 # Early Boot / Pre-Zygote — avaliação inicial (2026-09-29)
 
+> **Atualização pré-release.** Esta avaliação pre-zygote continua sendo NO-GO,
+> mas a investigação de um gatilho *pós-system_server e anterior a
+> LOCKED_BOOT_COMPLETED* avançou. Jobs de outros componentes foram observados
+> nessa janela, portanto
+> `JOBSCHEDULER_CAN_DISPATCH_PRE_LOCKED_BOOT=PHYSICAL_PASS`. Isso não prova a
+> elegibilidade do DFR: `DFR_PERSISTED_JOB_EARLY_CALLBACK=UNVERIFIED` e
+> `DFR_JOB_STAGEHOP_READY=UNVERIFIED`.
+>
+> A próxima APK contém somente um experimento observacional explicitamente
+> armado: `DfrEarlyBootJobService`, persisted/direct-boot, one-shot e incapaz de
+> executar Auto Root, DirtyFrag, StageHop dispatch, transporte root ou soft
+> reboot. O callback grava marcador atômico com identidade real do processo e
+> resolve, sem invocar, ProcessRecord, IApplicationThread e
+> `scheduleReceiver/12`. Um disparo no mesmo boot de arming é registrado como
+> `EARLY_JOB_FIRED_SAME_BOOT` e nunca promovido a PASS.
+
 ## Escopo e decisão
 
 Esta rodada é uma revisão documental do `main` de `igorcv88/DFReroot-S25U`. Não houve acesso ao Galaxy S25 Ultra, captura de um full boot, inventário do firmware em execução ou ensaio físico. Por isso, nenhum horário, daemon candidato, capability observada ou vetor de execução anterior ao zygote é declarado como provado.

@@ -71,7 +71,7 @@ static void sanitize(char *s)
 JNIEXPORT jobjectArray JNICALL
 Java_com_polygraphene_df_reroot_RootTransport_nativeRunRootShell(
     JNIEnv *env, jobject thiz, jstring j_comm, jstring j_command,
-    jlong timeout_ms, jboolean supercall_allowed)
+    jlong timeout_ms, jboolean transport_fix_allowed)
 {
     struct dfr_su_result res;
     char out[DFR_SU_OUT_CAP];
@@ -103,7 +103,7 @@ Java_com_polygraphene_df_reroot_RootTransport_nativeRunRootShell(
 
     (void)dfr_su_spawn(&dfr_su_real_ops, comm, argv, NULL, (long)timeout_ms,
                        1 /* a hung probe shell is housekeeping */,
-                       supercall_allowed == JNI_TRUE, out, sizeof(out), &res);
+                       transport_fix_allowed == JNI_TRUE, out, sizeof(out), &res);
     sanitize(out);
     packed = pack(env, &res, out);
 
@@ -116,7 +116,7 @@ JNIEXPORT jobjectArray JNICALL
 Java_com_polygraphene_df_reroot_RootTransport_nativeExecPinnedDaemon(
     JNIEnv *env, jobject thiz, jstring j_comm, jstring j_path,
     jstring j_pinned, jstring j_arg, jlong timeout_ms,
-    jboolean supercall_allowed)
+    jboolean transport_fix_allowed)
 {
     struct dfr_su_result res;
     char out[DFR_SU_OUT_CAP];
@@ -149,7 +149,7 @@ Java_com_polygraphene_df_reroot_RootTransport_nativeExecPinnedDaemon(
          */
         (void)dfr_su_spawn(&dfr_su_real_ops, comm, argv, pinned,
                            (long)timeout_ms, 0,
-                           supercall_allowed == JNI_TRUE, out, sizeof(out),
+                           transport_fix_allowed == JNI_TRUE, out, sizeof(out),
                            &res);
         sanitize(out);
         packed = pack(env, &res, out);

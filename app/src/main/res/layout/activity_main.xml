@@ -91,6 +91,21 @@
         android:textSize="11sp"
         android:textColor="@color/textSecondary" />
 
+    <Button
+        android:id="@+id/btnArmEarlyBootProbe"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="@string/arm_early_boot_probe" />
+
+    <TextView
+        android:id="@+id/earlyBootProbeState"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/early_boot_probe_not_armed"
+        android:textSize="11sp"
+        android:textColor="@color/textSecondary" />
+
     <ScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"

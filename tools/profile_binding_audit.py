@@ -753,9 +753,11 @@ def audit():
     # The boot window must be measured locally at service entry, not read from
     # the caller's Intent and not resampled on each readiness poll.
     svc_code = code_only(autoroot_service_src)
-    if "val serviceStartMs = SystemClock.elapsedRealtime()" not in svc_code \
+    if "val serviceStartMs = monotonicNow()" not in svc_code \
             or "broadcastUptimeMs = serviceStartMs" not in svc_code \
-            or "q.broadcastUptimeMs = broadcastUptimeMs" not in svc_code:
+            or "q.broadcastUptimeMs = broadcastUptimeMs" not in svc_code \
+            or "SystemClock.elapsedRealtime()" not in svc_code \
+            or "-1L" not in svc_code:
         fail("DfrAutoRootService must pass its own service-entry monotonic time "
              "to the boot-window policy; an Intent extra is telemetry only")
     # ...and the assertion above only proves the GOOD assignment is present. A
@@ -805,6 +807,16 @@ def audit():
                  % forbidden)
     if "ACTION_BOOT_COMPLETED" not in boot_receiver_src:
         fail("DfrBootReceiver no longer compares the broadcast action")
+    receiver_code = code_only(boot_receiver_src)
+    if "SystemClock.elapsedRealtime()" not in receiver_code \
+            or "receiver monotonic clock unavailable" not in receiver_code \
+            or "-1L" not in receiver_code:
+        fail("DfrBootReceiver no longer maps a failed monotonic sample to -1 "
+             "telemetry; an exception must not escape system_server")
+    if "private fun monotonicNow(): Long = try" not in svc_code \
+            or "monotonic clock unavailable" not in svc_code:
+        fail("DfrAutoRootService no longer maps clock failures to the refusing "
+             "-1 policy input")
     # The receiver must gate on the CLASSIFIED verdict and log it. A boolean here
     # is what made an observed refusal useless as evidence: one line stood for an
     # absent record, an unreadable one, a version bump, a changed ksud digest, a
@@ -947,7 +959,7 @@ def audit():
              "drift apart")
     for signal in ("requestBootId.equals(in.currentBootId)",
                    "pinned.equals(actual)",
-                   "PHASE_DISPATCHED"):
+                   "PHASE_CLAIMED"):
         if signal not in soft_policy_code:
             fail("SoftRebootPolicy no longer enforces %r" % signal)
     # The binary is chosen by digest, never by path: /data/adb/ksud was observed
@@ -1029,12 +1041,10 @@ def audit():
     # Four properties, because the call is one edit away from being unguarded
     # if any one of them lapses:
     #   1. exactly one shipped source may name the supercall at all;
-    #   2. in that file the name appears only under the supercall_allowed
-    #      branch - never on a path a missing fd can reach on its own, which is
-    #      the reasoning that panicked the device;
-    #   3. the flag is threaded, not decided: no layer below the caller may
-    #      compute it, and the ops signature must carry it;
-    #   4. the caller derives it from PostRootStatus.supercallAllowed() on a
+    #   2. transport_fix_allowed is checked before driver-fd acquisition AND
+    #      grant_root, so an inherited fd cannot bypass the marker;
+    #   3. the flag is threaded, not decided below the caller;
+    #   4. the caller derives it from PostRootStatus.transportFixAllowed() on a
     #      verdict for the current boot.
     SUPERCALL_TOKENS = ("__NR_reboot", "SYS_reboot", "0xdeadbeef", "0xcafebabe")
     SUPERCALL_OWNER = "dfr_su_core.c"
@@ -1071,34 +1081,27 @@ def audit():
         fail("%s is missing; the supercall gate has no owner to prove"
              % SUPERCALL_OWNER)
     else:
-        # The ops entry must carry the flag. A one-argument driver_fd is a
-        # driver_fd that decides for itself.
         header = supercall_header_code or ""
-        if "int (*driver_fd)(int *fd_out, int supercall_allowed);" not in header:
-            fail("struct dfr_su_ops.driver_fd no longer takes "
-                 "supercall_allowed; the gate would then be decided in the one "
-                 "layer that cannot read the evidence (AGENTS.md 3.6.1)")
-        if "DFR_SU_STEP_SUPERCALL_GATED" not in header:
-            fail("DFR_SU_STEP_SUPERCALL_GATED is gone; a withheld supercall "
-                 "would then be indistinguishable from a kernel refusal "
-                 "(AGENTS.md 3.7)")
+        if "int (*driver_fd)(int *fd_out, struct dfr_su_transport_diag *diag);" \
+                not in header:
+            fail("struct dfr_su_ops.driver_fd lost the independently reported "
+                 "transport diagnostics")
+        if "DFR_SU_STEP_TRANSPORT_FIX_GATED" not in header:
+            fail("DFR_SU_STEP_TRANSPORT_FIX_GATED is gone; marker refusal would "
+                 "be indistinguishable from driver acquisition failure")
 
         # The call site itself. Everything from the refusing branch to the
         # syscall must be one unbroken sequence, so the name can only be
         # reached with the flag set.
-        gate = supercall_owner_code.find("if (!supercall_allowed) {")
+        gate = supercall_owner_code.find("if (!transport_fix_allowed) {")
         call = supercall_owner_code.find("syscall(__NR_reboot")
-        scan = supercall_owner_code.find("real_scan_driver_fd(fd_out) == 0")
-        if gate < 0 or call < 0 or scan < 0:
-            fail("%s no longer has the scan-then-gate-then-supercall shape; "
-                 "the call must be unreachable without the flag"
+        acquire = supercall_owner_code.find("int dfr_acquire_driver_fd(")
+        driver = supercall_owner_code.find("ops->driver_fd(&driver_fd, &diag)")
+        grant = supercall_owner_code.find("ops->grant_root(driver_fd)")
+        if min(gate, call, acquire, driver, grant) < 0 or not (gate < driver < grant):
+            fail("%s no longer gates the complete driver-fd/grant path; an "
+                 "inherited [ksu_driver] fd must not bypass transport_fix"
                  % SUPERCALL_OWNER)
-        elif not (scan < gate < call):
-            fail("%s issues the supercall outside the supercall_allowed "
-                 "branch, or before the scan. 'the fd was missing' is not a "
-                 "second condition that can stand in for the marker - that is "
-                 "exactly the reasoning that panicked this device "
-                 "(AGENTS.md 3.6.1)" % SUPERCALL_OWNER)
         if supercall_owner_code.count("syscall(__NR_reboot") != 1:
             fail("%s names the supercall more than once; only the gated call "
                  "site may exist" % SUPERCALL_OWNER)
@@ -1110,24 +1113,28 @@ def audit():
         # one token (AGENTS.md 3.7) and points the next physical run at the
         # wrong question. This path cannot be reached from a host test - the
         # syscall is real - so it is asserted statically (AGENTS.md 5).
-        elif call >= 0:
-            after_call = supercall_owner_code[call:]
-            rescan = after_call.find("real_scan_driver_fd(fd_out) == 0")
-            if rescan < 0:
+        if acquire >= 0:
+            acquire_end = supercall_owner_code.find(
+                "static const struct dfr_driver_fd_ops", acquire)
+            acquire_code = supercall_owner_code[acquire:acquire_end]
+            call_in_acquire = acquire_code.find("rc = ops->supercall(&fd)")
+            rescan = acquire_code.find("if (ops->scan(fd_out) == 0)",
+                                       call_in_acquire)
+            if call_in_acquire < 0 or rescan < 0:
                 fail("%s does not re-scan /proc/self/fd after the supercall; "
                      "a returned success is not evidence the fd exists "
                      "(AGENTS.md 3.5)" % SUPERCALL_OWNER)
-            elif "return -1;" in after_call[:rescan]:
+            elif "return -1;" in acquire_code[call_in_acquire:rescan]:
                 fail("%s returns before re-scanning when the supercall fails. "
                      "The install is queued as task_work and the real syscall "
                      "runs after the handler, so its failure does not mean no "
                      "fd was installed - observe first, decide after "
                      "(AGENTS.md 3.7)" % SUPERCALL_OWNER)
         # Nothing in the native layer may synthesise the flag.
-        for bad in ("supercall_allowed = 1", "supercall_allowed = true",
-                    "supercall_allowed || ", "|| supercall_allowed"):
+        for bad in ("transport_fix_allowed = 1", "transport_fix_allowed = true",
+                    "transport_fix_allowed || ", "|| transport_fix_allowed"):
             if bad in supercall_owner_code:
-                fail("%s derives supercall_allowed (%r) instead of taking it "
+                fail("%s derives transport_fix_allowed (%r) instead of taking it "
                      "as a parameter; the evidence lives in a record this "
                      "layer cannot read (AGENTS.md 3.6.1)"
                      % (SUPERCALL_OWNER, bad))
@@ -1136,17 +1143,17 @@ def audit():
     # needs an Android runtime cannot be unit-tested here, so the invoked shape
     # is asserted statically (AGENTS.md 5).
     transport_kt_code = code_only(dfr_source("RootTransport.kt"))
-    if "fun prepare(context: Context, supercallAllowed: Boolean)" not in \
+    if "fun prepare(context: Context, transportFixAllowed: Boolean)" not in \
             transport_kt_code:
-        fail("RootTransport.prepare no longer takes supercallAllowed; a "
+        fail("RootTransport.prepare no longer takes transportFixAllowed; a "
              "default here would be a decision taken without the evidence "
              "AGENTS.md 3.6.1 requires")
-    derives_gate = "PostRootStatus.supercallAllowed(" in soft_receiver_code
+    derives_gate = "PostRootStatus.transportFixAllowed(" in soft_receiver_code
     if not derives_gate:
         fail("DfrSoftRebootReceiver no longer derives the supercall gate from "
-             "PostRootStatus.supercallAllowed(); the driver-fd supercall must "
+             "PostRootStatus.transportFixAllowed(); the grant path must "
              "not be issued on any weaker evidence (AGENTS.md 3.6.1)")
-    if "RootTransport.prepare(context, supercallAllowed)" not in \
+    if "RootTransport.prepare(context, transportFixAllowed)" not in \
             soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer passes the derived gate into the "
              "transport")
@@ -1162,7 +1169,8 @@ def audit():
     for signal in ('DFR_KSU_DRIVER_LINK "[ksu_driver]"',
                    '__NR_getdents64',
                    'DFR_KSU_IOCTL_GRANT_ROOT 0x4b01u',
-                   'ops->current_uid() != 0',
+                   'uid = ops->current_uid()',
+                   'if (uid != 0)',
                    'DFR_SU_STEP_NOT_ROOT',
                    'dfr_verified_execveat(argv[0], pinned_hex'):
         if signal not in su_core_code:
@@ -1172,9 +1180,11 @@ def audit():
     # credential is checked, before the namespace switch that needs it, and
     # before either exec - and the check must come before the execs too, because
     # a returned success is not evidence of root (AGENTS.md 3.5).
-    order = ("ops->driver_fd(&driver_fd, supercall_allowed)",
+    order = ("if (!transport_fix_allowed)",
+             "ops->driver_fd(&driver_fd, &diag)",
              "ops->grant_root(driver_fd)",
-             "ops->current_uid() != 0", "ops->enter_init_mnt_ns()",
+             "uid = ops->current_uid()", "if (uid != 0)",
+             "ops->enter_init_mnt_ns()",
              "dfr_verified_execveat(argv[0], pinned_hex", "execv(argv[0], argv)")
     positions = [su_core_code.find(signal) for signal in order]
     if any(at < 0 for at in positions):
@@ -1232,11 +1242,11 @@ def audit():
     if "SoftRebootPolicy.precheck(inputs)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer runs the unprivileged precheck first; a "
              "stale notification would ask for a root shell before being refused")
-    if "RootTransport.prepare(context, supercallAllowed)" not in \
+    if "RootTransport.prepare(context, transportFixAllowed)" not in \
             soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer prepares the pinned transport")
     elif soft_receiver_code.index("SoftRebootPolicy.precheck(inputs)") > \
-            soft_receiver_code.index("RootTransport.prepare(context, supercallAllowed)"):
+            soft_receiver_code.index("RootTransport.prepare(context, transportFixAllowed)"):
         fail("DfrSoftRebootReceiver asks for a root shell before the unprivileged "
              "precheck has had a chance to refuse")
     # The gate must be derived BEFORE the transport is built with it. Deriving
@@ -1245,9 +1255,9 @@ def audit():
     # and indexing for it here would raise instead of producing a verdict - an
     # audit that crashes is an audit that gates nothing.
     elif derives_gate and \
-            soft_receiver_code.index("PostRootStatus.supercallAllowed(") > \
+            soft_receiver_code.index("PostRootStatus.transportFixAllowed(") > \
             soft_receiver_code.index(
-                "RootTransport.prepare(context, supercallAllowed)"):
+                "RootTransport.prepare(context, transportFixAllowed)"):
         fail("DfrSoftRebootReceiver builds the transport before deriving the "
              "supercall gate")
     # Keep transport creation, helper identity drift and a started-but-unprivileged
@@ -1283,9 +1293,15 @@ def audit():
     # compare-and-set is what serialises them; the exclusive on-disk create covers
     # the other case the record is for, a process restarted within the same boot.
     # Neither alone closes the race the lock exists for.
-    if "dispatchGuard.compareAndSet(false, true)" not in soft_receiver_code:
+    if "val lease = dispatchGuard.tryAcquire()" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer serialises concurrent taps in-process; "
              "two threads could both pass the policy and both dispatch a teardown")
+    claim_at = soft_receiver_code.find("AutoRootStore.claimSoftReboot(bootId)")
+    durable_at = soft_receiver_code.find("lease.markDurableClaimed()")
+    close_at = soft_receiver_code.find("lease.close()")
+    if min(claim_at, durable_at, close_at) < 0 or not (claim_at < durable_at < close_at):
+        fail("DfrSoftRebootReceiver no longer releases its lease only before the "
+             "durable claim boundary")
     store_claim = code_only(autoroot_store_src)
     if "var claimed = target.createNewFile()" not in store_claim \
             or "claimed = target.delete() && target.createNewFile()" not in store_claim \
@@ -1348,6 +1364,16 @@ def audit():
              "daemonising path and when it skips the operation on a UAPI mismatch")
     if "/data/system/dfreroot-softreboot-lock" not in autoroot_store_src:
         fail("AutoRootStore no longer keeps the per-boot soft-reboot lock")
+    if 'PHASE_CLAIMED = "CLAIMED"' not in soft_policy_code \
+            or "claimed_at_ms" not in soft_policy_code \
+            or "PHASE_DISPATCHED" in soft_policy_code:
+        fail("the soft-reboot lock must say CLAIMED/SPENT, not imply that ksud "
+             "already received the command")
+    for signal in ("FD_SOURCE=", "SUPERCALL_RC=", "SUPERCALL_ERRNO=",
+                   "GRANT_RESULT=PASS", "UID_AFTER_GRANT=",
+                   "INIT_MNT_NS=PASS", "EXEC_HANDOFF=ENTER"):
+        if signal not in su_core_code:
+            fail("the child transport lost physical diagnostic %r" % signal)
     rcv2 = re.search(r"<receiver[^>]*DfrSoftRebootReceiver[^>]*/?>", manifest_code)
     if not rcv2:
         fail("DfrSoftRebootReceiver is not declared in the manifest")
@@ -1356,6 +1382,53 @@ def audit():
              "able to ask for a soft reboot")
     else:
         autoroot["soft_reboot_receiver_exported"] = "false"
+
+    # Observation-only persisted early-job experiment. The scheduler binding is
+    # exported under the signature BIND_JOB_SERVICE permission; the service may
+    # inspect readiness but may never reach any destructive/root entry point.
+    early_job_src = dfr_source("DfrEarlyBootJobService.kt")
+    early_arm_src = dfr_source("DfrEarlyBootProbe.kt")
+    stage_hop_src = dfr_source("StageHop.kt")
+    job_service = re.search(
+        r"<service[^>]*DfrEarlyBootJobService[^>]*/>", manifest_code, flags=re.S)
+    if not job_service:
+        fail("DfrEarlyBootJobService is not declared in the manifest")
+    else:
+        declaration = job_service.group(0)
+        for required in ('android:permission="android.permission.BIND_JOB_SERVICE"',
+                         'android:directBootAware="true"',
+                         'android:exported="true"'):
+            if required not in declaration:
+                fail("DfrEarlyBootJobService manifest boundary is missing %s" % required)
+    for forbidden in ("DfrRootCoordinator", "DirtyFrag", "hopToNetworkStack",
+                      "RootTransport", "soft-reboot", "APPLY_MODULES",
+                      "transact(5"):
+        if forbidden in code_only(early_job_src):
+            fail("DfrEarlyBootJobService references destructive/root entry point %r"
+                 % forbidden)
+    for required in ("setPersisted(true)", "setMinimumLatency(MINIMUM_LATENCY_MS)",
+                     "forNamespace(NAMESPACE)", "getPendingJob(JOB_ID)",
+                     "existing.service != component"):
+        if required not in code_only(early_arm_src):
+                fail("early-job arming lost identity/persistence guard %r" % required)
+    for required in ("it.jobId == params.jobId", "it.jobId == DfrEarlyBootProbe.JOB_ID",
+                     "it.namespace == expectedNamespace"):
+        if required not in code_only(early_job_src):
+            fail("early-job callback accepts an unbound arm record: missing %r"
+                 % required)
+    if "EARLY_JOB_LOCKED_BOOT_PENDING" not in dfr_source("EarlyBootProbePolicy.java") \
+            or "EarlyBootProbeStore.finalizeLockedBoot(bootId, arrivalMs)" \
+                not in boot_receiver_src:
+        fail("an absent locked-boot marker can be promoted without a later "
+             "monotonic timestamp comparison")
+    if ".invoke(" in code_only(stage_hop_src)[
+                code_only(stage_hop_src).find("fun probeReadiness"):
+                code_only(stage_hop_src).find("fun hopToNetworkStack")]:
+        fail("the early-job readiness probe invokes scheduleReceiver instead of "
+             "only resolving it")
+    if "return false" not in code_only(early_job_src) \
+            or "scheduler.schedule(job)" not in code_only(early_arm_src):
+        fail("the early-job probe is no longer explicit, one-shot owner arming")
 
     # --- Kotlin that no compiler in this environment will ever see -----------
     # There is no Kotlin compiler, SDK or Gradle here, so the signed release run is
@@ -1376,7 +1449,9 @@ def audit():
     for name in ("AutoRootStore.kt", "DfrAutoRootService.kt", "DfrRootCoordinator.kt",
                  "DfrSoftRebootReceiver.kt", "RootNotifier.kt", "RootTransport.kt",
                  "MainActivity.kt", "KsudStage.kt", "StageHop.kt", "Diagnostics.kt",
-                 "StageReceiver.kt", "DfrBootReceiver.kt", "TerminalActivity.kt"):
+                 "StageReceiver.kt", "DfrBootReceiver.kt", "TerminalActivity.kt",
+                 "DfrEarlyBootProbe.kt", "DfrEarlyBootJobService.kt",
+                 "EarlyBootProbeStore.kt"):
         try:
             kotlin_bodies[name] = dfr_source(name)
         except Exception:

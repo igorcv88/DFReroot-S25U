@@ -5,19 +5,23 @@ what is physically proven now, what still needs to be implemented, and the
 acceptance criteria for the next signed build. If this file disagrees with
 `docs/S25U_ZZIC_COMPATIBILITY.md` about evidence, the compatibility dossier wins.
 
-> **Open, and where to start: the twelfth run's Apply Modules refusal.** Root
-> itself succeeded; the soft-reboot transport refused with
-> `DFR_SU_STEP=DRIVER_FD errno=1`. That verdict proves the marker gate *opened*
-> — the whole `transport_fix` pipeline works end to end — and that the
-> supercall returned `EPERM`. It does **not** prove that no fd was installed:
-> `reboot_handler_pre()` is a pre-handler that queues the install and lets the
-> real `sys_reboot` run, so the syscall's verdict says nothing about it, and
-> the build that produced this token never looked afterwards. Those are two
-> facts (`AGENTS.md §3.7`) and this line collapsed them until 2026-09-29.
-> The cause is **unknown and must not be guessed**; three earlier attributions
-> in this exact spot were wrong (`AGENTS.md §3.6.1`).
-> See `docs/INVESTIGATION-SUPERCALL-EPERM.md` for the inference, the candidate
-> causes, and the ordered first moves.
+> **Open, and where to start: one release, two physical discriminators.** The
+> current boot `30e61b44-267d-4f60-bb64-0a758f2eeedf` is verified
+> `POST_ROOT_COMPLETE`, Enforcing, UAPI 2, and carries
+> `transport_fix=kdp-cred-1`; both daemon candidates match the pinned digest.
+> The last Apply Modules tap stopped at `PROBE_RETURNED rc=-1`, wrote no lock,
+> and reported `DRIVER_FD errno=1`. It proved `SUPERCALL_GATE_OPEN=CONFIRMED`
+> and `SUPERCALL_SYSCALL_RESULT=REFUSED_EPERM`, while
+> `DRIVER_FD_INSTALL_ON_THIS_RUN=UNDETERMINED`. The pre-handler can install the
+> fd and still let real `sys_reboot` return EPERM, so those facts remain separate.
+>
+> This branch prepares the conclusive rerun: the post-call scan remains
+> unconditional and now records `FD_SOURCE`, `SUPERCALL_RC`, and
+> `SUPERCALL_ERRNO`; the `transport_fix` gate dominates both inherited-fd and
+> grant paths; the per-process guard is retryable only before the durable
+> `phase=CLAIMED` lock. The same APK adds an explicitly armed, persisted,
+> marker-only JobService plus a read-only StageHop readiness probe. It cannot
+> root, hop, soft-reboot, or reschedule itself.
 
 ## Current state
 
@@ -48,6 +52,70 @@ nothing at all).
 
 Version numbers are no longer part of the state to hand over: nothing in the
 tree names one (see *The version is derived per release run*, below).
+
+### Early-job probe in the next APK
+
+`JOBSCHEDULER_CAN_DISPATCH_PRE_LOCKED_BOOT=PHYSICAL_PASS`: the latest boot
+capture contains other components' JobScheduler callbacks before boot animation
+exit / `LOCKED_BOOT_COMPLETED`. This proves scheduler timing, not DFR eligibility.
+The pre-probe package remains `/data/app`, shared uid 1000, `PRIVILEGED`,
+`PARTIALLY_DIRECT_BOOT_AWARE`, not `FLAG_SYSTEM`, with
+`RECEIVE_BOOT_COMPLETED` granted. `/data/system/job/jobs_1000.xml` exists as
+ABX/binary XML, contains many uid-1000 jobs, and contained no DFR component.
+
+This release adds `DfrEarlyBootJobService`, exported for the standard scheduler
+bind under signature permission `BIND_JOB_SERVICE`, and direct-boot aware. It is
+observation-only. The owner must tap **Arm Early Boot Probe**; arming uses the
+API-34+ namespace `dfr-early-boot-probe`, job id `0x44465245`,
+`setPersisted(true)`, and a 15-second minimum latency. Start the full reboot
+within 10 seconds. AOSP JobStore persists the elapsed delay as an RTC earliest
+bound and restores it with `nowElapsed + max(storedRtc-nowWallclock, 0)`, so
+time spent shutting down and rebooting consumes the delay. If it fires before
+the reboot, the record says `EARLY_JOB_FIRED_SAME_BOOT`, finishes once, does
+not root, and does not reschedule.
+
+The callback atomically writes `/data/system/dfreroot-early-job-probe`, including
+pid/ppid/uid/euid/domain, boot and wall/elapsed times, boot-completed/unlocked
+state, and separate NetworkStack PID, AMS ProcessRecord, IApplicationThread and
+`scheduleReceiver/12` resolution. `StageHop.probeReadiness()` shares the lookup
+logic but never invokes `scheduleReceiver`.
+If the callback precedes the locked-boot marker it first records
+`EARLY_JOB_LOCKED_BOOT_PENDING`; `DfrBootReceiver` then compares both monotonic
+timestamps and atomically finalizes the record to
+`EARLY_JOB_PRE_LOCKED_BOOT`. A missing marker is therefore never promoted to
+PASS merely by absence.
+
+Until hardware answers, keep these exact states:
+
+```text
+DFR_PERSISTED_JOB_EARLY_CALLBACK=UNVERIFIED
+DFR_JOB_STAGEHOP_READY=UNVERIFIED
+```
+
+No JobService → Auto Root/DirtyFrag path and no automatic soft reboot exists in
+this release.
+
+### One-cycle physical acceptance sequence
+
+1. While the current rooted boot is still alive, install the new APK and tap
+   **Apply Modules (Soft Reboot)** once. Preserve the pre-tap boot id. Collect
+   `/data/system/dfreroot-softreboot-trace`, the lock, and `[DFR][SOFT_REBOOT]`
+   output. A useful success must show the transport-fix gate permitted, named
+   `FD_SOURCE`, raw supercall rc/errno, `GRANT_RESULT=PASS`,
+   `UID_AFTER_GRANT=0`, `INIT_MNT_NS=PASS`, pinned descriptor-bound handoff, and
+   either an observed dispatch or honestly `UNDETERMINED` timeout. If userspace
+   restarts, verify the same boot id, KernelSU, Enforcing, ReZygisk, LSPosed and
+   HMA. Do not run Auto Root again in that boot.
+2. After the framework/root session stabilizes, tap **Arm Early Boot Probe**.
+   Confirm the UI/log says job `0x44465245` (`1145459269`), namespace
+   `dfr-early-boot-probe`, `schedule_result=1`, `persisted=1`, then confirm it is
+   pending in `dumpsys jobscheduler`. Start one **FULL reboot within 10 seconds**.
+3. After boot, retrieve `/data/system/dfreroot-early-job-probe`,
+   `/data/system/dfreroot-locked-boot-marker`, `[DFR][EARLY_JOB]` logcat,
+   `dumpsys jobscheduler`, boot id, and bootanim/SystemUI/locked-boot timing.
+   Promote DFR timing only for `EARLY_JOB_FIRED_NEW_BOOT` plus finalized
+   `EARLY_JOB_PRE_LOCKED_BOOT`; assess StageHop readiness only from all three
+   AMS/app-thread/method fields, never from PID alone.
 
 ## Implementation checkpoint — fail-closed closeout
 
@@ -224,13 +292,13 @@ The remaining sequence is:
    fix and publishes the marker (PR #4, with PR #5 making that patch
    applicable, atomic and self-verifying — #4 as merged refuses on every real
    tree). `PostRootStatus` accepts the marker (optional to parse, so the
-   previous pair keeps working) and exposes `supercallAllowed()`. And the
+   previous pair keeps working) and exposes `transportFixAllowed()`. And the
    native transport now issues the supercall behind that flag:
    `DfrSoftRebootReceiver` derives it, `RootTransport.prepare(context,
-   supercallAllowed)` carries it, `dfr_su_jni.c` marshals it, and
-   `dfr_su_core.c` scans `/proc/self/fd` first and refuses with `EPERM` —
-   surfaced as the distinct `DFR_SU_STEP=SUPERCALL_GATED` — when it is
-   withheld. `tools/profile_binding_audit.py` proves the gate instead of the
+   transportFixAllowed)` carries it, `dfr_su_jni.c` marshals it, and
+   `dfr_su_core.c` refuses before any fd acquisition or grant — surfaced as
+   `DFR_SU_STEP=TRANSPORT_FIX_GATED` — when it is withheld. An existing or
+   inherited `[ksu_driver]` fd is not a bypass. `tools/profile_binding_audit.py` proves the gate instead of the
    absence, and each of its four checks was mutation-verified.
    The daemon was never reached on the eleventh run, proven by the absent
    soft-reboot lock.
@@ -262,14 +330,12 @@ The remaining sequence is:
    that call returns `Ok`, and emits the marker only when that record names
    the current boot.
 
-   What is **not** yet true is that the device is running it. The pair
-   installed there is still the broken one, its post-root record carries no
-   marker, and until a boot completes the chain with the new daemon every tap
-   refuses at `DFR_SU_STEP=SUPERCALL_GATED` having asked the kernel nothing.
-   That is the gate working. The remaining sequence is: build and sign the
-   APKs (`release.yml`, one dispatch — AGENTS.md 6.1), install, run the chain
-   to establish root, and only then does a boot's record carry the marker and
-   a tap reach the supercall at all.
+   The device now physically runs the fixed pair. Its current same-boot record
+   carries `transport_fix=kdp-cred-1`, both `/data/adb/ksud` and
+   `/data/system/dfreroot-ksud` match the pinned bytes, and system_server had no
+   inherited `[ksu_driver]` at collection time. The remaining sequence is to
+   build/sign this corrected APK, install it without losing the current root
+   session, and tap Apply Modules once.
    `/data/system/dfreroot-softreboot-trace` records each phase before it runs,
    fsync'd, so a teardown can never again leave nothing to read. Do **not**
    grant uid 1000 in KernelSU Manager as a shortcut;

@@ -26,7 +26,12 @@ import android.util.Log
 class DfrBootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
-        val arrivalMs = SystemClock.elapsedRealtime()
+        val arrivalMs = try {
+            SystemClock.elapsedRealtime()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][AUTOROOT] receiver monotonic clock unavailable: $t")
+            -1L
+        }
         val action = intent?.action
         if (action != Intent.ACTION_BOOT_COMPLETED &&
             action != Intent.ACTION_LOCKED_BOOT_COMPLETED) {
@@ -35,6 +40,25 @@ class DfrBootReceiver : BroadcastReceiver() {
         }
         Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] receiver_arrival" +
             " action=$action elapsed_ms=$arrivalMs")
+        if (action == Intent.ACTION_LOCKED_BOOT_COMPLETED) {
+            val bootId = DfrRootCoordinator.readBootId()
+            val failure = if (bootId.isEmpty()) {
+                "boot_id unavailable"
+            } else {
+                EarlyBootProbeStore.recordLockedBoot(bootId, arrivalMs)
+            }
+            if (failure != null) {
+                Log.e(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=FAIL $failure")
+            } else {
+                val finalizeFailure =
+                    EarlyBootProbeStore.finalizeLockedBoot(bootId, arrivalMs)
+                if (finalizeFailure != null) {
+                    Log.e(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_FINALIZE=FAIL $finalizeFailure")
+                }
+                Log.i(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=PASS" +
+                    " boot_id=$bootId elapsed_ms=$arrivalMs")
+            }
+        }
         /*
          * LOCKED_BOOT_COMPLETED arrives before the user unlocks; BOOT_COMPLETED
          * after. Both are accepted because the state this needs lives in

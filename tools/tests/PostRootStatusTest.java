@@ -49,7 +49,7 @@ public final class PostRootStatusTest {
          * correctly, so a record without it must stay complete - requiring it
          * here would refuse a good post-root state and break the chain on every
          * device that has not rebuilt. What it gates is one question, asked by
-         * supercallAllowed(), and there the default is no.
+         * transportFixAllowed(), and there the default is no.
          */
         String fixed = record(boot) + "transport_fix="
                 + PostRootStatus.EXPECTED_TRANSPORT_FIX + "\n";
@@ -62,21 +62,22 @@ public final class PostRootStatusTest {
                         && PostRootStatus.evaluate(record(boot), boot, 1).transportFix == null,
                 "a record from the previous pair is complete with no marker");
 
-        expect(PostRootStatus.supercallAllowed(PostRootStatus.evaluate(fixed, boot, 1)),
+        expect(PostRootStatus.transportFixAllowed(PostRootStatus.evaluate(fixed, boot, 1)),
                 "the supercall is allowed only with the exact marker");
-        expect(!PostRootStatus.supercallAllowed(
+        expect(!PostRootStatus.transportFixAllowed(
                         PostRootStatus.evaluate(record(boot), boot, 1)),
                 "no marker means no supercall");
-        expect(!PostRootStatus.supercallAllowed(PostRootStatus.evaluate(
+        expect(!PostRootStatus.transportFixAllowed(PostRootStatus.evaluate(
                         record(boot) + "transport_fix=kdp-cred-0\n", boot, 1)),
                 "an unknown marker means no supercall");
-        expect(!PostRootStatus.supercallAllowed(PostRootStatus.evaluate(
+        expect(!PostRootStatus.transportFixAllowed(PostRootStatus.evaluate(
                         fixed, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 1)),
                 "the marker from another boot means no supercall");
-        expect(!PostRootStatus.supercallAllowed(
+        expect(!PostRootStatus.transportFixAllowed(
                         PostRootStatus.evaluate(fixed, boot, 0)),
                 "a marker with SELinux not enforcing means no supercall");
-        expect(!PostRootStatus.supercallAllowed(null), "a null verdict means no supercall");
+        expect(!PostRootStatus.transportFixAllowed(null),
+                "a null verdict means no transport/grant permission");
         refused(record(boot) + "transport_fix=a\ntransport_fix=b\n", boot, 1,
                 "a duplicated marker is refused outright");
 

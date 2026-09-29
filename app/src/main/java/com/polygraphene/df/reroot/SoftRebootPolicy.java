@@ -62,11 +62,15 @@ import java.util.Set;
  */
 public final class SoftRebootPolicy {
 
-    /** Phase written to the per-boot lock once the request has been handed to ksud. */
-    public static final String PHASE_DISPATCHED = "DISPATCHED";
+    /** Phase written when this boot's one permitted attempt is claimed/spent. */
+    public static final String PHASE_CLAIMED = "CLAIMED";
 
     private static final Set<String> LOCK_KEYS =
+            Set.of("boot_id", "phase", "claimed_at_ms");
+    private static final Set<String> LEGACY_LOCK_KEYS =
             Set.of("boot_id", "phase", "dispatched_at_ms");
+    private static final Set<String> ALL_LOCK_KEYS =
+            Set.of("boot_id", "phase", "claimed_at_ms", "dispatched_at_ms");
 
     private SoftRebootPolicy() {}
 
@@ -92,7 +96,7 @@ public final class SoftRebootPolicy {
         public String requestBootId;
         public String postRootRecord;
         public int liveSelinux = -1;
-        /** null when nothing was dispatched in any boot; never "" for that. */
+        /** null when no attempt was claimed in any boot; never "" for that. */
         public String lockRecord;
         public String pinnedKsudSha256;
         /** In preference order. The first digest match wins; no match refuses. */
@@ -198,7 +202,7 @@ public final class SoftRebootPolicy {
                         + " dispatching a second one");
             }
             if (in.currentBootId.equals(lock.get("boot_id"))) {
-                return refuse("a soft reboot was already dispatched in this boot ("
+                return refuse("this boot's soft-reboot attempt is already claimed/spent ("
                         + lock.get("phase") + ")");
             }
             // A lock naming another boot is last boot's record and locks nothing.
@@ -250,17 +254,21 @@ public final class SoftRebootPolicy {
             int separator = line.indexOf('=');
             if (separator <= 0 || separator == line.length() - 1) return null;
             String key = line.substring(0, separator);
-            if (!LOCK_KEYS.contains(key)) return null;
+            if (!ALL_LOCK_KEYS.contains(key)) return null;
             if (values.putIfAbsent(key, line.substring(separator + 1)) != null) return null;
         }
-        if (!values.keySet().equals(LOCK_KEYS)) return null;
+        if (values.keySet().equals(LOCK_KEYS)) {
+            if (!PHASE_CLAIMED.equals(values.get("phase"))) return null;
+        } else if (!values.keySet().equals(LEGACY_LOCK_KEYS)) {
+            return null;
+        }
         return values;
     }
 
     /** The lock record, in the one format {@link #parse} accepts. */
-    public static String formatLock(String bootId, long dispatchedAtMs) {
+    public static String formatLock(String bootId, long claimedAtMs) {
         return "boot_id=" + bootId + "\n"
-                + "phase=" + PHASE_DISPATCHED + "\n"
-                + "dispatched_at_ms=" + dispatchedAtMs + "\n";
+                + "phase=" + PHASE_CLAIMED + "\n"
+                + "claimed_at_ms=" + claimedAtMs + "\n";
     }
 }
