@@ -73,7 +73,7 @@ public final class AutoRootPolicy {
     public static final String RECORD_UNREADABLE = "dfr_record_unreadable";
 
     /**
-     * How long after a kernel boot a boot broadcast may still start an attempt.
+     * How long after a kernel boot the Auto Root service may still start an attempt.
      *
      * This is a BOUND, not a proof. Android offers no signal that says "this
      * BOOT_COMPLETED belongs to a fresh kernel boot": a framework restart
@@ -131,10 +131,9 @@ public final class AutoRootPolicy {
         /** One of MARKER_PRESENT / MARKER_ABSENT / MARKER_UNKNOWN. */
         public int markerState = MARKER_UNKNOWN;
         /**
-         * Milliseconds since kernel boot when the boot broadcast ARRIVED, not
-         * when this poll runs: a readiness loop may span minutes, and the
-         * question is how close to the boot the trigger was. Negative means it
-         * could not be read, which refuses.
+         * Locally sampled milliseconds since kernel boot when the service
+         * STARTED, not when this poll runs. An Intent's receiver timestamp is
+         * telemetry only and cannot be used here. Negative refuses.
          */
         public long broadcastUptimeMs = -1;
         /** 1, 0, or -1 when /sys/fs/selinux/enforce could not be read. */
@@ -422,7 +421,8 @@ public final class AutoRootPolicy {
                     + " boot_id and is not one)");
         }
         /*
-         * How long the kernel has been up when the trigger arrived.
+         * How long the kernel has been up when the service started. This must be
+         * sampled locally, never accepted from an Intent extra.
          *
          * The two rules above only cover boots this code has stored something
          * about. A later boot in which nothing of ours ran leaves no record at
@@ -436,7 +436,7 @@ public final class AutoRootPolicy {
                     + " cannot be placed in its boot is refused");
         }
         if (in.broadcastUptimeMs > MAX_BOOT_WINDOW_MS) {
-            return refuse("the boot trigger arrived " + (in.broadcastUptimeMs / 1000)
+            return refuse("the Auto Root service started " + (in.broadcastUptimeMs / 1000)
                     + "s after kernel boot, past the " + (MAX_BOOT_WINDOW_MS / 1000)
                     + "s boot window; a framework restart re-broadcasts it and is not"
                     + " a full boot");
