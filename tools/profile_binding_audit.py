@@ -945,9 +945,9 @@ def audit():
     # A transport that reports one undifferentiated failure tells the next
     # physical run nothing about which boundary refused (AGENTS.md 3.7).
     # The magic supercall that asks the kernel for the driver fd rebooted this
-    # device instead of refusing, and had no handler to answer it anyway
-    # (CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y leaves the syscall dispatcher
-    # uninstalled). Rejected by mechanism, not by spelling: no source shipped in
+    # device instead of refusing. Its handler does exist - a kprobe on
+    # __arm64_sys_reboot - and returns 0, so the real Samsung syscall runs after
+    # it by design. Rejected by mechanism, not by spelling: no source shipped in
     # this app may name the reboot syscall at all, because a destructive probe
     # guarded by a condition is one edit away from being unguarded.
     # Every source the app ships, not just the two files that happened to hold

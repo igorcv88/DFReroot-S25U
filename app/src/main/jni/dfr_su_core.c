@@ -45,13 +45,19 @@ extern char **environ;
  * left none. So the teardown happened inside the probe, and the supercall was
  * the only privileged syscall the probe had gained.
  *
- * It also had no chance of working on this firmware. The paired module is
- * built with CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y, so ksu_patch_text() returns
- * -EOPNOTSUPP, the syscall dispatcher never installs, and the module falls back
- * to registering sucompat kprobes only - there is no supercall handler to
- * answer. The call therefore reached the real sys_reboot on a heavily patched
- * Samsung kernel, which is not a place to send an unrecognised magic on a
- * device someone depends on.
+ * A first version of this comment blamed a missing handler. The KernelSU
+ * source at the pinned SHA refutes that, and the truth is worse for the
+ * supercall rather than better: ksu_supercalls_init() registers a kprobe on
+ * __arm64_sys_reboot unconditionally, and reboot_handler_pre() checks only the
+ * two magics, queues the fd install as a task_work, and returns 0 - it does
+ * NOT suppress the syscall. The real, heavily patched Samsung
+ * __arm64_sys_reboot therefore runs afterwards BY DESIGN. KernelSU itself
+ * whitelists __NR_reboot in the task's seccomp cache only for the manager and
+ * for allowlisted uids, which this app is neither.
+ *
+ * So what rebooted the device is unexplained, not "an unhandled supercall";
+ * no pre-reboot log survives on this device to say more. The call stays out
+ * until someone can say why.
  *
  * So the scan stays and the supercall is gone. tools/profile_binding_audit.py
  * rejects its return by mechanism - no source shipped in this app may name

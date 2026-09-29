@@ -337,13 +337,26 @@ mode is worse than the thing it is diagnosing.
 The soft-reboot transport asked the kernel for KernelSU's driver descriptor with
 the magic supercall the pinned daemon uses,
 `syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)`. On this firmware it did
-not return an error: the device rebooted and root was lost. It never had a
-handler to answer it either — the paired module is built
-`CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y`, so `ksu_patch_text()` returns
-`-EOPNOTSUPP`, the syscall dispatcher never installs, and only sucompat kprobes
-are registered. The call reached a heavily patched Samsung `sys_reboot`.
+not return an error: the device rebooted and root was lost.
 
-So: **no source that ships inside this app may name the reboot syscall**, and
+An earlier version of this rule explained that by saying no handler existed. The
+KernelSU source at the pinned SHA refutes it, and the correction matters more
+than the rule's wording: `ksu_supercalls_init()` runs unconditionally from
+`kernelsu_init()` and registers a kprobe on `__arm64_sys_reboot`, so the handler
+was there. What it does is queue a `task_work` and `return 0` — it does **not**
+suppress the syscall, so the real, heavily patched Samsung `__arm64_sys_reboot`
+runs afterwards by design. KernelSU itself treats that syscall as one the caller
+normally may not make: `ksu_handle_setresuid()` whitelists `__NR_reboot` in the
+task's seccomp cache for the manager and for allowlisted uids only. This app is
+neither, so it was reaching for an interface outside its sanctioned caller set.
+
+What caused the reboot is still **unexplained**: no pre-reboot log survives on
+this device. What is established is that it happened, and that the daemon did
+not run.
+
+The ban stands on the observation, not on the explanation that was wrong: until
+someone can say why the device rebooted, the call stays out. **No source that
+ships inside this app may name the reboot syscall**, and
 `tools/profile_binding_audit.py` rejects it by mechanism rather than by
 spelling, exactly as it does for 3.6. "Only when the fd is missing" is not a
 safeguard; it is the condition under which the call was already made.

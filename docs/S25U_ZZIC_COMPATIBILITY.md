@@ -1981,11 +1981,27 @@ daemon's own bytes. The causal link is circumstantial — no kernel log survived
 but the cost asymmetry is not: every test of it costs a reboot and a root
 session.
 
-It could not have worked here in any case. The paired module is built
-`CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y`, so `ksu_patch_text()` returns
-`-EOPNOTSUPP`, the syscall dispatcher never installs, and the fallback path
-registers sucompat kprobes only. There is no supercall handler on this build to
-answer it, so the call reached the real, heavily patched Samsung `sys_reboot`.
+**That paragraph's original sequel was wrong, and is corrected here.** It said
+the call could not have worked because `CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y`
+leaves no supercall handler. Reading the KernelSU source at the pinned SHA
+(`932014ab…`, `kernel/supercall/supercall.c`) shows otherwise:
+
+- `ksu_supercalls_init()` is called unconditionally from `kernelsu_init()` and
+  registers a kprobe on `__arm64_sys_reboot`. It is independent of the syscall
+  dispatcher and of `NO_PATCH_TEXT`, so the handler **was** present;
+- `reboot_handler_pre()` performs **no permission check at all** — it compares
+  the two magics, queues a `task_work` that calls `ksu_install_fd()`, and
+  returns 0. So the driver fd is available to any caller, including a
+  `system_server` child;
+- returning 0 does not suppress the syscall, so the real Samsung
+  `__arm64_sys_reboot` runs afterwards **by design**, not for want of a handler;
+- KernelSU treats that syscall as one these callers normally may not make:
+  `ksu_handle_setresuid()` whitelists `__NR_reboot` in the task's seccomp cache
+  for the manager and for allowlisted uids only.
+
+So the cause of the reboot is **UNEXPLAINED**, not "an unhandled supercall". The
+removal stands on the observation alone: it happened, ksud did not run, and no
+pre-reboot log survives to say more.
 
 The supercall is removed, and AGENTS.md 3.6.1 now forbids naming the reboot
 syscall in any source that ships inside this app, enforced by mechanism.
@@ -2001,6 +2017,15 @@ the uid allowlist, not on the `allowed_for_su()` predicate the DFR patch
 extends. Allowlisting uid 1000 remains the wrong boundary: it is the shared
 platform uid.
 
-`SOFT_REBOOT_TRANSPORT` therefore stays `BLOCKED`, and the blocker is now
-precise and module-side: **the fd install has to accept the caller
-`allowed_for_su()` already accepts.** Nothing app-side closes it.
+**The module-side blocker stated here was also wrong.** It read: "the fd install
+has to accept the caller `allowed_for_su()` already accepts". It already does —
+the install is ungated, and `KSU_IOCTL_GRANT_ROOT` is gated by `allowed_for_su()`,
+which the DFR patch already extends to this caller. No module change is needed
+for either step.
+
+What is actually missing is a **non-destructive way to trigger the install**.
+The only trigger in the source is the magic reboot, which AGENTS.md 3.6.1 now
+forbids until the reboot is explained. `SOFT_REBOOT_TRANSPORT` therefore stays
+`BLOCKED` on that, and the shape of any module change is different from what was
+written here: not widening an authorization, but adding a trigger that does not
+fall through to `sys_reboot`.

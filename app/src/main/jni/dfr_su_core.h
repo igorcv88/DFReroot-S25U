@@ -33,18 +33,17 @@
  * is created before the daemon is ever invoked, and the boot that rebooted
  * left none, so nothing was executed. What the probe had gained was one
  * privileged syscall - the magic supercall that asks the kernel for the driver
- * fd - and this firmware has no handler for it: the paired module is built
- * CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y, so the syscall dispatcher never installs
- * and only sucompat kprobes are registered. That call is gone; see
- * dfr_su_core.c for the full reading and the rule that keeps it gone.
+ * fd. That call is gone; see dfr_su_core.c for what the KernelSU source
+ * actually says about it (the handler exists, and does not suppress the real
+ * syscall) and for the rule that keeps it out while the reboot is unexplained.
  *
- * What remains is the fd itself. The kernel installs one on the sucompat `su`
- * execve path, which its pre-filter gates on the uid allowlist rather than on
- * the predicate the DFR patch adds - and allowlisting uid 1000 is the wrong
- * boundary, since it is the shared platform uid. So today this transport scans
- * for an fd it will not find, refuses at DFR_SU_STEP_DRIVER_FD, and executes
- * nothing. Closing that is a module-side change: the fd install has to accept
- * the same caller allowed_for_su() already accepts.
+ * What remains is the fd itself, and the reason is narrower than it first
+ * looked. The install is not gated - reboot_handler_pre() checks only the two
+ * magics - and the grant ioctl is gated by allowed_for_su(), which the DFR
+ * patch already extends to this caller. Neither step needs a module change.
+ * What is missing is a way to TRIGGER the install that does not fall through
+ * to the real sys_reboot. So today this transport scans for an fd it will not
+ * find, refuses at DFR_SU_STEP_DRIVER_FD, and executes nothing.
  */
 #ifndef DFR_SU_CORE_H
 #define DFR_SU_CORE_H

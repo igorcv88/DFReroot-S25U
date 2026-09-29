@@ -179,18 +179,20 @@ The remaining sequence is:
    absent soft-reboot lock. The transport keeps the safe half of the daemon's
    own lookup (scan `/proc/self/fd` for `[ksu_driver]`), finds nothing on this
    firmware, and refuses at `DFR_SU_STEP_DRIVER_FD` without executing anything.
-   The blocker is now module-side and precise: the kernel installs that fd only
-   on the sucompat `su` execve path, whose Samsung pre-filter gates on the uid
-   allowlist rather than on `allowed_for_su()`. Nothing app-side closes it, and
-   allowlisting uid 1000 is not the remedy.
+   **Corrected after reading the KernelSU source at the pinned SHA:** the fd
+   install is *ungated* (`reboot_handler_pre()` checks only the two magics), and
+   the grant ioctl is gated by `allowed_for_su()`, which the DFR patch already
+   extends to this caller. No module change is needed to authorize either step.
+   What is missing is a trigger for the install that does not fall through to
+   the real `__arm64_sys_reboot`, which the existing one does by design.
    The client mechanics were read first-hand out of the pinned daemon's own
    unstripped bytes rather than guessed: the driver fd comes from
    `syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)` and the grant is
-   `ioctl(fd, _IO('K', 1))`. What those bytes cannot say is whether the KERNEL
-   gates the fd install by the same `allowed_for_su()` the DFR patch extends;
-   reading `kernel/supercall/*` at `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e`
-   (`KSU_REPO`/`KSU_TAG_SHA` in RMGLabs-Payloads
-   `.github/workflows/build-zzic-exact-port.yml`) would settle it offline.
+   `ioctl(fd, _IO('K', 1))`. That question — whether the kernel gates
+   the fd install — is settled: `kernel/supercall/supercall.c` at
+   `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e` (`KSU_REPO`/`KSU_TAG_SHA` in
+   RMGLabs-Payloads `.github/workflows/build-zzic-exact-port.yml`) shows it is
+   not gated at all.
    A tap is now safe and still refuses: it reports `DFR_SU_STEP=DRIVER_FD`, and
    `/data/system/dfreroot-softreboot-trace` records each phase before it runs,
    fsync'd, so a teardown can never again leave nothing to read. Do **not**
