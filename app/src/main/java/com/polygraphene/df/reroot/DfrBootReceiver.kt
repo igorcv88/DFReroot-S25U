@@ -52,7 +52,8 @@ class DfrBootReceiver : BroadcastReceiver() {
             return
         }
         try {
-            context.startService(Intent(context, DfrAutoRootService::class.java))
+            context.startService(Intent(context, DfrAutoRootService::class.java)
+                .setAction(action))
             Log.i(TAG, "[DFR][AUTOROOT] boot=$action handed to DfrAutoRootService")
         } catch (t: Throwable) {
             // Never silent: an unattended path that fails to start must say so,
