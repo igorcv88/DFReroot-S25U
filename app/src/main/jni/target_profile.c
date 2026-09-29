@@ -78,8 +78,8 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
      * literals are present and neither forbidden one is.
      */
     .ksud_sha256 =
-        "f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c",
-    .ksud_size        = 6675136,
+        "d0cb516da0047b1b918f84adf8ce7a389c6285de9282cd6301514a40849af7fc",
+    .ksud_size        = 6674552,
     .post_root_record = "/data/system/dfreroot-post-root",
     .kernelsu_version = 32601,
     .kernelsu_uapi_version = 2,

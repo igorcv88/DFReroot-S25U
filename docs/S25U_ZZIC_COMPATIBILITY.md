@@ -2310,3 +2310,96 @@ That is the gate working, and it is also the only state this repository has
 evidence for. Repinning the new ksud digest in `KsudStage.kt`,
 `target_profile.c` and `tools/zzic_profile.json` remains open and is what a
 physical run needs next.
+
+### The fixed pair is bundled — 2026-09-29
+
+`MARKER_PRODUCER_BUNDLED = CONFIRMED`. RMGLabs-Payloads PR #5 merged at 15:57
+UTC and exact-port run #9 built the pair from `main` at `11d5b997`, all twelve
+steps green. Its daemon is now the bundled asset:
+
+```text
+asset      app/src/main/assets/ksud
+sha256     79651c46c5d61596b56b849512d0f0f0038ea7f1b35d1911b40d386606b69afc
+size       6672576                     (previously f9ba5d98…, 6675136)
+source     RMGLabs-Payloads kernelsu/ksud-pa3q-S938BXXUCZZIC-dfreroot-v3.3.0
+```
+
+**The claim is bound to bytes, not to the workflow's grep** (AGENTS.md 3.5).
+The published file's recorded digest was re-computed from the file itself and
+agrees, and the record format literal was read out of the bundled binary at
+offset 138341:
+
+```text
+state=POST_ROOT_COMPLETE\nboot_id=…\nksu_version=…\nuapi_version=…
+\nruntime_mode=late-load\nselinux=1\ntransport_fix=kdp-cred-1\n
+```
+
+Exactly one occurrence. Every pin site moved together — the asset, `KsudStage`,
+`target_profile.c`, `tools/zzic_profile.json` and the two policy tests — and
+`profile_binding_audit.py` reports `ZZIC_KSUD_BINDING : PASS` against the new
+bytes. The DirtyFrag LKM pin (`b941d323…`) is untouched: the module rebuilt by
+that workflow is KernelSU's, a different artefact.
+
+**What this still does not claim.** The marker's *producer* is in the tree; the
+device is not running it. `SUPERCALL_GATE_OPEN` stays `UNVERIFIED` until a boot
+on this firmware completes the chain with this daemon and writes a post-root
+record carrying the marker. Until then every tap refuses at `SUPERCALL_GATED`,
+which remains the correct and only evidenced outcome.
+
+### The marker attested the wrong artefact — 2026-09-29 (Codex P1, upheld)
+
+`MARKER_BOUND_TO_DAEMON = REFUTED_AS_SUFFICIENT`. The daemon above published
+`transport_fix=kdp-cred-1` as a literal inside the post-root format string, so
+it was emitted on every completion. That makes the marker a property of the
+**daemon's** bytes, while the thing it is offered as evidence for is a property
+of the **loaded module** — and `late_load.rs` separates the two:
+
+```rust
+if ksuinit::has_kernelsu() { /* skip loading ko */ } else { ... load_module(...) }
+```
+
+`dfr_verify_ksu_control()` compares `version`, `uapi_version` and
+`is_late_load()`. The credential fix bumps **none** of them, so on the skip
+path the closeout cannot distinguish the fixed module from the broken one and
+publishes the marker regardless. `PostRootStatus.supercallAllowed()` would then
+permit the supercall, and the grant would reach the `put_cred()` that panics.
+
+Reachable on this firmware, not hypothetical: run the chain once with the
+broken pair, install the new build, run again without rebooting.
+
+This is AGENTS.md 3.5 in its purest form — a boolean bound to the wrong bytes —
+and it was found by a review bot, not by this repository's own gates. Worth
+recording as such.
+
+`MARKER_BINDS_LOADED_MODULE = CONFIRMED`. RMGLabs-Payloads PR #6 fixed it where
+the marker is written. The daemon now writes `/data/system/dfreroot-ko-loaded`
+— boot id plus the SHA-256 of the exact `.ko` image passed to `load_module()` —
+immediately after that call returns `Ok`, and emits the marker only when that
+record names the current boot. A second invocation in the same boot still
+publishes, because its predecessor's record proves the live module is this
+daemon's; a boot where KernelSU came up any other way publishes nothing.
+
+Run #10 built it from `main` at `aa2d86ea`:
+
+```text
+asset      app/src/main/assets/ksud
+sha256     d0cb516da0047b1b918f84adf8ce7a389c6285de9282cd6301514a40849af7fc
+size       6674552        (superseding 79651c46…/6672576 and f9ba5d98…/6675136)
+```
+
+**The decisive evidence here is a negative, read out of the bundled bytes.**
+`transport_fix=kdp-cred-1` no longer occurs as a contiguous literal **at all**
+(0 occurrences, against 1 before), and the post-root format literal now ends:
+
+```text
+state=POST_ROOT_COMPLETE\nboot_id=…\nksu_version=…\nuapi_version=…
+\nruntime_mode=late-load\nselinux=1\n   <- then an argument placeholder
+```
+
+So the marker cannot be emitted except through the conditional. `kdp-cred-1`
+appears exactly once (the single `DFR_TRANSPORT_FIX` const), and
+`/data/system/dfreroot-ko-loaded`, `ko_sha256=` and `DFR_KO_LOADED=PASS` are
+all present — the evidence machinery the condition reads.
+
+`SUPERCALL_GATE_OPEN` remains `UNVERIFIED`. Nothing above puts this daemon on
+the device.
