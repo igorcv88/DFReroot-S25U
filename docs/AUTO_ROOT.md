@@ -244,16 +244,16 @@ reboot, the same boundary the manual path has.
 Before `STARTED`, readiness failures may be retried. The bound is a time window
 (`READINESS_BUDGET_MS`, ten minutes per service invocation) plus a total poll
 count kept **in the journal**, so a process restart cannot buy a fresh count;
-backoff doubles from 20 s and is capped at 60 s, so the budget is spent on polls
-rather than on sleeping. There is no alarm and no job: the retry budget is one
-thread and one number, and the binding audit fails if `AlarmManager` or
-`JobScheduler` appears anywhere on this path.
+backoff doubles from 500 ms and is capped at 3 s (240 polls per boot). There is
+no alarm and no job: the retry budget is one thread and one number, and the
+binding audit fails if `AlarmManager` or `JobScheduler` appears anywhere on
+this path.
 
 Two details that a smaller cap got wrong, and that must not be reintroduced:
 
-- the poll cap has to leave room for a real boot. `LOCKED_BOOT_COMPLETED` arrives
-  well before `sys.boot_completed` is 1, so the first polls always fail; a cap of
-  three closed the window after about a minute and any slower boot was skipped.
+- the poll cap has to leave room for a real boot. `LOCKED_BOOT_COMPLETED` can
+  precede NetworkStack readiness, and a short cap would exhaust the boot before
+  the process appeared.
 - **readiness never arriving does not lock the boot.** Nothing was staged, hopped
   or written, so it is not a failed attempt. The journal keeps the poll count and
   the invocation simply stops; the later `BOOT_COMPLETED` resumes the same bounded
@@ -275,15 +275,34 @@ Every element refuses on its own, and each has a negative test in
 | journal readable and parsable | refuse **this boot** when it is not — a torn write, an unknown phase, a `native_started` that is neither 0 nor 1, or an I/O error on a file that exists. It may be hiding a `STARTED`, so an error must never read as "no journal" |
 | `/dev/df` and `dfm1..dfm4` **positively** absent | refuse when one is present, and refuse when the probe could not answer. The probe is `stat(2)` plus errno, not `File.exists()`: only `ENOENT` is absence, and any other errno is a lookup that failed. `File.exists()` reports both as `false`, and `false` is the answer that would let a run proceed |
 | live `/sys/fs/selinux/enforce == 1` (unreadable reads `-1`) | refuse |
-| `sys.boot_completed == 1` | wait and retry |
-| NetworkStack process visible | wait and retry |
+| NetworkStack process absent | wait and retry |
+| NetworkStack process unknown while `sys.boot_completed != 1` | wait and retry |
 
 The NetworkStack probe is deliberately tri-state. "No such process" and "procfs
 would not tell us" are different facts (AGENTS.md §3.7), and this probe gates
 nothing destructive: the hop performs its own authoritative AMS lookup and ends
 on `PROCESS_LOOKUP=PASS|FAIL` before a single page-cache byte is written. An
-undeterminable probe therefore proceeds **and says so**, logging
-`NETWORKSTACK_PROCESS_FOUND=UNKNOWN`; it is never silently read as either answer.
+undeterminable probe proceeds only once `sys.boot_completed=1`, **and says so**,
+logging `NETWORKSTACK_PROCESS_FOUND=UNKNOWN`; it is never silently read as
+either answer. Before that property is set, the early path requires a positive
+process observation. This can save time only if `LOCKED_BOOT_COMPLETED` reaches
+the receiver before the former trigger; the physical timing remains to be measured.
+
+## Early Integrated Boot timing experiment
+
+The early readiness change does not dispatch a soft reboot. It tests whether the
+existing, qualified Auto Root can start before `sys.boot_completed` without
+weakening the native AMS lookup or the one-attempt journal. Capture one full boot
+and compare monotonic times for `LOCKED_BOOT_COMPLETED`, the `[TIMELINE]` trigger,
+`PREFLIGHT=PASS`, `PHASE=`, `POST_ROOT_COMPLETE`, `ro.boottime.zygote`,
+`ro.boottime.system_server`, bootanimation, SystemUI and Keyguard. Preserve the
+logcat trace immediately after the boot, as this device's default buffer wraps
+quickly. A physical video of the screen determines whether the first lockscreen
+is usable before root completes; log timestamps alone cannot establish that.
+
+Only after that trace should a separate ksud-owned, fail-closed automatic
+soft-reboot handshake be enabled. Functional success and seamless visual behavior
+are separate verdicts; neither is established by this timing change.
 
 A permanent refusal always wins over a retryable one, so a bounded loop cannot
 become an unbounded one.
