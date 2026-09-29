@@ -133,7 +133,6 @@
   .equ SYS_unshare,         97
   .equ SYS_futex,           98
   .equ SYS_kill,           129
-  .equ SYS_reboot,         142
   .equ SYS_setuid,         146
   .equ SYS_setsid,         157
   .equ SYS_uname,          160

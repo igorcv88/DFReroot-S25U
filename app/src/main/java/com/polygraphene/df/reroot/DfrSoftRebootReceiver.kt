@@ -112,7 +112,7 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          * not the identity boundary. The module does not allowlist uid 1000 and
          * does not expose /system/bin/su in this namespace.
          */
-        AutoRootStore.traceSoftReboot(bootId, "PREPARE")
+        if (refuseWithoutTrace(context, bootId, "PREPARE")) return
         val preparation = RootTransport.prepare(context)
         val transport = preparation.transport
         if (transport == null) {
@@ -131,7 +131,7 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          * which is precisely the ambiguity that cost a cycle when a probe
          * rebooted the device and left nothing behind.
          */
-        AutoRootStore.traceSoftReboot(bootId, "PROBE_ENTER")
+        if (refuseWithoutTrace(context, bootId, "PROBE_ENTER")) return
         val probe = transport.runAsRoot("id", RootTransport.PROBE_TIMEOUT_MS)
         AutoRootStore.traceSoftReboot(bootId, "PROBE_RETURNED rc=${probe.rc}")
         if (probe.rc == RootTransport.RC_NO_TRANSPORT) {
@@ -220,7 +220,9 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          * descriptor. A replacement landing after the open cannot change the bytes
          * that run.
          */
-        AutoRootStore.traceSoftReboot(bootId, "EXEC_ENTER path=${decision.binaryPath}")
+        if (refuseWithoutTrace(context, bootId, "EXEC_ENTER path=${decision.binaryPath}")) {
+            return
+        }
         val outcome = transport.execPinnedDaemon(
             decision.binaryPath, "soft-reboot", TRANSPORT_TIMEOUT_MS
         )
@@ -293,6 +295,29 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
                 )
             }
         }
+    }
+
+    /**
+     * Write the pre-operation breadcrumb, or refuse the operation.
+     *
+     * The phases AFTER a step are ordinary telemetry and a failure there only
+     * logs: the step already happened, and refusing would not unhappen it. The
+     * phases BEFORE one are the record that has to outlive a teardown, so
+     * failing to persist one is a refusal - proceeding would rebuild exactly the
+     * undiagnosable reboot this whole mechanism came from.
+     *
+     * Returns true when the caller must stop.
+     */
+    private fun refuseWithoutTrace(context: Context, bootId: String, phase: String): Boolean {
+        val failure = AutoRootStore.traceSoftReboot(bootId, phase) ?: return false
+        Log.e(TAG, "[DFR][SOFT_REBOOT] REFUSED no durable trace for $phase: $failure")
+        RootNotifier.notifySoftReboot(
+            context, context.getString(R.string.notif_soft_reboot_refused),
+            "the dispatch record could not be written ($failure), so a failure" +
+                " here would leave nothing to diagnose. Nothing was attempted;" +
+                " root is unaffected."
+        )
+        return true
     }
 
     private fun readPostRoot(): String? {

@@ -265,17 +265,24 @@ object AutoRootStore {
      * atomically and fsync'd by [write], because a trace that dies in the page
      * cache with the userspace it was tracing is no trace.
      *
-     * Telemetry only. Nothing reads it to decide anything; every permission is
-     * still re-derived from the records that own that job.
+     * Nothing READS it to decide anything; every permission is still re-derived
+     * from the records that own that job. But a trace that could not be written
+     * is not telemetry that failed - it is the pre-operation record missing
+     * before the operation, which is the exact condition this exists to end. So
+     * it returns the failure, and the caller refuses rather than taking a
+     * privileged step it could not have diagnosed.
+     *
+     * Returns null on success, or why it could not persist.
      */
-    fun traceSoftReboot(bootId: String, phase: String) {
+    fun traceSoftReboot(bootId: String, phase: String): String? {
         val failure = write(
             SOFT_REBOOT_TRACE_PATH,
             "boot_id=$bootId\nphase=$phase\n"
         )
         if (failure != null) {
-            Log.i(TAG, "[DFR][SOFT_REBOOT] could not record phase=$phase: $failure")
+            Log.e(TAG, "[DFR][SOFT_REBOOT] could not record phase=$phase: $failure")
         }
+        return failure
     }
 
     fun softRebootTrace(): String? = read(SOFT_REBOOT_TRACE_PATH)

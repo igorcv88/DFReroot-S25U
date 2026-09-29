@@ -358,7 +358,9 @@ And when such a thing does fire, what makes it diagnosable is a record written
 ksud is that `/data/system/dfreroot-softreboot-lock` — created before the daemon
 is ever invoked — was absent afterwards. Reasoning from an absence works once.
 `AutoRootStore.traceSoftReboot()` now writes the positive record, fsync'd,
-before each privileged step.
+before each privileged step — and a record that cannot be written is a refusal,
+not a logged inconvenience. Proceeding without it would rebuild the very
+condition the record exists to end.
 
 ### 3.7 Signals are never collapsed
 
