@@ -2,7 +2,8 @@
 
 **Read `AGENTS.md` first.** This file is the authoritative record of the Auto
 Root path: what is implemented, what each refusal is for, and the physical
-acceptance that is still owed. The gate matrix in
+acceptance behind it — steps 1-7 done; the soft-reboot tap and
+`POST_ROOT_LSPOSED_COMPAT` are what remain owed. The gate matrix in
 `docs/S25U_ZZIC_COMPATIBILITY.md` still wins on what is *proven*; the plan this
 implements is in `docs/HANDOFF.md`.
 
@@ -341,7 +342,7 @@ verdict, `STARTED` is recorded before the native run, the qualification is bound
 to the pinned ksud digest, and no scheduler appears on this path. Each of those
 guards was confirmed to fail when its rule is violated.
 
-## Physical acceptance — steps 1-6 done, step 7 still owed
+## Physical acceptance — steps 1-7 done, `AUTO_ROOT_FULL_BOOT` accepted
 
 Gate I passed manually first, in that order. The acceptance run is recorded in
 `docs/S25U_ZZIC_COMPATIBILITY.md` as the fifth physical run
@@ -366,14 +367,26 @@ dossier):
    `attempts=1` / `native_started=1` on the new `boot_id`, and the second broadcast of
    that boot logged `REFUSED Auto Root already completed in this boot` — the
    one-attempt-per-boot rule observed rather than inferred.
-7. **still owed.** Untick the box and confirm no attempt on the next full boot.
+7. **done** — eighth physical run in the dossier, boot `0e8eaa2f…` on `2.0.8-zzic`.
+   The qualification was valid for the installed build (`20008` / `2.0.8-zzic` against
+   an app at exactly those values), so `buildMatches()` had nothing to invalidate and
+   `opt_in=0` was the only refusal left. The boot's **only** `[DFR]` line was
+   `[DFR][AUTOROOT] not opted in for this build; nothing to do`, from pid 3007
+   (`system_server`) — the opt-in path by name, reached by a receiver that did fire.
+   Root was absent; a manual run then recovered it without the journal ever naming
+   that boot, so manual and automatic do not share the per-boot budget.
 
-Step 7 is the one a successful boot cannot speak for, and it has a trap: updating the
-app also stops Auto Root, but through a **different** refusal. A version bump
-invalidates the qualification (`buildMatches`) before `opt_in` is consulted, so
-"nothing ran after the update" is not evidence for step 7. It needs a valid
-qualification for the installed build, the box then unticked, and the
-`"Auto Root is not opted in"` path taken.
+Step 7 was the one a successful boot could not speak for, and it had a trap that cost
+one cycle: updating the app also stops Auto Root, but through a **different** refusal.
+A version bump invalidates the qualification (`buildMatches`) before `opt_in` is
+consulted, so "nothing ran after the update" is **not** evidence for step 7 — it needs
+a valid qualification for the installed build, the box then unticked, and the
+`"Auto Root is not opted in"` path taken. The eighth run is that; the attempt before it
+was not, and both are recorded so the distinction survives.
+
+`AUTO_ROOT_FULL_BOOT` is therefore **ACCEPTED**. It still ships OFF and still requires
+a verified manual completion on the exact build plus an explicit opt-in: acceptance
+says the refusals behave as specified, not that anything may run unasked.
 
 Record the outcome separately from Gate I and from `POST_ROOT_LSPOSED_COMPAT`. A
 failure of the automatic path is not a failure to obtain root, and must not be
@@ -648,7 +661,7 @@ of two different things is missing:
 
 | logcat | meaning | what would change it |
 |---|---|---|
-| `[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT` | no `su` this app can start, from any candidate path | possibly a KernelSU Manager grant — see below |
+| `[DFR][SOFT_REBOOT] NO_ROOT_TRANSPORT` | no `su` this app can start, from any candidate path | read the errno first — a manager grant, a mount namespace or a wrong `PATH` all reach this row; see below |
 | `[DFR][SOFT_REBOOT] NOT_ROOT` | `su` started and we are still uid 1000 | a KernelSU Manager grant |
 
 **What the device answered, and a row this table used to get wrong.** The first tap
@@ -676,17 +689,45 @@ So the code was changed to narrow it: `RootTransport.SU_CANDIDATES` tries
 which one started. The bare name is last precisely because it is the one that depends
 on `PATH`.
 
-**That narrows cause 2; it does not close it.** `ENOENT` from all four rules out
-exactly three conventional absolute locations plus whatever this process's `PATH`
-resolves. If the `su` that works in Termux is a wrapper, or an executable at any
-other absolute path, all four probes still return `ENOENT` for a reason that is
-`PATH`-shaped and not an allowlist decision. **The real path of the working `su` was
-never captured** — the only observation on record is that `su -c` succeeds in a
-Termux shell, which says nothing about where the binary lives. Until
-`command -v su` / `readlink -f` is read off the device and that path is either
-already in the candidate list or added to it, cause 2 stays live and the next tap's
-answer stays ambiguous. Recording the absence is the point: three ruled-out paths is
-not the same fact as "the PATH explanation is dead".
+**The path was then captured, and it reframes the question.** From the device (eighth
+physical run in the dossier):
+
+```text
+$ command -v su
+/data/data/com.termux/files/usr/bin/su        <- Termux's own shim, another app's uid
+$ ls -lZ /system/bin/su /debug_ramdisk/su /sbin/su
+-rwxr-xr-x? 1 root root ? 6670272 Sep 27 14:22 /system/bin/su
+ls: cannot access '/debug_ramdisk/su': No such file or directory
+ls: cannot access '/sbin/su': No such file or directory
+```
+
+- **"`su` works in Termux" was never evidence about a reachable binary.** What Termux
+  resolves is its own shim inside `/data/data/com.termux`, and that shim is also what
+  printed `No su program found on this device` in the rootless boot — it *ran* and
+  reported. A wrapper's success was being read as its target's location.
+- **The shim is not a candidate and must not become one:** another app's private
+  directory, unreachable from this uid, and present only if Termux is installed.
+  Depending on it is the KernelSU-dependency §3.6 rules out, wearing a different hat.
+- **`/system/bin/su` is real, and is created by the chain** — its mtime is the minute
+  the manual run established root, and it does not exist in a boot where root was
+  never obtained. `/debug_ramdisk/su` and `/sbin/su` do not exist at all. So of the
+  three absolute candidates, exactly one is ever real on this device, and only after a
+  successful run.
+
+**What that settles, and what it does not.** The `v2.0.8` tap tried the bare name only,
+so its `ENOENT` is fully explained by `/system/bin/su` not being on that process's
+`PATH` — no allowlist conclusion was ever available from it. `v2.0.9` probes that
+absolute path first, so the next tap **is** diagnostic, and it discriminates by errno:
+
+| next tap's result | what it means |
+|---|---|
+| `ENOENT` on `/system/bin/su` | the lookup or the mount namespace — a binary ksud created may not be visible outside the namespace it was created in |
+| `EACCES` | policy: SELinux or the allowlist refusing the exec |
+| starts, `id` says uid 0 | it works |
+| starts, `id` says uid 1000 | allowlist denial (`NOT_ROOT`) |
+
+Three causes now, not two — the namespace one was not on the earlier list. **None may
+be asserted until one of those four is observed.**
 
 Both come with a notification saying root itself is unaffected and the lifecycle was
 not re-applied. The first tap is an experiment whose result, either way, is the
