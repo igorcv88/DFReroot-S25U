@@ -693,14 +693,34 @@ unstripped): the driver fd comes from
 version/UAPI read-back.
 
 The implementation is `app/src/main/jni/dfr_su_core.c`, reached through
-`libdfrsu.so`, which the app **loads** rather than executes. Whether the fd
-install itself is gated by the same `allowed_for_su()` the DFR patch extends is
-kernel-side and still unread, so this is source-complete and physically
-unverified — not "about to work". What it buys is that the next physical run
-answers a question instead of repeating one: every step refuses on its own
-(`DFR_SU_STEP=DRIVER_FD`, `GRANT`, `NOT_ROOT`, `MNT_NS`, `EXEC`, `DIGEST`,
-`TIMEOUT`), so the notification names the boundary that said no. The acceptance
-run is therefore: tap the action once and capture the `DFR_SU_STEP=` token.
+`libdfrsu.so`, which the app **loads** rather than executes.
+
+**Two things this paragraph used to say are now settled, and neither the way it
+guessed.** It asked whether the kernel gates the fd install by the same
+`allowed_for_su()` the DFR patch extends, and named a physical tap as the way to
+find out. Reading `kernel/supercall/supercall.c` at the pinned SHA answered it
+offline: `reboot_handler_pre()` performs **no permission check at all**, so the
+install is open to any caller, and `KSU_IOCTL_GRANT_ROOT` is gated by
+`allowed_for_su()`, which the patch already extends here. No module change
+authorizes anything that is missing.
+
+And the supercall that triggers the install is **gone from this app**: it
+rebooted the device on its only physical run, and AGENTS.md 3.6.1 forbids naming
+the reboot syscall in any shipped source while that reboot is unexplained. The
+transport keeps the safe half of the daemon's own lookup — scan `/proc/self/fd`
+for `[ksu_driver]` — which finds nothing here.
+
+**So a tap is no longer an acceptance run.** It refuses at
+`DFR_SU_STEP=DRIVER_FD` and executes nothing; that outcome is already known and
+a run costs an install to re-learn it. It is safe, and it is not evidence. What
+would move this forward is either an explanation for the reboot, or a trigger
+for the fd install that does not fall through to `sys_reboot` — the latter being
+the only module-side change still worth discussing.
+
+The step vocabulary stays as it is, because it is what makes any future run
+legible: `DRIVER_FD`, `GRANT`, `NOT_ROOT`, `MNT_NS`, `EXEC`, `DIGEST`,
+`TIMEOUT`, each refusing on its own, with
+`/data/system/dfreroot-softreboot-trace` written before each privileged step.
 
 **One RMGLabs design change that does not transfer.** It moved Apply Modules off a
 broadcast receiver and into a foreground service, because holding a broadcast open
