@@ -45,11 +45,11 @@ class DfrAutoRootService : Service() {
     private val started = AtomicBoolean(false)
 
     /**
-     * Time since kernel boot when the receiver observed the protected broadcast.
+     * Time since kernel boot when this service began processing the request.
      *
-     * Read once, at the broadcast, and reused for every readiness poll: the loop
-     * may span minutes and the question the policy asks is how close to the boot
-     * the TRIGGER was, not how long we have been polling.
+     * Sampled locally at service entry and reused for every readiness poll. The
+     * receiver timestamp is carried by an Intent and is only diagnostic data;
+     * even another process with our shared UID must not move the boot window.
      */
     @Volatile private var broadcastUptimeMs = -1L
 
@@ -68,13 +68,10 @@ class DfrAutoRootService : Service() {
         val serviceStartMs = SystemClock.elapsedRealtime()
         val arrivalMs = intent?.getLongExtra(DfrBootReceiver.EXTRA_RECEIVER_UPTIME_MS, -1L)
             ?: -1L
-        broadcastUptimeMs = if (arrivalMs >= 0 && arrivalMs <= serviceStartMs) {
-            arrivalMs
-        } else {
-            -1L
-        }
+        broadcastUptimeMs = serviceStartMs
+        val receiverElapsedMs = if (arrivalMs >= 0 && arrivalMs <= serviceStartMs) arrivalMs else -1L
         Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] service_start action=${intent?.action}" +
-            " receiver_elapsed_ms=$broadcastUptimeMs service_elapsed_ms=$serviceStartMs" +
+            " receiver_elapsed_ms=$receiverElapsedMs service_elapsed_ms=$serviceStartMs" +
             " boot_id=${DfrRootCoordinator.readBootId()}")
         Thread({
             var lock: PowerManager.WakeLock? = null
