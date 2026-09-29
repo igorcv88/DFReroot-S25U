@@ -76,7 +76,7 @@ class DfrAutoRootService : Service() {
             var lock: PowerManager.WakeLock? = null
             try {
                 /*
-         * The post-root wait polls for up to two minutes. Without a
+                 * The post-root wait polls for up to two minutes. Without a
                  * wakelock a device that suspends mid-wait would resume with the
                  * deadline already expired and report a failure that never
                  * happened - and it would do it after the page-cache writes.
@@ -146,11 +146,10 @@ class DfrAutoRootService : Service() {
              * Give up on THIS invocation without locking the boot.
              *
              * Readiness never arriving is not a failed attempt: nothing was
-             * staged, hopped or written. Writing FAILED_LOCKED here used to end
-             * an early LOCKED_BOOT_COMPLETED could consume the whole budget
-             * before NetworkStack is ready, and the real BOOT_COMPLETED would
-             * only find a locked journal. The
-             * journal keeps the poll COUNT instead, so a later broadcast resumes
+             * staged, hopped or written. Writing FAILED_LOCKED here used to
+             * consume the budget before NetworkStack was ready, so a later
+             * BOOT_COMPLETED only found a locked journal. The journal keeps
+             * the poll COUNT instead, so a later broadcast resumes
              * the same bounded budget rather than a fresh one, and the policy
              * refuses on its own once the count is spent.
              */
