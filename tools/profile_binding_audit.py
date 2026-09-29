@@ -758,6 +758,30 @@ def audit():
             or "q.broadcastUptimeMs = broadcastUptimeMs" not in svc_code:
         fail("DfrAutoRootService must pass its own service-entry monotonic time "
              "to the boot-window policy; an Intent extra is telemetry only")
+    # ...and the assertion above only proves the GOOD assignment is present. A
+    # later line re-assigning the field from the Intent extra would leave it
+    # passing while the boot window moved back under a caller's control, which
+    # is the "gate enforced at one entry point" failure of AGENTS.md 3.2. So
+    # enumerate every assignment and require each one to be the local sample or
+    # the refusing initialiser; nothing else may reach the policy's clock.
+    allowed_uptime_rhs = ("-1L", "serviceStartMs")
+    # The lookbehind keeps this on assignments to the FIELD: "q.broadcastUptimeMs
+    # = broadcastUptimeMs" is the policy input being filled from it, which is the
+    # direction this check exists to protect, not a write to it.
+    for rhs in re.findall(r"(?<![.\w])broadcastUptimeMs\s*=\s*([^\n]+)", svc_code):
+        if rhs.strip() not in allowed_uptime_rhs:
+            fail("DfrAutoRootService assigns broadcastUptimeMs from %r; the "
+                 "boot window may only carry the service's own monotonic "
+                 "sample, and an Intent extra is telemetry only"
+                 % rhs.strip())
+    # The extra is readable - it measures the receiver-to-service handoff - but
+    # it must never be what the policy reads. Bind that to the field name, not
+    # to the current variable spelling.
+    for line in svc_code.splitlines():
+        if "EXTRA_RECEIVER_UPTIME_MS" in line and "broadcastUptimeMs" in line:
+            fail("DfrAutoRootService derives broadcastUptimeMs from the "
+                 "receiver's Intent extra; a caller would then choose whether "
+                 "the boot window had expired")
     if "in.broadcastUptimeMs > MAX_BOOT_WINDOW_MS" not in policy_code:
         fail("AutoRootPolicy no longer bounds how long after kernel boot a trigger "
              "may start an attempt; a framework restart hours into a session would "

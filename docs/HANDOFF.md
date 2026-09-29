@@ -9,9 +9,13 @@ acceptance criteria for the next signed build. If this file disagrees with
 > itself succeeded; the soft-reboot transport refused with
 > `DFR_SU_STEP=DRIVER_FD errno=1`. That verdict proves the marker gate *opened*
 > — the whole `transport_fix` pipeline works end to end — and that the
-> supercall was then refused with `EPERM` before any fd was installed. The
-> cause is **unknown and must not be guessed**; three earlier attributions in
-> this exact spot were wrong (`AGENTS.md §3.6.1`).
+> supercall returned `EPERM`. It does **not** prove that no fd was installed:
+> `reboot_handler_pre()` is a pre-handler that queues the install and lets the
+> real `sys_reboot` run, so the syscall's verdict says nothing about it, and
+> the build that produced this token never looked afterwards. Those are two
+> facts (`AGENTS.md §3.7`) and this line collapsed them until 2026-09-29.
+> The cause is **unknown and must not be guessed**; three earlier attributions
+> in this exact spot were wrong (`AGENTS.md §3.6.1`).
 > See `docs/INVESTIGATION-SUPERCALL-EPERM.md` for the inference, the candidate
 > causes, and the ordered first moves.
 
@@ -26,12 +30,16 @@ kernel 6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k
 aarch64 / 4096-byte pages
 ```
 
-Gate I is a physical PASS (`v2.0.5-zzic`, boot `62e8538c…`) and
-`AUTO_ROOT_FULL_BOOT` is a physical PASS as of `2.0.6-zzic`, boot `2e447aaf…`:
-the service completed an unattended attempt after a full reboot, with its own
-journal reading `phase=COMPLETE` / `native_started=1` / `attempts=1` against a
-same-boot post-root record. It still **ships disabled**. See the dossier, which is
-authoritative for evidence.
+Gate I is a physical PASS (`v2.0.5-zzic`, boot `62e8538c…`).
+`AUTO_ROOT_FULL_BOOT` is **partially accepted** as of `2.0.6-zzic`, boot
+`2e447aaf…`: the service completed an unattended attempt after a full reboot,
+with its own journal reading `phase=COMPLETE` / `native_started=1` /
+`attempts=1` against a same-boot post-root record. This file called that a
+`PASS` until 2026-09-29, which the dossier's own matrix row contradicted — of
+the three boundaries one successful boot cannot speak for, the opt-out
+suppressing the next boot is **still untested**. It also still **ships
+disabled**. The dossier is authoritative for evidence; where it and this file
+disagree, it wins, and this was that disagreement.
 
 `POST_ROOT_LSPOSED_COMPAT` remains unaccepted, and so does the *negative* half of
 the Auto Root sequence (steps 5-7 in `docs/AUTO_ROOT.md`: a framework restart must
