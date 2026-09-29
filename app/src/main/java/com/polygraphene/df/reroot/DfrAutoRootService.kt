@@ -70,11 +70,13 @@ class DfrAutoRootService : Service() {
         } catch (t: Throwable) {
             -1L
         }
+        Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] trigger action=${intent?.action}" +
+            " elapsed_ms=$broadcastUptimeMs boot_id=${DfrRootCoordinator.readBootId()}")
         Thread({
             var lock: PowerManager.WakeLock? = null
             try {
                 /*
-                 * The post-root wait polls for up to two minutes. Without a
+         * The post-root wait polls for up to two minutes. Without a
                  * wakelock a device that suspends mid-wait would resume with the
                  * deadline already expired and report a failure that never
                  * happened - and it would do it after the page-cache writes.
@@ -145,9 +147,9 @@ class DfrAutoRootService : Service() {
              *
              * Readiness never arriving is not a failed attempt: nothing was
              * staged, hopped or written. Writing FAILED_LOCKED here used to end
-             * the boot after about a minute, so the LOCKED_BOOT_COMPLETED that
-             * arrives before `sys.boot_completed` consumed the whole budget and
-             * the real BOOT_COMPLETED only ever found a locked journal. The
+             * an early LOCKED_BOOT_COMPLETED could consume the whole budget
+             * before NetworkStack is ready, and the real BOOT_COMPLETED would
+             * only find a locked journal. The
              * journal keeps the poll COUNT instead, so a later broadcast resumes
              * the same bounded budget rather than a fresh one, and the policy
              * refuses on its own once the count is spent.
@@ -186,6 +188,8 @@ class DfrAutoRootService : Service() {
             }
 
             override fun beforeNativeRun(): Boolean {
+                Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] native_boundary" +
+                    " elapsed_ms=${SystemClock.elapsedRealtime()} boot_id=$bootId")
                 /*
                  * The point of no return. STARTED is recorded BEFORE the
                  * destructive transaction, so a failure - or a crash, or a kernel
@@ -207,6 +211,9 @@ class DfrAutoRootService : Service() {
         val result = DfrRootCoordinator.run(
             context, "autoroot", host, DfrRootCoordinator.AUTOROOT_CONTROLLER_TIMEOUT_MS
         )
+        Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] coordinator_return" +
+            " elapsed_ms=${SystemClock.elapsedRealtime()} success=${result.success}" +
+            " native_started=${result.nativeStarted}")
         /*
          * What a failure costs depends on whether transaction 5 was issued, and
          * that distinction is not a softening of the one-attempt rule - it is the
@@ -251,6 +258,8 @@ class DfrAutoRootService : Service() {
             Log.e(TAG, "[DFR][AUTOROOT] cannot post the verdict notification: $t")
         }
         if (result.success) {
+            Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] post_root_complete" +
+                " elapsed_ms=${SystemClock.elapsedRealtime()} boot_id=$bootId")
             Log.i(TAG, "[DFR][AUTOROOT] AUTO_ROOT_RESULT=SUCCESS boot_id=$bootId" +
                 " selinux=${result.liveSelinux}")
         } else {
@@ -341,10 +350,10 @@ class DfrAutoRootService : Service() {
         /** How long readiness may be waited for, in total, in one boot. */
         const val READINESS_BUDGET_MS = 10 * 60 * 1000L
 
-        const val FIRST_BACKOFF_MS = 20_000L
+        const val FIRST_BACKOFF_MS = 500L
 
         /** Polling interval ceiling, so the budget is spent on polls, not sleep. */
-        const val MAX_BACKOFF_MS = 60_000L
+        const val MAX_BACKOFF_MS = 3_000L
 
         /** Readiness budget plus the controller and post-root deadlines, doubled. */
         const val WAKELOCK_BUDGET_MS = 15 * 60 * 1000L
