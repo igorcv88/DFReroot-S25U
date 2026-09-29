@@ -33,23 +33,23 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * What this class does NOT establish, and must not be read as claiming: that the
  * platform will keep a plain `startService` component alive to completion at boot
- * on this build. The manifest's `process="system"` names the process the
- * components are hosted in - it does not make that process `system_server`, and
- * the shared UID does not either. Naming the worker thread does not extend its
- * life past the process. If the phase sequence truncates during the acceptance
- * run, the remedy is a foreground service, not a retry; docs/AUTO_ROOT.md carries
- * the reasoning and the evidence that does exist.
+ * on every build. On the captured ZZIC boot this component ran in PID 3012,
+ * `system_server`; the manifest declarations alone do not prove that outcome on
+ * another firmware. Naming the worker thread does not extend its life past the
+ * process. If the phase sequence truncates during acceptance, inspect the
+ * lifetime before changing the retry policy; docs/AUTO_ROOT.md carries the
+ * physical evidence.
  */
 class DfrAutoRootService : Service() {
 
     private val started = AtomicBoolean(false)
 
     /**
-     * Time since kernel boot when the trigger arrived, captured before any work.
+     * Time since kernel boot when this service began processing the request.
      *
-     * Read once, at the broadcast, and reused for every readiness poll: the loop
-     * may span minutes and the question the policy asks is how close to the boot
-     * the TRIGGER was, not how long we have been polling.
+     * Sampled locally at service entry and reused for every readiness poll. The
+     * receiver timestamp is carried by an Intent and is only diagnostic data;
+     * even another process with our shared UID must not move the boot window.
      */
     @Volatile private var broadcastUptimeMs = -1L
 
@@ -65,11 +65,14 @@ class DfrAutoRootService : Service() {
             Log.i(TAG, "[DFR][AUTOROOT] a run is already in flight in this process")
             return START_NOT_STICKY
         }
-        broadcastUptimeMs = try {
-            SystemClock.elapsedRealtime()
-        } catch (t: Throwable) {
-            -1L
-        }
+        val serviceStartMs = SystemClock.elapsedRealtime()
+        val arrivalMs = intent?.getLongExtra(DfrBootReceiver.EXTRA_RECEIVER_UPTIME_MS, -1L)
+            ?: -1L
+        broadcastUptimeMs = serviceStartMs
+        val receiverElapsedMs = if (arrivalMs >= 0 && arrivalMs <= serviceStartMs) arrivalMs else -1L
+        Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] service_start action=${intent?.action}" +
+            " receiver_elapsed_ms=$receiverElapsedMs service_elapsed_ms=$serviceStartMs" +
+            " boot_id=${DfrRootCoordinator.readBootId()}")
         Thread({
             var lock: PowerManager.WakeLock? = null
             try {
@@ -111,7 +114,7 @@ class DfrAutoRootService : Service() {
             Log.e(TAG, "[DFR][AUTOROOT] REFUSED current boot_id unreadable")
             return
         }
-        val deadline = System.currentTimeMillis() + READINESS_BUDGET_MS
+        val deadline = SystemClock.elapsedRealtime() + READINESS_BUDGET_MS
         var backoffMs = FIRST_BACKOFF_MS
 
         while (true) {
@@ -144,16 +147,15 @@ class DfrAutoRootService : Service() {
              * Give up on THIS invocation without locking the boot.
              *
              * Readiness never arriving is not a failed attempt: nothing was
-             * staged, hopped or written. Writing FAILED_LOCKED here used to end
-             * the boot after about a minute, so the LOCKED_BOOT_COMPLETED that
-             * arrives before `sys.boot_completed` consumed the whole budget and
-             * the real BOOT_COMPLETED only ever found a locked journal. The
-             * journal keeps the poll COUNT instead, so a later broadcast resumes
+             * staged, hopped or written. Writing FAILED_LOCKED here used to
+             * consume the budget before a slow boot was ready, so a later
+             * BOOT_COMPLETED only found a locked journal. The journal keeps
+             * the poll count instead, so a later broadcast resumes
              * the same bounded budget rather than a fresh one, and the policy
              * refuses on its own once the count is spent.
              */
             if (attempts >= AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT ||
-                System.currentTimeMillis() + backoffMs > deadline) {
+                SystemClock.elapsedRealtime() + backoffMs > deadline) {
                 Log.i(TAG, "[DFR][AUTOROOT] WAIT_BOOT_READY gave up for now after" +
                     " $attempts/${AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT} polls:" +
                     " ${decision.reason}")
@@ -197,6 +199,9 @@ class DfrAutoRootService : Service() {
                 val ok = AutoRootStore.journalPhase(
                     bootId, AutoRootPolicy.PHASE_STARTED, attemptNo, true
                 )
+                Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] before_native" +
+                    " elapsed_ms=${SystemClock.elapsedRealtime()}" +
+                    " started_journal_durable=$ok boot_id=$bootId")
                 if (!ok) {
                     Log.e(TAG, "[DFR][AUTOROOT] REFUSED cannot record STARTED;" +
                         " refusing to run without the one-attempt guarantee")
@@ -207,6 +212,9 @@ class DfrAutoRootService : Service() {
         val result = DfrRootCoordinator.run(
             context, "autoroot", host, DfrRootCoordinator.AUTOROOT_CONTROLLER_TIMEOUT_MS
         )
+        Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] coordinator_return" +
+            " elapsed_ms=${SystemClock.elapsedRealtime()} success=${result.success}" +
+            " native_started=${result.nativeStarted}")
         /*
          * What a failure costs depends on whether transaction 5 was issued, and
          * that distinction is not a softening of the one-attempt rule - it is the
@@ -241,9 +249,15 @@ class DfrAutoRootService : Service() {
             !result.nativeStarted -> AutoRootPolicy.PHASE_PREFLIGHT
             else -> AutoRootPolicy.PHASE_FAILED_LOCKED
         }
-        AutoRootStore.journalPhase(
+        val journalWritten = AutoRootStore.journalPhase(
             bootId, phase, attemptNo, result.nativeStarted
         )
+        Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] journal_phase=$phase" +
+            " elapsed_ms=${SystemClock.elapsedRealtime()} durable=$journalWritten")
+        if (!journalWritten) {
+            Log.e(TAG, "[DFR][AUTOROOT] journal phase=$phase was not persisted;" +
+                " no future integrated dispatch may treat this run as ACKed")
+        }
         // The verdict, where a human can see it. Never a gate: see RootNotifier.
         try {
             RootNotifier.notifyRunVerdict(context, result, "autoroot")
@@ -251,6 +265,8 @@ class DfrAutoRootService : Service() {
             Log.e(TAG, "[DFR][AUTOROOT] cannot post the verdict notification: $t")
         }
         if (result.success) {
+            Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] verified_post_root_result" +
+                " elapsed_ms=${SystemClock.elapsedRealtime()} boot_id=$bootId")
             Log.i(TAG, "[DFR][AUTOROOT] AUTO_ROOT_RESULT=SUCCESS boot_id=$bootId" +
                 " selinux=${result.liveSelinux}")
         } else {

@@ -244,16 +244,18 @@ reboot, the same boundary the manual path has.
 Before `STARTED`, readiness failures may be retried. The bound is a time window
 (`READINESS_BUDGET_MS`, ten minutes per service invocation) plus a total poll
 count kept **in the journal**, so a process restart cannot buy a fresh count;
-backoff doubles from 20 s and is capped at 60 s, so the budget is spent on polls
-rather than on sleeping. There is no alarm and no job: the retry budget is one
-thread and one number, and the binding audit fails if `AlarmManager` or
-`JobScheduler` appears anywhere on this path.
+backoff doubles from 20 s and is capped at 60 s (12 polls per boot). Every poll
+currently makes a crash-durable journal write, including `fsync(file)` and
+`fsync(directory)`. A subsecond poll would require a separate ephemeral
+readiness counter; changing the interval alone would multiply durable writes
+during boot. There is no alarm or job, and the binding audit rejects either
+scheduler on this path.
 
 Two details that a smaller cap got wrong, and that must not be reintroduced:
 
-- the poll cap has to leave room for a real boot. `LOCKED_BOOT_COMPLETED` arrives
-  well before `sys.boot_completed` is 1, so the first polls always fail; a cap of
-  three closed the window after about a minute and any slower boot was skipped.
+- the poll cap has to leave room for a real boot. On some boots
+  `LOCKED_BOOT_COMPLETED` can precede readiness, and a short cap exhausts the
+  boot before the process appears.
 - **readiness never arriving does not lock the boot.** Nothing was staged, hopped
   or written, so it is not a failed attempt. The journal keeps the poll count and
   the invocation simply stops; the later `BOOT_COMPLETED` resumes the same bounded
@@ -275,15 +277,103 @@ Every element refuses on its own, and each has a negative test in
 | journal readable and parsable | refuse **this boot** when it is not — a torn write, an unknown phase, a `native_started` that is neither 0 nor 1, or an I/O error on a file that exists. It may be hiding a `STARTED`, so an error must never read as "no journal" |
 | `/dev/df` and `dfm1..dfm4` **positively** absent | refuse when one is present, and refuse when the probe could not answer. The probe is `stat(2)` plus errno, not `File.exists()`: only `ENOENT` is absence, and any other errno is a lookup that failed. `File.exists()` reports both as `false`, and `false` is the answer that would let a run proceed |
 | live `/sys/fs/selinux/enforce == 1` (unreadable reads `-1`) | refuse |
-| `sys.boot_completed == 1` | wait and retry |
-| NetworkStack process visible | wait and retry |
+| `sys.boot_completed != 1` | wait and retry |
+| NetworkStack process absent | wait and retry |
 
 The NetworkStack probe is deliberately tri-state. "No such process" and "procfs
 would not tell us" are different facts (AGENTS.md §3.7), and this probe gates
 nothing destructive: the hop performs its own authoritative AMS lookup and ends
 on `PROCESS_LOOKUP=PASS|FAIL` before a single page-cache byte is written. An
-undeterminable probe therefore proceeds **and says so**, logging
+undeterminable probe proceeds **and says so**, logging
 `NETWORKSTACK_PROCESS_FOUND=UNKNOWN`; it is never silently read as either answer.
+
+## Early Integrated Boot: trigger investigation, 2026-09-29
+
+The physical `DFR_EARLYBOOT_20260929_112543.tar.gz` (SHA-256
+`d1503ad7025105a6e84446af9fa4c143a7661afc697e3e9bd1fd8581b0ad7d0b`)
+already answers whether removing `sys.boot_completed` advances this boot:
+
+| Monotonic time | Observed event |
+|---:|---|
+| 16.255 s | NetworkStack process started (PID 4383) |
+| 16.458 s | SystemUI process started (PID 4453) |
+| 16.752 s | `USER_STARTED` sent for user 0 |
+| 19.095 s | `service.bootanim.exit=1` observed |
+| 19.385 s | `LOCKED_BOOT_COMPLETED` sent for user 0 |
+| 20.500 s | DFR receiver handed off to service |
+| 20.595 s | old policy returned `PREFLIGHT=PASS` |
+| 20.748 s | NetworkStack returned CONTROLLER |
+| 20.755 s | `RUN_NATIVE` began |
+
+The old policy required `sys.boot_completed=1`, so `PREFLIGHT=PASS` at 20.595 s
+proves that requirement had already been satisfied. Removing it while retaining
+the same broadcast trigger cannot explain the 16.255–20.500 s delay. Another
+boot in the handoff placed NetworkStack near 15.3 s; these timestamps are
+boot-specific, not a promise that the process is ready at a fixed second.
+
+The earlier `USER_STARTED` event cannot wake this app from the manifest: AOSP
+sends it with `FLAG_RECEIVER_REGISTERED_ONLY`. A dynamic receiver needs this
+app's code to have been loaded already. The captured app was loaded from
+`/data/app` at 20.478 s. A system-process `ContentProvider` is not a proven
+early entry point for this package: AOSP filters non-system APK providers out
+of `installSystemProviders`. At 14.606 s Wi-Fi tried to bind a ScorerService in
+this and many other packages, and logged `not found`; claiming that service
+would take on Wi-Fi's service contract merely to wake DFR, so it is not an
+acceptable trigger. These observations do not prove that no other entry point
+exists; they close the candidates that the current evidence can evaluate.
+
+### Last offline review of earlier triggers
+
+| Candidate | Verdict for the present package | Concrete reason |
+|---|---|---|
+| Persisted `JobScheduler` job | **UNKNOWN** as an earlier usable trigger | The ZZIC trace starts `JobScheduler` at 14.281 s, enters phase 600 (`PHASE_THIRD_PARTY_APPS_CAN_START`) at 16.363 s, and calls its `onBootPhase(600)` at 16.416 s, ahead of the 19.385 s locked-boot broadcast. AOSP loads persisted jobs before system services are ready and begins tracking/checking them at phase 600. This establishes a possible *time window*, not that an eligible DFR job runs in it. The current APK declares no `JobService`, schedules no persisted job, and has no trace of such a job. Direct-Boot awareness, user-start state, persisted-job permission, package availability and Samsung's actual scheduling/constraints remain unproved. The existing Auto Root audit also prohibits JobScheduler as a retry mechanism. No job was scheduled in this PR. |
+| DFInstaller making DFR `FLAG_SYSTEM` or an updated-system app | **NO-GO** for the present installer | The captured DFR APK is loaded from `/data/app`. `PackagesXml.kt` changes signing lineage (`<shared-user><sigs><pastSigs>`), not a verified system APK or a disabled system package backing an updated-system app. AOSP scan logic associates `SCAN_AS_SYSTEM` for a data update with a system package setting; the shared UID/signature does not supply that backing package. Samsung's exact private scan code was not captured, so this verdict describes the present installer and observed installation, not every possible vendor modification. |
+| `android:persistent` | **NO-GO** for the present APK | The manifest has no `android:persistent` attribute (default false); changing it would require a different APK. Android documents persistence as intended for certain system applications. Neither the shared UID nor the installer's signing-lineage edit makes the existing APK persistent or a system app. Whether a newly built `/data/app` APK would receive early persistent treatment on ZZIC is unmeasured and is not claimed here. |
+
+The JobScheduler result is deliberately **UNKNOWN**: phase 600 physically
+precedes the locked-boot broadcast, but scheduler availability is not a measured
+DFR `JobService` callback. It remains a distinct future hypothesis requiring a
+non-destructive marker and proof of eligibility and timing before any change to
+the production Auto Root path. This offline review does not require a physical
+reboot; Android compilation remains a separate verification gate.
+
+The receiver's `EXTRA_RECEIVER_UPTIME_MS` is **telemetry only**. A process with
+the same shared UID can start a non-exported service and provide an arbitrary
+Intent extra. `MAX_BOOT_WINDOW_MS` therefore uses `elapsedRealtime()` sampled
+by `DfrAutoRootService.onStartCommand()` itself. The receiver and service
+samples remain separately logged to measure handoff delay; a readiness loop
+reuses the service sample so polling cannot extend the window.
+
+Source references: [AOSP UserController](https://android.googlesource.com/platform/frameworks/base/+/master/services/core/java/com/android/server/am/UserController.java),
+[Android Direct Boot](https://developer.android.com/privacy-and-security/direct-boot),
+[AOSP system-provider filter](https://android.googlesource.com/platform/frameworks/base/+/fa0e57fbe77d46039f9e9a54512dce13f71773b5%5E2..fa0e57fbe77d46039f9e9a54512dce13f71773b5/).
+Additional primary references: [AOSP SystemServer phase 600](https://android.googlesource.com/platform/frameworks/base/+/1a1e6bc55f2e/services/java/com/android/server/SystemServer.java),
+[AOSP JobScheduler boot phases and user start](https://android.googlesource.com/platform/frameworks/base/+/515e89f909b17e5befdcac128614264172b899df/apex/jobscheduler/service/java/com/android/server/job/JobSchedulerService.java),
+[AOSP updated-system scan flags](https://android.googlesource.com/platform/frameworks/base/+/0cd20302215515abb58c0d8b3cbe94206486a585/services/core/java/com/android/server/pm/ScanPackageUtils.java),
+[Android `persistent` manifest documentation](https://developer.android.com/guide/topics/manifest/application-element).
+
+`EARLY_TRIGGER_BEFORE_LOCKED_BOOT_COMPLETED=NO_CANDIDATE` under the present
+stock `/data/app` installation. No new early trigger or automatic soft reboot
+is enabled by this PR, and this timing question needs no release of the same
+trigger. If a candidate is later found, it first needs a marker-only physical
+timestamp and proof that the app starts before the bootanimation exits.
+
+Before an early destructive attempt, readiness must check the same AMS
+`ProcessRecord`, non-null `mOnewayThread`/`mThread`, and `scheduleReceiver/12`
+shape that `StageHop` needs. A PID alone does not establish those conditions.
+Any failure before transaction 5 that is proven transient must return to a
+bounded readiness state, while `STARTED` and every post-transaction failure
+remain locked for the boot. Polling must use a monotonic deadline; only the
+`STARTED` safety transition needs immediate crash durability. The existing
+coordinator has not been given a transient failure classification, so the
+current code does not pretend all pre-native failures are safe to retry.
+
+`DfrBootReceiver` now records actual receiver arrival separately from service
+startup. The service uses monotonic time for its readiness deadline and logs
+native boundary, result and journal outcome. These signals cannot determine
+first Keyguard draw or whether a user saw the first lockscreen; a physical video
+would still be required to claim `INTEGRATED_BOOT_SEAMLESS_UX=PASS`. The app ↔
+ksud ACK and one-shot soft reboot belong after an earlier trigger is proven.
 
 A permanent refusal always wins over a retryable one, so a bounded loop cannot
 become an unbounded one.

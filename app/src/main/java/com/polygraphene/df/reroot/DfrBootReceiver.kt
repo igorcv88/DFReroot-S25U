@@ -3,6 +3,7 @@ package com.polygraphene.df.reroot
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.SystemClock
 import android.util.Log
 
 /**
@@ -25,12 +26,15 @@ import android.util.Log
 class DfrBootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
+        val arrivalMs = SystemClock.elapsedRealtime()
         val action = intent?.action
         if (action != Intent.ACTION_BOOT_COMPLETED &&
             action != Intent.ACTION_LOCKED_BOOT_COMPLETED) {
             Log.i(TAG, "[DFR][AUTOROOT] ignoring unexpected action=$action")
             return
         }
+        Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] receiver_arrival" +
+            " action=$action elapsed_ms=$arrivalMs")
         /*
          * LOCKED_BOOT_COMPLETED arrives before the user unlocks; BOOT_COMPLETED
          * after. Both are accepted because the state this needs lives in
@@ -52,7 +56,9 @@ class DfrBootReceiver : BroadcastReceiver() {
             return
         }
         try {
-            context.startService(Intent(context, DfrAutoRootService::class.java))
+            context.startService(Intent(context, DfrAutoRootService::class.java)
+                .setAction(action)
+                .putExtra(EXTRA_RECEIVER_UPTIME_MS, arrivalMs))
             Log.i(TAG, "[DFR][AUTOROOT] boot=$action handed to DfrAutoRootService")
         } catch (t: Throwable) {
             // Never silent: an unattended path that fails to start must say so,
@@ -64,5 +70,6 @@ class DfrBootReceiver : BroadcastReceiver() {
 
     companion object {
         const val TAG = "DFReroot"
+        const val EXTRA_RECEIVER_UPTIME_MS = "dfr_receiver_uptime_ms"
     }
 }
