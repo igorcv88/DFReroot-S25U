@@ -38,8 +38,17 @@ class DfrBootReceiver : BroadcastReceiver() {
          * journal - not the number of broadcasts - is what keeps a single attempt
          * single.
          */
-        if (!AutoRootStore.isOptedIn()) {
-            Log.i(TAG, "[DFR][AUTOROOT] not opted in for this build; nothing to do")
+        /*
+         * The verdict is logged, not a boolean. This line used to read "not opted
+         * in for this build" for every reason isOptedIn() could be false - an
+         * absent record, an unreadable one, a version bump, a changed ksud digest,
+         * a firmware update, or a deliberate opt-out - and step 7 of
+         * docs/AUTO_ROOT.md needs to observe the LAST of those specifically. A
+         * reader who has to guess which one fired is reading no evidence at all.
+         */
+        val verdict = AutoRootStore.optInVerdict()
+        if (verdict != AutoRootPolicy.OPT_IN_OK) {
+            Log.i(TAG, "[DFR][AUTOROOT] no automatic attempt: $verdict")
             return
         }
         try {

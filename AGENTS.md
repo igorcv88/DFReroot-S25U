@@ -309,6 +309,26 @@ the pathname after `open(2)` therefore cannot change the launched bytes. The hos
 test also proves that this form retains `dfreroot-ksud` as the task `comm`, so the
 paired module's defense-in-depth name check remains intact.
 
+**Third: a wrapper's success is not evidence about its target.** The same change
+reasoned for weeks from "`su` works in Termux" that a root binary sat at some path a
+`PATH` lookup could reach. What Termux resolves is its own shim in
+`/data/data/com.termux`, which *searches* for a real `su` and prints its own message
+when it finds none — so the shim running proved only that the shim exists. The binary
+it finds, `/system/bin/su`, is created by this chain at the moment root is obtained and
+is absent in any boot where the chain did not run.
+
+Two rules follow, and they generalise past `su`:
+
+- **Locate the artefact before reasoning about why it cannot be reached.** "It works
+  over there" is an observation about the tool that worked, not about a path. Read the
+  path (`command -v`, `readlink -f`, a `stat`) and put it in the record; an inference
+  from a wrapper is an inference from nothing.
+- **Never make a candidate out of a path another app owns.** A third-party app's
+  private directory is unreachable from this uid and disappears when that app does, so
+  depending on one is the same defect as depending on a root manager, which §3.6
+  forbids. The fix for an unreachable artefact is a path this chain controls, never a
+  borrowed one.
+
 ### 3.6 No execution override, under any name
 
 The marker that once let the owner accept the kernel-crash risk was removed, not

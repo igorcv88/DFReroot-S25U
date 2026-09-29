@@ -367,6 +367,60 @@ public class AutoRootPolicyTest {
         check(!armedDecision.allow && armedDecision.reason.contains("switched on during this boot"),
                 "the record written by opting in refuses in that same boot");
 
+        // --- the opt-in verdict is classified, one value per fact ----------
+        // The boot log is the ONLY record an unattended acceptance run leaves, and
+        // step 7 needs to observe the opt-out specifically. Every branch gets its
+        // own negative case, because a verdict that cannot distinguish is the
+        // defect this replaced.
+        check(AutoRootPolicy.OPT_IN_NO_RECORD.equals(
+                        AutoRootPolicy.optInVerdict(null, CODE, NAME, KSUD, FP)),
+                "no qualification record reads NO_QUALIFICATION_RECORD");
+        check(AutoRootPolicy.OPT_IN_NO_RECORD.equals(
+                        AutoRootPolicy.optInVerdict("   \n", CODE, NAME, KSUD, FP)),
+                "an empty qualification file reads NO_QUALIFICATION_RECORD");
+        check(AutoRootPolicy.OPT_IN_UNREADABLE.equals(AutoRootPolicy.optInVerdict(
+                        AutoRootPolicy.RECORD_UNREADABLE, CODE, NAME, KSUD, FP)),
+                "an unreadable record reads QUALIFICATION_UNREADABLE, which is NOT the"
+                        + " same fact as absent");
+        check(AutoRootPolicy.OPT_IN_NOT_QUALIFIED.equals(
+                        AutoRootPolicy.optInVerdict("state=QUALIFIED\n", CODE, NAME, KSUD, FP)),
+                "a malformed record reads NOT_QUALIFIED");
+        check(AutoRootPolicy.OPT_IN_OK.equals(
+                        AutoRootPolicy.optInVerdict(flipped, CODE, NAME, KSUD, FP)),
+                "a valid opted-in record for this build reads OPTED_IN");
+        check(AutoRootPolicy.OPT_IN_OPTED_OUT.equals(
+                        AutoRootPolicy.optInVerdict(off, CODE, NAME, KSUD, FP)),
+                "a valid record for this build with the flag cleared reads OPTED_OUT");
+        // The ordering assertion, stated four ways because the implication
+        // "OPTED_OUT implies buildMatches passed" is the whole value of the verdict.
+        // If any of these reported OPTED_OUT, an observed OPTED_OUT would no longer
+        // prove the opt-out boundary was the one exercised - which is exactly the
+        // ambiguity that blocked step 7.
+        check(AutoRootPolicy.optInVerdict(off, CODE + 1, NAME, KSUD, FP)
+                        .startsWith(AutoRootPolicy.OPT_IN_BUILD_MISMATCH),
+                "a version-code bump outranks the cleared flag: BUILD_MISMATCH, not"
+                        + " OPTED_OUT");
+        check(AutoRootPolicy.optInVerdict(off, CODE, NAME + "-x", KSUD, FP)
+                        .startsWith(AutoRootPolicy.OPT_IN_BUILD_MISMATCH),
+                "a version-name change outranks the cleared flag");
+        check(AutoRootPolicy.optInVerdict(off, CODE, NAME, KSUD.replace('1', '2'), FP)
+                        .startsWith(AutoRootPolicy.OPT_IN_BUILD_MISMATCH),
+                "a changed ksud digest outranks the cleared flag");
+        check(AutoRootPolicy.optInVerdict(off, CODE, NAME, KSUD, FP + "/other")
+                        .startsWith(AutoRootPolicy.OPT_IN_BUILD_MISMATCH),
+                "a firmware change outranks the cleared flag");
+        check(AutoRootPolicy.optInVerdict(off, CODE + 1, NAME, KSUD, FP)
+                        .contains(Integer.toString(CODE + 1)),
+                "BUILD_MISMATCH carries the reason, so the log says what diverged");
+        // isOptedIn must not become a second copy of the conjunction.
+        check(AutoRootPolicy.isOptedIn(flipped, CODE, NAME, KSUD, FP)
+                        == AutoRootPolicy.OPT_IN_OK.equals(
+                                AutoRootPolicy.optInVerdict(flipped, CODE, NAME, KSUD, FP))
+                        && AutoRootPolicy.isOptedIn(off, CODE, NAME, KSUD, FP)
+                        == AutoRootPolicy.OPT_IN_OK.equals(
+                                AutoRootPolicy.optInVerdict(off, CODE, NAME, KSUD, FP)),
+                "isOptedIn agrees with the verdict it is derived from");
+
         check(AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT >= 8,
                 "the readiness poll cap leaves room for a slow boot instead of"
                         + " closing the window in the first minute");

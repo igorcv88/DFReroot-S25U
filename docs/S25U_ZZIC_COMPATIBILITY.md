@@ -957,7 +957,7 @@ inferred from a nearby firmware.
 | G4 — Write safety | **physical PASS** | system remained operational after `enforcing=0`, KernelSU late-load completed and root worked |
 | H — Installer / packages.xml | **physical PASS** | injected key survived framework restart; write-path fixes regression-tested |
 | I — Automatic safe end state | **physical PASS** | `v2.0.5-zzic`, boot `62e8538c…`: the closeout ran unaided to a same-boot `POST_ROOT_COMPLETE`, and the operator independently read `Enforcing` / sysfs `1`, `su` in `u:r:ksu:s0`, and the pinned daemon installed at `/data/adb/ksud`. See the fourth physical run below |
-| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **PARTIALLY ACCEPTED (still ships disabled)** | `2.0.6-zzic`, boot `2e447aaf…`: the service completed an unattended attempt after a full reboot. Its own per-boot journal — written by `DfrAutoRootService` and by nothing else — read `phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id` as a valid post-root record, with `Enforcing` / sysfs `1` and `su` in `u:r:ksu:s0`. The gate also covers three boundaries one successful boot cannot speak for, and they are now in different states: a framework restart must trigger nothing (**done**, seventh physical run, with the caveat recorded there), the next full boot must make exactly one attempt (**done**, `2.0.8-zzic`, boot `7d1cea20…`, with the refusal of the boot's second broadcast in the log), and opting out must suppress the next boot (**still untested** — and note that a version bump stops Auto Root through `buildMatches` before `opt_in` is consulted, so "nothing ran after an update" is not evidence for it). Step 7 is therefore why this is not a promotion to PASS (AGENTS.md section 8). It ships OFF: a verified manual completion on the exact build plus an explicit opt-in remain required. See the fifth and seventh physical runs below |
+| AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **PARTIALLY ACCEPTED (still ships disabled)** | `2.0.6-zzic`, boot `2e447aaf…`: the service completed an unattended attempt after a full reboot, its own per-boot journal reading `phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id` as a valid post-root record, with `Enforcing` / sysfs `1` and `su` in `u:r:ksu:s0`. Of the three boundaries one successful boot cannot speak for: a framework restart triggers nothing (**done**, seventh run, two observations), the next full boot makes exactly one attempt (**done**, boot `7d1cea20…`, the boot's second broadcast refused in the log), and opting out suppresses the next boot (**still untested**). Step 7 was briefly promoted on the eighth run and is **withdrawn**: the refusal that run observed was logged by a line the receiver emitted for six different facts, so it did not identify the opt-out. The receiver now logs a classified verdict and the observation to make is `OPTED_OUT`. See the fifth, seventh and eighth physical runs below |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
 remaining blocker to calling the automated flow complete is the post-root
@@ -1027,11 +1027,13 @@ This promotes nothing. What it adds to the evidence record is negative:
 - no gate is weakened, no override exists, and the automatic PASS is the same
   conjunction as the manual one.
 
-`AUTO_ROOT_FULL_BOOT` is **partially accepted** as of the fifth physical run below,
-executed after Gate I passed manually, in that order. The run proves the positive
-path; steps 5-7 of `docs/AUTO_ROOT.md` — the boundaries a single successful boot
-cannot speak for — remain untested, and the gate is not promoted to PASS until they
-are.
+`AUTO_ROOT_FULL_BOOT` is **partially accepted**. The fifth run, executed after Gate I
+passed manually in that order, proves the positive path. Steps 5 and 6 of
+`docs/AUTO_ROOT.md` are covered by the seventh run. **Step 7 is not**, and was briefly
+promoted on the eighth run before that promotion was withdrawn — see the eighth run for
+why, and for the code change that makes the observation obtainable at all. The gate is
+not promoted to PASS until step 7 is observed on a build whose receiver logs
+`OPTED_OUT`.
 
 ### Third physical run — `v2.0.5-zzic`, displaced by a pre-existing KernelSU
 
@@ -1808,11 +1810,12 @@ not list — and **neither is established**: the KernelSU sources that would set
 are not at the paths tried for the pinned revision from this environment. The code now
 tries `/system/bin/su`, `/debug_ramdisk/su` and `/sbin/su` before the bare name and
 logs which started, which **narrows** the `PATH` cause to three conventional locations
-without eliminating it: the path of the `su` that works in Termux was never captured,
-so a wrapper or an executable anywhere else still explains `ENOENT` from all four. The
-observation that closes it is `command -v su` / `readlink -f` read off the device; it
-is owed, and until it lands the next tap's `ENOENT` remains ambiguous between the two
-causes.
+without eliminating it: at the time of this run the path of the `su` that works in
+Termux had never been captured, so a wrapper or an executable anywhere else still
+explained `ENOENT` from all four. **That observation has since landed** — see the
+eighth physical run, which reads the path off the device, finds Termux resolving its
+own shim, finds `/system/bin/su` real but created by the chain itself, and replaces
+the two candidate causes with three.
 
 **Step 5 — a framework-only restart triggers nothing — recorded here, which it was
 not before.** The observation belongs to boot `2e447aaf…` on `2.0.6-zzic`: after a
@@ -1845,6 +1848,182 @@ invalidated it before `opt_in` was ever consulted. Step 7 requires a **valid**
 qualification for the installed build, the box then unticked, and a full boot that
 starts nothing — the `"Auto Root is not opted in"` path. Different code, different
 evidence, still owed.
+
+### Eighth physical run — `v2.0.8-zzic`, a step-7 promotion made and withdrawn
+
+The boundary the previous seven runs could not speak for. Unlike the attempt this
+dossier rejected one entry above, the qualification on disk was **valid for the
+installed build**, so `AutoRootPolicy.buildMatches()` passed and `opt_in` was the only
+thing left to refuse on.
+
+State before the reboot, read in boot `7d1cea20…` after unticking the box:
+
+```text
+state=QUALIFIED
+opt_in=0
+opt_in_boot_id=7d1cea20-f2d7-4285-b6d1-53511a11f3a4
+version_code=20008
+version_name=2.0.8-zzic
+ksud_sha256=14fb9eaf14cb6dc0a32aace6024e89124bba1ea8b4b37979136b7c2017dec97a
+device_fingerprint=samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCZZIC_OXMCZZIC:user/release-keys
+boot_id=6ae7dd04-93b9-4ccf-bb95-69bafd7d1d78
+```
+
+Recorded in full, all four `buildMatches` fields included, because an excerpt that drops
+one of them cannot be checked against the comparison it is offered as evidence for.
+
+`version_code=20008` / `version_name=2.0.8-zzic`, and the app was believed to be at
+exactly those values. That belief is where this run's claim came apart — see below: the
+installed `versionCode` was never read back, and the log line the run then produced
+could not have distinguished the outcome anyway.
+
+Full reboot. New boot `0e8eaa2f-6c23-42a2-9d50-4b63a850a3dc`, and the **complete**
+`[DFR]` output of that boot, captured before anything was pressed, was one line:
+
+```text
+09-27 14:21:18.971  3007  3007 I DFReroot: [DFR][AUTOROOT] not opted in for this build; nothing to do
+```
+
+Two things that line does establish, and one it was wrongly read as establishing:
+
+- pid `3007` is `system_server`, so the receiver **did** fire and **did** reach the
+  policy. This is not the "never fired" ambiguity that weakened step 5's first
+  observation;
+- it is the **only** `[DFR]` line in the boot. A grep of both `main` and `system` over
+  the whole boot returned exactly this one line, so nothing else in the chain ran —
+  the refusal is not one entry in a sequence that continued anyway;
+- it is **not** an identification of the `opt_in` refusal, although this dossier first
+  said it was. The message text is the same for every reason the conjunction can be
+  false. See the withdrawal below.
+
+Root was correspondingly absent, checked from an unprivileged shell:
+
+```text
+$ su
+No su program found on this device.
+```
+
+Then, in the same boot, the manual path was used to recover — and the journal is the
+proof that a manual run does not consume the boot's auto-root attempt:
+
+```text
+[DFR][RUN] owner=ui boot_id=0e8eaa2f-6c23-42a2-9d50-4b63a850a3dc
+… all gates PASS, exact-kernel module b941d323…, POST_ROOT_COMPLETE=PASS boot_id=0e8eaa2f…
+[DFR][POST_ROOT] ROOT_RESULT=SUCCESS
+[*] AUTO_ROOT_QUALIFIED=1 for this build
+
+$ su -c 'cat /data/system/dfreroot-autoroot-journal'
+boot_id=7d1cea20-f2d7-4285-b6d1-53511a11f3a4
+phase=COMPLETE
+attempts=1
+native_started=1
+```
+
+The journal still names boot `7d1cea20…` while root was obtained in `0e8eaa2f…`. A
+manual run writes **no** auto-root journal, so the two owners do not share the
+per-boot budget — which is the second half of what step 7 asks, and the half that
+would silently rot if only the refusal were recorded.
+
+**That promotion was made, and is withdrawn. The log line does not identify the
+opt-out.** It was caught in review, it is correct, and the failure is worth more than
+the promotion was.
+
+`DfrBootReceiver` emitted `not opted in for this build; nothing to do` for the **whole**
+false branch of `AutoRootStore.isOptedIn()`, and that method is a conjunction:
+
+```java
+STATE_QUALIFIED.equals(q.get("state"))
+        && "1".equals(q.get("opt_in"))
+        && buildMatches(q, versionCode, versionName, ksudSha256, deviceFingerprint) == null
+```
+
+So the same line stands for six different facts: no record, an unreadable record, a
+record that is not `QUALIFIED`, a `versionCode`/`versionName` bump, a changed `ksud`
+digest, a firmware change — **and** a deliberate opt-out. Reading it as the opt-out is
+reading a collapsed signal as a specific one, which is the §3.7 failure this repository
+is built to catch, and it was in the app's own code rather than in a document.
+
+What the run does still establish, and it is not nothing: the receiver **fired**,
+reached the policy, and the chain did not run. What it cannot establish on the log alone
+is which element refused. Three of the four `buildMatches` fields *are* independently
+corroborated in that same boot — the manual run printed `ksud sha256 14fb9eaf…`, equal
+to the record's, and `TARGET_FINGERPRINT` string-identical to the record's
+`device_fingerprint` — but the installed `versionCode` was never read back in that boot.
+It is inferred from the record having been written by the installed app, and an
+inference is what §2 calls missing evidence. (The excerpt above also omitted
+`ksud_sha256` when first written here, which is its own record-keeping defect and is
+fixed.)
+
+**The fix is in the app, not in the wording.** `AutoRootPolicy.optInVerdict()` now
+returns one value per fact — `NO_QUALIFICATION_RECORD`, `QUALIFICATION_UNREADABLE`,
+`NOT_QUALIFIED`, `BUILD_MISMATCH: <what diverged>`, `OPTED_OUT`, `OPTED_IN` — and the
+receiver logs it. The check order inside it is load-bearing and asserted four ways in
+`AutoRootPolicyTest` plus once statically in `tools/profile_binding_audit.py`: the build
+comparison runs **before** the flag, so `OPTED_OUT` *implies* `buildMatches()` passed.
+That implication is the entire value of the verdict, and reversing the two lines would
+silently restore the ambiguity.
+
+So step 7 is **still owed**, and it is now obtainable: on a build carrying the verdict,
+the observation to capture is
+
+```text
+[DFR][AUTOROOT] no automatic attempt: OPTED_OUT
+```
+
+and nothing else will do. `BUILD_MISMATCH: …` on that run would mean the qualification
+had gone stale again and the boundary was never reached — the same trap as the seventh
+run, but now legible instead of silent.
+
+#### The `su` path, captured — and what the ninth investigation then settled
+
+§3.5.1 and the seventh run left an ambiguity open on purpose: `ENOENT` from
+`ProcessBuilder("su")` inside `system_server` fit more than one cause, and the path of
+the `su` that works in Termux had never been read. It was read here:
+
+```text
+$ command -v su
+/data/data/com.termux/files/usr/bin/su
+$ readlink -f "$(command -v su)"
+/data/data/com.termux/files/usr/bin/su
+$ ls -lZ /system/bin/su /debug_ramdisk/su /sbin/su
+ls: cannot access '/debug_ramdisk/su': No such file or directory
+ls: cannot access '/sbin/su': No such file or directory
+-rwxr-xr-x? 1 root root ? 6670272 Sep 27 14:22 /system/bin/su
+```
+
+Four facts, and one of them retires an assumption this dossier carried:
+
+1. **The `su` Termux resolves is Termux's own shim**, at
+   `/data/data/com.termux/files/usr/bin/su` — inside another app's private data
+   directory. So "`su` works from Termux" never meant "a root binary sits somewhere on
+   a `PATH`": it meant a shim ran and searched. The same shim is what printed
+   `No su program found on this device` in the rootless boot, i.e. it **executed** and
+   reported; it did not fail to exist. Every earlier inference that read "su works in
+   Termux" as evidence about a reachable binary was reading a wrapper's success as its
+   target's location. AGENTS.md §3.5.1 carries the general rule.
+2. **That shim is not a candidate and must never become one.** It lives under another
+   app's uid in a directory DFReroot cannot traverse, and its existence depends on a
+   third-party app being installed. Adding it would make the chain depend on Termux,
+   which §3.6 rules out by name.
+3. **`/system/bin/su` exists**, `-rwxr-xr-x root root`, while `/debug_ramdisk/su` and
+   `/sbin/su` do not. Its mtime `Sep 27 14:22` is the minute the manual run above
+   established root, so it is **created by the chain**, not shipped by the firmware —
+   it does not exist in a boot where root was never obtained. A transport built on it
+   would need root to obtain root.
+4. **Its size, 6670272 bytes, equals the pinned `ksud` asset's exactly** (`[*] ksud
+   asset 6670272 bytes`), consistent with `su` being the multicall daemon under another
+   name. Consistent is not identical: **no digest of `/system/bin/su` was taken**, and
+   equal size is not byte identity (§3.5). It is a lead, not a finding, and nothing may
+   rest on it until `sha256sum /system/bin/su` is compared against `14fb9eaf…`.
+
+**The cause was then settled, and not by this run.** At the time this was written the
+`2.0.8` tap's `ENOENT` was explained by `PATH` alone (it probed the bare name only) and
+three candidate causes were left open — the lookup, the mount namespace, or the
+allowlist. The **ninth investigation below closed it**: `/proc/<system_server>/root`
+does not contain `/system/bin/su` at all while Termux can use it, so the two processes
+see **different mount namespaces**. That is why the transport is now native rather than
+better at probing paths, and why `tools/profile_binding_audit.py` fails if a
+`SU_CANDIDATES` list reappears instead of merely checking its order.
 
 ### Ninth investigation — paired Apply Modules transport implemented, physical result owed
 

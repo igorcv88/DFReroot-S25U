@@ -2,7 +2,8 @@
 
 **Read `AGENTS.md` first.** This file is the authoritative record of the Auto
 Root path: what is implemented, what each refusal is for, and the physical
-acceptance that is still owed. The gate matrix in
+acceptance behind it — steps 1-6 done; step 7, the soft-reboot tap and
+`POST_ROOT_LSPOSED_COMPAT` are what remain owed. The gate matrix in
 `docs/S25U_ZZIC_COMPATIBILITY.md` still wins on what is *proven*; the plan this
 implements is in `docs/HANDOFF.md`.
 
@@ -366,14 +367,47 @@ dossier):
    `attempts=1` / `native_started=1` on the new `boot_id`, and the second broadcast of
    that boot logged `REFUSED Auto Root already completed in this boot` — the
    one-attempt-per-boot rule observed rather than inferred.
-7. **still owed.** Untick the box and confirm no attempt on the next full boot.
+7. **still owed** — and the eighth physical run explains why a run that looked like it
+   closed this did not. Untick the box and confirm no attempt on the next full boot.
 
-Step 7 is the one a successful boot cannot speak for, and it has a trap: updating the
-app also stops Auto Root, but through a **different** refusal. A version bump
-invalidates the qualification (`buildMatches`) before `opt_in` is consulted, so
-"nothing ran after the update" is not evidence for step 7. It needs a valid
-qualification for the installed build, the box then unticked, and the
-`"Auto Root is not opted in"` path taken.
+Step 7 has two traps, and the second was only found in review:
+
+- **A version bump stops Auto Root too, through a different refusal.** `buildMatches`
+  invalidates the qualification before `opt_in` is consulted, so "nothing ran after the
+  update" is not evidence. It needs a qualification valid for the installed build.
+- **The old log line could not tell the two apart.** `DfrBootReceiver` printed
+  `not opted in for this build; nothing to do` for the entire false branch of
+  `isOptedIn()` — a conjunction of `state=QUALIFIED`, `opt_in=1` and `buildMatches`
+  passing. Six distinct facts, one message: no record, unreadable record, not
+  qualified, version bump, changed `ksud` digest, firmware change, opt-out. Reading it
+  as the opt-out was reading a collapsed signal as a specific one, which is what §3.7
+  forbids — and the collapse was in the app, not in the prose.
+
+**The receiver now logs a classified verdict**, `AutoRootPolicy.optInVerdict()`:
+
+| verdict | fact |
+|---|---|
+| `NO_QUALIFICATION_RECORD` | the chain has never completed here |
+| `QUALIFICATION_UNREADABLE` | the file exists and could not be read — not the same fact as absent |
+| `NOT_QUALIFIED` | present and readable, but malformed or another state |
+| `BUILD_MISMATCH: <what diverged>` | qualified for a different build, daemon or firmware |
+| `OPTED_OUT` | qualified for **this** build and deliberately switched off |
+| `OPTED_IN` | an attempt may start |
+
+The check order is load-bearing: the build comparison runs **before** the flag, so
+`OPTED_OUT` **implies** `buildMatches()` passed. That implication is the whole value of
+the verdict, and it is asserted four ways in `AutoRootPolicyTest` and once statically in
+`tools/profile_binding_audit.py`, because reversing two lines would restore the
+ambiguity without any compiler noticing.
+
+So the observation step 7 needs, on a build carrying the verdict, is exactly:
+
+```text
+[DFR][AUTOROOT] no automatic attempt: OPTED_OUT
+```
+
+`BUILD_MISMATCH: …` on that run means the qualification went stale and the boundary was
+never reached — the same trap as before, but now legible instead of silent.
 
 Record the outcome separately from Gate I and from `POST_ROOT_LSPOSED_COMPAT`. A
 failure of the automatic path is not a failure to obtain root, and must not be
@@ -694,6 +728,35 @@ version/UAPI read-back.
 
 The implementation is `app/src/main/jni/dfr_su_core.c`, reached through
 `libdfrsu.so`, which the app **loads** rather than executes.
+
+**The `su` path was captured before this transport replaced the probing one, and two
+of those observations still matter.** They are kept because they are why a `su` path
+can never be the transport here, not as a record of the probe that is gone:
+
+```text
+$ command -v su
+/data/data/com.termux/files/usr/bin/su        <- Termux's own shim, another app's uid
+$ ls -lZ /system/bin/su /debug_ramdisk/su /sbin/su
+-rwxr-xr-x? 1 root root ? 6670272 Sep 27 14:22 /system/bin/su
+ls: cannot access '/debug_ramdisk/su': No such file or directory
+ls: cannot access '/sbin/su': No such file or directory
+```
+
+- **"`su` works in Termux" was never evidence about a reachable binary.** What Termux
+  resolves is its own shim inside `/data/data/com.termux`, and that shim is also what
+  printed `No su program found on this device` in the rootless boot — it *ran* and
+  reported. A wrapper's success was being read as its target's location. The shim is
+  unreachable from this uid and present only if Termux is, so depending on it is the
+  §3.6 dependency in a different hat. AGENTS.md §3.5.1 carries the general rule.
+- **`/system/bin/su` is created by the chain, not shipped by the firmware** — its mtime
+  is the minute a manual run established root, and it is absent in any boot where the
+  chain did not run; `/debug_ramdisk/su` and `/sbin/su` never exist. So a transport
+  built on `su` would need root to obtain root. That is the structural reason this one
+  is native, and it is why `tools/profile_binding_audit.py` now **fails** if a
+  `SU_CANDIDATES` list reappears rather than merely checking its order.
+- Its size equals the pinned `ksud` asset's exactly, consistent with `su` being the
+  multicall daemon under another name. **No digest was taken**, and per §3.5 equal size
+  is not byte identity, so that stays a lead and nothing rests on it.
 
 **Two things this paragraph used to say are now settled, and neither the way it
 guessed.** It asked whether the kernel gates the fd install by the same
