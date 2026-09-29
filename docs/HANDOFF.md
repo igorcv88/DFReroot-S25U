@@ -5,6 +5,16 @@ what is physically proven now, what still needs to be implemented, and the
 acceptance criteria for the next signed build. If this file disagrees with
 `docs/S25U_ZZIC_COMPATIBILITY.md` about evidence, the compatibility dossier wins.
 
+> **Open, and where to start: the twelfth run's Apply Modules refusal.** Root
+> itself succeeded; the soft-reboot transport refused with
+> `DFR_SU_STEP=DRIVER_FD errno=1`. That verdict proves the marker gate *opened*
+> — the whole `transport_fix` pipeline works end to end — and that the
+> supercall was then refused with `EPERM` before any fd was installed. The
+> cause is **unknown and must not be guessed**; three earlier attributions in
+> this exact spot were wrong (`AGENTS.md §3.6.1`).
+> See `docs/INVESTIGATION-SUPERCALL-EPERM.md` for the inference, the candidate
+> causes, and the ordered first moves.
+
 ## Current state
 
 The exact Galaxy S25 Ultra target is:

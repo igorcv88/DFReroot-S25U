@@ -307,12 +307,7 @@ public class AutoRootPolicyTest {
 
         in = ready();
         in.bootCompleted = false;
-        allowed(in, "NetworkStack visible before sys.boot_completed can start the chain");
-
-        in = ready();
-        in.bootCompleted = false;
-        in.networkStack = AutoRootPolicy.PROCESS_UNKNOWN;
-        retryable(in, "unknown NetworkStack before boot completion waits for evidence");
+        retryable(in, "sys.boot_completed=0 is retryable, not a refusal");
 
         in = ready();
         in.networkStack = AutoRootPolicy.PROCESS_ABSENT;

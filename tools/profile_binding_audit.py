@@ -1065,6 +1065,27 @@ def audit():
         if supercall_owner_code.count("syscall(__NR_reboot") != 1:
             fail("%s names the supercall more than once; only the gated call "
                  "site may exist" % SUPERCALL_OWNER)
+        # The scan AFTER the call must be unconditional on the call's return.
+        # reboot_handler_pre() is a pre-handler: it queues the fd install and
+        # lets the real sys_reboot run, so a failing syscall does not mean no
+        # fd was installed. Returning early on rc != 0 collapses "filtered
+        # before the handler" and "fd installed, then the syscall failed" into
+        # one token (AGENTS.md 3.7) and points the next physical run at the
+        # wrong question. This path cannot be reached from a host test - the
+        # syscall is real - so it is asserted statically (AGENTS.md 5).
+        elif call >= 0:
+            after_call = supercall_owner_code[call:]
+            rescan = after_call.find("real_scan_driver_fd(fd_out) == 0")
+            if rescan < 0:
+                fail("%s does not re-scan /proc/self/fd after the supercall; "
+                     "a returned success is not evidence the fd exists "
+                     "(AGENTS.md 3.5)" % SUPERCALL_OWNER)
+            elif "return -1;" in after_call[:rescan]:
+                fail("%s returns before re-scanning when the supercall fails. "
+                     "The install is queued as task_work and the real syscall "
+                     "runs after the handler, so its failure does not mean no "
+                     "fd was installed - observe first, decide after "
+                     "(AGENTS.md 3.7)" % SUPERCALL_OWNER)
         # Nothing in the native layer may synthesise the flag.
         for bad in ("supercall_allowed = 1", "supercall_allowed = true",
                     "supercall_allowed || ", "|| supercall_allowed"):
