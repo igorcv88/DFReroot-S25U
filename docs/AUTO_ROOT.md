@@ -322,9 +322,35 @@ would take on Wi-Fi's service contract merely to wake DFR, so it is not an
 acceptable trigger. These observations do not prove that no other entry point
 exists; they close the candidates that the current evidence can evaluate.
 
+### Last offline review of earlier triggers
+
+| Candidate | Verdict for the present package | Concrete reason |
+|---|---|---|
+| Persisted `JobScheduler` job | **UNKNOWN** as an earlier usable trigger | The ZZIC trace starts `JobScheduler` at 14.281 s, enters phase 600 (`PHASE_THIRD_PARTY_APPS_CAN_START`) at 16.363 s, and calls its `onBootPhase(600)` at 16.416 s, ahead of the 19.385 s locked-boot broadcast. AOSP loads persisted jobs before system services are ready and begins tracking/checking them at phase 600. This establishes a possible *time window*, not that an eligible DFR job runs in it. The current APK declares no `JobService`, schedules no persisted job, and has no trace of such a job. Direct-Boot awareness, user-start state, persisted-job permission, package availability and Samsung's actual scheduling/constraints remain unproved. The existing Auto Root audit also prohibits JobScheduler as a retry mechanism. No job was scheduled in this PR. |
+| DFInstaller making DFR `FLAG_SYSTEM` or an updated-system app | **NO-GO** for the present installer | The captured DFR APK is loaded from `/data/app`. `PackagesXml.kt` changes signing lineage (`<shared-user><sigs><pastSigs>`), not a verified system APK or a disabled system package backing an updated-system app. AOSP scan logic associates `SCAN_AS_SYSTEM` for a data update with a system package setting; the shared UID/signature does not supply that backing package. Samsung's exact private scan code was not captured, so this verdict describes the present installer and observed installation, not every possible vendor modification. |
+| `android:persistent` | **NO-GO** for the present APK | The manifest has no `android:persistent` attribute (default false); changing it would require a different APK. Android documents persistence as intended for certain system applications. Neither the shared UID nor the installer's signing-lineage edit makes the existing APK persistent or a system app. Whether a newly built `/data/app` APK would receive early persistent treatment on ZZIC is unmeasured and is not claimed here. |
+
+The JobScheduler result is deliberately **UNKNOWN**: phase 600 physically
+precedes the locked-boot broadcast, but scheduler availability is not a measured
+DFR `JobService` callback. It remains a distinct future hypothesis requiring a
+non-destructive marker and proof of eligibility and timing before any change to
+the production Auto Root path. This offline review does not require a physical
+reboot; Android compilation remains a separate verification gate.
+
+The receiver's `EXTRA_RECEIVER_UPTIME_MS` is **telemetry only**. A process with
+the same shared UID can start a non-exported service and provide an arbitrary
+Intent extra. `MAX_BOOT_WINDOW_MS` therefore uses `elapsedRealtime()` sampled
+by `DfrAutoRootService.onStartCommand()` itself. The receiver and service
+samples remain separately logged to measure handoff delay; a readiness loop
+reuses the service sample so polling cannot extend the window.
+
 Source references: [AOSP UserController](https://android.googlesource.com/platform/frameworks/base/+/master/services/core/java/com/android/server/am/UserController.java),
 [Android Direct Boot](https://developer.android.com/privacy-and-security/direct-boot),
 [AOSP system-provider filter](https://android.googlesource.com/platform/frameworks/base/+/fa0e57fbe77d46039f9e9a54512dce13f71773b5%5E2..fa0e57fbe77d46039f9e9a54512dce13f71773b5/).
+Additional primary references: [AOSP SystemServer phase 600](https://android.googlesource.com/platform/frameworks/base/+/1a1e6bc55f2e/services/java/com/android/server/SystemServer.java),
+[AOSP JobScheduler boot phases and user start](https://android.googlesource.com/platform/frameworks/base/+/515e89f909b17e5befdcac128614264172b899df/apex/jobscheduler/service/java/com/android/server/job/JobSchedulerService.java),
+[AOSP updated-system scan flags](https://android.googlesource.com/platform/frameworks/base/+/0cd20302215515abb58c0d8b3cbe94206486a585/services/core/java/com/android/server/pm/ScanPackageUtils.java),
+[Android `persistent` manifest documentation](https://developer.android.com/guide/topics/manifest/application-element).
 
 `EARLY_TRIGGER_BEFORE_LOCKED_BOOT_COMPLETED=NO_CANDIDATE` under the present
 stock `/data/app` installation. No new early trigger or automatic soft reboot
