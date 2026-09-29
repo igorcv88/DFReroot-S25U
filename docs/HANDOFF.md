@@ -155,8 +155,11 @@ The remaining sequence is:
 3. **Apply Modules (Soft Reboot) is blocked, and re-running it buys nothing.** The
    tenth physical run refuted the exec the transport is built on: a process at
    `u:r:system_server:s0` — which is every component of this app, because the
-   manifest sets `android:process="system"` — cannot `execve` a file under
-   `/data`. Reproduced outside the app with
+   manifest sets `android:process="system"` — cannot `execve` the packaged
+   launcher, labelled `apk_data_file`. The former `system_data_file` target was
+   not tested and stays `UNVERIFIED`; the compatibility record carries the one
+   command that would settle it, and the redesign below does not wait on it.
+   Reproduced outside the app with
    `runcon u:r:system_server:s0 <launcher>` → `Permission denied`, while the same
    launcher runs from `u:r:ksu:s0`. The evidence table is in
    `docs/S25U_ZZIC_COMPATIBILITY.md`, "The exec proof came back negative".

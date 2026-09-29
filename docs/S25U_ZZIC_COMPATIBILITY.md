@@ -1897,8 +1897,28 @@ device answered, and the answer is **no**.
   error=13, Permission denied
 ```
 
-`SYSTEM_SERVER_EXEC_FROM_DATA = REFUTED`. Four observations fix that verdict,
-and none of them rests on an absent log line:
+`SYSTEM_SERVER_EXEC_APK_DATA_FILE = REFUTED`. The verdict is named after the type
+that was actually executed, because SELinux decides `execute_no_trans` per target
+type: this run tested `apk_data_file` (the packaged launcher) and nothing else.
+`SYSTEM_SERVER_EXEC_SYSTEM_DATA_FILE` — the former target, `/data/system/
+dfreroot-ksud` — is `UNVERIFIED`, and an absent test is not a refusal any more than
+it is a pass. What would settle it is one command, with a file of that label that
+the run can remove again:
+
+```sh
+su -c 'cp /system/bin/toybox /data/system/dfr-exectest &&
+       chcon u:object_r:system_data_file:s0 /data/system/dfr-exectest &&
+       chmod 755 /data/system/dfr-exectest &&
+       runcon u:r:system_server:s0 /data/system/dfr-exectest true; echo rc=$?;
+       rm -f /data/system/dfr-exectest'
+```
+
+The redesign below does not wait on that answer, because it removes the exec from
+`system_server` altogether; the question matters only to anyone tempted to move the
+artefact to a different label and try again.
+
+Four observations fix the verdict that was tested, and none of them rests on an
+absent log line:
 
 | observation | what it rules out |
 |---|---|
@@ -1907,13 +1927,16 @@ and none of them rests on an absent log line:
 | `runcon u:r:system_server:s0 <launcher>` → `Permission denied`, reproduced from a root shell with no app involved | the app, the `ProcessBuilder` argv, the receiver thread |
 | `dmesg`: `audit_lost=5545 audit_rate_limit=5 audit_backlog_limit=64` | "no `avc:` line appeared" meaning anything at all — the audit backlog is saturated and dropping records |
 
-The denial is bound to the **domain**, not to the artefact. `app/src/main/
+The denial is bound to the **domain**, not to the artefact: the same file runs
+from `u:r:ksu:s0` and is refused from `u:r:system_server:s0`. `app/src/main/
 AndroidManifest.xml` sets `android:process="system"`, so every component of this
-app — `DfrSoftRebootReceiver` included — runs inside `system_server` at
-`u:r:system_server:s0`, which the policy does not give `execute_no_trans` over
-`/data`. Commit 3f801f2 moved the exec target from `system_data_file`
-(`/data/system/dfreroot-ksud`) to `apk_data_file` (the packaged launcher); it
-could not have changed this outcome, because the executing domain never changed.
+app — `DfrSoftRebootReceiver` included — runs inside `system_server` at that
+second context. Commit 3f801f2 moved the exec target from `system_data_file`
+(`/data/system/dfreroot-ksud`) to `apk_data_file` (the packaged launcher). That
+did not fix anything, and the evidence here does not say it could not have: it
+says the executing domain never changed, and that the type it moved *to* is
+refused. Whether the type it moved *from* is refused as well is the `UNVERIFIED`
+question above.
 
 **This refutes the transport's shape, not its authorization boundary.** The
 paired module's `dfr_system_server_child_transport()` requires the caller to

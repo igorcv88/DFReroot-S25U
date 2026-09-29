@@ -676,9 +676,29 @@ manager grant, bare `su`, or conventional absolute `su` path remains.
 The paired source and exact-port workflow are implemented. The generated helper is
 `ksud-pa3q-S938BXXUCZZIC-dfreroot-v3.3.0`, with published SHA-256
 `f9ba5d98d23606f278d86ea4c60101092da22043486a889f5794c7bf23bac97c`.
-The remaining evidence is physical: the final APK must show
-`PINNED_TRANSPORT_READY=PASS`, a root `id`, a matching installed-daemon digest and
-then `DISPATCHED` or the deliberately separate `UNDETERMINED` timeout outcome.
+
+**BLOCKED as of 2026-09-29 — do not run this sequence again to collect that
+evidence.** The physical run refuted the step everything above rests on: the
+launcher, labelled `apk_data_file`, cannot be `execve`d from
+`u:r:system_server:s0`, which is where every component of this app runs
+(`android:process="system"`). Reproduced outside the app with `runcon`; the
+evidence table is in `docs/S25U_ZZIC_COMPATIBILITY.md`, "The exec proof came back
+negative". `PINNED_TRANSPORT_READY=PASS` is still reached — staging and
+verification are unaffected — and root itself is untouched, so a repeat attempt
+costs an install and returns the same `NO_ROOT_TRANSPORT`.
+
+What replaces the sequence above is a redesign, not another attempt: take the
+grant **before** any exec. The paired module reads `current`, so a `fork()` inside
+`system_server` already carries the uid, the caller SID and the real-parent SID it
+requires, with nothing executed; `prctl(PR_SET_NAME, "dfreroot-ksud")` supplies the
+task name that module treats as defense in depth rather than authority. The
+KernelSU client mechanics are read out of the pinned daemon's own bytes (it ships
+unstripped): the driver fd comes from
+`syscall(__NR_reboot, 0xdeadbeef, 0xcafebabe, 0, &fd)` and the grant is
+`ioctl(fd, _IO('K', 1))` on it, with `ioctl(fd, 0x80004b02, &info)` for the
+version/UAPI read-back. Whether the fd install itself is gated by the same
+`allowed_for_su()` the DFR patch extends is kernel-side and still unread; until it
+is, this stays BLOCKED rather than "about to work".
 
 **One RMGLabs design change that does not transfer.** It moved Apply Modules off a
 broadcast receiver and into a foreground service, because holding a broadcast open
