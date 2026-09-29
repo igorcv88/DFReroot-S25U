@@ -1,5 +1,6 @@
 import com.polygraphene.df.reroot.AutoRootPolicy;
 import com.polygraphene.df.reroot.SoftRebootPolicy;
+import com.polygraphene.df.reroot.SoftRebootDispatchGuard;
 import com.polygraphene.df.reroot.SoftRebootPolicy.Candidate;
 import com.polygraphene.df.reroot.SoftRebootPolicy.Decision;
 import com.polygraphene.df.reroot.SoftRebootPolicy.Inputs;
@@ -136,16 +137,21 @@ public class SoftRebootPolicyTest {
         selinuxUnreadable.liveSelinux = -1;
         refuse("live SELinux unreadable", selinuxUnreadable);
 
-        Inputs alreadyDispatched = ok();
-        alreadyDispatched.lockRecord = SoftRebootPolicy.formatLock(BOOT, 1L);
-        refuse("a soft reboot was already dispatched in this boot", alreadyDispatched);
+        Inputs alreadyClaimed = ok();
+        alreadyClaimed.lockRecord = SoftRebootPolicy.formatLock(BOOT, 1L);
+        refuse("a soft reboot attempt was already claimed in this boot", alreadyClaimed);
+
+        Inputs legacyCurrentBoot = ok();
+        legacyCurrentBoot.lockRecord = "boot_id=" + BOOT
+                + "\nphase=DISPATCHED\ndispatched_at_ms=1\n";
+        refuse("a current-boot legacy lock still fails closed", legacyCurrentBoot);
 
         Inputs lockUnreadable = ok();
         lockUnreadable.lockRecord = AutoRootPolicy.RECORD_UNREADABLE;
         refuse("the lock exists but is unreadable", lockUnreadable);
 
         Inputs lockGarbage = ok();
-        lockGarbage.lockRecord = "boot_id=" + BOOT + "\nphase=DISPATCHED\n";
+        lockGarbage.lockRecord = "boot_id=" + BOOT + "\nphase=CLAIMED\n";
         refuse("the lock is missing a field", lockGarbage);
 
         Inputs lockUnknownKey = ok();
@@ -156,6 +162,12 @@ public class SoftRebootPolicyTest {
         Inputs oldLock = ok();
         oldLock.lockRecord = SoftRebootPolicy.formatLock(OTHER_BOOT, 1L);
         allow("a lock naming another boot does not lock this one", oldLock, STAGED);
+
+        Inputs oldLegacyLock = ok();
+        oldLegacyLock.lockRecord = "boot_id=" + OTHER_BOOT
+                + "\nphase=DISPATCHED\ndispatched_at_ms=1\n";
+        allow("a legacy lock naming another boot does not lock this one",
+                oldLegacyLock, STAGED);
 
         Inputs noPinned = ok();
         noPinned.pinnedKsudSha256 = "";
@@ -248,6 +260,36 @@ public class SoftRebootPolicyTest {
         } else {
             fail++;
             System.out.println("  FAIL - precheck selected " + p2.binaryPath);
+        }
+
+        System.out.println("");
+        System.out.println("[T] SoftRebootDispatchGuard");
+        SoftRebootDispatchGuard guard = new SoftRebootDispatchGuard();
+        SoftRebootDispatchGuard.Lease preClaim = guard.tryAcquire();
+        preClaim.close();
+        SoftRebootDispatchGuard.Lease retry = guard.tryAcquire();
+        if (retry != null) {
+            pass++;
+            System.out.println("  ok   - a pre-claim refusal releases the guard");
+        } else {
+            fail++;
+            System.out.println("  FAIL - pre-claim refusal left the guard held");
+        }
+        if (guard.tryAcquire() == null) {
+            pass++;
+            System.out.println("  ok   - concurrent pre-claim taps stay serialized");
+        } else {
+            fail++;
+            System.out.println("  FAIL - concurrent tap acquired the held guard");
+        }
+        retry.markDurableClaimed();
+        retry.close();
+        if (guard.tryAcquire() == null) {
+            pass++;
+            System.out.println("  ok   - durable claim keeps future attempts refused");
+        } else {
+            fail++;
+            System.out.println("  FAIL - durable claim released the guard");
         }
 
         System.out.println("");

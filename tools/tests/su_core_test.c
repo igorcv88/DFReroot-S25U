@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -23,7 +24,9 @@ static int fake_uid;
 static int fail_step;
 /* Whether the fake driver_fd op should behave like the real one: refuse with
  * EPERM when the supercall is not authorised. */
-static int fake_fd_needs_supercall;
+static int fake_fd_source;
+static volatile int *fake_driver_calls;
+static volatile int *fake_grant_calls;
 
 static void check(int ok, const char *what)
 {
@@ -43,18 +46,17 @@ static int fake_set_comm(const char *comm)
     return 0;
 }
 
-static int fake_driver_fd(int *fd_out, int supercall_allowed)
+static int fake_driver_fd(int *fd_out, struct dfr_su_transport_diag *diag)
 {
+    (*fake_driver_calls)++;
+    diag->fd_source = fake_fd_source;
+    diag->supercall_rc = DFR_SU_SUPERCALL_NOT_ISSUED;
+    diag->supercall_errno = 0;
     if (fail_step == DFR_SU_STEP_DRIVER_FD) {
         /* ENOTTY, not EPERM: this stands for "the scan found nothing and the
          * supercall was allowed but produced nothing", which must NOT be
          * reported as the gate. */
         errno = ENOTTY;
-        return -1;
-    }
-    if (fake_fd_needs_supercall && !supercall_allowed) {
-        /* Exactly what real_driver_fd() does when the marker withheld it. */
-        errno = EPERM;
         return -1;
     }
     *fd_out = STDERR_FILENO;
@@ -64,6 +66,7 @@ static int fake_driver_fd(int *fd_out, int supercall_allowed)
 static int fake_grant_root(int fd)
 {
     (void)fd;
+    (*fake_grant_calls)++;
     if (fail_step == DFR_SU_STEP_GRANT) {
         errno = ENOTTY;
         return -1;
@@ -94,7 +97,49 @@ static void reset(void)
 {
     fake_uid = 0;
     fail_step = -1;
-    fake_fd_needs_supercall = 0;
+    fake_fd_source = DFR_SU_FD_SOURCE_EXISTING;
+    *fake_driver_calls = 0;
+    *fake_grant_calls = 0;
+}
+
+static int acquire_scan_calls;
+static int acquire_scan_success_on;
+static long acquire_supercall_rc;
+static int acquire_supercall_errno;
+static int acquire_supercall_fd;
+static int acquire_supercall_calls;
+
+static int acquire_scan(int *fd_out)
+{
+    acquire_scan_calls++;
+    if (acquire_scan_calls == acquire_scan_success_on) {
+        *fd_out = 42;
+        return 0;
+    }
+    errno = ENOTTY;
+    return -1;
+}
+
+static long acquire_supercall(int *fd_out)
+{
+    acquire_supercall_calls++;
+    *fd_out = acquire_supercall_fd;
+    errno = acquire_supercall_errno;
+    return acquire_supercall_rc;
+}
+
+static const struct dfr_driver_fd_ops acquire_ops = {
+    acquire_scan, acquire_supercall,
+};
+
+static void reset_acquire(void)
+{
+    acquire_scan_calls = 0;
+    acquire_scan_success_on = -1;
+    acquire_supercall_rc = -1;
+    acquire_supercall_errno = EPERM;
+    acquire_supercall_fd = -1;
+    acquire_supercall_calls = 0;
 }
 
 static int run_gated(char *const argv[], const char *pinned, long timeout_ms,
@@ -132,12 +177,26 @@ int main(void)
                     DFR_SU_STEP_MNT_NS };
     size_t i;
 
+    fake_driver_calls = mmap(NULL, sizeof(*fake_driver_calls),
+                             PROT_READ | PROT_WRITE,
+                             MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fake_grant_calls = mmap(NULL, sizeof(*fake_grant_calls),
+                            PROT_READ | PROT_WRITE,
+                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (fake_driver_calls == MAP_FAILED || fake_grant_calls == MAP_FAILED) {
+        perror("mmap");
+        return 2;
+    }
+
     reset();
     check(run(echo_argv, NULL, 5000, 1, out, sizeof(out), &res) == 0,
           "a granted child runs and is reaped");
     check(res.step == DFR_SU_OK && res.reaped && res.exit_code == 0,
           "success is reported as OK with the child's exit code");
-    check(strstr(out, "uid=0") && strstr(out, "second"),
+    check(strstr(out, "FD_SOURCE=EXISTING") &&
+              strstr(out, "SUPERCALL_RC=NOT_ISSUED") &&
+              strstr(out, "SUPERCALL_ERRNO=0") &&
+              strstr(out, "uid=0") && strstr(out, "second"),
           "stdout is captured across multiple writes");
     dfr_su_status_token(&res, token, sizeof(token));
     check(strcmp(token, "DFR_SU_STEP=OK exit=0") == 0, "the OK token is stable");
@@ -171,7 +230,7 @@ int main(void)
     check(run(echo_argv, NULL, 5000, 1, out, sizeof(out), &res) == -1 &&
               res.step == DFR_SU_STEP_NOT_ROOT,
           "a grant that leaves uid 1000 refuses instead of executing");
-    check(strlen(out) == 0, "nothing was executed, so nothing was captured");
+    check(!strstr(out, "uid=0"), "nothing was executed after a false grant");
 
     reset();
     check(run(missing_argv, NULL, 5000, 1, out, sizeof(out), &res) == -1 &&
@@ -250,21 +309,38 @@ int main(void)
      * say so by returning an error rather than by handing back a stale fd - a
      * grant ioctl sent to an arbitrary descriptor is not a refusal.
      */
+    /* Exercise the real acquisition algorithm without issuing reboot(2). */
     {
-        int fd = 12345;
+        struct dfr_su_transport_diag diag;
+        int fd = -1;
 
-        /*
-         * supercall_allowed = 0 on a build host is the interesting direction:
-         * it must refuse WITHOUT issuing the syscall. Passing 1 here would
-         * issue a real reboot(2) on the host, which is why this only ever
-         * asserts the gated side. The permitted side is covered by the fake
-         * op, where the syscall is not real.
-         */
-        check(dfr_su_real_ops.driver_fd(&fd, 0) == -1 && fd == 12345,
-              "the real driver-fd lookup refuses with the supercall withheld "
-              "and leaves fd_out untouched");
-        check(errno == EPERM,
-              "and it refuses with EPERM, the errno the gate reserves");
+        reset_acquire();
+        acquire_scan_success_on = 1;
+        check(dfr_acquire_driver_fd(&acquire_ops, &fd, &diag) == 0 &&
+                  diag.fd_source == DFR_SU_FD_SOURCE_EXISTING &&
+                  acquire_supercall_calls == 0,
+              "an existing driver fd is named EXISTING without a supercall");
+
+        reset_acquire();
+        acquire_scan_success_on = 2;
+        check(dfr_acquire_driver_fd(&acquire_ops, &fd, &diag) == 0 &&
+                  diag.fd_source == DFR_SU_FD_SOURCE_SUPERCALL_POSTSCAN &&
+                  diag.supercall_rc == -1 && diag.supercall_errno == EPERM,
+              "EPERM plus a post-call fd continues as SUPERCALL_POSTSCAN");
+
+        reset_acquire();
+        check(dfr_acquire_driver_fd(&acquire_ops, &fd, &diag) == -1 &&
+                  errno == EPERM && diag.fd_source == DFR_SU_FD_SOURCE_NONE &&
+                  diag.supercall_rc == -1 && diag.supercall_errno == EPERM,
+              "EPERM plus no post-call fd remains DRIVER_FD evidence");
+
+        reset_acquire();
+        acquire_supercall_rc = 0;
+        acquire_supercall_errno = 0;
+        acquire_supercall_fd = 77;
+        check(dfr_acquire_driver_fd(&acquire_ops, &fd, &diag) == 0 && fd == 77 &&
+                  diag.fd_source == DFR_SU_FD_SOURCE_SUPERCALL_OUTPARAM,
+              "a successful out-parameter is named SUPERCALL_OUTPARAM");
     }
 
     /*
@@ -274,27 +350,29 @@ int main(void)
      * tells the next physical run nothing (AGENTS.md 3.7).
      */
     reset();
-    fake_fd_needs_supercall = 1;
     check(run_gated(echo_argv, NULL, 5000, 1, 0, out, sizeof(out), &res) == -1 &&
-              res.step == DFR_SU_STEP_SUPERCALL_GATED,
-          "with no transport_fix marker the child refuses at SUPERCALL_GATED");
-    check(strlen(out) == 0,
-          "and nothing was executed, so nothing was captured");
+              res.step == DFR_SU_STEP_TRANSPORT_FIX_GATED,
+          "marker absent plus an existing fd refuses at TRANSPORT_FIX_GATED");
+    check(*fake_driver_calls == 0 && *fake_grant_calls == 0,
+          "the absent marker reaches neither fd acquisition nor grant_root");
+    check(strstr(out, "FD_SOURCE=NONE") &&
+              strstr(out, "SUPERCALL_RC=NOT_ISSUED"),
+          "the gated path records that no supercall was issued");
     dfr_su_status_token(&res, token, sizeof(token));
-    check(strstr(token, "DFR_SU_STEP=SUPERCALL_GATED") == token,
+    check(strstr(token, "DFR_SU_STEP=TRANSPORT_FIX_GATED") == token,
           "the gated refusal renders its own token, not DRIVER_FD's");
 
     reset();
-    fake_fd_needs_supercall = 1;
     check(run_gated(echo_argv, NULL, 5000, 1, 1, out, sizeof(out), &res) == 0 &&
-              res.step == DFR_SU_OK,
-          "with the marker present the same run proceeds");
+              res.step == DFR_SU_OK && *fake_grant_calls == 1,
+          "marker present plus an existing fd reaches one grant");
 
     reset();
-    fake_fd_needs_supercall = 0;
-    check(run_gated(echo_argv, NULL, 5000, 1, 0, out, sizeof(out), &res) == 0 &&
-              res.step == DFR_SU_OK,
-          "a task that already holds the fd never reaches the gate");
+    fake_fd_source = DFR_SU_FD_SOURCE_NONE;
+    check(run_gated(echo_argv, NULL, 5000, 1, 0, out, sizeof(out), &res) == -1 &&
+              res.step == DFR_SU_STEP_TRANSPORT_FIX_GATED &&
+              *fake_driver_calls == 0 && *fake_grant_calls == 0,
+          "marker absent plus no fd issues no supercall and no grant");
 
     /*
      * The two failures must stay distinguishable. A driver_fd op that fails
@@ -304,9 +382,9 @@ int main(void)
      */
     reset();
     fail_step = DFR_SU_STEP_DRIVER_FD;
-    check(run_gated(echo_argv, NULL, 5000, 1, 0, out, sizeof(out), &res) == -1 &&
+    check(run_gated(echo_argv, NULL, 5000, 1, 1, out, sizeof(out), &res) == -1 &&
               res.step == DFR_SU_STEP_DRIVER_FD && res.err == ENOTTY,
-          "a non-gate driver-fd failure is not relabelled as the gate");
+          "an authorised driver-fd failure is not relabelled as the gate");
 
     /*
      * Note on what is NOT asserted here: the fake op runs in the forked child,
@@ -325,6 +403,8 @@ int main(void)
         printf("\nsu_core_test FAILED: %d\n", failures);
         return 1;
     }
+    munmap((void *)fake_driver_calls, sizeof(*fake_driver_calls));
+    munmap((void *)fake_grant_calls, sizeof(*fake_grant_calls));
     printf("\nsu_core_test passed\n");
     return 0;
 }

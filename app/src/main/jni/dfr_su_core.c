@@ -65,10 +65,10 @@ extern char **environ;
  * ban: the supercall may be issued only when a complete post-root record for
  * the CURRENT boot says the loaded module carries the fix
  * (transport_fix=kdp-cred-1, published by the paired module's ksud and checked
- * by PostRootStatus.supercallAllowed()). Absent, stale, unknown or unreadable
+ * by PostRootStatus.transportFixAllowed()). Absent, stale, unknown or unreadable
  * marker is a refusal.
  *
- * Two properties keep that honest and are why supercall_allowed is a parameter
+ * Two properties keep that honest and are why transport_fix_allowed is a parameter
  * threaded down from Kotlin rather than anything decided in this file:
  *
  *   - the record lives at /data/system/dfreroot-post-root, which this layer
@@ -76,14 +76,15 @@ extern char **environ;
  *     default computed without evidence;
  *   - "the fd was missing" is NOT a second condition that can stand in for the
  *     first. That was precisely the reasoning that panicked the device - the
- *     scan found nothing, so the code asked. The scan below therefore refuses
- *     at DFR_SU_STEP_SUPERCALL_GATED when the flag is 0, and a missing fd never
- *     promotes itself into permission.
+ *     scan found nothing, so the code asked. The child now refuses at
+ *     DFR_SU_STEP_TRANSPORT_FIX_GATED before even the existing-fd path. That
+ *     makes the stronger property true: without the marker, grant_root is
+ *     unreachable regardless of how an fd arrived.
  *
  * tools/profile_binding_audit.py no longer asserts the call's absence; it
  * asserts this gate - that the only source naming the supercall is this file,
- * that the name appears only under the supercall_allowed branch, and that the
- * Kotlin caller derives the flag from PostRootStatus.supercallAllowed().
+ * that the transport gate precedes both driver_fd and grant_root, and that the
+ * Kotlin caller derives the flag from PostRootStatus.transportFixAllowed().
  */
 #define DFR_KSU_DRIVER_LINK "[ksu_driver]"
 
@@ -204,46 +205,42 @@ static int real_scan_driver_fd(int *fd_out)
 }
 
 /*
- * Obtain the driver fd: observe first, and ask only when the module's own
- * marker says the module that would answer carries the KDP credential fix.
- *
- * The order matters and is not an optimisation. A task that already holds the
- * fd needs nothing from the kernel, so the gated call is never reached on that
- * path; and when the scan comes up empty, the absence is reported as the
- * distinct DFR_SU_STEP_SUPERCALL_GATED rather than folded into
- * DFR_SU_STEP_DRIVER_FD. Those are different facts (AGENTS.md 3.7): "this task
- * holds no driver fd" and "we were not permitted to ask for one" send the next
- * physical run to different places.
+ * Obtain the driver fd after child_main has authorised the entire transport
+ * boundary. Keeping marker policy out of this acquisition routine is crucial:
+ * the gate must dominate both the existing-fd shortcut and the later grant.
  */
-static int real_driver_fd(int *fd_out, int supercall_allowed)
+static long real_supercall_driver_fd(int *fd_out)
+{
+    return syscall(__NR_reboot,
+                   (long)(unsigned int)DFR_KSU_SUPERCALL_MAGIC1,
+                   (long)(unsigned int)DFR_KSU_SUPERCALL_MAGIC2, 0L,
+                   (void *)fd_out);
+}
+
+int dfr_acquire_driver_fd(const struct dfr_driver_fd_ops *ops, int *fd_out,
+                          struct dfr_su_transport_diag *diag)
 {
     int fd = -1;
     int call_errno;
     long rc;
 
-    if (real_scan_driver_fd(fd_out) == 0) {
-        return 0;
-    }
-    if (!supercall_allowed) {
-        /*
-         * The refusing default of AGENTS.md 3.6.1. Reaching here means the
-         * post-root record did not say transport_fix=kdp-cred-1 for this boot,
-         * so the module that would service the grant is the one whose
-         * put_cred() panicked this device. Asking it is the operation that
-         * took the device down; not asking it costs one refused button press.
-         */
-        errno = EPERM;
+    if (!ops || !ops->scan || !ops->supercall || !fd_out || !diag) {
+        errno = EINVAL;
         return -1;
     }
-    /*
-     * The magic supercall, exactly as the pinned daemon issues it. The kernel
-     * side is a kprobe on __arm64_sys_reboot that recognises the two magics,
-     * queues a driver-fd install through task_work and writes the fd through
-     * the fourth argument; it then returns so the real syscall runs.
-     */
-    rc = syscall(__NR_reboot, (long)(unsigned int)DFR_KSU_SUPERCALL_MAGIC1,
-                 (long)(unsigned int)DFR_KSU_SUPERCALL_MAGIC2, 0L, (void *)&fd);
+    diag->fd_source = DFR_SU_FD_SOURCE_NONE;
+    diag->supercall_rc = DFR_SU_SUPERCALL_NOT_ISSUED;
+    diag->supercall_errno = 0;
+
+    if (ops->scan(fd_out) == 0) {
+        diag->fd_source = DFR_SU_FD_SOURCE_EXISTING;
+        return 0;
+    }
+
+    rc = ops->supercall(&fd);
     call_errno = (rc != 0) ? errno : 0;
+    diag->supercall_rc = rc;
+    diag->supercall_errno = call_errno;
     /*
      * rc is deliberately NOT a gate on the scan below, and this is the whole
      * subtlety of the call. reboot_handler_pre() is a *pre*-handler: it queues
@@ -264,11 +261,13 @@ static int real_driver_fd(int *fd_out, int supercall_allowed)
      * so the scan is authoritative in both directions and the out-parameter is
      * only a fallback, trusted just when the call itself reported success.
      */
-    if (real_scan_driver_fd(fd_out) == 0) {
+    if (ops->scan(fd_out) == 0) {
+        diag->fd_source = DFR_SU_FD_SOURCE_SUPERCALL_POSTSCAN;
         return 0;
     }
     if (rc == 0 && fd >= 0) {
         *fd_out = fd;
+        diag->fd_source = DFR_SU_FD_SOURCE_SUPERCALL_OUTPARAM;
         return 0;
     }
     /*
@@ -278,6 +277,16 @@ static int real_driver_fd(int *fd_out, int supercall_allowed)
      */
     errno = call_errno ? call_errno : ENOTTY;
     return -1;
+}
+
+static const struct dfr_driver_fd_ops real_driver_fd_ops = {
+    real_scan_driver_fd,
+    real_supercall_driver_fd,
+};
+
+static int real_driver_fd(int *fd_out, struct dfr_su_transport_diag *diag)
+{
+    return dfr_acquire_driver_fd(&real_driver_fd_ops, fd_out, diag);
 }
 
 static int real_grant_root(int driver_fd)
@@ -327,6 +336,74 @@ static void child_fail(int status_fd, int step, int err, const char *found_hex)
     _exit(127);
 }
 
+static void child_write_all(int fd, const char *text, size_t len)
+{
+    while (len > 0) {
+        ssize_t written = write(fd, text, len);
+
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return;
+        }
+        text += written;
+        len -= (size_t)written;
+    }
+}
+
+#define CHILD_WRITE_LITERAL(fd, literal) \
+    child_write_all((fd), (literal), sizeof(literal) - 1)
+
+static void child_write_long(int fd, long value)
+{
+    char digits[32];
+    unsigned long magnitude;
+    size_t pos = sizeof(digits);
+
+    if (value < 0) {
+        CHILD_WRITE_LITERAL(fd, "-");
+        magnitude = (unsigned long)(-(value + 1)) + 1UL;
+    } else {
+        magnitude = (unsigned long)value;
+    }
+    do {
+        digits[--pos] = (char)('0' + magnitude % 10UL);
+        magnitude /= 10UL;
+    } while (magnitude != 0);
+    child_write_all(fd, digits + pos, sizeof(digits) - pos);
+}
+
+static void child_emit_transport_diag(int out_fd,
+                                      const struct dfr_su_transport_diag *diag)
+{
+    CHILD_WRITE_LITERAL(out_fd, "FD_SOURCE=");
+    switch (diag->fd_source) {
+    case DFR_SU_FD_SOURCE_EXISTING:
+        CHILD_WRITE_LITERAL(out_fd, "EXISTING\n");
+        break;
+    case DFR_SU_FD_SOURCE_SUPERCALL_POSTSCAN:
+        CHILD_WRITE_LITERAL(out_fd, "SUPERCALL_POSTSCAN\n");
+        break;
+    case DFR_SU_FD_SOURCE_SUPERCALL_OUTPARAM:
+        CHILD_WRITE_LITERAL(out_fd, "SUPERCALL_OUTPARAM\n");
+        break;
+    default:
+        CHILD_WRITE_LITERAL(out_fd, "NONE\n");
+        break;
+    }
+    CHILD_WRITE_LITERAL(out_fd, "SUPERCALL_RC=");
+    if (diag->supercall_rc == DFR_SU_SUPERCALL_NOT_ISSUED) {
+        CHILD_WRITE_LITERAL(out_fd, "NOT_ISSUED\n");
+    } else {
+        child_write_long(out_fd, diag->supercall_rc);
+        CHILD_WRITE_LITERAL(out_fd, "\n");
+    }
+    CHILD_WRITE_LITERAL(out_fd, "SUPERCALL_ERRNO=");
+    child_write_long(out_fd, diag->supercall_errno);
+    CHILD_WRITE_LITERAL(out_fd, "\n");
+}
+
 /*
  * Everything from here to exec runs between fork() and exec() in a process that
  * is a forked copy of system_server. No allocation, no libc call that may take
@@ -334,13 +411,17 @@ static void child_fail(int status_fd, int step, int err, const char *found_hex)
  */
 static void child_main(const struct dfr_su_ops *ops, const char *comm,
                        char *const argv[], const char *pinned_hex,
-                       int supercall_allowed,
+                       int transport_fix_allowed,
                        int status_fd, int out_fd, int null_fd)
 {
+    struct dfr_su_transport_diag diag = {
+        DFR_SU_FD_SOURCE_NONE, DFR_SU_SUPERCALL_NOT_ISSUED, 0
+    };
     char found[65];
     int driver_fd = -1;
     int err = 0;
     int rc;
+    int uid;
 
     memset(found, 0, sizeof(found));
 
@@ -352,27 +433,34 @@ static void child_main(const struct dfr_su_ops *ops, const char *comm,
     if (ops->set_comm(comm) != 0) {
         child_fail(status_fd, DFR_SU_STEP_COMM, errno, NULL);
     }
-    if (ops->driver_fd(&driver_fd, supercall_allowed) != 0) {
-        /*
-         * EPERM from this op is the gate, not a kernel refusal: it is the one
-         * errno real_driver_fd() reserves for "the marker did not authorise
-         * asking". Keeping it a separate step is what lets a log say which of
-         * the two happened without the reader guessing.
-         */
-        child_fail(status_fd,
-                   (!supercall_allowed && errno == EPERM)
-                       ? DFR_SU_STEP_SUPERCALL_GATED : DFR_SU_STEP_DRIVER_FD,
-                   errno, NULL);
+    /* The marker authorises the complete paired transport/grant predicate.
+     * Keep this before even an existing-fd scan so an inherited descriptor can
+     * never turn absence of evidence into permission to call grant_root(). */
+    if (!transport_fix_allowed) {
+        child_emit_transport_diag(out_fd, &diag);
+        child_fail(status_fd, DFR_SU_STEP_TRANSPORT_FIX_GATED, EPERM, NULL);
     }
+    if (ops->driver_fd(&driver_fd, &diag) != 0) {
+        int driver_errno = errno;
+
+        child_emit_transport_diag(out_fd, &diag);
+        child_fail(status_fd, DFR_SU_STEP_DRIVER_FD, driver_errno, NULL);
+    }
+    child_emit_transport_diag(out_fd, &diag);
     if (ops->grant_root(driver_fd) != 0) {
         child_fail(status_fd, DFR_SU_STEP_GRANT, errno, NULL);
     }
+    CHILD_WRITE_LITERAL(out_fd, "GRANT_RESULT=PASS\n");
     /*
      * A returned success is not evidence of root (AGENTS.md 3.5: a boolean is
      * not evidence). The credential change is observable, so observe it before
      * executing anything.
      */
-    if (ops->current_uid() != 0) {
+    uid = ops->current_uid();
+    CHILD_WRITE_LITERAL(out_fd, "UID_AFTER_GRANT=");
+    child_write_long(out_fd, uid);
+    CHILD_WRITE_LITERAL(out_fd, "\n");
+    if (uid != 0) {
         child_fail(status_fd, DFR_SU_STEP_NOT_ROOT, 0, NULL);
     }
     /*
@@ -383,8 +471,11 @@ static void child_main(const struct dfr_su_ops *ops, const char *comm,
     if (ops->enter_init_mnt_ns() != 0) {
         child_fail(status_fd, DFR_SU_STEP_MNT_NS, errno, NULL);
     }
+    CHILD_WRITE_LITERAL(out_fd, "INIT_MNT_NS=PASS\n");
 
     if (pinned_hex) {
+        CHILD_WRITE_LITERAL(out_fd, "PINNED_DIGEST_BIND=ENTER\n");
+        CHILD_WRITE_LITERAL(out_fd, "EXEC_HANDOFF=ENTER\n");
         rc = dfr_verified_execveat(argv[0], pinned_hex, argv, environ, &err, found);
         if (rc == DFR_VEXEC_ERR_DIGEST) {
             child_fail(status_fd, DFR_SU_STEP_DIGEST, 0, found);
@@ -392,6 +483,7 @@ static void child_main(const struct dfr_su_ops *ops, const char *comm,
         child_fail(status_fd, DFR_SU_STEP_EXEC, err, NULL);
     }
 
+    CHILD_WRITE_LITERAL(out_fd, "EXEC_HANDOFF=ENTER\n");
     execv(argv[0], argv);
     child_fail(status_fd, DFR_SU_STEP_EXEC, errno, NULL);
 }
@@ -414,7 +506,7 @@ static void set_result(struct dfr_su_result *res, int step, int err)
 
 int dfr_su_spawn(const struct dfr_su_ops *ops, const char *comm,
                  char *const argv[], const char *pinned_hex,
-                 long timeout_ms, int kill_on_timeout, int supercall_allowed,
+                 long timeout_ms, int kill_on_timeout, int transport_fix_allowed,
                  char *out, size_t out_cap, struct dfr_su_result *res)
 {
     int status_pipe[2] = { -1, -1 };
@@ -470,7 +562,7 @@ int dfr_su_spawn(const struct dfr_su_ops *ops, const char *comm,
     if (pid == 0) {
         close(status_pipe[0]);
         close(out_pipe[0]);
-        child_main(ops, comm, argv, pinned_hex, supercall_allowed,
+        child_main(ops, comm, argv, pinned_hex, transport_fix_allowed,
                    status_pipe[1], out_pipe[1], null_fd);
         _exit(127); /* not reached */
     }
@@ -590,8 +682,8 @@ int dfr_su_spawn(const struct dfr_su_ops *ops, const char *comm,
 void dfr_su_status_token(const struct dfr_su_result *res, char *buf, size_t cap)
 {
     static const char *const names[] = {
-        "OK", "PIPE", "FORK", "COMM", "DRIVER_FD",
-        "SUPERCALL_GATED", "GRANT", "NOT_ROOT",
+        "OK", "PIPE", "FORK", "COMM", "TRANSPORT_FIX_GATED",
+        "DRIVER_FD", "GRANT", "NOT_ROOT",
         "MNT_NS", "EXEC", "DIGEST", "TIMEOUT", "INTERNAL"
     };
     const char *name;

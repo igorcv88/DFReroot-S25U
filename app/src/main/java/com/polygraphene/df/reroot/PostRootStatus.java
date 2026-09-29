@@ -34,7 +34,7 @@ public final class PostRootStatus {
      * evaluate() refuse a perfectly good post-root state and break the chain on
      * every device that has not rebuilt yet. What the marker gates is one
      * thing - whether the supercall may be issued - and that question is asked
-     * by supercallAllowed(), not by this verdict.
+     * by transportFixAllowed(), not by this verdict.
      */
     private static final Set<String> OPTIONAL_KEYS = Set.of("transport_fix");
 
@@ -70,7 +70,7 @@ public final class PostRootStatus {
     }
 
     /**
-     * May the KernelSU driver-fd supercall be issued on this boot?
+     * May the paired KernelSU transport/grant predicate be reached this boot?
      *
      * Only when a complete, same-boot record says the loaded module carries the
      * fix. Every other answer - no record, another boot's record, no marker, a
@@ -78,7 +78,7 @@ public final class PostRootStatus {
      * kernel panic and a lost root session, so this is the one question where
      * absence of evidence has to read as absence of permission (AGENTS.md 2).
      */
-    public static boolean supercallAllowed(Verdict verdict) {
+    public static boolean transportFixAllowed(Verdict verdict) {
         return verdict != null
                 && verdict.complete
                 && EXPECTED_TRANSPORT_FIX.equals(verdict.transportFix);

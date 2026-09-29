@@ -12,14 +12,19 @@ set -eu
 cd "$(dirname "$0")/../.."
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
-javac -nowarn -d "$OUT" \
+if command -v javac >/dev/null 2>&1; then
+    JAVAC="javac"
+else
+    JAVAC="java com.sun.tools.javac.Main"
+fi
+$JAVAC -nowarn -d "$OUT" \
     installer/src/main/java/com/polygraphene/df/installer/SafeWrite.java \
     tools/tests/SafeWriteTest.java
 java -cp "$OUT" SafeWriteTest
 
 # Same-boot DFR post-root parser: stale/malformed status, wrong SELinux and
 # invalid KernelSU/UAPI fields must all remain negative without Android.
-javac -nowarn -d "$OUT" \
+$JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/PostRootStatus.java \
     tools/tests/PostRootStatusTest.java
 java -cp "$OUT" PostRootStatusTest
@@ -27,7 +32,7 @@ java -cp "$OUT" PostRootStatusTest
 # Auto Root scheduling policy: qualification, opt-in, full-boot identity and the
 # one-attempt-per-boot journal. Pure by design, because none of these states can
 # be produced on demand on a device.
-javac -nowarn -d "$OUT" \
+$JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
     tools/tests/AutoRootPolicyTest.java
 java -cp "$OUT" AutoRootPolicyTest
@@ -35,7 +40,7 @@ java -cp "$OUT" AutoRootPolicyTest
 # Run control: the Activity/service race and the CONTROLLER deadline. Both are
 # negative cases the Auto Root plan requires and neither can be provoked on a
 # device - the race needs two triggers in one millisecond, the timeout a 30s wait.
-javac -nowarn -d "$OUT" \
+$JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/RunGuard.java \
     app/src/main/java/com/polygraphene/df/reroot/AwaitBox.java \
     tools/tests/RunHandoffTest.java
@@ -46,9 +51,17 @@ java -cp "$OUT" RunHandoffTest
 # ksud to invoke. None of it is reachable on a device - it needs a notification
 # minted in a previous boot, a lock from a dispatch that already happened, and a
 # /data/adb/ksud the root manager replaced with its own build.
-javac -nowarn -d "$OUT" \
+$JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/SoftRebootPolicy.java \
+    app/src/main/java/com/polygraphene/df/reroot/SoftRebootDispatchGuard.java \
     app/src/main/java/com/polygraphene/df/reroot/PostRootStatus.java \
     app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
     tools/tests/SoftRebootPolicyTest.java
 java -cp "$OUT" SoftRebootPolicyTest
+
+# Marker-only JobScheduler probe: strict arm parsing and the key semantic that a
+# callback in the arming boot is evidence only, never an early-trigger pass.
+$JAVAC -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/EarlyBootProbePolicy.java \
+    tools/tests/EarlyBootProbePolicyTest.java
+java -cp "$OUT" EarlyBootProbePolicyTest

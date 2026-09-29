@@ -326,16 +326,38 @@ exists; they close the candidates that the current evidence can evaluate.
 
 | Candidate | Verdict for the present package | Concrete reason |
 |---|---|---|
-| Persisted `JobScheduler` job | **UNKNOWN** as an earlier usable trigger | The ZZIC trace starts `JobScheduler` at 14.281 s, enters phase 600 (`PHASE_THIRD_PARTY_APPS_CAN_START`) at 16.363 s, and calls its `onBootPhase(600)` at 16.416 s, ahead of the 19.385 s locked-boot broadcast. AOSP loads persisted jobs before system services are ready and begins tracking/checking them at phase 600. This establishes a possible *time window*, not that an eligible DFR job runs in it. The current APK declares no `JobService`, schedules no persisted job, and has no trace of such a job. Direct-Boot awareness, user-start state, persisted-job permission, package availability and Samsung's actual scheduling/constraints remain unproved. The existing Auto Root audit also prohibits JobScheduler as a retry mechanism. No job was scheduled in this PR. |
+| Persisted `JobScheduler` job | **marker experiment implemented; DFR timing still unverified** | A later physical capture promoted only `JOBSCHEDULER_CAN_DISPATCH_PRE_LOCKED_BOOT=PHYSICAL_PASS`: other clients ran early. This APK now declares a direct-boot-aware marker-only `DfrEarlyBootJobService`, explicitly armed with a persisted namespaced one-shot. It cannot call Auto Root, DirtyFrag, StageHop dispatch, RootTransport, or soft reboot. Whether this `/data/app` DFR job runs early and whether the exact StageHop environment is ready remain physical questions. |
 | DFInstaller making DFR `FLAG_SYSTEM` or an updated-system app | **NO-GO** for the present installer | The captured DFR APK is loaded from `/data/app`. `PackagesXml.kt` changes signing lineage (`<shared-user><sigs><pastSigs>`), not a verified system APK or a disabled system package backing an updated-system app. AOSP scan logic associates `SCAN_AS_SYSTEM` for a data update with a system package setting; the shared UID/signature does not supply that backing package. Samsung's exact private scan code was not captured, so this verdict describes the present installer and observed installation, not every possible vendor modification. |
 | `android:persistent` | **NO-GO** for the present APK | The manifest has no `android:persistent` attribute (default false); changing it would require a different APK. Android documents persistence as intended for certain system applications. Neither the shared UID nor the installer's signing-lineage edit makes the existing APK persistent or a system app. Whether a newly built `/data/app` APK would receive early persistent treatment on ZZIC is unmeasured and is not claimed here. |
 
-The JobScheduler result is deliberately **UNKNOWN**: phase 600 physically
-precedes the locked-boot broadcast, but scheduler availability is not a measured
-DFR `JobService` callback. It remains a distinct future hypothesis requiring a
-non-destructive marker and proof of eligibility and timing before any change to
-the production Auto Root path. This offline review does not require a physical
-reboot; Android compilation remains a separate verification gate.
+The scheduler's general timing is now physically positive, while the DFR result
+is deliberately **UNKNOWN**. Existing early jobs prove scheduler dispatch, not
+eligibility of a privileged/shared-uid `/data/app`. The one-shot marker now
+measures exactly that without any destructive path:
+
+```text
+JOBSCHEDULER_CAN_DISPATCH_PRE_LOCKED_BOOT=PHYSICAL_PASS
+DFR_PERSISTED_JOB_EARLY_CALLBACK=UNVERIFIED
+DFR_JOB_STAGEHOP_READY=UNVERIFIED
+```
+
+Physical package/JobStore facts before the probe: DFR is installed from
+`/data/app`, shares uid 1000, is `PRIVILEGED` and
+`PARTIALLY_DIRECT_BOOT_AWARE`, is not `FLAG_SYSTEM`, and has
+`RECEIVE_BOOT_COMPLETED` granted. `/data/system/job/jobs_1000.xml` is Android
+Binary XML (ABX), contains many uid-1000 jobs, and its snapshot contained no
+`com.polygraphene.df.reroot` record. That store proves neither package
+eligibility nor callback time; the marker is the authority for both.
+
+Arming uses `setPersisted(true)`, namespace `dfr-early-boot-probe`, a 15 s
+minimum latency, and requires a full reboot within 10 s. JobStore serializes
+elapsed delay/deadline bounds onto the RTC timebase, then restores them as
+elapsed bounds with time spent rebooting consumed. A same-boot callback is
+recorded as `EARLY_JOB_FIRED_SAME_BOOT`, finishes, and is never promoted to an
+early-trigger pass.
+An absent locked-boot marker at callback time is recorded as
+`EARLY_JOB_LOCKED_BOOT_PENDING`, not PASS. The later receiver persists its own
+monotonic timestamp and finalizes `PRE_LOCKED` only after comparing the two.
 
 The receiver's `EXTRA_RECEIVER_UPTIME_MS` is **telemetry only**. A process with
 the same shared UID can start a non-exported service and provide an arbitrary
@@ -349,21 +371,19 @@ Source references: [AOSP UserController](https://android.googlesource.com/platfo
 [AOSP system-provider filter](https://android.googlesource.com/platform/frameworks/base/+/fa0e57fbe77d46039f9e9a54512dce13f71773b5%5E2..fa0e57fbe77d46039f9e9a54512dce13f71773b5/).
 Additional primary references: [AOSP SystemServer phase 600](https://android.googlesource.com/platform/frameworks/base/+/1a1e6bc55f2e/services/java/com/android/server/SystemServer.java),
 [AOSP JobScheduler boot phases and user start](https://android.googlesource.com/platform/frameworks/base/+/515e89f909b17e5befdcac128614264172b899df/apex/jobscheduler/service/java/com/android/server/job/JobSchedulerService.java),
+[AOSP JobStore persisted RTC/elapsed conversion](https://android.googlesource.com/platform/frameworks/base/+/a40c6e1715e75a579a4740c811b26af712aed43e/apex/jobscheduler/service/java/com/android/server/job/JobStore.java),
+[Android JobScheduler namespaces](https://developer.android.com/reference/android/app/job/JobScheduler#forNamespace(java.lang.String)),
 [AOSP updated-system scan flags](https://android.googlesource.com/platform/frameworks/base/+/0cd20302215515abb58c0d8b3cbe94206486a585/services/core/java/com/android/server/pm/ScanPackageUtils.java),
 [Android `persistent` manifest documentation](https://developer.android.com/guide/topics/manifest/application-element).
 
-`EARLY_TRIGGER_BEFORE_LOCKED_BOOT_COMPLETED=NO_PROVEN_CANDIDATE` under the
-present stock `/data/app` installation. The token deliberately does **not** say
-`NO_CANDIDATE`: the table above leaves the persisted-`JobScheduler` route
-`UNKNOWN`, and a verdict that reads as "none exists" over one undetermined
-candidate is the collapse AGENTS.md §3.7 forbids — the same shape as reading an
-`UNKNOWN` probe as an answer. Two of the three candidates are `NO-GO` for this
-package and one is unmeasured; that is the fact.
+`EARLY_TRIGGER_BEFORE_LOCKED_BOOT_COMPLETED=DFR_UNVERIFIED` under the present
+stock `/data/app` installation. General JobScheduler timing has passed; the DFR
+callback and its StageHop readiness have not.
 
-No new early trigger or automatic soft reboot is enabled by this work, and this
-timing question needs no release of the same trigger. If a candidate is later
-found, it first needs a marker-only physical timestamp and proof that the app
-starts before the bootanimation exits.
+No early callback is wired to Auto Root and no automatic soft reboot is enabled
+by this work. The only new callback is the marker-only probe; it must first
+produce a physical timestamp and readiness record before any destructive link
+is considered.
 
 Before an early destructive attempt, readiness must check the same AMS
 `ProcessRecord`, non-null `mOnewayThread`/`mThread`, and `scheduleReceiver/12`
@@ -874,26 +894,26 @@ owner's decision as a condition: the supercall may be issued only when a
 complete post-root record **for the current boot** carries
 `transport_fix=kdp-cred-1`, published by the fixed paired module's ksud.
 
-The transport still scans `/proc/self/fd` for `[ksu_driver]` first, and asks
-only when the marker permits. "The fd was missing" is deliberately not a second
-condition that can stand in for the marker — that reasoning is what panicked
-the device.
+The transport checks the marker before it can scan or use an existing
+`[ksu_driver]` fd, issue the supercall, or reach `grant_root()`. "An fd already
+exists" and "the fd was missing" are both deliberately incapable of standing
+in for the marker.
 
-**So a tap is still not an acceptance run, for a new reason.** The pair
-installed on this device is the broken one, so no record carries the marker and
-a tap refuses at `DFR_SU_STEP=SUPERCALL_GATED` having asked the kernel nothing.
-That outcome is already known, so a run costs an install to re-learn it. What
-moves this forward is building and installing the fixed pair
-(`apply-v330-dfr-kdp-cred-fix.py` in RMGLabs-Payloads) and repinning the new
-ksud digest; only then does a tap reach the supercall at all.
+The current physical boot runs the fixed pair and its same-boot record carries
+`transport_fix=kdp-cred-1`; both daemon candidates match the pinned digest. The
+next tap is therefore the acceptance run for fd acquisition and grant.
 
 The step vocabulary stays as it is, because it is what makes any future run
-legible: `DRIVER_FD`, `SUPERCALL_GATED`, `GRANT`, `NOT_ROOT`, `MNT_NS`, `EXEC`,
+legible: `TRANSPORT_FIX_GATED`, `DRIVER_FD`, `GRANT`, `NOT_ROOT`, `MNT_NS`, `EXEC`,
 `DIGEST`, `TIMEOUT`, each refusing on its own, with
 `/data/system/dfreroot-softreboot-trace` written before each privileged step.
-`DRIVER_FD` and `SUPERCALL_GATED` are kept apart on purpose (AGENTS.md 3.7):
-one says this task holds no driver fd, the other says we were not permitted to
-ask for one.
+`DRIVER_FD` and `TRANSPORT_FIX_GATED` are kept apart on purpose (AGENTS.md 3.7):
+one says an authorised acquisition produced no driver fd, the other says the
+paired transport/grant predicate was not authorised at all. The native child
+also records `FD_SOURCE=EXISTING|SUPERCALL_POSTSCAN|SUPERCALL_OUTPARAM|NONE`
+and independent `SUPERCALL_RC` / `SUPERCALL_ERRNO` values. These signals are
+kept apart because a pre-handler can install an fd even when the real syscall
+returns EPERM.
 
 **One RMGLabs design change that does not transfer.** It moved Apply Modules off a
 broadcast receiver and into a foreground service, because holding a broadcast open

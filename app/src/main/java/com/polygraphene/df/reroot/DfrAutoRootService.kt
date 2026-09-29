@@ -65,11 +65,12 @@ class DfrAutoRootService : Service() {
             Log.i(TAG, "[DFR][AUTOROOT] a run is already in flight in this process")
             return START_NOT_STICKY
         }
-        val serviceStartMs = SystemClock.elapsedRealtime()
+        val serviceStartMs = monotonicNow()
         val arrivalMs = intent?.getLongExtra(DfrBootReceiver.EXTRA_RECEIVER_UPTIME_MS, -1L)
             ?: -1L
         broadcastUptimeMs = serviceStartMs
-        val receiverElapsedMs = if (arrivalMs >= 0 && arrivalMs <= serviceStartMs) arrivalMs else -1L
+        val receiverElapsedMs =
+            if (serviceStartMs >= 0 && arrivalMs in 0L..serviceStartMs) arrivalMs else -1L
         Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] service_start action=${intent?.action}" +
             " receiver_elapsed_ms=$receiverElapsedMs service_elapsed_ms=$serviceStartMs" +
             " boot_id=${DfrRootCoordinator.readBootId()}")
@@ -114,7 +115,8 @@ class DfrAutoRootService : Service() {
             Log.e(TAG, "[DFR][AUTOROOT] REFUSED current boot_id unreadable")
             return
         }
-        val deadline = SystemClock.elapsedRealtime() + READINESS_BUDGET_MS
+        val deadlineStart = monotonicNow()
+        val deadline = if (deadlineStart >= 0) deadlineStart + READINESS_BUDGET_MS else -1L
         var backoffMs = FIRST_BACKOFF_MS
 
         while (true) {
@@ -154,8 +156,9 @@ class DfrAutoRootService : Service() {
              * the same bounded budget rather than a fresh one, and the policy
              * refuses on its own once the count is spent.
              */
-            if (attempts >= AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT ||
-                SystemClock.elapsedRealtime() + backoffMs > deadline) {
+            val now = monotonicNow()
+            if (attempts >= AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT || now < 0 ||
+                deadline < 0 || now + backoffMs > deadline) {
                 Log.i(TAG, "[DFR][AUTOROOT] WAIT_BOOT_READY gave up for now after" +
                     " $attempts/${AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT} polls:" +
                     " ${decision.reason}")
@@ -200,7 +203,7 @@ class DfrAutoRootService : Service() {
                     bootId, AutoRootPolicy.PHASE_STARTED, attemptNo, true
                 )
                 Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] before_native" +
-                    " elapsed_ms=${SystemClock.elapsedRealtime()}" +
+                    " elapsed_ms=${monotonicNow()}" +
                     " started_journal_durable=$ok boot_id=$bootId")
                 if (!ok) {
                     Log.e(TAG, "[DFR][AUTOROOT] REFUSED cannot record STARTED;" +
@@ -213,7 +216,7 @@ class DfrAutoRootService : Service() {
             context, "autoroot", host, DfrRootCoordinator.AUTOROOT_CONTROLLER_TIMEOUT_MS
         )
         Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] coordinator_return" +
-            " elapsed_ms=${SystemClock.elapsedRealtime()} success=${result.success}" +
+            " elapsed_ms=${monotonicNow()} success=${result.success}" +
             " native_started=${result.nativeStarted}")
         /*
          * What a failure costs depends on whether transaction 5 was issued, and
@@ -253,7 +256,7 @@ class DfrAutoRootService : Service() {
             bootId, phase, attemptNo, result.nativeStarted
         )
         Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] journal_phase=$phase" +
-            " elapsed_ms=${SystemClock.elapsedRealtime()} durable=$journalWritten")
+            " elapsed_ms=${monotonicNow()} durable=$journalWritten")
         if (!journalWritten) {
             Log.e(TAG, "[DFR][AUTOROOT] journal phase=$phase was not persisted;" +
                 " no future integrated dispatch may treat this run as ACKed")
@@ -266,7 +269,7 @@ class DfrAutoRootService : Service() {
         }
         if (result.success) {
             Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] verified_post_root_result" +
-                " elapsed_ms=${SystemClock.elapsedRealtime()} boot_id=$bootId")
+                " elapsed_ms=${monotonicNow()} boot_id=$bootId")
             Log.i(TAG, "[DFR][AUTOROOT] AUTO_ROOT_RESULT=SUCCESS boot_id=$bootId" +
                 " selinux=${result.liveSelinux}")
         } else {
@@ -353,6 +356,13 @@ class DfrAutoRootService : Service() {
 
     companion object {
         const val TAG = "DFReroot"
+
+        private fun monotonicNow(): Long = try {
+            SystemClock.elapsedRealtime()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][AUTOROOT] monotonic clock unavailable: $t")
+            -1L
+        }
 
         /** How long readiness may be waited for, in total, in one boot. */
         const val READINESS_BUDGET_MS = 10 * 60 * 1000L

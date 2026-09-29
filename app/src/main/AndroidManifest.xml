@@ -66,6 +66,17 @@
             android:exported="false"
             android:directBootAware="true" />
         <!--
+          JobScheduler binds from the system through this standard exported
+          JobService boundary. BIND_JOB_SERVICE is a signature permission and
+          remains the authorization gate. The service is observation-only: it
+          writes an early-boot marker and never reaches root or StageHop dispatch.
+        -->
+        <service
+            android:name=".DfrEarlyBootJobService"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="true"
+            android:directBootAware="true" />
+        <!--
           The notification action for "Apply Modules (Soft Reboot)". Never
           exported: the PendingIntent names this component explicitly, so the
           platform delivers it with this app's own identity and no external caller

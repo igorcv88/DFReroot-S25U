@@ -2277,17 +2277,17 @@ standing verdicts are the two above.
 ### The supercall restored, under the marker — 2026-09-29
 
 The owner's decision, taken in the open, is the condition now in AGENTS.md
-3.6.1 rather than a ban: the driver-fd supercall may be issued only when a
+3.6.1 rather than a ban: the complete transport/grant path may be reached only when a
 complete post-root record **for the current boot** carries
 `transport_fix=kdp-cred-1`. The app implements it as follows, and none of it
 rests on the app's own judgement about the module:
 
 | Layer | What it does | Why it cannot decide the gate |
 |---|---|---|
-| `DfrSoftRebootReceiver.kt` | `PostRootStatus.supercallAllowed(evaluate(record, bootId, selinux))` | the only layer that can read `/data/system/dfreroot-post-root` |
-| `RootTransport.prepare(context, supercallAllowed)` | carries the flag into `Prepared` | no default parameter: a default is a decision without evidence |
+| `DfrSoftRebootReceiver.kt` | `PostRootStatus.transportFixAllowed(evaluate(record, bootId, selinux))` | the only layer that can read `/data/system/dfreroot-post-root` |
+| `RootTransport.prepare(context, transportFixAllowed)` | carries the flag into `Prepared` | no default parameter: a default is a decision without evidence |
 | `dfr_su_jni.c` | passes the `jboolean` through | marshalling only, by AGENTS.md 5 |
-| `dfr_su_core.c` | scan `/proc/self/fd`; refuse with `EPERM` if withheld; only then `syscall(__NR_reboot, …)` | the record is not visible from here at all |
+| `dfr_su_core.c` | refuse before fd acquisition or grant if withheld; otherwise scan, optionally supercall, postscan, then grant | the record is not visible from here at all |
 
 `SUPERCALL_GATE_MARKER_REQUIRED = ENFORCED`, by four checks in
 `tools/profile_binding_audit.py` and five host-test cases in
@@ -2296,20 +2296,13 @@ branch, moving the call ahead of the gate, dropping the receiver's derivation,
 deriving it after the transport is built, and naming the magic in a second
 shipped file each produce a named FAIL.
 
-`DFR_SU_STEP_SUPERCALL_GATED` is a distinct verdict from
-`DFR_SU_STEP_DRIVER_FD`, per AGENTS.md 3.7: "this task holds no driver fd" and
-"we were not permitted to ask for one" are different facts, and only the second
-is the marker's doing.
+`DFR_SU_STEP_TRANSPORT_FIX_GATED` is a distinct verdict from
+`DFR_SU_STEP_DRIVER_FD`, per AGENTS.md 3.7: "the paired predicate is not
+authorised" and "an authorised acquisition produced no fd" are different facts.
 
-**What this does not claim.** Nothing here says the chain now works
-end to end. The paired module that publishes the marker is the one fixed by
-`apply-v330-dfr-kdp-cred-fix.py` in RMGLabs-Payloads, and until a build of that
-pair is installed on the device, every record on this firmware lacks the marker
-and every run refuses at `SUPERCALL_GATED` having asked the kernel nothing.
-That is the gate working, and it is also the only state this repository has
-evidence for. Repinning the new ksud digest in `KsudStage.kt`,
-`target_profile.c` and `tools/zzic_profile.json` remains open and is what a
-physical run needs next.
+**What this does not claim.** The marker and fixed pair are physically present,
+but the corrected Apply Modules transport has not yet completed a grant or
+handed off `soft-reboot`. That remains the next physical acceptance boundary.
 
 ### The fixed pair is bundled — 2026-09-29
 
@@ -2341,10 +2334,9 @@ bytes. The DirtyFrag LKM pin (`b941d323…`) is untouched: the module rebuilt by
 that workflow is KernelSU's, a different artefact.
 
 **What this still does not claim.** The marker's *producer* is in the tree; the
-device is not running it. `SUPERCALL_GATE_OPEN` stays `UNVERIFIED` until a boot
-on this firmware completes the chain with this daemon and writes a post-root
-record carrying the marker. Until then every tap refuses at `SUPERCALL_GATED`,
-which remains the correct and only evidenced outcome.
+At that checkpoint the device was not yet running it, so
+`SUPERCALL_GATE_OPEN` stayed `UNVERIFIED` pending a same-boot record carrying
+the marker. The later twelfth-run section supersedes that checkpoint.
 
 ### The marker attested the wrong artefact — 2026-09-29 (Codex P1, upheld)
 
@@ -2361,7 +2353,7 @@ if ksuinit::has_kernelsu() { /* skip loading ko */ } else { ... load_module(...)
 `dfr_verify_ksu_control()` compares `version`, `uapi_version` and
 `is_late_load()`. The credential fix bumps **none** of them, so on the skip
 path the closeout cannot distinguish the fixed module from the broken one and
-publishes the marker regardless. `PostRootStatus.supercallAllowed()` would then
+publishes the marker regardless. `PostRootStatus.transportFixAllowed()` would then
 permit the supercall, and the grant would reach the `put_cred()` that panics.
 
 Reachable on this firmware, not hypothetical: run the chain once with the
@@ -2401,8 +2393,8 @@ appears exactly once (the single `DFR_TRANSPORT_FIX` const), and
 `/data/system/dfreroot-ko-loaded`, `ko_sha256=` and `DFR_KO_LOADED=PASS` are
 all present — the evidence machinery the condition reads.
 
-`SUPERCALL_GATE_OPEN` remains `UNVERIFIED`. Nothing above puts this daemon on
-the device.
+At this implementation checkpoint `SUPERCALL_GATE_OPEN` remained `UNVERIFIED`;
+the next physical section records its later promotion.
 
 ### The gate opened and the syscall was refused — 2026-09-29 (twelfth physical run)
 
@@ -2417,7 +2409,7 @@ DFR_SU_STEP=DRIVER_FD errno=1
 ```
 
 The promotion rests on which token that is, not on a log line claiming it.
-`child_main()` emits `SUPERCALL_GATED` when and only when
+The physically tested legacy build's `child_main()` emitted `SUPERCALL_GATED` when and only when
 `!supercall_allowed && errno == EPERM`; the verdict was `DRIVER_FD`, so
 `supercall_allowed` was true and the post-root record for that boot carried
 `transport_fix=kdp-cred-1`. The whole marker pipeline — RMGLabs-Payloads #5 and
@@ -2461,3 +2453,54 @@ Pinned state for this run: ksud asset
 bytes) from RMGLabs-Payloads exact-port run #10, `main` @ `aa2d86ea`; DirtyFrag
 LKM `b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017`,
 untouched.
+
+### Pre-release closeout: complete grant gate and early-job marker
+
+The current physical state remains the twelfth-run boot
+`30e61b44-267d-4f60-bb64-0a758f2eeedf`: `POST_ROOT_COMPLETE`, KernelSU 32601,
+UAPI 2, late-load, SELinux Enforcing, `transport_fix=kdp-cred-1`. Both
+`/data/adb/ksud` and `/data/system/dfreroot-ksud` have the pinned
+`d0cb516d…` digest. The current system_server had no inherited `[ksu_driver]`.
+The last tap stopped at `phase=PROBE_RETURNED rc=-1`; no soft-reboot lock was
+written. Later `dmesg` fd-install lines came from Termux collection commands and
+are not evidence about that tap.
+
+The pre-release transport now gates the complete property that matters:
+without the same-boot fix marker, `grant_root()` is unreachable even if the
+child already holds a valid driver fd. The refusal is
+`DFR_SU_STEP=TRANSPORT_FIX_GATED`. An authorised acquisition separately writes:
+
+```text
+FD_SOURCE=EXISTING|SUPERCALL_POSTSCAN|SUPERCALL_OUTPARAM|NONE
+SUPERCALL_RC=<raw result>|NOT_ISSUED
+SUPERCALL_ERRNO=<captured errno>
+```
+
+The post-supercall scan remains unconditional. Thus EPERM plus
+`SUPERCALL_POSTSCAN` proceeds to grant; EPERM plus `NONE` ends at `DRIVER_FD`.
+The durable per-boot lock now says `phase=CLAIMED`: it means the one attempt is
+spent, not that ksud received the command. `EXEC_ENTER`, `EXEC_RETURNED`,
+`DISPATCHED`, and `UNDETERMINED` remain separate trace/execution evidence.
+
+General JobScheduler timing has one physical promotion and two deliberately
+open DFR questions:
+
+```text
+JOBSCHEDULER_CAN_DISPATCH_PRE_LOCKED_BOOT=PHYSICAL_PASS
+DFR_PERSISTED_JOB_EARLY_CALLBACK=UNVERIFIED
+DFR_JOB_STAGEHOP_READY=UNVERIFIED
+```
+
+The package is `/data/app`, shared uid 1000, `PRIVILEGED`,
+`PARTIALLY_DIRECT_BOOT_AWARE`, not `FLAG_SYSTEM`, with
+`RECEIVE_BOOT_COMPLETED` granted. The pre-probe
+`/data/system/job/jobs_1000.xml` is ABX/binary XML, contains many uid-1000 jobs,
+and contains no DFR job. The new namespaced persisted job is explicitly armed
+and marker-only; its callback records the exact read-only StageHop readiness
+components and cannot root or dispatch a receiver.
+
+Current system_server evidence is `NoNewPrivs=0`, `Seccomp=2`,
+`Seccomp_filters=1`. No textual `reboot`/`__NR_reboot` rule was found in the
+searched policy files under system, system_ext, product, vendor, or APEX. This
+does not prove reboot is allowed, and seccomp is not assigned as the cause of
+the old EPERM; that cause remains `UNKNOWN`.

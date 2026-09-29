@@ -2,6 +2,16 @@
 
 Open investigation, written 2026-09-29 after the twelfth physical run.
 
+> **Pre-release instrumentation now implemented.** The complete grant boundary,
+> not only the syscall, is gated by `transport_fix`: an inherited driver fd can
+> no longer bypass the marker. The next build emits independent
+> `FD_SOURCE=EXISTING|SUPERCALL_POSTSCAN|SUPERCALL_OUTPARAM|NONE`,
+> `SUPERCALL_RC`, and `SUPERCALL_ERRNO` tokens from the fork child using fixed
+> `write(2)` output. The old physical facts remain exactly:
+> `SUPERCALL_GATE_OPEN=CONFIRMED`,
+> `SUPERCALL_SYSCALL_RESULT=REFUSED_EPERM`, and
+> `DRIVER_FD_INSTALL_ON_THIS_RUN=UNDETERMINED`.
+
 This file is a **working record, not authority**. What is proven lives in
 `docs/S25U_ZZIC_COMPATIBILITY.md`; what to do next lives in `docs/HANDOFF.md`,
 which points here. Fold the conclusion into both and delete this file once the
@@ -31,9 +41,9 @@ which is the machinery working.
 `errno=1` is `EPERM`. Two things follow, and one thing that looked like it
 followed does not.
 
-**Proven: the gate opened.** In `child_main()`, `SUPERCALL_GATED` is emitted
-only when `!supercall_allowed && errno == EPERM`. The verdict was `DRIVER_FD`,
-so `supercall_allowed` was TRUE — the post-root record for that boot carried
+**Proven: the legacy gate opened.** In the build tested physically,
+`SUPERCALL_GATED` was emitted only when `!supercall_allowed && errno == EPERM`.
+The verdict was `DRIVER_FD`, so the flag was TRUE — the post-root record carried
 `transport_fix=kdp-cred-1`. The whole marker pipeline (RMGLabs-Payloads #5 and
 #6, the per-boot `dfreroot-ko-loaded` evidence, `PostRootStatus`, the threading
 through `prepare()` → JNI → `dfr_su_core`) **works end to end**. That is newly
@@ -84,13 +94,12 @@ runs changed the outcome from
 "fd installed" to "EPERM". Candidates, **none verified**, listed so the next
 session tests rather than reasons:
 
-- **Seccomp.** This boot's system_server reports `Seccomp=2` (filter mode),
-  `Seccomp_filters=1`. A filter returning `SCMP_ACT_ERRNO(EPERM)` for
-  `reboot(2)` produces exactly this, with no kernel-side trace. PR #35's own
-  body records that KernelSU whitelists `__NR_reboot` in the task's seccomp
-  cache **for the manager and allowlisted uids only**
-  (`ksu_handle_setresuid()`), which would make an unlisted caller's reboot a
-  filtered syscall. That is a read of the source, not of this device.
+- **Seccomp.** This boot's system_server reports `NoNewPrivs=0`, `Seccomp=2`,
+  `Seccomp_filters=1`. No textual `reboot` or `__NR_reboot` rule was found in
+  the searched policy files under `/system/etc`, `/system_ext/etc`,
+  `/product/etc`, `/vendor/etc`, or `/apex`. An active filter is proven; a
+  matching textual rule was not found; whether seccomp allows or refuses this
+  call remains **UNDETERMINED**. It must not be named as the old EPERM's cause.
 - **The module changed.** The pair installed now is the one built by
   RMGLabs-Payloads run #10 (`d0cb516d…`), not the one live during the panic.
   Whether anything in #5/#6 touched the supercall path needs checking — the

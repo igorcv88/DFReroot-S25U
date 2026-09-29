@@ -75,13 +75,17 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          * below covers the other case the persistent record is for - a process that
          * restarted within the same boot.
          *
-         * Never released. One dispatch per process, and the persistent lock keeps
-         * the guarantee across a restart.
+         * This guard owns only the interval before the durable claim. Ordinary
+         * refusals release it so a repaired precondition can be retried without
+         * a full reboot. Once claimSoftReboot succeeds, the lease stays held for
+         * this process and the on-disk lock keeps the guarantee across restart.
          */
-        if (!dispatchGuard.compareAndSet(false, true)) {
+        val lease = dispatchGuard.tryAcquire()
+        if (lease == null) {
             Log.i(TAG, "[DFR][SOFT_REBOOT] REFUSED a dispatch is already in flight")
             return
         }
+        try {
         val bootId = DfrRootCoordinator.readBootId()
         val inputs = SoftRebootPolicy.Inputs()
         inputs.currentBootId = bootId
@@ -123,22 +127,23 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          * carries the fix, and the only thing that can answer it is that
          * module's own ksud, through transport_fix=kdp-cred-1 in a record for
          * THIS boot. Absent, stale, unknown or unreadable is false, and false
-         * makes the native side refuse at SUPERCALL_GATED having asked nothing.
+         * makes the native side refuse at TRANSPORT_FIX_GATED before an inherited
+         * fd, a supercall, or grant_root can be reached.
          *
          * inputs.postRootRecord is reused rather than re-read: the precheck
          * above has already accepted this boot on the strength of it, and a
          * second read could disagree with the decision already taken.
          */
-        val supercallAllowed = PostRootStatus.supercallAllowed(
+        val transportFixAllowed = PostRootStatus.transportFixAllowed(
             PostRootStatus.evaluate(inputs.postRootRecord, bootId, inputs.liveSelinux)
         )
         Log.i(
             TAG,
-            "[DFR][SOFT_REBOOT] SUPERCALL_GATE=" +
-                (if (supercallAllowed) "PERMITTED" else "WITHHELD") +
+            "[DFR][SOFT_REBOOT] TRANSPORT_FIX_GATE=" +
+                (if (transportFixAllowed) "PERMITTED" else "WITHHELD") +
                 " expected=${PostRootStatus.EXPECTED_TRANSPORT_FIX}"
         )
-        val preparation = RootTransport.prepare(context, supercallAllowed)
+        val preparation = RootTransport.prepare(context, transportFixAllowed)
         val transport = preparation.transport
         if (transport == null) {
             Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_UNAVAILABLE ${preparation.detail}")
@@ -217,11 +222,13 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
             Log.e(TAG, "[DFR][SOFT_REBOOT] REFUSED cannot claim the boot: $lockFailure")
             RootNotifier.notifySoftReboot(
                 context, context.getString(R.string.notif_soft_reboot_refused),
-                "could not record the dispatch ($lockFailure); refusing rather than" +
+                "could not record the one-shot claim ($lockFailure); refusing rather than" +
                     " allowing a second one"
             )
             return
         }
+        lease.markDurableClaimed()
+        AutoRootStore.traceSoftReboot(bootId, "CLAIMED")
 
         /*
          * Bind the digest to the bytes that run, in the call that runs them.
@@ -320,6 +327,9 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
                 )
             }
         }
+        } finally {
+            lease.close()
+        }
     }
 
     /**
@@ -364,13 +374,13 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         const val TAG = "DFReroot"
 
         /**
-         * One dispatch per process, decided by a compare-and-set.
+         * One in-flight attempt per process until the durable claim takes over.
          *
          * The on-disk lock is a durable record and cannot serialise two threads
          * that raced past the policy together; this can, and it runs before any of
          * them reads anything.
          */
-        private val dispatchGuard = java.util.concurrent.atomic.AtomicBoolean(false)
+        private val dispatchGuard = SoftRebootDispatchGuard()
 
         const val ACTION_APPLY_MODULES =
             "com.polygraphene.df.reroot.action.APPLY_MODULES_SOFT_REBOOT"
