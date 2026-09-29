@@ -354,11 +354,35 @@ paired module's DFR predicate — while handling the grant. `panic_on_oops=1` an
 `panic=-1` turned that oops into an immediate reboot with no log, which is why
 three rounds of reasoning had nothing to stand on.
 
-So the reboot syscall is not what broke the device, and any ban on it rests on
-a refuted attribution. Whether that ban is lifted, and whether the app restores
-the supercall, is the repository owner's call and is **not** a change an agent
-makes on its own — the module bug has to be fixed first, or the next grant
-panics the same way.
+So the reboot syscall is not what broke the device. Asking a **broken module**
+for the grant is. The owner's decision, made in the open, is therefore not a
+ban but a condition:
+
+> The driver-fd supercall may be issued **only** when a complete record for the
+> **current boot** says the loaded module carries the fix
+> (`transport_fix=kdp-cred-1`, published by the paired module's ksud and
+> checked by `PostRootStatus.supercallAllowed()`). Absent, stale, unknown or
+> unreadable marker is a refusal. There is no unconditional form of this call,
+> and "the fd was missing" is not a second condition that can stand in for the
+> first — that was the reasoning that panicked the device.
+
+Two properties keep that honest, and both are load-bearing:
+
+- **The marker is required to act, never to parse.** The previous pair writes
+  no `transport_fix` line and still roots this device correctly, so
+  `PostRootStatus.evaluate()` must keep accepting a record without it. Making
+  it a required key would refuse a good post-root state and break the chain on
+  every device that has not rebuilt. `tools/tests/PostRootStatusTest.java`
+  asserts both halves.
+- **The evidence comes from a layer that can see it.** `dfr_su_core.c` takes
+  `supercall_allowed` as a parameter and never decides it: the record lives
+  where the native transport cannot read it, and a default has to be the
+  refusing one.
+
+While the app carries no supercall at all, `tools/profile_binding_audit.py`
+enforces its absence by mechanism, as it does for 3.6. Whoever reintroduces the
+call replaces that guard with one that proves the gate above — never with
+nothing.
 
 **What survives, and is the actual rule:** a probe is only a probe if its worst
 outcome is a refusal. When the worst outcome is a reboot, a corrupted file or a

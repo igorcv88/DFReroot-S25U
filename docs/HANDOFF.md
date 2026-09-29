@@ -182,9 +182,18 @@ The remaining sequence is:
    predicate calls plain `put_cred()` on a KDP-protected credential instead of
    the `ksu_put_cred()` wrapper the Samsung patch uses everywhere else. That is
    a module bug with a small fix (read the parent SID under the RCU lock already
-   held, taking no reference). The supercall is still out of the app pending
-   that fix and the owner's call on AGENTS.md 3.6.1; the daemon was never
-   reached, proven by the absent soft-reboot lock. The transport keeps the safe half of the daemon's
+   held, taking no reference). The owner has since decided the policy
+   (AGENTS.md 3.6.1): the transport's driver-fd request is gated, not banned —
+   allowed only behind `transport_fix=kdp-cred-1` in a same-boot post-root
+   record. Two of the three pieces exist: RMGLabs-Payloads PR #4 carries the
+   module fix and publishes that marker, and `PostRootStatus` accepts it
+   (optional to parse, so the previous pair keeps working) and exposes
+   `supercallAllowed()`, host-tested in both directions. **The third is not
+   written**: the native transport still requests no descriptor, so
+   `supercallAllowed()` has no caller yet, the audit still enforces absence,
+   and a tap refuses at `DFR_SU_STEP=DRIVER_FD`. Completing that piece was
+   refused by the agent sandbox and is the owner's to make or delegate. The
+   daemon was never reached, proven by the absent soft-reboot lock. The transport keeps the safe half of the daemon's
    own lookup (scan `/proc/self/fd` for `[ksu_driver]`), finds nothing on this
    firmware, and refuses at `DFR_SU_STEP_DRIVER_FD` without executing anything.
    **Corrected after reading the KernelSU source at the pinned SHA:** the fd
