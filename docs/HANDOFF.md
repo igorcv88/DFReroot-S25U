@@ -74,18 +74,27 @@ The exact DFR ksud has now been generated and repinned in this branch:
 
 ```text
 asset      app/src/main/assets/ksud
-source     RMGLabs-Payloads exact-port dfreroot workflow, run #9, 2026-09-29
-sha256     79651c46c5d61596b56b849512d0f0f0038ea7f1b35d1911b40d386606b69afc
-size       6672576
+source     RMGLabs-Payloads exact-port dfreroot workflow, run #10, 2026-09-29
+sha256     d0cb516da0047b1b918f84adf8ce7a389c6285de9282cd6301514a40849af7fc
+size       6674552
 ```
 
-This is the **fixed pair's** daemon: run #9 built it from `main` at
-`11d5b997` (the merge of PR #5), so its module carries the KDP credential fix
-and its post-root record publishes the marker. Verified in the bundled bytes,
-not inferred from the workflow's grep — the format literal reads
-`…\nselinux=1\ntransport_fix=kdp-cred-1\n`, exactly once. The previous pin
-(`f9ba5d98…`, 6675136 bytes) belongs to the pair whose predicate panicked the
-device and is retained in the evidence record only as history.
+This is the **fixed pair's** daemon, with the marker bound to the module that
+is actually loaded: run #10 built it from `main` at `aa2d86ea` (the merge of
+RMGLabs-Payloads PR #6). Verified in the bundled bytes rather than inferred
+from the workflow's grep, and the interesting half of that verification is a
+**negative**: `transport_fix=kdp-cred-1` no longer appears as a contiguous
+literal at all (0 occurrences), and the post-root format literal now ends at
+`…\nruntime_mode=late-load\nselinux=1\n` followed by an argument placeholder.
+The marker can therefore only be emitted through the conditional path.
+`kdp-cred-1` appears exactly once — the single `DFR_TRANSPORT_FIX` const — and
+`/data/system/dfreroot-ko-loaded`, `ko_sha256=` and `DFR_KO_LOADED=PASS` are
+all present, which is the per-boot evidence machinery the condition reads.
+
+Two earlier pins are history, not candidates: `f9ba5d98…` (6675136) is the pair
+whose predicate panicked the device, and `79651c46…` (6672576) is the one that
+published the marker unconditionally — it would have authorised the supercall
+against a module it had not loaded.
 
 PRs #21, #22 and #24 are merged. #24 also added the fail-closed Auto Root path
 (off by default) and two release guards; the host gate set now stands at:
@@ -217,11 +226,23 @@ The remaining sequence is:
    not gated at all — `reboot_handler_pre()` checks only the two magics — which
    is exactly why the gate has to be ours.
 
-   **Where this stands, and what a tap does.** PR #5 landed, run #9 built the
-   fixed pair, and its daemon is now the bundled, pinned asset
-   (`79651c46…`) — its record format literal carries
-   `transport_fix=kdp-cred-1`, read out of the bundled bytes. So the marker's
-   *producer* is in the tree.
+   **Where this stands, and what a tap does.** PRs #5 and #6 landed, run #10
+   built the fixed pair, and its daemon is the bundled, pinned asset
+   (`d0cb516d…`). So the marker's *producer* is in the tree, and — after the
+   P1 Codex raised on DFReroot-S25U#37 — it is a producer that can only speak
+   about the module it actually loaded.
+
+   That correction is worth keeping in view, because the first version of this
+   marker was wrong in a way the app could not have detected. `late_load.rs`
+   skips loading the `.ko` when KernelSU is already up, and
+   `dfr_verify_ksu_control()` compares only `version`, `uapi_version` and
+   `is_late_load()` — none of which the credential fix bumps. A marker emitted
+   unconditionally therefore attested the *daemon's* bytes while the *broken*
+   module could be the one live, which is precisely the state that panics.
+   The daemon now writes `/data/system/dfreroot-ko-loaded` — boot id plus the
+   SHA-256 of the exact image passed to `load_module()` — immediately after
+   that call returns `Ok`, and emits the marker only when that record names
+   the current boot.
 
    What is **not** yet true is that the device is running it. The pair
    installed there is still the broken one, its post-root record carries no

@@ -31,8 +31,8 @@ object KsudStage {
      * on a bundled asset whose digest is not this one.
      */
     private const val KSUD_SHA256 =
-        "79651c46c5d61596b56b849512d0f0f0038ea7f1b35d1911b40d386606b69afc"
-    private const val KSUD_SIZE = 6672576L
+        "d0cb516da0047b1b918f84adf8ce7a389c6285de9282cd6301514a40849af7fc"
+    private const val KSUD_SIZE = 6674552L
 
     /**
      * The pinned digest, for code that must bind a decision to these exact bytes

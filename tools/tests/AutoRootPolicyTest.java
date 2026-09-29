@@ -17,7 +17,7 @@ public class AutoRootPolicyTest {
     private static final int CODE = 8;
     private static final String NAME = "2.0.5-zzic";
     private static final String KSUD =
-            "79651c46c5d61596b56b849512d0f0f0038ea7f1b35d1911b40d386606b69afc";
+            "d0cb516da0047b1b918f84adf8ce7a389c6285de9282cd6301514a40849af7fc";
     private static final String FP =
             "samsung/zzic/pa3q:17/BP4A.250505.005/S938BXXUCZZIC:user/release-keys";
     private static final String QUAL_BOOT = "0643a5e2-9a44-4bb9-b7a4-31a3b255e3ac";
