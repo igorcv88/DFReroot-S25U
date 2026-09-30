@@ -19,6 +19,26 @@ public final class EarlyBootProbePolicy {
     /** Written when a monotonic read failed. Never parses back into a number. */
     public static final String UNKNOWN = "UNKNOWN";
 
+    /** One identity and vocabulary for the persisted DFR probe across Java/Kotlin. */
+    public static final int EXPECTED_JOB_ID = 0x44465245; // "DFRE"
+    public static final String EXPECTED_NAMESPACE = "dfr-early-boot-probe";
+    public static final String DEFAULT_UID_NAMESPACE = "DEFAULT_UID_NAMESPACE";
+
+    public static final String SIGNAL_PASS = "PASS";
+    public static final String SIGNAL_FAIL = "FAIL";
+    public static final String NETWORKSTACK_READY = "NETWORKSTACK_READY";
+    public static final String NETWORKSTACK_PARTIAL = "NETWORKSTACK_PARTIAL";
+    public static final String NETWORKSTACK_NOT_READY = "NETWORKSTACK_NOT_READY";
+    public static final String SAME_BOOT_TRUE = "1";
+    public static final String SAME_BOOT_FALSE = "0";
+
+    public static final String CALLBACK_ENTERED = "EARLY_JOB_CALLBACK_ENTERED";
+    public static final String CALLBACK_STOPPED = "EARLY_JOB_CALLBACK_STOPPED";
+    public static final String STOP_BEFORE_ARM_READ = "before_arm_read";
+    public static final String STOP_BEFORE_READINESS = "before_readiness";
+    public static final String STOP_AFTER_READINESS = "after_readiness";
+    public static final String STOP_BEFORE_MARKER = "before_marker";
+
     private static final Set<String> ARM_KEYS = Set.of(
             "state", "armed_boot_id", "job_id", "namespace",
             "minimum_latency_ms", "schedule_result", "scheduled_elapsed_ms",
@@ -42,6 +62,13 @@ public final class EarlyBootProbePolicy {
 
     private static final Set<String> LOCKED_KEYS = Set.of("boot_id", "elapsed_ms");
 
+    private static final Set<String> CALLBACK_ENTERED_KEYS = Set.of(
+            "state", "fired_boot_id", "job_id", "callback_namespace",
+            "callback_elapsed_ms", "callback_wallclock_ms");
+
+    private static final Set<String> CALLBACK_STOPPED_KEYS = Set.of(
+            "state", "fired_boot_id", "job_id", "stopped_at", "callback_elapsed_ms");
+
     private static final Set<String> FIRE_STATES = Set.of(
             "EARLY_JOB_NOT_ARMED", STATE_FIRED_SAME_BOOT, STATE_FIRED_NEW_BOOT);
 
@@ -57,9 +84,9 @@ public final class EarlyBootProbePolicy {
      * exactly where the next verdict starts.
      */
     private static final Set<String> READINESS_STATES = Set.of(
-            "NETWORKSTACK_READY", "NETWORKSTACK_PARTIAL", "NETWORKSTACK_NOT_READY");
+            NETWORKSTACK_READY, NETWORKSTACK_PARTIAL, NETWORKSTACK_NOT_READY);
 
-    private static final Set<String> SIGNALS = Set.of("PASS", "FAIL", UNKNOWN);
+    private static final Set<String> SIGNALS = Set.of(SIGNAL_PASS, SIGNAL_FAIL, UNKNOWN);
 
     private static final Set<String> BINDINGS = Set.of("PASS", "FAIL");
 
@@ -76,6 +103,10 @@ public final class EarlyBootProbePolicy {
     private static final Set<String> SIGNAL_FIELDS = Set.of(
             "networkstack_proc", "ams_process_record", "application_thread",
             "schedule_receiver_12");
+
+    private static final Set<String> STOP_BOUNDARIES = Set.of(
+            STOP_BEFORE_ARM_READ, STOP_BEFORE_READINESS,
+            STOP_AFTER_READINESS, STOP_BEFORE_MARKER);
 
     private EarlyBootProbePolicy() {}
 
@@ -106,6 +137,24 @@ public final class EarlyBootProbePolicy {
             this.fireState = fireState;
             this.lockedBootState = lockedBootState;
             this.callbackElapsedMs = callbackElapsedMs;
+        }
+    }
+
+    /** Strictly parsed durable evidence that JobScheduler entered the callback. */
+    public static final class Callback {
+        public final String state;
+        public final String firedBootId;
+        public final int jobId;
+        public final long callbackElapsedMs;
+        public final String stoppedAt;
+
+        private Callback(String state, String firedBootId, int jobId,
+                         long callbackElapsedMs, String stoppedAt) {
+            this.state = state;
+            this.firedBootId = firedBootId;
+            this.jobId = jobId;
+            this.callbackElapsedMs = callbackElapsedMs;
+            this.stoppedAt = stoppedAt;
         }
     }
 
@@ -156,32 +205,141 @@ public final class EarlyBootProbePolicy {
         Map<String, String> values = strictFields(record, PROBE_KEYS);
         if (values == null) return null;
         if (!STATE_FIRED.equals(values.get("state"))) return null;
+
         String fireState = values.get("fire_state");
         String lockedState = values.get("locked_boot_state");
-        if (!FIRE_STATES.contains(fireState)) return null;
-        if (!LOCKED_STATES.contains(lockedState)) return null;
         String firedBootId = values.get("fired_boot_id");
+        String armedBootId = values.get("armed_boot_id");
+        String sameBoot = values.get("same_boot");
+        String binding = values.get("namespace_binding");
+        String namespace = values.get("namespace");
+        String callbackNamespace = values.get("callback_namespace");
+
+        if (!FIRE_STATES.contains(fireState) || !LOCKED_STATES.contains(lockedState)) return null;
         if (firedBootId.trim().isEmpty()) return null;
         if (!READINESS_STATES.contains(values.get("networkstack_state"))) return null;
-        if (!BINDINGS.contains(values.get("namespace_binding"))) return null;
-        if (!SAME_BOOT.contains(values.get("same_boot"))) return null;
+        if (!BINDINGS.contains(binding)) return null;
+        if (!SAME_BOOT.contains(sameBoot)) return null;
         if (!BOOLEANS.contains(values.get("stopped"))) return null;
         for (String field : SIGNAL_FIELDS) {
             if (!SIGNALS.contains(values.get(field))) return null;
         }
+
+        int jobId;
         try {
-            Integer.parseInt(values.get("job_id"));
+            jobId = Integer.parseInt(values.get("job_id"));
         } catch (NumberFormatException e) {
             return null;
         }
-        for (String field : OPTIONAL_TIMES) {
-            // UNKNOWN is the only way to say "absent"; everything else must be
-            // a real reading. parseOptionalLong folds garbage and numeric
-            // negatives alike into MIN_VALUE.
-            if (parseOptionalLong(values.get(field)) == Long.MIN_VALUE) return null;
-        }
+        if (jobId != EXPECTED_JOB_ID) return null;
+
         long callbackElapsed = parseOptionalLong(values.get("callback_elapsed_ms"));
+        long readinessElapsed = parseOptionalLong(values.get("readiness_elapsed_ms"));
+        long markerElapsed = parseOptionalLong(values.get("marker_write_elapsed_ms"));
+        long callbackWallclock = parseOptionalLong(values.get("callback_wallclock_ms"));
+        if (callbackElapsed == Long.MIN_VALUE || readinessElapsed == Long.MIN_VALUE
+                || markerElapsed == Long.MIN_VALUE || callbackWallclock == Long.MIN_VALUE) {
+            return null;
+        }
+        if (callbackElapsed >= 0 && readinessElapsed >= 0
+                && callbackElapsed > readinessElapsed) return null;
+        if (readinessElapsed >= 0 && markerElapsed >= 0
+                && readinessElapsed > markerElapsed) return null;
+
+        String expectedReadiness = readinessState(
+                values.get("networkstack_proc"), values.get("ams_process_record"),
+                values.get("application_thread"), values.get("schedule_receiver_12"));
+        if (!expectedReadiness.equals(values.get("networkstack_state"))) return null;
+
+        if (STATE_FIRED_SAME_BOOT.equals(fireState)) {
+            if (!SAME_BOOT_TRUE.equals(sameBoot) || !armedBootId.equals(firedBootId)) return null;
+            if (!SIGNAL_PASS.equals(binding) || !namespace.equals(callbackNamespace)) return null;
+        } else if (STATE_FIRED_NEW_BOOT.equals(fireState)) {
+            if (!SAME_BOOT_FALSE.equals(sameBoot) || UNKNOWN.equals(armedBootId)
+                    || armedBootId.equals(firedBootId)) return null;
+            if (!SIGNAL_PASS.equals(binding) || !namespace.equals(callbackNamespace)) return null;
+        } else {
+            if (!UNKNOWN.equals(sameBoot) || !UNKNOWN.equals(armedBootId)) return null;
+        }
         return new Probe(firedBootId, fireState, lockedState, callbackElapsed);
+    }
+
+    /** Strict parser for the pre-readiness callback breadcrumb. */
+    public static Callback parseCallback(String record) {
+        Map<String, String> entered = strictFields(record, CALLBACK_ENTERED_KEYS);
+        if (entered != null && CALLBACK_ENTERED.equals(entered.get("state"))) {
+            int jobId = parseExpectedJobId(entered.get("job_id"));
+            long callbackElapsed = parseOptionalLong(entered.get("callback_elapsed_ms"));
+            long callbackWallclock = parseOptionalLong(entered.get("callback_wallclock_ms"));
+            if (jobId < 0 || callbackElapsed == Long.MIN_VALUE
+                    || callbackWallclock == Long.MIN_VALUE) return null;
+            return new Callback(CALLBACK_ENTERED, entered.get("fired_boot_id"),
+                    jobId, callbackElapsed, null);
+        }
+
+        Map<String, String> stopped = strictFields(record, CALLBACK_STOPPED_KEYS);
+        if (stopped != null && CALLBACK_STOPPED.equals(stopped.get("state"))) {
+            int jobId = parseExpectedJobId(stopped.get("job_id"));
+            long callbackElapsed = parseOptionalLong(stopped.get("callback_elapsed_ms"));
+            String boundary = stopped.get("stopped_at");
+            if (jobId < 0 || callbackElapsed == Long.MIN_VALUE
+                    || !STOP_BOUNDARIES.contains(boundary)) return null;
+            return new Callback(CALLBACK_STOPPED, stopped.get("fired_boot_id"),
+                    jobId, callbackElapsed, boundary);
+        }
+        return null;
+    }
+
+    /**
+     * Whether THIS boot still needs its first LOCKED_BOOT_COMPLETED timestamp.
+     *
+     * A callback/probe from this same boot still needs the marker until the
+     * probe has a final verdict. A callback/probe from an older boot is a spent
+     * cycle and the current boot's marker cannot finalize it. Malformed or
+     * unreadable evidence never stands in for "spent".
+     */
+    public static boolean needsLockedBootMarker(String probeRecord, String callbackRecord,
+                                                String currentBootId) {
+        if (currentBootId == null || currentBootId.trim().isEmpty()) return false;
+
+        Probe probe = parseProbe(probeRecord);
+        if (probe != null) {
+            if (!LOCKED_PENDING.equals(probe.lockedBootState)) return false;
+            return currentBootId.equals(probe.firedBootId);
+        }
+
+        Callback callback = parseCallback(callbackRecord);
+        if (callback != null) {
+            if (UNKNOWN.equals(callback.firedBootId)) return false;
+            return currentBootId.equals(callback.firedBootId);
+        }
+
+        // No valid callback/probe says the one-shot fired. The persisted job may
+        // still be waiting, so preserve the timestamp rather than assume spent.
+        return true;
+    }
+
+    /** The one readiness roll-up used by both StageHop and the evidence parser. */
+    public static String readinessState(String proc, String processRecord,
+                                        String applicationThread, String scheduleReceiver12) {
+        if (SIGNAL_PASS.equals(proc) && SIGNAL_PASS.equals(processRecord)
+                && SIGNAL_PASS.equals(applicationThread)
+                && SIGNAL_PASS.equals(scheduleReceiver12)) {
+            return NETWORKSTACK_READY;
+        }
+        if (SIGNAL_FAIL.equals(proc) || SIGNAL_FAIL.equals(processRecord)) {
+            return NETWORKSTACK_NOT_READY;
+        }
+        return NETWORKSTACK_PARTIAL;
+    }
+
+    private static int parseExpectedJobId(String raw) {
+        try {
+            int jobId = Integer.parseInt(raw);
+            return jobId == EXPECTED_JOB_ID ? jobId : -1;
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     /** Strict parse of the locked-boot marker. null means "no usable evidence". */
