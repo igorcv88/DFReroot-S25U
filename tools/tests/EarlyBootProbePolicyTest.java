@@ -215,6 +215,111 @@ public class EarlyBootProbePolicyTest {
                                 "networkstack_proc=UNKNOWN")) != null,
                 "an UNKNOWN readiness signal parses; absence is not a refusal");
 
+        // --- cross-field evidence invariants -------------------------------
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("same_boot=0", "same_boot=1")) == null,
+                "FIRED_NEW_BOOT cannot claim same_boot=1");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("armed_boot_id=boot-a", "armed_boot_id=boot-b")) == null,
+                "FIRED_NEW_BOOT requires distinct armed and fired boot ids");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("namespace=dfr-early-boot-probe",
+                                "namespace=other")) == null,
+                "a promotable callback requires arm and callback namespaces to agree");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("job_id=1145459269", "job_id=7")) == null,
+                "a different numeric job id is not this probe");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("networkstack_proc=PASS",
+                                "networkstack_proc=FAIL")) == null,
+                "NETWORKSTACK_READY cannot contradict a failing readiness signal");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("networkstack_state=NETWORKSTACK_READY",
+                                "networkstack_state=NETWORKSTACK_PARTIAL")) == null,
+                "the readiness roll-up must match its four signals");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("readiness_elapsed_ms=520",
+                                "readiness_elapsed_ms=490")) == null,
+                "readiness time cannot precede callback time");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("marker_write_elapsed_ms=530",
+                                "marker_write_elapsed_ms=510")) == null,
+                "marker-write time cannot precede readiness time");
+
+        String sameBootProbe = probe
+                .replace("fire_state=EARLY_JOB_FIRED_NEW_BOOT",
+                        "fire_state=EARLY_JOB_FIRED_SAME_BOOT")
+                .replace("locked_boot_state=EARLY_JOB_LOCKED_BOOT_PENDING",
+                        "locked_boot_state=EARLY_JOB_LOCKED_BOOT_UNKNOWN")
+                .replace("fired_boot_id=boot-b", "fired_boot_id=boot-a")
+                .replace("same_boot=0", "same_boot=1");
+        expect(EarlyBootProbePolicy.parseProbe(sameBootProbe) != null,
+                "a self-consistent FIRED_SAME_BOOT record parses");
+
+        // --- callback breadcrumb is strict durable evidence ------------------
+        String entered = "state=" + EarlyBootProbePolicy.CALLBACK_ENTERED + "\n"
+                + "fired_boot_id=boot-b\n"
+                + "job_id=" + EarlyBootProbePolicy.EXPECTED_JOB_ID + "\n"
+                + "callback_namespace=" + EarlyBootProbePolicy.EXPECTED_NAMESPACE + "\n"
+                + "callback_elapsed_ms=500\n"
+                + "callback_wallclock_ms=1700000000000\n";
+        EarlyBootProbePolicy.Callback enteredCallback =
+                EarlyBootProbePolicy.parseCallback(entered);
+        expect(enteredCallback != null
+                        && EarlyBootProbePolicy.CALLBACK_ENTERED.equals(enteredCallback.state),
+                "a complete callback-entry breadcrumb parses");
+
+        String stopped = "state=" + EarlyBootProbePolicy.CALLBACK_STOPPED + "\n"
+                + "fired_boot_id=boot-b\n"
+                + "job_id=" + EarlyBootProbePolicy.EXPECTED_JOB_ID + "\n"
+                + "stopped_at=" + EarlyBootProbePolicy.STOP_AFTER_READINESS + "\n"
+                + "callback_elapsed_ms=500\n";
+        EarlyBootProbePolicy.Callback stoppedCallback =
+                EarlyBootProbePolicy.parseCallback(stopped);
+        expect(stoppedCallback != null
+                        && EarlyBootProbePolicy.STOP_AFTER_READINESS.equals(
+                                stoppedCallback.stoppedAt),
+                "a stopped callback breadcrumb preserves its cancellation boundary");
+        expect(EarlyBootProbePolicy.parseCallback(entered + "extra=1\n") == null,
+                "an unknown callback key refuses");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        entered.replace("job_id=" + EarlyBootProbePolicy.EXPECTED_JOB_ID,
+                                "job_id=7")) == null,
+                "a callback for another numeric job id refuses");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped.replace(EarlyBootProbePolicy.STOP_AFTER_READINESS,
+                                "somewhere_else")) == null,
+                "an unknown stop boundary refuses");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        entered.replace("callback_elapsed_ms=500",
+                                "callback_elapsed_ms=-1")) == null,
+                "a numeric -1 callback breadcrumb timestamp refuses");
+
+        // --- positive PRE_LOCKED path must retain the locked marker ----------
+        expect(EarlyBootProbePolicy.needsLockedBootMarker(null, null, "boot-b"),
+                "an armed cycle with no callback still needs the marker");
+        expect(EarlyBootProbePolicy.needsLockedBootMarker(probe, entered, "boot-b"),
+                "a PENDING probe fired in this boot still needs the marker");
+        expect(EarlyBootProbePolicy.needsLockedBootMarker(null, entered, "boot-b"),
+                "breadcrumb-only in this boot still needs the marker");
+        expect(!EarlyBootProbePolicy.needsLockedBootMarker(probe, entered, "boot-c"),
+                "a PENDING probe from an older fired boot does not need this boot's marker");
+        expect(!EarlyBootProbePolicy.needsLockedBootMarker(null, entered, "boot-c"),
+                "an older breadcrumb-only cycle does not cost markers forever");
+        expect(!EarlyBootProbePolicy.needsLockedBootMarker(
+                        EarlyBootProbePolicy.withLockedBootState(
+                                probe, EarlyBootProbePolicy.PRE_LOCKED),
+                        entered, "boot-b"),
+                "a finalized PRE_LOCKED probe no longer needs the marker");
+        expect(!EarlyBootProbePolicy.needsLockedBootMarker(
+                        EarlyBootProbePolicy.withLockedBootState(
+                                probe, EarlyBootProbePolicy.POST_LOCKED),
+                        entered, "boot-b"),
+                "a finalized POST_LOCKED probe no longer needs the marker");
+        expect(EarlyBootProbePolicy.needsLockedBootMarker(
+                        "garbage", "garbage", "boot-b"),
+                "malformed evidence never suppresses the marker");
+
         // --- the first locked timestamp of a boot is immutable ---------------
         String first = EarlyBootProbePolicy.formatLockedBoot("boot-b", 19300);
         expect(EarlyBootProbePolicy.mergeLockedBoot(null, "boot-b", 19300) != null,
