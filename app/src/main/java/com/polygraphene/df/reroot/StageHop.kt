@@ -47,30 +47,27 @@ object StageHop {
     fun probeReadiness(context: Context): Readiness {
         val log = StringBuilder()
         val proc = networkStackProcVisible()
-        var processRecord = "UNKNOWN"
-        var appThread = "UNKNOWN"
-        var scheduleReceiver = "UNKNOWN"
+        var processRecord = EarlyBootProbePolicy.UNKNOWN
+        var appThread = EarlyBootProbePolicy.UNKNOWN
+        var scheduleReceiver = EarlyBootProbePolicy.UNKNOWN
         try {
             val (ams, amsClass) = activityManagerService(log)
             val pr = findProcessRecord(ams, amsClass, log)
-            processRecord = if (pr == null) "FAIL" else "PASS"
+            processRecord = if (pr == null) EarlyBootProbePolicy.SIGNAL_FAIL else EarlyBootProbePolicy.SIGNAL_PASS
             if (pr != null) {
                 val thread = findAppThread(pr, log)
-                appThread = if (thread == null) "FAIL" else "PASS"
+                appThread = if (thread == null) EarlyBootProbePolicy.SIGNAL_FAIL else EarlyBootProbePolicy.SIGNAL_PASS
                 if (thread != null) {
                     scheduleReceiver =
-                        if (resolveScheduleReceiver12(thread) == null) "FAIL" else "PASS"
+                        if (resolveScheduleReceiver12(thread) == null) EarlyBootProbePolicy.SIGNAL_FAIL else EarlyBootProbePolicy.SIGNAL_PASS
                 }
             }
         } catch (t: Throwable) {
             log.appendLine("[!] readiness probe failed: $t")
         }
-        val state = when {
-            proc == "PASS" && processRecord == "PASS" && appThread == "PASS" &&
-                scheduleReceiver == "PASS" -> "NETWORKSTACK_READY"
-            proc == "FAIL" || processRecord == "FAIL" -> "NETWORKSTACK_NOT_READY"
-            else -> "NETWORKSTACK_PARTIAL"
-        }
+        val state = EarlyBootProbePolicy.readinessState(
+            proc, processRecord, appThread, scheduleReceiver
+        )
         return Readiness(
             proc, processRecord, appThread, scheduleReceiver, state,
             log.toString().replace('\n', ' ').trim().ifEmpty { "UNKNOWN" }
@@ -145,7 +142,7 @@ object StageHop {
             File("/proc").list()
         } catch (_: Throwable) {
             null
-        } ?: return "UNKNOWN"
+        } ?: return EarlyBootProbePolicy.UNKNOWN
         var readable = 0
         for (name in entries) {
             if (name.toIntOrNull() == null) continue
@@ -155,9 +152,13 @@ object StageHop {
                 continue
             }
             readable++
-            if (cmdline == NETWORK_STACK_PROCESS) return "PASS"
+            if (cmdline == NETWORK_STACK_PROCESS) return EarlyBootProbePolicy.SIGNAL_PASS
         }
-        return if (readable == 0) "UNKNOWN" else "FAIL"
+        return if (readable == 0) {
+            EarlyBootProbePolicy.UNKNOWN
+        } else {
+            EarlyBootProbePolicy.SIGNAL_FAIL
+        }
     }
 
     /**
