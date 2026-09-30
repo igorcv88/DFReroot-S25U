@@ -56,7 +56,18 @@ class DfrBootReceiver : BroadcastReceiver() {
          * docs/AUTO_ROOT.md needs to observe the LAST of those specifically. A
          * reader who has to guess which one fired is reading no evidence at all.
          */
+        /*
+         * optInVerdict() is a filesystem read, and it is still on this looper.
+         * It no longer corrupts the early-job measurement - arrivalMs is
+         * sampled above, before it - but it does sit between the broadcast and
+         * DfrAutoRootService, so it can delay the automatic run. Whether that
+         * matters is a question about milliseconds nobody has measured, so
+         * measure it rather than restructure Auto Root on a guess: three
+         * monotonic readings, logged, no extra I/O and no new file.
+         */
+        val optInStartMs = monotonicNow()
         val verdict = AutoRootStore.optInVerdict()
+        val optInEndMs = monotonicNow()
         if (verdict != AutoRootPolicy.OPT_IN_OK) {
             Log.i(TAG, "[DFR][AUTOROOT] no automatic attempt: $verdict")
         } else {
@@ -82,7 +93,17 @@ class DfrBootReceiver : BroadcastReceiver() {
          * delay it by exactly the quantity the experiment is trying to measure.
          * goAsync() keeps the receiver alive while the worker persists it.
          */
+        Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] receiver_dispatch_cost" +
+            " action=$action receiver_arrival_ms=$arrivalMs" +
+            " optin_start_ms=$optInStartMs optin_end_ms=$optInEndMs" +
+            " dispatch_return_ms=${monotonicNow()}")
         persistLockedBootEvidence(action, arrivalMs)
+    }
+
+    private fun monotonicNow(): Long = try {
+        SystemClock.elapsedRealtime()
+    } catch (_: Throwable) {
+        -1L
     }
 
     /**
@@ -94,7 +115,9 @@ class DfrBootReceiver : BroadcastReceiver() {
      * changing the system it instruments long after the question was answered.
      */
     private fun persistLockedBootEvidence(action: String?, arrivalMs: Long) {
-        if (action != Intent.ACTION_LOCKED_BOOT_COMPLETED) return
+        val locked = action == Intent.ACTION_LOCKED_BOOT_COMPLETED
+        val booted = action == Intent.ACTION_BOOT_COMPLETED
+        if (!locked && !booted) return
         val pending = try {
             goAsync()
         } catch (t: Throwable) {
@@ -103,7 +126,7 @@ class DfrBootReceiver : BroadcastReceiver() {
         }
         val task = Runnable {
             try {
-                recordLockedBoot(arrivalMs)
+                if (locked) recordLockedBoot(arrivalMs) else retryPendingFinalize()
             } catch (t: Throwable) {
                 Log.e(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=FAIL $t", t)
             } finally {
@@ -117,10 +140,71 @@ class DfrBootReceiver : BroadcastReceiver() {
         try {
             worker.execute(task)
         } catch (t: Throwable) {
-            // A rejected worker must not strand the PendingResult; run inline
-            // rather than leave the broadcast open.
-            Log.e(TAG, "[DFR][EARLY_JOB] worker unavailable, recording inline: $t")
-            task.run()
+            /*
+             * Lose the evidence, never the invariant.
+             *
+             * Running inline here would put the read-modify-write and two
+             * fsyncs back on system_server's main looper - the exact defect
+             * this whole path exists to remove - and it would do it on the
+             * failure path, where nobody is watching. A fail-closed design
+             * does not keep a fallback that reproduces the thing it forbids.
+             * An unwritten marker costs one boot of the experiment; a blocked
+             * looper corrupts the measurement and delays Auto Root.
+             */
+            Log.e(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=UNKNOWN" +
+                " reason=worker_unavailable ($t); refusing to record on the " +
+                "main looper")
+            try {
+                pending?.finish()
+            } catch (f: Throwable) {
+                Log.e(TAG, "[DFR][EARLY_JOB] pending result finish failed: $f")
+            }
+        }
+    }
+
+    /**
+     * The third and last chance to complete an ordering that both timestamps
+     * already support.
+     *
+     * The two-sided convergence closes the race, but not a transient write
+     * failure: if the receiver's finalize and the callback's own retry both
+     * fail, the record stays PENDING for the rest of the boot with the answer
+     * sitting in two files nobody compares again. BOOT_COMPLETED is the right
+     * third attempt precisely because it is late and uninvolved - it is not a
+     * comparison timestamp, it never touches the locked marker, and it is off
+     * the early-trigger path entirely.
+     *
+     * It can only ever move PENDING to a verdict the stored timestamps already
+     * imply. It writes no new time and creates no marker.
+     */
+    private fun retryPendingFinalize() {
+        val armRecord = EarlyBootProbeStore.readArm() ?: return
+        if (armRecord == AutoRootPolicy.RECORD_UNREADABLE ||
+            EarlyBootProbePolicy.parseArm(armRecord) == null) {
+            return
+        }
+        val probeRecord = EarlyBootProbeStore.readProbe() ?: return
+        if (probeRecord == AutoRootPolicy.RECORD_UNREADABLE) {
+            Log.i(TAG, "[DFR][EARLY_JOB] LATE_FINALIZE=SKIP probe record unreadable")
+            return
+        }
+        val probe = EarlyBootProbePolicy.parseProbe(probeRecord)
+        if (probe == null) {
+            Log.i(TAG, "[DFR][EARLY_JOB] LATE_FINALIZE=SKIP probe record malformed")
+            return
+        }
+        // Only a record still missing its verdict. Anything else is settled.
+        if (probe.lockedBootState != EarlyBootProbePolicy.LOCKED_PENDING) return
+        val bootId = DfrRootCoordinator.readBootId()
+        if (bootId.isEmpty()) {
+            Log.e(TAG, "[DFR][EARLY_JOB] LATE_FINALIZE=FAIL boot_id unavailable")
+            return
+        }
+        val failure = EarlyBootProbeStore.finalizeFromStoredLockedBoot(bootId)
+        if (failure != null) {
+            Log.e(TAG, "[DFR][EARLY_JOB] LATE_FINALIZE=FAIL $failure")
+        } else {
+            Log.i(TAG, "[DFR][EARLY_JOB] LATE_FINALIZE=ATTEMPTED boot_id=$bootId")
         }
     }
 
@@ -133,35 +217,40 @@ class DfrBootReceiver : BroadcastReceiver() {
             return
         }
         /*
-         * Armed is not the same as unspent. The one-shot job leaves its arm
-         * record on disk after it fires, so a parse alone keeps this path live
-         * on every later boot forever - two fsyncs per boot for an experiment
-         * that is over. arm() archives the previous cycle, so a probe record
-         * present means THIS cycle already fired and nothing is waiting for a
-         * marker. Unreadable is not consumed: the experiment may still be live,
-         * and the marker is the cheaper thing to lose.
+         * Armed is not the same as resolved. The positive result we are trying
+         * to observe is callback -> PENDING probe -> LOCKED_BOOT timestamp ->
+         * PRE_LOCKED finalization. A breadcrumb or PENDING probe from THIS boot
+         * therefore makes the marker more necessary, not less. Evidence from
+         * an older fired boot is spent: this boot's timestamp cannot finalize it
+         * and must not cost two fsyncs forever.
          */
-        val probeRecord = EarlyBootProbeStore.readProbe()
-        if (probeRecord != null && probeRecord != AutoRootPolicy.RECORD_UNREADABLE) {
-            Log.i(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=SKIP probe already consumed")
-            return
-        }
-        // The breadcrumb alone also means this cycle fired - the callback ran
-        // and did not finish. A marker written now has nothing left to be
-        // compared against.
-        if (probeRecord == null && EarlyBootProbeStore.readCallbackEntered() != null) {
-            Log.i(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=SKIP callback already " +
-                "entered for this cycle")
-            return
-        }
-        if (probeRecord == AutoRootPolicy.RECORD_UNREADABLE) {
-            Log.i(TAG, "[DFR][EARLY_JOB] probe record unreadable; recording the " +
-                "marker anyway rather than assuming the cycle is spent")
-        }
         val bootId = DfrRootCoordinator.readBootId()
         if (bootId.isEmpty()) {
             Log.e(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=FAIL boot_id unavailable")
             return
+        }
+        val probeRecord = EarlyBootProbeStore.readProbe()
+        val callbackRecord = EarlyBootProbeStore.readCallbackEntered()
+        if (!EarlyBootProbePolicy.needsLockedBootMarker(
+                probeRecord, callbackRecord, bootId)) {
+            Log.i(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=SKIP cycle already resolved/spent")
+            return
+        }
+        if (probeRecord == AutoRootPolicy.RECORD_UNREADABLE) {
+            Log.i(TAG, "[DFR][EARLY_JOB] probe record unreadable; recording the " +
+                "marker rather than assuming the cycle is spent")
+        } else if (probeRecord != null) {
+            val parsed = EarlyBootProbePolicy.parseProbe(probeRecord)
+            if (parsed == null) {
+                Log.i(TAG, "[DFR][EARLY_JOB] probe record malformed; recording the " +
+                    "marker rather than assuming the cycle is spent")
+            } else {
+                Log.i(TAG, "[DFR][EARLY_JOB] probe still PENDING in this boot; " +
+                    "preserving the timestamp needed to finalize it")
+            }
+        } else if (callbackRecord != null) {
+            Log.i(TAG, "[DFR][EARLY_JOB] callback entered in this boot without a " +
+                "final probe; preserving the locked-boot timestamp")
         }
         /*
          * A file that wrote successfully is not a timestamp that can be

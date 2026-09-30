@@ -120,21 +120,51 @@ Three further properties keep the evidence honest:
   established by that archive, never inferred from boot ids — a re-arm in the
   boot the previous callback fired in makes the stale record's `fired_boot_id`
   equal the new arm's `armed_boot_id`, so any boot-id heuristic reports a
-  freshly pending job as already consumed. The receiver likewise stops writing
-  the marker once this cycle has fired, instead of paying two `fsync`s on every
-  later boot for a spent experiment.
+  freshly pending job as already consumed. The receiver stops writing a marker
+  only when the record is already finalized, or when the callback/probe belongs
+  to an older fired boot that the current timestamp cannot finalize. A
+  breadcrumb-only callback or a `PENDING` probe in THIS boot still needs the
+  first `LOCKED_BOOT_COMPLETED` timestamp; suppressing it would make the desired
+  PRE_LOCKED result impossible to prove.
 - **An absent record is two different outcomes, so it is two files.** The
   worker writes `/data/system/dfreroot-early-job-callback` before the readiness
   sweep. Neither file means the scheduler never called back; that file alone
   means it called back and the run did not complete (killed, or the write
   failed); both mean it completed. The record also carries `stopped=`, because
   the scheduler pulling the job and a slow probe are different facts.
+- **The JobScheduler lifecycle is obeyed, not narrated.** After `onStopJob`
+  the platform has ended that execution, so the worker abandons it at its next
+  boundary and does **not** call `jobFinished` — reporting completion then is a
+  claim about a job that is no longer ours. Cancellation state lives in a
+  per-run token, never in an instance field: the platform keeps one instance of
+  the service across callbacks, so a `stopped` flag set once would still read
+  true on a later run that was never stopped. The final `jobFinished` decision
+  is posted back to the main looper, where it is serialized with `onStopJob`;
+  there is no worker-side check-then-finish race. `stopped=` in the record is
+  therefore **best-effort lifecycle evidence** — a stop arriving after the last
+  boundary still races the write — and is never authority to promote or refuse
+  an early-trigger result.
+- **No fallback may reproduce the defect the path exists to remove.** When the
+  receiver's worker cannot be scheduled, the marker is recorded as
+  `UNKNOWN reason=worker_unavailable` and skipped. It is never run inline: that
+  would put the read-modify-write and two `fsync`s back on system_server's main
+  looper, on the failure path, where nobody is watching. Losing one boot of
+  evidence is cheaper than corrupting the measurement.
+- **A transient finalize failure gets one late retry.** Two-sided convergence
+  closes the race but not a failed write: if both attempts fail, the verdict
+  sits unmade in two files. `BOOT_COMPLETED` is the third attempt precisely
+  because it is late and uninvolved — not a comparison timestamp, never touches
+  the locked marker, off the early-trigger path. It can only move `PENDING` to
+  a verdict the stored timestamps already imply.
 - **The callback is bound to the live scheduler, not only to our own file.**
   uid 1000 is shared, so `namespace_binding=PASS` requires
   `JobParameters.getJobNamespace()` to name `dfr-early-boot-probe`; the arm
-  record agreeing with itself is not evidence. A failed monotonic reading is
-  recorded as `UNKNOWN` and refused as a timestamp — a successful file write is
-  not timing evidence.
+  record agreeing with itself is not evidence. The durable probe parser also
+  checks cross-field invariants (fixed job id, same-boot relation, namespace
+  binding, readiness roll-up and monotonic timestamp order), and the callback
+  breadcrumb has its own strict parser. A failed monotonic reading is recorded
+  as `UNKNOWN` and refused as a timestamp — a successful file write is not
+  timing evidence.
 
 Until hardware answers, keep these exact states:
 
@@ -146,7 +176,22 @@ DFR_JOB_STAGEHOP_READY=UNVERIFIED
 No JobService → Auto Root/DirtyFrag path and no automatic soft reboot exists in
 this release.
 
+`MINIMUM_LATENCY_MS` stays at 15 s and `REBOOT_WITHIN_MS` at 10 s. The delay is
+meant to mature across arming, shutdown and the start of the next boot so the
+job is already eligible when JobScheduler comes up around the window being
+observed — roughly NetworkStack ~16 s, `bootanim.exit` ~19 s, locked boot
+~19.4 s on this device. A longer latency would be easier to operate and would
+also make `POST_LOCKED` close to certain, which is a worse experiment. If the
+ergonomics need changing later, measure arm→reboot, arm→kernel boot and kernel
+boot→callback first and adjust by seconds.
+
 ### One-cycle physical acceptance sequence
+
+The two steps below run in one session, gated: Apply Modules first, and the
+probe is armed **only** if that step leaves the device in a state worth
+spending a full reboot on. If Apply Modules produces a different `boot_id`, or
+root is lost, the Apply Modules test has failed — stop there and do not arm.
+That gate is what removes the ambiguity, not a second full boot.
 
 1. While the current rooted boot is still alive, install the new APK and tap
    **Apply Modules (Soft Reboot)** once. Preserve the pre-tap boot id. Collect
