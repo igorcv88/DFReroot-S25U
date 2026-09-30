@@ -1455,7 +1455,7 @@ def audit():
              "broadcast it is timing itself against")
     # The breadcrumb must precede the slow readiness sweep, or it cannot
     # separate "never fired" from "fired and died before the record".
-    if "EARLY_JOB_CALLBACK_ENTERED" not in early_job_code:
+    if "EarlyBootProbePolicy.CALLBACK_ENTERED" not in early_job_code:
         fail("the early-job callback writes no entry breadcrumb; an absent "
              "probe record would collapse two different outcomes")
     if 'appendLine("stopped=' not in early_job_code \
