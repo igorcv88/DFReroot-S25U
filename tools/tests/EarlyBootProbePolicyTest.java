@@ -225,9 +225,13 @@ public class EarlyBootProbePolicyTest {
                         probe.replace("armed_boot_id=boot-a", "armed_boot_id=boot-b")) == null,
                 "FIRED_NEW_BOOT requires distinct armed and fired boot ids");
         expect(EarlyBootProbePolicy.parseProbe(
-                        probe.replace("namespace=dfr-early-boot-probe",
-                                "namespace=other")) == null,
+                        probe.replace("\nnamespace=dfr-early-boot-probe\n",
+                                "\nnamespace=other\n")) == null,
                 "a promotable callback requires arm and callback namespaces to agree");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("callback_namespace=dfr-early-boot-probe",
+                                "callback_namespace=other")) == null,
+                "a promotable callback refuses a different callback namespace");
         expect(EarlyBootProbePolicy.parseProbe(
                         probe.replace("job_id=1145459269", "job_id=7")) == null,
                 "a different numeric job id is not this probe");
