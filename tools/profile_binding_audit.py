@@ -1413,10 +1413,17 @@ def audit():
                 fail("early-job arming lost identity/persistence guard %r" % required)
     for required in ("it.jobId == jobId", "it.jobId == DfrEarlyBootProbe.JOB_ID",
                      "it.namespace == expectedNamespace",
-                     'namespaceBinding == "PASS"'):
-        if required not in code_only(early_job_src):
+                     # The literal was refactored into a shared constant; accept
+                     # either spelling so the guard tracks the property, not one
+                     # way of writing it. A guard that fails on correct code
+                     # gets weakened or deleted, which is how the property is
+                     # really lost.
+                     ('namespaceBinding == "PASS"',
+                      'namespaceBinding == EarlyBootProbePolicy.SIGNAL_PASS')):
+        alternatives = required if isinstance(required, tuple) else (required,)
+        if not any(alt in code_only(early_job_src) for alt in alternatives):
             fail("early-job callback accepts an unbound arm record: missing %r"
-                 % required)
+                 % (required,))
     if "EARLY_JOB_LOCKED_BOOT_PENDING" not in dfr_source("EarlyBootProbePolicy.java") \
             or "EarlyBootProbeStore.finalizeFromStoredLockedBoot(bootId)" \
                 not in boot_receiver_src:

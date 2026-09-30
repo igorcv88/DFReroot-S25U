@@ -224,10 +224,17 @@ public class EarlyBootProbePolicyTest {
         expect(EarlyBootProbePolicy.parseProbe(
                         probe.replace("armed_boot_id=boot-a", "armed_boot_id=boot-b")) == null,
                 "FIRED_NEW_BOOT requires distinct armed and fired boot ids");
+        // Anchor on the newline: "callback_namespace=..." ENDS with
+        // "namespace=...", so an unanchored replace rewrites both lines, they
+        // still agree, and the assertion silently tests nothing.
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("\nnamespace=dfr-early-boot-probe\n",
+                                "\nnamespace=other\n")) == null,
+                "a promotable callback requires arm and callback namespaces to agree");
         expect(EarlyBootProbePolicy.parseProbe(
                         probe.replace("namespace=dfr-early-boot-probe",
                                 "namespace=other")) == null,
-                "a promotable callback requires arm and callback namespaces to agree");
+                "agreeing on a namespace nobody armed is not promotable either");
         expect(EarlyBootProbePolicy.parseProbe(
                         probe.replace("job_id=1145459269", "job_id=7")) == null,
                 "a different numeric job id is not this probe");
