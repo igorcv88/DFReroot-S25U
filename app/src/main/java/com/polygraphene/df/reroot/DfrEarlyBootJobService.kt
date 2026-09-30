@@ -3,6 +3,8 @@ package com.polygraphene.df.reroot
 import android.app.job.JobParameters
 import android.app.job.JobService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
 import android.os.UserManager
@@ -60,20 +62,11 @@ class DfrEarlyBootJobService : JobService() {
                 Log.e(TAG, "[DFR][EARLY_JOB] probe worker failed", t)
             } finally {
                 /*
-                 * Only a run the scheduler has NOT already stopped may call
-                 * jobFinished. After onStopJob the platform has ended that
-                 * execution itself; reporting completion afterwards is a claim
-                 * about a job that is no longer ours to finish.
+                 * Completion and onStopJob are serialized on the main looper.
+                 * A worker-side check-then-jobFinished has a race where stop can
+                 * run between the check and the completion call.
                  */
-                if (!token.stopped.get()) {
-                    try {
-                        // false: a one-shot marker, never rescheduled.
-                        jobFinished(params, false)
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "[DFR][EARLY_JOB] jobFinished failed", t)
-                    }
-                }
-                if (activeRun === token) activeRun = null
+                completeOnMain(params, token)
             }
         }
         try {
@@ -88,6 +81,24 @@ class DfrEarlyBootJobService : JobService() {
         }
         // true: work continues on the worker; jobFinished ends it.
         return true
+    }
+
+    private fun completeOnMain(params: JobParameters, token: RunToken) {
+        val posted = completionHandler.post {
+            if (!token.stopped.get()) {
+                try {
+                    jobFinished(params, false)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "[DFR][EARLY_JOB] jobFinished failed", t)
+                }
+            }
+            if (activeRun === token) activeRun = null
+        }
+        if (!posted) {
+            Log.e(TAG, "[DFR][EARLY_JOB] completion post rejected; refusing " +
+                "worker-side jobFinished")
+            if (activeRun === token) activeRun = null
+        }
     }
 
     /**
@@ -122,7 +133,7 @@ class DfrEarlyBootJobService : JobService() {
          * spending a physical boot on.
          */
         val breadcrumb = EarlyBootProbeStore.writeCallbackEntered(
-            "state=EARLY_JOB_CALLBACK_ENTERED\n" +
+            "state=${EarlyBootProbePolicy.CALLBACK_ENTERED}\n" +
                 "fired_boot_id=${value(firedBootId)}\n" +
                 "job_id=$jobId\n" +
                 "callback_namespace=$callbackNamespace\n" +
@@ -133,7 +144,7 @@ class DfrEarlyBootJobService : JobService() {
             Log.e(TAG, "[DFR][EARLY_JOB] CALLBACK_BREADCRUMB=FAIL $breadcrumb")
         }
         // Boundary 1: before reading any record.
-        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, "before_arm_read")) return
+        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, EarlyBootProbePolicy.STOP_BEFORE_ARM_READ)) return
         val armRecord = EarlyBootProbeStore.readArm()
         val parsedArm = if (armRecord == null || armRecord == AutoRootPolicy.RECORD_UNREADABLE) {
             null
@@ -151,19 +162,19 @@ class DfrEarlyBootJobService : JobService() {
          * the scheduler rather than to the record.
          */
         val namespaceBinding =
-            if (callbackNamespace == expectedNamespace) "PASS" else "FAIL"
+            if (callbackNamespace == expectedNamespace) EarlyBootProbePolicy.SIGNAL_PASS else EarlyBootProbePolicy.SIGNAL_FAIL
         val arm = parsedArm?.takeIf {
             it.jobId == jobId && it.jobId == DfrEarlyBootProbe.JOB_ID &&
-                it.namespace == expectedNamespace && namespaceBinding == "PASS"
+                it.namespace == expectedNamespace && namespaceBinding == EarlyBootProbePolicy.SIGNAL_PASS
         }
         val fireState = EarlyBootProbePolicy.fireState(arm, firedBootId)
         // Boundary 2: before the readiness sweep, which is the expensive part
         // and the whole reason a stopped run must not simply run to completion.
-        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, "before_readiness")) return
+        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, EarlyBootProbePolicy.STOP_BEFORE_READINESS)) return
         val readiness = StageHop.probeReadiness(applicationContext)
         val readinessElapsedMs = monotonicNow()
         // Boundary 3: after the sweep, before anything is committed.
-        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, "after_readiness")) return
+        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, EarlyBootProbePolicy.STOP_AFTER_READINESS)) return
         /*
          * The locked marker is read as LATE as possible - after the readiness
          * sweep, not before it. The receiver's worker may persist it at any
@@ -178,14 +189,14 @@ class DfrEarlyBootJobService : JobService() {
             arm, firedBootId, locked.first, locked.second, callbackElapsedMs
         )
         val sameBoot = when (fireState) {
-            EarlyBootProbePolicy.STATE_FIRED_SAME_BOOT -> "1"
-            EarlyBootProbePolicy.STATE_FIRED_NEW_BOOT -> "0"
+            EarlyBootProbePolicy.STATE_FIRED_SAME_BOOT -> EarlyBootProbePolicy.SAME_BOOT_TRUE
+            EarlyBootProbePolicy.STATE_FIRED_NEW_BOOT -> EarlyBootProbePolicy.SAME_BOOT_FALSE
             else -> "UNKNOWN"
         }
         // Boundary 4: the last chance before the record is committed. A stop
         // that arrives after this point still races the write, which is why
         // `stopped=` in the record is best-effort evidence and never authority.
-        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, "before_marker")) return
+        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, EarlyBootProbePolicy.STOP_BEFORE_MARKER)) return
         val markerWriteElapsedMs = monotonicNow()
         val record = buildString {
             appendLine("state=${EarlyBootProbePolicy.STATE_FIRED}")
@@ -269,7 +280,7 @@ class DfrEarlyBootJobService : JobService() {
 
     private fun namespaceForRuntime(): String =
         if (Build.VERSION.SDK_INT >= 34) DfrEarlyBootProbe.NAMESPACE
-        else "DEFAULT_UID_NAMESPACE"
+        else EarlyBootProbePolicy.DEFAULT_UID_NAMESPACE
 
     private fun lockedBootEvidence(): Pair<String?, Long> {
         val record = EarlyBootProbeStore.readLockedBoot()
@@ -350,7 +361,7 @@ class DfrEarlyBootJobService : JobService() {
         Log.i(TAG, "[DFR][EARLY_JOB] CALLBACK_ABANDONED boundary=$boundary " +
             "job_id=${token.jobId} boot_id=${value(firedBootId)}")
         val failure = EarlyBootProbeStore.writeCallbackEntered(
-            "state=EARLY_JOB_CALLBACK_STOPPED\n" +
+            "state=${EarlyBootProbePolicy.CALLBACK_STOPPED}\n" +
                 "fired_boot_id=${value(firedBootId)}\n" +
                 "job_id=${token.jobId}\n" +
                 "stopped_at=$boundary\n" +
@@ -370,6 +381,8 @@ class DfrEarlyBootJobService : JobService() {
          * callbacks can never interleave their record writes, and daemon so an
          * idle probe thread never holds the system process open.
          */
+        private val completionHandler = Handler(Looper.getMainLooper())
+
         private val worker = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "dfr-early-job").apply { isDaemon = true }
         }
