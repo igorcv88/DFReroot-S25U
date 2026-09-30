@@ -196,6 +196,16 @@ public class EarlyBootProbePolicyTest {
                         probe.replace("marker_write_elapsed_ms=530",
                                 "marker_write_elapsed_ms=-7")) == null,
                 "a negative monotonic reading is not a timestamp and refuses");
+        // -1 is the in-memory sentinel for UNKNOWN, never a value on disk. A
+        // record carrying it numerically was not written by this code.
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("readiness_elapsed_ms=520",
+                                "readiness_elapsed_ms=-1")) == null,
+                "a numeric -1 is not a second spelling of UNKNOWN and refuses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("callback_elapsed_ms=500",
+                                "callback_elapsed_ms=-1")) == null,
+                "a numeric -1 callback clock refuses rather than reading as absent");
         expect(EarlyBootProbePolicy.parseProbe(
                         probe.replace("callback_wallclock_ms=1700000000000",
                                 "callback_wallclock_ms=UNKNOWN")) != null,

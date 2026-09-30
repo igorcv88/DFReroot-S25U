@@ -175,10 +175,10 @@ public final class EarlyBootProbePolicy {
             return null;
         }
         for (String field : OPTIONAL_TIMES) {
-            long value = parseOptionalLong(values.get(field));
-            // MIN_VALUE is garbage; any other negative is a number that is not
-            // a monotonic reading, and UNKNOWN is the only way to say "absent".
-            if (value == Long.MIN_VALUE || value < -1L) return null;
+            // UNKNOWN is the only way to say "absent"; everything else must be
+            // a real reading. parseOptionalLong folds garbage and numeric
+            // negatives alike into MIN_VALUE.
+            if (parseOptionalLong(values.get(field)) == Long.MIN_VALUE) return null;
         }
         long callbackElapsed = parseOptionalLong(values.get("callback_elapsed_ms"));
         return new Probe(firedBootId, fireState, lockedState, callbackElapsed);
@@ -323,11 +323,21 @@ public final class EarlyBootProbePolicy {
         return values;
     }
 
-    /** -1 for a recorded UNKNOWN, the value for a number, MIN_VALUE for garbage. */
+    /**
+     * -1 for a recorded UNKNOWN, the value for a non-negative number,
+     * MIN_VALUE for anything else.
+     *
+     * A numeric negative is not a second spelling of UNKNOWN. The writer emits
+     * either a real monotonic reading or the literal token, so a record
+     * holding `-1` is one nobody in this codebase wrote - a corrupted or
+     * externally edited file - and a fail-closed parser refuses what it cannot
+     * account for rather than reading it as missing evidence.
+     */
     private static long parseOptionalLong(String raw) {
         if (UNKNOWN.equals(raw)) return -1L;
         try {
-            return Long.parseLong(raw);
+            long value = Long.parseLong(raw);
+            return value < 0 ? Long.MIN_VALUE : value;
         } catch (NumberFormatException e) {
             return Long.MIN_VALUE;
         }

@@ -1480,7 +1480,11 @@ def audit():
     if re.search(r"^\s*private var stopped\b", early_job_code, flags=re.M):
         fail("a service-instance `stopped` field is back; it never resets "
              "between executions")
-    if early_job_code.count("abandonIfStopped(") < 4:
+    # Call sites only: counting every occurrence of the name would include the
+    # declaration, so four boundaries plus one definition reads as five and a
+    # deleted boundary still reads as four. A guard that survives the
+    # regression it exists for is not a guard.
+    if early_job_code.count("if (abandonIfStopped(") < 4:
         fail("the early-job worker does not check for cancellation at its "
              "boundaries; a stopped run would still pay for the readiness "
              "sweep it was told to abandon")
