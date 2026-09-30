@@ -217,35 +217,40 @@ class DfrBootReceiver : BroadcastReceiver() {
             return
         }
         /*
-         * Armed is not the same as unspent. The one-shot job leaves its arm
-         * record on disk after it fires, so a parse alone keeps this path live
-         * on every later boot forever - two fsyncs per boot for an experiment
-         * that is over. arm() archives the previous cycle, so a probe record
-         * present means THIS cycle already fired and nothing is waiting for a
-         * marker. Unreadable is not consumed: the experiment may still be live,
-         * and the marker is the cheaper thing to lose.
+         * Armed is not the same as resolved. The positive result we are trying
+         * to observe is callback -> PENDING probe -> LOCKED_BOOT timestamp ->
+         * PRE_LOCKED finalization. A breadcrumb or PENDING probe from THIS boot
+         * therefore makes the marker more necessary, not less. Evidence from
+         * an older fired boot is spent: this boot's timestamp cannot finalize it
+         * and must not cost two fsyncs forever.
          */
-        val probeRecord = EarlyBootProbeStore.readProbe()
-        if (probeRecord != null && probeRecord != AutoRootPolicy.RECORD_UNREADABLE) {
-            Log.i(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=SKIP probe already consumed")
-            return
-        }
-        // The breadcrumb alone also means this cycle fired - the callback ran
-        // and did not finish. A marker written now has nothing left to be
-        // compared against.
-        if (probeRecord == null && EarlyBootProbeStore.readCallbackEntered() != null) {
-            Log.i(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=SKIP callback already " +
-                "entered for this cycle")
-            return
-        }
-        if (probeRecord == AutoRootPolicy.RECORD_UNREADABLE) {
-            Log.i(TAG, "[DFR][EARLY_JOB] probe record unreadable; recording the " +
-                "marker anyway rather than assuming the cycle is spent")
-        }
         val bootId = DfrRootCoordinator.readBootId()
         if (bootId.isEmpty()) {
             Log.e(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=FAIL boot_id unavailable")
             return
+        }
+        val probeRecord = EarlyBootProbeStore.readProbe()
+        val callbackRecord = EarlyBootProbeStore.readCallbackEntered()
+        if (!EarlyBootProbePolicy.needsLockedBootMarker(
+                probeRecord, callbackRecord, bootId)) {
+            Log.i(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=SKIP cycle already resolved/spent")
+            return
+        }
+        if (probeRecord == AutoRootPolicy.RECORD_UNREADABLE) {
+            Log.i(TAG, "[DFR][EARLY_JOB] probe record unreadable; recording the " +
+                "marker rather than assuming the cycle is spent")
+        } else if (probeRecord != null) {
+            val parsed = EarlyBootProbePolicy.parseProbe(probeRecord)
+            if (parsed == null) {
+                Log.i(TAG, "[DFR][EARLY_JOB] probe record malformed; recording the " +
+                    "marker rather than assuming the cycle is spent")
+            } else {
+                Log.i(TAG, "[DFR][EARLY_JOB] probe still PENDING in this boot; " +
+                    "preserving the timestamp needed to finalize it")
+            }
+        } else if (callbackRecord != null) {
+            Log.i(TAG, "[DFR][EARLY_JOB] callback entered in this boot without a " +
+                "final probe; preserving the locked-boot timestamp")
         }
         /*
          * A file that wrote successfully is not a timestamp that can be
