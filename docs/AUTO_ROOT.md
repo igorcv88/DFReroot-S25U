@@ -356,8 +356,28 @@ elapsed bounds with time spent rebooting consumed. A same-boot callback is
 recorded as `EARLY_JOB_FIRED_SAME_BOOT`, finishes, and is never promoted to an
 early-trigger pass.
 An absent locked-boot marker at callback time is recorded as
-`EARLY_JOB_LOCKED_BOOT_PENDING`, not PASS. The later receiver persists its own
-monotonic timestamp and finalizes `PRE_LOCKED` only after comparing the two.
+`EARLY_JOB_LOCKED_BOOT_PENDING`, not PASS. `PRE_LOCKED` is reached only by
+comparing two monotonic timestamps, and both workers attempt that comparison —
+the receiver after it persists the marker, the callback again after it writes
+its record — so the verdict follows the timestamps rather than the thread
+order. Only a record still reading `PENDING` is finalized, which makes the
+second attempt a no-op instead of a rewrite.
+
+Because this app declares `android:process="system"`, the callback and the
+receiver share system_server's main looper, which is also what orders the
+measurement. Both therefore do their work on a worker: `onStartJob` takes
+`callback_elapsed_ms` and returns `true`, and the receiver dispatches Auto Root
+before persisting anything, under `goAsync()`, and only while a valid arm
+record exists. Inline work in either one would have delayed the broadcast it is
+timed against — the probe answering its own question with its own side effect.
+
+Within one boot the **first** `LOCKED_BOOT_COMPLETED` timestamp is immutable: a
+framework restart re-delivers the broadcast under the same `boot_id`, and a
+later value would move the comparison point forward. The callback is also bound
+to `JobParameters.getJobNamespace()`, not only to the arm record, because uid
+1000 is shared and a record that agrees with itself proves nothing about who
+called back. A failed monotonic reading is recorded as `UNKNOWN` and never
+stored as a timestamp — a file that wrote successfully is not timing evidence.
 
 The receiver's `EXTRA_RECEIVER_UPTIME_MS` is **telemetry only**. A process with
 the same shared UID can start a non-exported service and provide an arbitrary

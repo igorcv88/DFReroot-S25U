@@ -74,6 +74,19 @@ object DfrEarlyBootProbe {
             cancelOwned(scheduler, component)
             return "[x] EARLY_JOB_NOT_ARMED: clock evidence unavailable"
         }
+        /*
+         * Archive BEFORE the arm record is written. The two must never be live
+         * together: a new arm record beside the previous cycle's probe record
+         * is exactly the state in which "has this fired?" has no answer. If the
+         * archive fails there is no safe way to continue, so the job is
+         * cancelled and the arming refuses.
+         */
+        val archiveFailure = EarlyBootProbeStore.archivePreviousCycle()
+        if (archiveFailure != null) {
+            cancelOwned(scheduler, component)
+            return "[x] EARLY_JOB_NOT_ARMED: cannot archive the previous probe " +
+                "cycle ($archiveFailure)"
+        }
         val record = EarlyBootProbePolicy.formatArm(
             bootId, JOB_ID, namespaceForRuntime(), MINIMUM_LATENCY_MS, result,
             elapsed, wallclock
@@ -88,14 +101,48 @@ object DfrEarlyBootProbe {
             "start the FULL reboot within ${REBOOT_WITHIN_MS / 1000}s"
     }
 
+    /**
+     * What the row says is the arm record AND this cycle's callback records.
+     *
+     * The arm record outlives the callback - the job is one-shot, so it never
+     * fires again, but nothing erases the file that says it was scheduled.
+     * Reporting only that record leaves the row reading EARLY_JOB_SCHEDULED
+     * after the probe has already been spent, and an owner who trusts it spends
+     * a full reboot on an experiment that cannot run.
+     *
+     * Which cycle a record belongs to is established by [arm], which archives
+     * the previous cycle's records before writing the new arm record - never
+     * inferred here from boot ids, which cannot distinguish a stale record from
+     * a fresh one when the owner re-arms in the boot the previous callback
+     * fired in.
+     */
     fun armState(): String {
         val record = EarlyBootProbeStore.readArm()
             ?: return "EARLY_JOB_NOT_ARMED"
         if (record == AutoRootPolicy.RECORD_UNREADABLE) return "EARLY_JOB_ARM_UNKNOWN"
         val arm = EarlyBootProbePolicy.parseArm(record)
             ?: return "EARLY_JOB_ARM_MALFORMED"
-        return "EARLY_JOB_SCHEDULED job_id=${arm.jobId} namespace=${arm.namespace} " +
+        val armed = "job_id=${arm.jobId} namespace=${arm.namespace} " +
             "armed_boot_id=${arm.armedBootId}"
+        val probeRecord = EarlyBootProbeStore.readProbe()
+        if (probeRecord == null) {
+            // No record. The breadcrumb still separates "never called back"
+            // from "called back and did not finish" (AGENTS.md 3.7).
+            return if (EarlyBootProbeStore.readCallbackEntered() == null) {
+                "EARLY_JOB_SCHEDULED $armed"
+            } else {
+                "EARLY_JOB_CALLBACK_INCOMPLETE $armed\n" +
+                    "The callback ran and did not finish its record. " +
+                    "Probe consumed; re-arm before the next full reboot."
+            }
+        }
+        if (probeRecord == AutoRootPolicy.RECORD_UNREADABLE) {
+            return "EARLY_JOB_PROBE_UNKNOWN $armed (probe record unreadable)"
+        }
+        val probe = EarlyBootProbePolicy.parseProbe(probeRecord)
+            ?: return "EARLY_JOB_PROBE_MALFORMED $armed"
+        return "${probe.fireState} ${probe.lockedBootState} $armed\n" +
+            "Probe consumed. Re-arm before the next full reboot."
     }
 
     private fun cancelOwned(scheduler: JobScheduler, component: ComponentName) {
