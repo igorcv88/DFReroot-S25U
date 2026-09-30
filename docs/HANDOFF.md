@@ -120,9 +120,12 @@ Three further properties keep the evidence honest:
   established by that archive, never inferred from boot ids — a re-arm in the
   boot the previous callback fired in makes the stale record's `fired_boot_id`
   equal the new arm's `armed_boot_id`, so any boot-id heuristic reports a
-  freshly pending job as already consumed. The receiver likewise stops writing
-  the marker once this cycle has fired, instead of paying two `fsync`s on every
-  later boot for a spent experiment.
+  freshly pending job as already consumed. The receiver stops writing a marker
+  only when the record is already finalized, or when the callback/probe belongs
+  to an older fired boot that the current timestamp cannot finalize. A
+  breadcrumb-only callback or a `PENDING` probe in THIS boot still needs the
+  first `LOCKED_BOOT_COMPLETED` timestamp; suppressing it would make the desired
+  PRE_LOCKED result impossible to prove.
 - **An absent record is two different outcomes, so it is two files.** The
   worker writes `/data/system/dfreroot-early-job-callback` before the readiness
   sweep. Neither file means the scheduler never called back; that file alone
@@ -135,7 +138,9 @@ Three further properties keep the evidence honest:
   claim about a job that is no longer ours. Cancellation state lives in a
   per-run token, never in an instance field: the platform keeps one instance of
   the service across callbacks, so a `stopped` flag set once would still read
-  true on a later run that was never stopped. `stopped=` in the record is
+  true on a later run that was never stopped. The final `jobFinished` decision
+  is posted back to the main looper, where it is serialized with `onStopJob`;
+  there is no worker-side check-then-finish race. `stopped=` in the record is
   therefore **best-effort lifecycle evidence** — a stop arriving after the last
   boundary still races the write — and is never authority to promote or refuse
   an early-trigger result.
@@ -154,9 +159,12 @@ Three further properties keep the evidence honest:
 - **The callback is bound to the live scheduler, not only to our own file.**
   uid 1000 is shared, so `namespace_binding=PASS` requires
   `JobParameters.getJobNamespace()` to name `dfr-early-boot-probe`; the arm
-  record agreeing with itself is not evidence. A failed monotonic reading is
-  recorded as `UNKNOWN` and refused as a timestamp — a successful file write is
-  not timing evidence.
+  record agreeing with itself is not evidence. The durable probe parser also
+  checks cross-field invariants (fixed job id, same-boot relation, namespace
+  binding, readiness roll-up and monotonic timestamp order), and the callback
+  breadcrumb has its own strict parser. A failed monotonic reading is recorded
+  as `UNKNOWN` and refused as a timestamp — a successful file write is not
+  timing evidence.
 
 Until hardware answers, keep these exact states:
 
