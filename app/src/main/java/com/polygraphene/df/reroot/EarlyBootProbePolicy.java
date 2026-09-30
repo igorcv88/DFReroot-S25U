@@ -253,11 +253,11 @@ public final class EarlyBootProbePolicy {
 
         if (STATE_FIRED_SAME_BOOT.equals(fireState)) {
             if (!SAME_BOOT_TRUE.equals(sameBoot) || !armedBootId.equals(firedBootId)) return null;
-            if (!SIGNAL_PASS.equals(binding) || !namespace.equals(callbackNamespace)) return null;
+            if (!promotableNamespace(binding, namespace, callbackNamespace)) return null;
         } else if (STATE_FIRED_NEW_BOOT.equals(fireState)) {
             if (!SAME_BOOT_FALSE.equals(sameBoot) || UNKNOWN.equals(armedBootId)
                     || armedBootId.equals(firedBootId)) return null;
-            if (!SIGNAL_PASS.equals(binding) || !namespace.equals(callbackNamespace)) return null;
+            if (!promotableNamespace(binding, namespace, callbackNamespace)) return null;
         } else {
             if (!UNKNOWN.equals(sameBoot) || !UNKNOWN.equals(armedBootId)) return null;
         }
@@ -298,6 +298,24 @@ public final class EarlyBootProbePolicy {
      * cycle and the current boot's marker cannot finalize it. Malformed or
      * unreadable evidence never stands in for "spent".
      */
+    /**
+     * Whether a fired record's namespace fields can carry a promotion.
+     *
+     * Agreement between the two was not enough. There are exactly two
+     * namespaces this experiment can be armed in, so a record whose arm and
+     * callback fields agree on a THIRD one is self-consistent and still
+     * describes a job nobody here scheduled - and uid 1000 is shared, which is
+     * the whole reason namespace_binding exists. Requiring the value to be one
+     * of the two closes the gap that mutual agreement leaves open.
+     */
+    private static boolean promotableNamespace(String binding, String namespace,
+                                               String callbackNamespace) {
+        if (!SIGNAL_PASS.equals(binding)) return false;
+        if (namespace == null || !namespace.equals(callbackNamespace)) return false;
+        return EXPECTED_NAMESPACE.equals(namespace)
+                || DEFAULT_UID_NAMESPACE.equals(namespace);
+    }
+
     public static boolean needsLockedBootMarker(String probeRecord, String callbackRecord,
                                                 String currentBootId) {
         if (currentBootId == null || currentBootId.trim().isEmpty()) return false;
