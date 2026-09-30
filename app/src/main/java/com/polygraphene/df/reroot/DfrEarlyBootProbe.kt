@@ -88,14 +88,44 @@ object DfrEarlyBootProbe {
             "start the FULL reboot within ${REBOOT_WITHIN_MS / 1000}s"
     }
 
+    /**
+     * What the row says is the arm record AND the callback record together.
+     *
+     * The arm record outlives the callback - the job is one-shot, so it never
+     * fires again, but nothing erases the file that says it was scheduled.
+     * Reporting only that record leaves the row reading EARLY_JOB_SCHEDULED
+     * after the probe has already been spent, and an owner who trusts it spends
+     * a full reboot on an experiment that cannot run. So a consumed probe is
+     * reported as consumed, with the verdict it produced.
+     */
     fun armState(): String {
         val record = EarlyBootProbeStore.readArm()
             ?: return "EARLY_JOB_NOT_ARMED"
         if (record == AutoRootPolicy.RECORD_UNREADABLE) return "EARLY_JOB_ARM_UNKNOWN"
         val arm = EarlyBootProbePolicy.parseArm(record)
             ?: return "EARLY_JOB_ARM_MALFORMED"
-        return "EARLY_JOB_SCHEDULED job_id=${arm.jobId} namespace=${arm.namespace} " +
+        val armed = "job_id=${arm.jobId} namespace=${arm.namespace} " +
             "armed_boot_id=${arm.armedBootId}"
+        val probeRecord = EarlyBootProbeStore.readProbe()
+            ?: return "EARLY_JOB_SCHEDULED $armed"
+        if (probeRecord == AutoRootPolicy.RECORD_UNREADABLE) {
+            return "EARLY_JOB_SCHEDULED $armed (probe record unreadable)"
+        }
+        val probe = EarlyBootProbePolicy.parseProbe(probeRecord)
+            ?: return "EARLY_JOB_SCHEDULED $armed (probe record malformed)"
+        /*
+         * A callback record from an older arming cycle is not this arming's
+         * result. It belongs to this one only if it fired in the boot that
+         * armed it, or in the boot we are in now - a re-arm in a later boot
+         * leaves the previous cycle's FIRED_NEW_BOOT record on disk, and
+         * treating that as consumed would hide a probe that is genuinely armed.
+         */
+        val currentBootId = DfrRootCoordinator.readBootId()
+        val thisCycle = probe.firedBootId == arm.armedBootId ||
+            (currentBootId.isNotEmpty() && probe.firedBootId == currentBootId)
+        if (!thisCycle) return "EARLY_JOB_SCHEDULED $armed"
+        return "${probe.fireState} ${probe.lockedBootState} $armed\n" +
+            "Probe consumed. Re-arm before the next full reboot."
     }
 
     private fun cancelOwned(scheduler: JobScheduler, component: ComponentName) {

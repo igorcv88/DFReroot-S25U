@@ -80,10 +80,51 @@ state, and separate NetworkStack PID, AMS ProcessRecord, IApplicationThread and
 `scheduleReceiver/12` resolution. `StageHop.probeReadiness()` shares the lookup
 logic but never invokes `scheduleReceiver`.
 If the callback precedes the locked-boot marker it first records
-`EARLY_JOB_LOCKED_BOOT_PENDING`; `DfrBootReceiver` then compares both monotonic
-timestamps and atomically finalizes the record to
-`EARLY_JOB_PRE_LOCKED_BOOT`. A missing marker is therefore never promoted to
-PASS merely by absence.
+`EARLY_JOB_LOCKED_BOOT_PENDING`; the comparison of both monotonic timestamps
+then finalizes the record to `EARLY_JOB_PRE_LOCKED_BOOT`. A missing marker is
+therefore never promoted to PASS merely by absence.
+
+**The probe may not perturb what it measures.** This app declares
+`android:process="system"`, so the JobService callback and `DfrBootReceiver` are
+both delivered on system_server's main looper — the same looper whose ordering
+is the entire measurement. So:
+
+- `onStartJob` reads one monotonic timestamp (`callback_elapsed_ms`) and hands
+  everything else to a worker, returning `true`; `jobFinished(params, false)`
+  ends the one-shot. Reflection, `/proc` reads and two `fsync`s inline would
+  have delayed `LOCKED_BOOT_COMPLETED` by the very quantity being compared.
+- `DfrBootReceiver` dispatches `DfrAutoRootService` first and persists the
+  locked-boot marker afterwards, under `goAsync()`, on a worker — and only when
+  a valid arm record exists, so an unarmed boot pays nothing.
+- Three timestamps are recorded, not one: `callback_elapsed_ms` (the only
+  ordering authority), `readiness_elapsed_ms` and `marker_write_elapsed_ms`.
+  Their spread is the probe's own cost, which a reader needs in order to judge
+  the result.
+
+Three further properties keep the evidence honest:
+
+- **The first `LOCKED_BOOT_COMPLETED` of a boot is immutable.** A framework
+  restart re-delivers the broadcast under the same `boot_id`; letting the later
+  one win would move the comparison point forward and could read a late job as
+  `PRE_LOCKED`. `EarlyBootProbePolicy.mergeLockedBoot()` keeps the earliest.
+- **Both workers finalize.** The receiver finalizes after persisting the
+  marker, and the callback finalizes again after writing its record. Only a
+  record still reading `PENDING` is acted on, so the verdict follows the two
+  timestamps rather than whichever thread finished last, and neither side can
+  overwrite a verdict. `EarlyBootProbeStore` serialises the whole
+  read-modify-write.
+- **An absent record is two different outcomes, so it is two files.** The
+  worker writes `/data/system/dfreroot-early-job-callback` before the readiness
+  sweep. Neither file means the scheduler never called back; that file alone
+  means it called back and the run did not complete (killed, or the write
+  failed); both mean it completed. The record also carries `stopped=`, because
+  the scheduler pulling the job and a slow probe are different facts.
+- **The callback is bound to the live scheduler, not only to our own file.**
+  uid 1000 is shared, so `namespace_binding=PASS` requires
+  `JobParameters.getJobNamespace()` to name `dfr-early-boot-probe`; the arm
+  record agreeing with itself is not evidence. A failed monotonic reading is
+  recorded as `UNKNOWN` and refused as a timestamp — a successful file write is
+  not timing evidence.
 
 Until hardware answers, keep these exact states:
 
@@ -111,6 +152,7 @@ this release.
    `dfr-early-boot-probe`, `schedule_result=1`, `persisted=1`, then confirm it is
    pending in `dumpsys jobscheduler`. Start one **FULL reboot within 10 seconds**.
 3. After boot, retrieve `/data/system/dfreroot-early-job-probe`,
+   `/data/system/dfreroot-early-job-callback`,
    `/data/system/dfreroot-locked-boot-marker`, `[DFR][EARLY_JOB]` logcat,
    `dumpsys jobscheduler`, boot id, and bootanim/SystemUI/locked-boot timing.
    Promote DFR timing only for `EARLY_JOB_FIRED_NEW_BOOT` plus finalized

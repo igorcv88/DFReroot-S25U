@@ -1411,22 +1411,115 @@ def audit():
                      "existing.service != component"):
         if required not in code_only(early_arm_src):
                 fail("early-job arming lost identity/persistence guard %r" % required)
-    for required in ("it.jobId == params.jobId", "it.jobId == DfrEarlyBootProbe.JOB_ID",
-                     "it.namespace == expectedNamespace"):
+    for required in ("it.jobId == jobId", "it.jobId == DfrEarlyBootProbe.JOB_ID",
+                     "it.namespace == expectedNamespace",
+                     'namespaceBinding == "PASS"'):
         if required not in code_only(early_job_src):
             fail("early-job callback accepts an unbound arm record: missing %r"
                  % required)
     if "EARLY_JOB_LOCKED_BOOT_PENDING" not in dfr_source("EarlyBootProbePolicy.java") \
-            or "EarlyBootProbeStore.finalizeLockedBoot(bootId, arrivalMs)" \
+            or "EarlyBootProbeStore.finalizeFromStoredLockedBoot(bootId)" \
                 not in boot_receiver_src:
         fail("an absent locked-boot marker can be promoted without a later "
              "monotonic timestamp comparison")
+
+    # --- the probe must not perturb what it measures ------------------------
+    # This app runs with android:process="system", so the JobService callback and
+    # DfrBootReceiver are both delivered on system_server's main looper. Heavy
+    # work in either one delays the other, and the one thing this experiment
+    # measures is which of the two happened first. An inline probe would
+    # manufacture its own early callback. None of this compiles here, so the
+    # shape is asserted statically or not at all.
+    early_job_code = code_only(early_job_src)
+    store_code = code_only(dfr_source("EarlyBootProbeStore.kt"))
+
+    def order(code, *needles):
+        """Index of each needle, or None when one is absent."""
+        found = [code.find(n) for n in needles]
+        return None if -1 in found else found
+
+    for required in ("val callbackElapsedMs = monotonicNow()",
+                     "worker.execute(task)", "return true", "jobFinished(params, false)"):
+        if required not in early_job_code:
+            fail("the early-job callback no longer offloads its work: missing %r"
+                 % required)
+    positions = order(early_job_code,
+                      "val callbackElapsedMs = monotonicNow()",
+                      "val task = Runnable {",
+                      "EarlyBootProbeStore.writeCallbackEntered",
+                      "StageHop.probeReadiness",
+                      "EarlyBootProbeStore.writeProbe")
+    if positions is None or positions != sorted(positions):
+        fail("the early-job callback reads its clock, or does readiness/marker "
+             "work, outside the worker - it would delay the LOCKED_BOOT "
+             "broadcast it is timing itself against")
+    # The breadcrumb must precede the slow readiness sweep, or it cannot
+    # separate "never fired" from "fired and died before the record".
+    if "EARLY_JOB_CALLBACK_ENTERED" not in early_job_code:
+        fail("the early-job callback writes no entry breadcrumb; an absent "
+             "probe record would collapse two different outcomes")
+    if 'appendLine("stopped=' not in early_job_code \
+            or "override fun onStopJob" not in early_job_code:
+        fail("the early-job record cannot distinguish a stopped job from a "
+             "slow one")
+    start_job = early_job_code.find("override fun onStartJob")
+    start_body = early_job_code[start_job:early_job_code.find("override fun onStopJob")]
+    for banned in ("StageHop.", "EarlyBootProbeStore.", "readBootId()", "readFile("):
+        if banned in start_body.split("val task = Runnable {")[0]:
+            fail("onStartJob does blocking work (%r) before handing off to the "
+                 "worker" % banned)
+
+    # The same rule for the receiver: Auto Root is dispatched first, and the
+    # marker - two fsyncs and a read-modify-write - happens afterwards, on a
+    # worker, and only while the experiment is armed.
+    for required in ("goAsync()", "persistLockedBootEvidence(action, arrivalMs)",
+                     "EarlyBootProbeStore.readArm()", "worker.execute(task)"):
+        if required not in receiver_code:
+            fail("DfrBootReceiver no longer keeps the early-job marker off the "
+                 "Auto Root critical path: missing %r" % required)
+    receiver_order = order(receiver_code,
+                           "DfrAutoRootService::class.java",
+                           "persistLockedBootEvidence(action, arrivalMs)")
+    if receiver_order is None or receiver_order != sorted(receiver_order):
+        fail("DfrBootReceiver persists early-job telemetry before dispatching "
+             "Auto Root; the instrumentation would delay the flow it measures")
+    on_receive = receiver_code.find("override fun onReceive")
+    on_receive_body = receiver_code[
+        on_receive:receiver_code.find("private fun persistLockedBootEvidence")]
+    if "EarlyBootProbeStore.recordLockedBoot" in on_receive_body:
+        fail("DfrBootReceiver writes the locked-boot marker synchronously in "
+             "onReceive")
+
+    # --- evidence convergence and clock honesty -----------------------------
+    # Both workers finalize, so the verdict follows the timestamps rather than
+    # whichever thread happened to finish last.
+    if "EarlyBootProbeStore.finalizeFromStoredLockedBoot(firedBootId)" \
+            not in early_job_code:
+        fail("the early-job callback does not re-check the locked-boot marker "
+             "after writing its record; a record written in the race window "
+             "would stay PENDING for the whole boot")
+    if "synchronized(lock)" not in store_code:
+        fail("EarlyBootProbeStore no longer serialises its read-modify-write "
+             "sequences; two workers in process \"system\" now share it")
+    if "EarlyBootProbePolicy.mergeLockedBoot" not in store_code:
+        fail("the locked-boot marker is written without the first-timestamp "
+             "merge rule; a framework restart could move the comparison point")
+    if 'if (elapsedMs < 0) return "monotonic_clock_unavailable"' not in store_code:
+        fail("a failed monotonic reading can still be stored as a locked-boot "
+             "timestamp; a successful write is not timing evidence")
+    if "params.jobNamespace" not in early_job_code \
+            or "namespace_binding=$namespaceBinding" not in early_job_code:
+        fail("the early-job record is not bound to the namespace JobScheduler "
+             "actually called back in; uid 1000 is shared")
     if ".invoke(" in code_only(stage_hop_src)[
                 code_only(stage_hop_src).find("fun probeReadiness"):
                 code_only(stage_hop_src).find("fun hopToNetworkStack")]:
         fail("the early-job readiness probe invokes scheduleReceiver instead of "
              "only resolving it")
-    if "return false" not in code_only(early_job_src) \
+    # One-shot: jobFinished(..., false) is the no-reschedule contract, and the
+    # service must never build a JobInfo of its own.
+    if "jobFinished(params, false)" not in early_job_code \
+            or "JobInfo" in early_job_code \
             or "scheduler.schedule(job)" not in code_only(early_arm_src):
         fail("the early-job probe is no longer explicit, one-shot owner arming")
 
