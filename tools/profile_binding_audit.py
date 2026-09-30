@@ -1462,6 +1462,50 @@ def audit():
             or "override fun onStopJob" not in early_job_code:
         fail("the early-job record cannot distinguish a stopped job from a "
              "slow one")
+
+    # --- JobScheduler lifecycle --------------------------------------------
+    # After onStopJob the platform has ended that execution, so reporting
+    # completion afterwards is a claim about a job that is no longer ours. And
+    # the platform keeps ONE instance of the service across callbacks, so
+    # per-run state must not live in an instance field: a `stopped` flag set
+    # once would still read true on a later run that was never stopped.
+    if "if (!token.stopped.get()) {" not in early_job_code \
+            or "jobFinished(params, false)" not in early_job_code:
+        fail("the early-job callback calls jobFinished unconditionally; after "
+             "onStopJob that execution is already over")
+    if "private class RunToken" not in early_job_code \
+            or "AtomicBoolean(false)" not in early_job_code:
+        fail("the early-job callback holds cancellation state per service "
+             "instance instead of per run; it would leak into the next job")
+    if re.search(r"^\s*private var stopped\b", early_job_code, flags=re.M):
+        fail("a service-instance `stopped` field is back; it never resets "
+             "between executions")
+    if early_job_code.count("abandonIfStopped(") < 4:
+        fail("the early-job worker does not check for cancellation at its "
+             "boundaries; a stopped run would still pay for the readiness "
+             "sweep it was told to abandon")
+
+    # --- no fallback may reproduce the defect the path exists to remove -----
+    if "task.run()" in receiver_code:
+        fail("DfrBootReceiver runs the early-job marker inline when the worker "
+             "is unavailable; the failure path would put two fsyncs back on "
+             "system_server's main looper")
+    if "reason=worker_unavailable" not in receiver_code:
+        fail("a rejected early-job worker no longer records that the marker "
+             "was refused rather than written")
+
+    # --- a transient finalize failure gets one late, uninvolved retry -------
+    if "private fun retryPendingFinalize()" not in receiver_code \
+            or "EarlyBootProbePolicy.LOCKED_PENDING" not in receiver_code:
+        fail("nothing retries a PENDING probe record after a transient "
+             "finalize failure; the verdict would sit unmade in two files")
+    if "recordLockedBoot(arrivalMs) else retryPendingFinalize()" \
+            not in receiver_code:
+        fail("the BOOT_COMPLETED retry writes a timestamp or a marker; it may "
+             "only complete an ordering the stored timestamps already imply")
+    if "optin_start_ms=" not in receiver_code:
+        fail("the receiver's dispatch cost is no longer measured; whether "
+             "optInVerdict() delays Auto Root would stay a guess")
     start_job = early_job_code.find("override fun onStartJob")
     start_body = early_job_code[start_job:early_job_code.find("override fun onStopJob")]
     for banned in ("StageHop.", "EarlyBootProbeStore.", "readBootId()", "readFile("):

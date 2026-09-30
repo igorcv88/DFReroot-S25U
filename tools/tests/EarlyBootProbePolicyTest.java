@@ -162,6 +162,49 @@ public class EarlyBootProbePolicyTest {
                         probe, EarlyBootProbePolicy.PRE_LOCKED)) != null,
                 "a finalized record still parses strictly");
 
+        // --- every field that could promote a gate is validated --------------
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("networkstack_state=NETWORKSTACK_READY",
+                                "networkstack_state=READY")) == null,
+                "an unrecognised networkstack_state refuses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("namespace_binding=PASS",
+                                "namespace_binding=UNKNOWN")) == null,
+                "namespace_binding has no third value; UNKNOWN refuses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("same_boot=0", "same_boot=maybe")) == null,
+                "an unrecognised same_boot refuses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("stopped=0", "stopped=UNKNOWN")) == null,
+                "stopped is a boolean; anything else refuses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("networkstack_proc=PASS",
+                                "networkstack_proc=READY")) == null,
+                "a readiness signal outside PASS/FAIL/UNKNOWN refuses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("schedule_receiver_12=PASS",
+                                "schedule_receiver_12=")) == null,
+                "an empty readiness signal refuses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("job_id=1145459269", "job_id=DFRE")) == null,
+                "a non-numeric job_id refuses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("readiness_elapsed_ms=520",
+                                "readiness_elapsed_ms=later")) == null,
+                "a malformed readiness timestamp refuses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("marker_write_elapsed_ms=530",
+                                "marker_write_elapsed_ms=-7")) == null,
+                "a negative monotonic reading is not a timestamp and refuses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("callback_wallclock_ms=1700000000000",
+                                "callback_wallclock_ms=UNKNOWN")) != null,
+                "an explicitly UNKNOWN clock field still parses");
+        expect(EarlyBootProbePolicy.parseProbe(
+                        probe.replace("networkstack_proc=PASS",
+                                "networkstack_proc=UNKNOWN")) != null,
+                "an UNKNOWN readiness signal parses; absence is not a refusal");
+
         // --- the first locked timestamp of a boot is immutable ---------------
         String first = EarlyBootProbePolicy.formatLockedBoot("boot-b", 19300);
         expect(EarlyBootProbePolicy.mergeLockedBoot(null, "boot-b", 19300) != null,

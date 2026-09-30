@@ -48,6 +48,35 @@ public final class EarlyBootProbePolicy {
     private static final Set<String> LOCKED_STATES = Set.of(
             PRE_LOCKED, POST_LOCKED, LOCKED_PENDING, LOCKED_UNKNOWN);
 
+    /*
+     * The remaining fields are validated too, and not for tidiness. PRE/POST
+     * needs only four of them, but DFR_JOB_STAGEHOP_READY would be promoted
+     * from exactly the ones below - the four readiness signals and the state
+     * they roll up into. A field that decides a gate later must be refused
+     * now when it holds something nobody wrote, or the strictness stops
+     * exactly where the next verdict starts.
+     */
+    private static final Set<String> READINESS_STATES = Set.of(
+            "NETWORKSTACK_READY", "NETWORKSTACK_PARTIAL", "NETWORKSTACK_NOT_READY");
+
+    private static final Set<String> SIGNALS = Set.of("PASS", "FAIL", UNKNOWN);
+
+    private static final Set<String> BINDINGS = Set.of("PASS", "FAIL");
+
+    private static final Set<String> SAME_BOOT = Set.of("0", "1", UNKNOWN);
+
+    private static final Set<String> BOOLEANS = Set.of("0", "1");
+
+    /** Fields that are a monotonic reading or an explicit UNKNOWN, never junk. */
+    private static final Set<String> OPTIONAL_TIMES = Set.of(
+            "callback_elapsed_ms", "readiness_elapsed_ms", "marker_write_elapsed_ms",
+            "callback_wallclock_ms");
+
+    /** Fields carrying one of the four readiness signals. */
+    private static final Set<String> SIGNAL_FIELDS = Set.of(
+            "networkstack_proc", "ams_process_record", "application_thread",
+            "schedule_receiver_12");
+
     private EarlyBootProbePolicy() {}
 
     public static final class Arm {
@@ -133,8 +162,25 @@ public final class EarlyBootProbePolicy {
         if (!LOCKED_STATES.contains(lockedState)) return null;
         String firedBootId = values.get("fired_boot_id");
         if (firedBootId.trim().isEmpty()) return null;
+        if (!READINESS_STATES.contains(values.get("networkstack_state"))) return null;
+        if (!BINDINGS.contains(values.get("namespace_binding"))) return null;
+        if (!SAME_BOOT.contains(values.get("same_boot"))) return null;
+        if (!BOOLEANS.contains(values.get("stopped"))) return null;
+        for (String field : SIGNAL_FIELDS) {
+            if (!SIGNALS.contains(values.get(field))) return null;
+        }
+        try {
+            Integer.parseInt(values.get("job_id"));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        for (String field : OPTIONAL_TIMES) {
+            long value = parseOptionalLong(values.get(field));
+            // MIN_VALUE is garbage; any other negative is a number that is not
+            // a monotonic reading, and UNKNOWN is the only way to say "absent".
+            if (value == Long.MIN_VALUE || value < -1L) return null;
+        }
         long callbackElapsed = parseOptionalLong(values.get("callback_elapsed_ms"));
-        if (callbackElapsed == Long.MIN_VALUE) return null;
         return new Probe(firedBootId, fireState, lockedState, callbackElapsed);
     }
 

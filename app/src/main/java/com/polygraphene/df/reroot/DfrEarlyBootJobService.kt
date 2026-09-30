@@ -10,6 +10,7 @@ import android.system.Os
 import android.util.Log
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Observation only. This service writes one marker and finishes; it has no root,
@@ -26,6 +27,23 @@ import java.util.concurrent.Executors
  * question with its own side effect.
  */
 class DfrEarlyBootJobService : JobService() {
+    /**
+     * One execution of the callback.
+     *
+     * The platform keeps a SINGLE instance of a JobService class alive across
+     * callbacks, so anything about "the current run" held in an instance field
+     * leaks into the next one: a `stopped` flag set once would still read true
+     * on a later execution that was never stopped, and the record would say so.
+     * The run owns its own cancellation state, and the instance owns only a
+     * pointer to whichever run is current.
+     */
+    private class RunToken(val jobId: Int) {
+        val stopped = AtomicBoolean(false)
+    }
+
+    @Volatile
+    private var activeRun: RunToken? = null
+
     override fun onStartJob(params: JobParameters): Boolean {
         // First statement in the callback. Everything below is measured against
         // this, so nothing that can block may come before it.
@@ -33,18 +51,29 @@ class DfrEarlyBootJobService : JobService() {
         val callbackWallclockMs = wallclockNow()
         val jobId = params.jobId
         val callbackNamespace = callbackNamespace(params)
+        val token = RunToken(jobId)
+        activeRun = token
         val task = Runnable {
             try {
-                runProbe(jobId, callbackNamespace, callbackElapsedMs, callbackWallclockMs)
+                runProbe(token, callbackNamespace, callbackElapsedMs, callbackWallclockMs)
             } catch (t: Throwable) {
                 Log.e(TAG, "[DFR][EARLY_JOB] probe worker failed", t)
             } finally {
-                // false: a one-shot marker, never rescheduled.
-                try {
-                    jobFinished(params, false)
-                } catch (t: Throwable) {
-                    Log.e(TAG, "[DFR][EARLY_JOB] jobFinished failed", t)
+                /*
+                 * Only a run the scheduler has NOT already stopped may call
+                 * jobFinished. After onStopJob the platform has ended that
+                 * execution itself; reporting completion afterwards is a claim
+                 * about a job that is no longer ours to finish.
+                 */
+                if (!token.stopped.get()) {
+                    try {
+                        // false: a one-shot marker, never rescheduled.
+                        jobFinished(params, false)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "[DFR][EARLY_JOB] jobFinished failed", t)
+                    }
                 }
+                if (activeRun === token) activeRun = null
             }
         }
         try {
@@ -54,6 +83,7 @@ class DfrEarlyBootJobService : JobService() {
             // forever. A probe is only a probe if its worst outcome is a
             // refusal, so say so and let the scheduler finish it.
             Log.e(TAG, "[DFR][EARLY_JOB] worker unavailable, probe not run: $t")
+            if (activeRun === token) activeRun = null
             return false
         }
         // true: work continues on the worker; jobFinished ends it.
@@ -61,21 +91,28 @@ class DfrEarlyBootJobService : JobService() {
     }
 
     /**
-     * The scheduler pulling the job is a different fact from a slow probe, and
-     * the record must be able to say which happened. false: never rescheduled.
+     * The scheduler has taken this execution back. Stop as early as the next
+     * boundary allows and do not report completion: the platform ended this
+     * lifecycle, so jobFinished afterwards would be a claim about a job that
+     * is no longer running. false: never rescheduled.
      */
     override fun onStopJob(params: JobParameters): Boolean {
-        stopped = true
-        Log.i(TAG, "[DFR][EARLY_JOB] onStopJob; the worker finishes its record anyway")
+        val token = activeRun
+        if (token != null && token.jobId == params.jobId) {
+            token.stopped.set(true)
+        }
+        Log.i(TAG, "[DFR][EARLY_JOB] onStopJob job_id=${params.jobId}; " +
+            "the worker stops at its next boundary and will not call jobFinished")
         return false
     }
 
     private fun runProbe(
-        jobId: Int,
+        token: RunToken,
         callbackNamespace: String,
         callbackElapsedMs: Long,
         callbackWallclockMs: Long,
     ) {
+        val jobId = token.jobId
         val firedBootId = readBootId()
         /*
          * Breadcrumb first, before the readiness sweep that dominates this
@@ -95,6 +132,8 @@ class DfrEarlyBootJobService : JobService() {
         if (breadcrumb != null) {
             Log.e(TAG, "[DFR][EARLY_JOB] CALLBACK_BREADCRUMB=FAIL $breadcrumb")
         }
+        // Boundary 1: before reading any record.
+        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, "before_arm_read")) return
         val armRecord = EarlyBootProbeStore.readArm()
         val parsedArm = if (armRecord == null || armRecord == AutoRootPolicy.RECORD_UNREADABLE) {
             null
@@ -118,8 +157,13 @@ class DfrEarlyBootJobService : JobService() {
                 it.namespace == expectedNamespace && namespaceBinding == "PASS"
         }
         val fireState = EarlyBootProbePolicy.fireState(arm, firedBootId)
+        // Boundary 2: before the readiness sweep, which is the expensive part
+        // and the whole reason a stopped run must not simply run to completion.
+        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, "before_readiness")) return
         val readiness = StageHop.probeReadiness(applicationContext)
         val readinessElapsedMs = monotonicNow()
+        // Boundary 3: after the sweep, before anything is committed.
+        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, "after_readiness")) return
         /*
          * The locked marker is read as LATE as possible - after the readiness
          * sweep, not before it. The receiver's worker may persist it at any
@@ -138,6 +182,10 @@ class DfrEarlyBootJobService : JobService() {
             EarlyBootProbePolicy.STATE_FIRED_NEW_BOOT -> "0"
             else -> "UNKNOWN"
         }
+        // Boundary 4: the last chance before the record is committed. A stop
+        // that arrives after this point still races the write, which is why
+        // `stopped=` in the record is best-effort evidence and never authority.
+        if (abandonIfStopped(token, firedBootId, callbackElapsedMs, "before_marker")) return
         val markerWriteElapsedMs = monotonicNow()
         val record = buildString {
             appendLine("state=${EarlyBootProbePolicy.STATE_FIRED}")
@@ -165,7 +213,7 @@ class DfrEarlyBootJobService : JobService() {
             appendLine("readiness_elapsed_ms=${knownLong(readinessElapsedMs)}")
             appendLine("marker_write_elapsed_ms=${knownLong(markerWriteElapsedMs)}")
             appendLine("callback_wallclock_ms=${knownLong(callbackWallclockMs)}")
-            appendLine("stopped=${if (stopped) "1" else "0"}")
+            appendLine("stopped=${if (token.stopped.get()) "1" else "0"}")
             appendLine("pid=${Process.myPid()}")
             appendLine("ppid=${safeInt { Os.getppid() }}")
             appendLine("uid=${Process.myUid()}")
@@ -283,9 +331,36 @@ class DfrEarlyBootJobService : JobService() {
     private fun value(raw: String?): String =
         raw?.replace('\n', ' ')?.replace('\r', ' ')?.takeIf { it.isNotEmpty() } ?: "UNKNOWN"
 
-    /** Set by onStopJob on the main thread, read by the worker. */
-    @Volatile
-    private var stopped = false
+    /**
+     * Give up this execution, recording WHY in the breadcrumb rather than in a
+     * probe record that would claim a completed observation.
+     *
+     * The breadcrumb already separates "never called back" from "called back
+     * and did not finish". This only adds which of those two the run was, and
+     * it is best-effort: a write failure here loses the reason, never the
+     * distinction.
+     */
+    private fun abandonIfStopped(
+        token: RunToken,
+        firedBootId: String,
+        callbackElapsedMs: Long,
+        boundary: String,
+    ): Boolean {
+        if (!token.stopped.get()) return false
+        Log.i(TAG, "[DFR][EARLY_JOB] CALLBACK_ABANDONED boundary=$boundary " +
+            "job_id=${token.jobId} boot_id=${value(firedBootId)}")
+        val failure = EarlyBootProbeStore.writeCallbackEntered(
+            "state=EARLY_JOB_CALLBACK_STOPPED\n" +
+                "fired_boot_id=${value(firedBootId)}\n" +
+                "job_id=${token.jobId}\n" +
+                "stopped_at=$boundary\n" +
+                "callback_elapsed_ms=${knownLong(callbackElapsedMs)}\n"
+        )
+        if (failure != null) {
+            Log.e(TAG, "[DFR][EARLY_JOB] CALLBACK_STOP_BREADCRUMB=FAIL $failure")
+        }
+        return true
+    }
 
     companion object {
         const val TAG = "DFReroot"
