@@ -113,6 +113,16 @@ Three further properties keep the evidence honest:
   timestamps rather than whichever thread finished last, and neither side can
   overwrite a verdict. `EarlyBootProbeStore` serialises the whole
   read-modify-write.
+- **One arming cycle at a time.** The one-shot job leaves its arm record on
+  disk after firing, so "the arm record parses" is not "a probe is waiting".
+  `arm()` archives the previous cycle's records to `<path>.prev` before writing
+  the new arm record, and refuses if it cannot. Cycle identity is therefore
+  established by that archive, never inferred from boot ids — a re-arm in the
+  boot the previous callback fired in makes the stale record's `fired_boot_id`
+  equal the new arm's `armed_boot_id`, so any boot-id heuristic reports a
+  freshly pending job as already consumed. The receiver likewise stops writing
+  the marker once this cycle has fired, instead of paying two `fsync`s on every
+  later boot for a spent experiment.
 - **An absent record is two different outcomes, so it is two files.** The
   worker writes `/data/system/dfreroot-early-job-callback` before the readiness
   sweep. Neither file means the scheduler never called back; that file alone

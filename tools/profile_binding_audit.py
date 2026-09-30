@@ -1507,6 +1507,30 @@ def audit():
     if 'if (elapsedMs < 0) return "monotonic_clock_unavailable"' not in store_code:
         fail("a failed monotonic reading can still be stored as a locked-boot "
              "timestamp; a successful write is not timing evidence")
+    # --- one arming cycle at a time ----------------------------------------
+    # The one-shot job leaves its arm record on disk after firing, so "the arm
+    # record parses" is not "a probe is waiting". Cycle identity comes from
+    # arm() archiving the previous cycle's records, never from comparing boot
+    # ids: a re-arm in the boot the previous callback fired in makes the stale
+    # record's fired_boot_id equal the new arm's armed_boot_id, and any
+    # heuristic then reports a freshly pending job as consumed.
+    arm_code = code_only(early_arm_src)
+    if "EarlyBootProbeStore.archivePreviousCycle()" not in arm_code:
+        fail("arming does not archive the previous probe cycle; a stale "
+             "callback record would be read as this cycle's result")
+    archive_order = order(arm_code, "EarlyBootProbeStore.archivePreviousCycle()",
+                          "EarlyBootProbeStore.writeArm(record)")
+    if archive_order is None or archive_order != sorted(archive_order):
+        fail("arming writes the new arm record before archiving the previous "
+             "cycle; the two must never be live together")
+    if "probe.firedBootId == arm.armedBootId" in arm_code \
+            or "thisCycle" in arm_code:
+        fail("the arm-state row infers the probe cycle from boot ids again; "
+             "that cannot distinguish a same-boot re-arm from a stale result")
+    if "LOCKED_BOOT_MARKER=SKIP probe already consumed" not in receiver_code:
+        fail("DfrBootReceiver keeps writing the locked-boot marker after the "
+             "probe has fired; a spent experiment would cost two fsyncs on "
+             "every later boot, forever")
     if "params.jobNamespace" not in early_job_code \
             or "namespace_binding=$namespaceBinding" not in early_job_code:
         fail("the early-job record is not bound to the namespace JobScheduler "

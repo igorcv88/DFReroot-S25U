@@ -132,6 +132,32 @@ class DfrBootReceiver : BroadcastReceiver() {
             Log.i(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=SKIP no valid arm record")
             return
         }
+        /*
+         * Armed is not the same as unspent. The one-shot job leaves its arm
+         * record on disk after it fires, so a parse alone keeps this path live
+         * on every later boot forever - two fsyncs per boot for an experiment
+         * that is over. arm() archives the previous cycle, so a probe record
+         * present means THIS cycle already fired and nothing is waiting for a
+         * marker. Unreadable is not consumed: the experiment may still be live,
+         * and the marker is the cheaper thing to lose.
+         */
+        val probeRecord = EarlyBootProbeStore.readProbe()
+        if (probeRecord != null && probeRecord != AutoRootPolicy.RECORD_UNREADABLE) {
+            Log.i(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=SKIP probe already consumed")
+            return
+        }
+        // The breadcrumb alone also means this cycle fired - the callback ran
+        // and did not finish. A marker written now has nothing left to be
+        // compared against.
+        if (probeRecord == null && EarlyBootProbeStore.readCallbackEntered() != null) {
+            Log.i(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=SKIP callback already " +
+                "entered for this cycle")
+            return
+        }
+        if (probeRecord == AutoRootPolicy.RECORD_UNREADABLE) {
+            Log.i(TAG, "[DFR][EARLY_JOB] probe record unreadable; recording the " +
+                "marker anyway rather than assuming the cycle is spent")
+        }
         val bootId = DfrRootCoordinator.readBootId()
         if (bootId.isEmpty()) {
             Log.e(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=FAIL boot_id unavailable")

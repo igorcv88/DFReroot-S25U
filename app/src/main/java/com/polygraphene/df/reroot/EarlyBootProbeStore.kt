@@ -43,12 +43,65 @@ object EarlyBootProbeStore {
     fun readArm(): String? = synchronized(lock) { read(ARM_PATH) }
     fun readLockedBoot(): String? = synchronized(lock) { read(LOCKED_BOOT_PATH) }
     fun readProbe(): String? = synchronized(lock) { read(PROBE_PATH) }
+    fun readCallbackEntered(): String? = synchronized(lock) { read(CALLBACK_PATH) }
 
     fun writeArm(record: String): String? = synchronized(lock) { atomicWrite(ARM_PATH, record) }
     fun writeProbe(record: String): String? = synchronized(lock) { atomicWrite(PROBE_PATH, record) }
 
     fun writeCallbackEntered(record: String): String? =
         synchronized(lock) { atomicWrite(CALLBACK_PATH, record) }
+
+    /**
+     * Move the previous cycle's callback records aside, so that "a probe record
+     * exists" means, without qualification, "this arming cycle already fired".
+     *
+     * Without this the two records have no cycle identity, and every reader has
+     * to guess one from boot ids - which cannot be done. A callback in boot B
+     * followed by a re-arm in boot B produces a stale record whose fired_boot_id
+     * equals the new arm's armed_boot_id, so any boot-id heuristic reports a
+     * freshly pending job as already consumed, and keeps reporting it after the
+     * reboot even if the new callback never runs. An absent result displayed as
+     * a result is the one thing this experiment cannot afford.
+     *
+     * The records are renamed, never deleted: the previous cycle's evidence
+     * stays readable at <path>.prev. A rename that fails is a refusal, because
+     * arming on top of an unarchived record recreates the ambiguity.
+     */
+    fun archivePreviousCycle(): String? = synchronized(lock) { archiveLocked() }
+
+    private fun archiveLocked(): String? {
+        for (path in listOf(PROBE_PATH, CALLBACK_PATH)) {
+            val file = File(path)
+            val exists = try {
+                file.exists()
+            } catch (t: Throwable) {
+                return "cannot stat $path: $t"
+            }
+            if (!exists) continue
+            try {
+                Os.rename(path, "$path.prev")
+            } catch (t: Throwable) {
+                return "cannot archive $path: $t"
+            }
+        }
+        val dirFd = try {
+            Os.open(File(PROBE_PATH).parentFile?.absolutePath ?: "/data/system",
+                OsConstants.O_RDONLY, 0)
+        } catch (t: Throwable) {
+            return "cannot open state directory: $t"
+        }
+        try {
+            Os.fsync(dirFd)
+        } catch (t: Throwable) {
+            return "cannot fsync state directory: $t"
+        } finally {
+            try {
+                Os.close(dirFd)
+            } catch (_: Throwable) {
+            }
+        }
+        return null
+    }
 
     /**
      * Persist the FIRST valid LOCKED_BOOT_COMPLETED timestamp of this boot.
