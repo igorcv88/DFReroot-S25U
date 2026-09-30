@@ -1469,10 +1469,17 @@ def audit():
     # the platform keeps ONE instance of the service across callbacks, so
     # per-run state must not live in an instance field: a `stopped` flag set
     # once would still read true on a later run that was never stopped.
-    if "if (!token.stopped.get()) {" not in early_job_code \
-            or "jobFinished(params, false)" not in early_job_code:
-        fail("the early-job callback calls jobFinished unconditionally; after "
-             "onStopJob that execution is already over")
+    if "completeOnMain(params, token)" not in early_job_code \
+            or "completionHandler.post" not in early_job_code \
+            or early_job_code.count("jobFinished(params, false)") != 1:
+        fail("early-job completion is no longer serialized with onStopJob on "
+             "the main looper; a worker-side check-then-finish reopens the race")
+    task_start = early_job_code.find("val task = Runnable {")
+    task_end = early_job_code.find("try {\n            worker.execute(task)", task_start)
+    if task_start < 0 or task_end < 0 \
+            or "jobFinished(params, false)" in early_job_code[task_start:task_end]:
+        fail("the early-job worker calls jobFinished directly instead of posting "
+             "the lifecycle decision to the main looper")
     if "private class RunToken" not in early_job_code \
             or "AtomicBoolean(false)" not in early_job_code:
         fail("the early-job callback holds cancellation state per service "
@@ -1575,10 +1582,36 @@ def audit():
             or "thisCycle" in arm_code:
         fail("the arm-state row infers the probe cycle from boot ids again; "
              "that cannot distinguish a same-boot re-arm from a stale result")
-    if "LOCKED_BOOT_MARKER=SKIP probe already consumed" not in receiver_code:
-        fail("DfrBootReceiver keeps writing the locked-boot marker after the "
-             "probe has fired; a spent experiment would cost two fsyncs on "
-             "every later boot, forever")
+    if "EarlyBootProbePolicy.needsLockedBootMarker(" not in receiver_code \
+            or "probeRecord, callbackRecord, bootId" not in receiver_code \
+            or "LOCKED_BOOT_MARKER=SKIP cycle already resolved/spent" not in receiver_code:
+        fail("DfrBootReceiver no longer distinguishes same-boot PENDING evidence "
+             "from a resolved/older cycle; PRE_LOCKED would be unprovable or a "
+             "spent probe would cost markers forever")
+    if "LOCKED_BOOT_MARKER=SKIP callback already entered" in receiver_code:
+        fail("a callback breadcrumb suppresses the same-boot LOCKED_BOOT marker "
+             "again; breadcrumb-only is incomplete evidence and needs that timestamp")
+    # Shared evidence vocabulary: StageHop and the JobService must use the
+    # policy's constants/roll-up rather than maintaining a second spelling that
+    # can drift away from the parser.
+    stage_hop_code = code_only(stage_hop_src)
+    if "EarlyBootProbePolicy.readinessState(" not in stage_hop_code:
+        fail("StageHop duplicates the readiness roll-up instead of using the "
+             "policy that validates its durable record")
+    for literal in ("NETWORKSTACK_READY", "NETWORKSTACK_PARTIAL",
+                    "NETWORKSTACK_NOT_READY"):
+        if ('"' + literal + '"') in stage_hop_code:
+            fail("StageHop hard-codes readiness state %s instead of sharing the "
+                 "policy constant" % literal)
+    for literal in ("EARLY_JOB_CALLBACK_ENTERED", "EARLY_JOB_CALLBACK_STOPPED",
+                    "before_arm_read", "before_readiness",
+                    "after_readiness", "before_marker"):
+        if ('"' + literal + '"') in early_job_code:
+            fail("DfrEarlyBootJobService duplicates evidence token %s instead of "
+                 "sharing EarlyBootProbePolicy" % literal)
+    if "EarlyBootProbePolicy.parseCallback(callbackRecord)" not in arm_code:
+        fail("the UI treats breadcrumb existence as evidence without strict parsing")
+
     if "params.jobNamespace" not in early_job_code \
             or "namespace_binding=$namespaceBinding" not in early_job_code:
         fail("the early-job record is not bound to the namespace JobScheduler "
