@@ -212,8 +212,10 @@ public class EarlyBootProbePolicyTest {
                 "an explicitly UNKNOWN clock field still parses");
         expect(EarlyBootProbePolicy.parseProbe(
                         probe.replace("networkstack_proc=PASS",
-                                "networkstack_proc=UNKNOWN")) != null,
-                "an UNKNOWN readiness signal parses; absence is not a refusal");
+                                "networkstack_proc=UNKNOWN")
+                                .replace("networkstack_state=NETWORKSTACK_READY",
+                                        "networkstack_state=NETWORKSTACK_PARTIAL")) != null,
+                "an UNKNOWN readiness signal parses when the roll-up matches");
 
         // --- cross-field evidence invariants -------------------------------
         expect(EarlyBootProbePolicy.parseProbe(
