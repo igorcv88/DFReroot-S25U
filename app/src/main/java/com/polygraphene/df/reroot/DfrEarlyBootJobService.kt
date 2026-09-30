@@ -191,7 +191,7 @@ class DfrEarlyBootJobService : JobService() {
         val sameBoot = when (fireState) {
             EarlyBootProbePolicy.STATE_FIRED_SAME_BOOT -> EarlyBootProbePolicy.SAME_BOOT_TRUE
             EarlyBootProbePolicy.STATE_FIRED_NEW_BOOT -> EarlyBootProbePolicy.SAME_BOOT_FALSE
-            else -> "UNKNOWN"
+            else -> EarlyBootProbePolicy.UNKNOWN
         }
         // Boundary 4: the last chance before the record is committed. A stop
         // that arrives after this point still races the write, which is why
@@ -203,11 +203,11 @@ class DfrEarlyBootJobService : JobService() {
             appendLine("fire_state=$fireState")
             appendLine("locked_boot_state=$lockedState")
             appendLine("networkstack_state=${readiness.state}")
-            appendLine("armed_boot_id=${arm?.armedBootId ?: "UNKNOWN"}")
+            appendLine("armed_boot_id=${arm?.armedBootId ?: EarlyBootProbePolicy.UNKNOWN}")
             appendLine("fired_boot_id=${value(firedBootId)}")
             appendLine("same_boot=$sameBoot")
             appendLine("job_id=$jobId")
-            appendLine("namespace=${arm?.namespace ?: "UNKNOWN"}")
+            appendLine("namespace=${arm?.namespace ?: EarlyBootProbePolicy.UNKNOWN}")
             appendLine("callback_namespace=$callbackNamespace")
             appendLine("namespace_binding=$namespaceBinding")
             /*
@@ -270,12 +270,12 @@ class DfrEarlyBootJobService : JobService() {
      */
     private fun callbackNamespace(params: JobParameters): String = try {
         if (Build.VERSION.SDK_INT >= 34) {
-            params.jobNamespace ?: "DEFAULT_UID_NAMESPACE"
+            params.jobNamespace ?: EarlyBootProbePolicy.DEFAULT_UID_NAMESPACE
         } else {
-            "DEFAULT_UID_NAMESPACE"
+            EarlyBootProbePolicy.DEFAULT_UID_NAMESPACE
         }
     } catch (_: Throwable) {
-        "UNKNOWN"
+        EarlyBootProbePolicy.UNKNOWN
     }
 
     private fun namespaceForRuntime(): String =
