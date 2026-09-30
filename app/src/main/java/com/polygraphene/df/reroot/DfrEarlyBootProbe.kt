@@ -9,8 +9,8 @@ import android.os.SystemClock
 
 /** Explicit owner-controlled arming for the marker-only persisted job. */
 object DfrEarlyBootProbe {
-    const val JOB_ID = 0x44465245 // "DFRE"
-    const val NAMESPACE = "dfr-early-boot-probe"
+    val JOB_ID: Int = EarlyBootProbePolicy.EXPECTED_JOB_ID
+    val NAMESPACE: String = EarlyBootProbePolicy.EXPECTED_NAMESPACE
     const val MINIMUM_LATENCY_MS = 15_000L
     const val REBOOT_WITHIN_MS = 10_000L
 
@@ -126,10 +126,16 @@ object DfrEarlyBootProbe {
             "armed_boot_id=${arm.armedBootId}"
         val probeRecord = EarlyBootProbeStore.readProbe()
         if (probeRecord == null) {
-            // No record. The breadcrumb still separates "never called back"
-            // from "called back and did not finish" (AGENTS.md 3.7).
-            return if (EarlyBootProbeStore.readCallbackEntered() == null) {
-                "EARLY_JOB_SCHEDULED $armed"
+            val callbackRecord = EarlyBootProbeStore.readCallbackEntered()
+                ?: return "EARLY_JOB_SCHEDULED $armed"
+            if (callbackRecord == AutoRootPolicy.RECORD_UNREADABLE) {
+                return "EARLY_JOB_CALLBACK_UNKNOWN $armed (breadcrumb unreadable)"
+            }
+            val callback = EarlyBootProbePolicy.parseCallback(callbackRecord)
+                ?: return "EARLY_JOB_CALLBACK_MALFORMED $armed"
+            return if (callback.state == EarlyBootProbePolicy.CALLBACK_STOPPED) {
+                "EARLY_JOB_CALLBACK_STOPPED stopped_at=${callback.stoppedAt} $armed\n" +
+                    "Probe consumed; re-arm before the next full reboot."
             } else {
                 "EARLY_JOB_CALLBACK_INCOMPLETE $armed\n" +
                     "The callback ran and did not finish its record. " +
@@ -155,7 +161,8 @@ object DfrEarlyBootProbe {
     }
 
     private fun namespaceForRuntime(): String =
-        if (Build.VERSION.SDK_INT >= 34) NAMESPACE else "DEFAULT_UID_NAMESPACE"
+        if (Build.VERSION.SDK_INT >= 34) NAMESPACE
+        else EarlyBootProbePolicy.DEFAULT_UID_NAMESPACE
 
     private fun monotonicNow(): Long = try {
         SystemClock.elapsedRealtime()
