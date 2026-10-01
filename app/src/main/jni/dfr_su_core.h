@@ -142,6 +142,29 @@ enum dfr_su_fd_quarantine_method {
 
 int dfr_fd_quarantine(int *method_out);
 
+/*
+ * The fallback mechanism on its own, exported so the host suite can drive it:
+ * on a kernel that has CLOSE_RANGE_CLOEXEC it is otherwise unreachable, and the
+ * device may be the only place it ever runs. Returns 0, or -1 with errno.
+ */
+int dfr_fd_quarantine_proc_scan(void);
+
+/*
+ * Classify a /proc/self/fd entry name. Exported for the same reason: the
+ * distinction below is the fail-closed part, and it has to be assertable.
+ *
+ * 0 with *out set - a descriptor number this code can act on.
+ * DFR_FD_NAME_NOT_NUMERIC - "." or ".."; the ONLY entry that may be skipped.
+ * DFR_FD_NAME_UNREPRESENTABLE - numeric, so a descriptor, but too large for an
+ *   int. A refusal, never a skip: the first version of this capped at 65535 and
+ *   reported such a name exactly as it reported ".", so the quarantine walked
+ *   past a real descriptor and still reported success.
+ */
+#define DFR_FD_NAME_NOT_NUMERIC (-1)
+#define DFR_FD_NAME_UNREPRESENTABLE (-2)
+
+int dfr_parse_fd(const char *name, int *out);
+
 enum dfr_su_fd_source {
     DFR_SU_FD_SOURCE_NONE = 0,
     DFR_SU_FD_SOURCE_EXISTING,

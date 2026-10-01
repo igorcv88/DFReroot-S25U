@@ -16,7 +16,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -448,6 +450,88 @@ int main(void)
                   (method == DFR_SU_FDQ_CLOSE_RANGE ||
                    method == DFR_SU_FDQ_PROC_SCAN),
               "the quarantine names the mechanism it used");
+    }
+
+
+    /*
+     * The entry classifier, which is where the first version of this change had
+     * a hole: it capped at 65535 and reported a larger numeric name exactly as
+     * it reported "." - so the quarantine walked past a real descriptor and
+     * still reported PROC_SCAN success. A cap is also not a fact this file may
+     * assume: system_server's RLIMIT_NOFILE is not ours, and a descriptor is an
+     * int. Found by review on PR #47.
+     */
+    {
+        int value = -1;
+
+        check(dfr_parse_fd("4", &value) == 0 && value == 4,
+              "an ordinary descriptor name parses");
+        value = -1;
+        check(dfr_parse_fd("70000", &value) == 0 && value == 70000,
+              "a descriptor above the old 65535 cap parses, instead of being "
+              "reported as if it were not a descriptor");
+        value = -1;
+        check(dfr_parse_fd("2147483647", &value) == 0 && value == INT_MAX,
+              "the whole int range a descriptor can occupy parses");
+        check(dfr_parse_fd(".", &value) == DFR_FD_NAME_NOT_NUMERIC &&
+                  dfr_parse_fd("..", &value) == DFR_FD_NAME_NOT_NUMERIC &&
+                  dfr_parse_fd("", &value) == DFR_FD_NAME_NOT_NUMERIC &&
+                  dfr_parse_fd("12a", &value) == DFR_FD_NAME_NOT_NUMERIC,
+              "only a non-numeric name is the skippable outcome");
+        check(dfr_parse_fd("2147483648", &value) == DFR_FD_NAME_UNREPRESENTABLE &&
+                  dfr_parse_fd("99999999999999999999", &value) ==
+                      DFR_FD_NAME_UNREPRESENTABLE,
+              "a numeric name too large for an int is its own outcome, not the "
+              "same one as \".\"");
+    }
+
+    /*
+     * The fallback mechanism itself. On this host close_range(CLOSE_RANGE_CLOEXEC)
+     * exists, so dfr_fd_quarantine() never reaches the walk and the device could
+     * be the only place it ever runs - which is exactly why it is driven here
+     * directly rather than left unreached in a fail-closed path.
+     */
+    {
+        int high = -1;
+        int low = dup(STDIN_FILENO);
+
+        check(low >= DFR_SU_FD_QUARANTINE_FLOOR,
+              "the scan test obtained an ordinary descriptor");
+        if (low >= 0) {
+            struct rlimit rl;
+            int want = 0;
+
+            if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur > 64) {
+                /* As high as this host allows. The point is a descriptor well
+                 * outside the first few, not a specific number. */
+                want = (int)rl.rlim_cur - 2;
+                high = fcntl(low, F_DUPFD, want);
+            }
+            check(fcntl(low, F_SETFD, 0) == 0 &&
+                      (high < 0 || fcntl(high, F_SETFD, 0) == 0),
+                  "the descriptors under test start without FD_CLOEXEC");
+            check(dfr_fd_quarantine_proc_scan() == 0,
+                  "the /proc walk completes on a table it can account for");
+            check((fcntl(low, F_GETFD) & FD_CLOEXEC) != 0,
+                  "the walk marks an ordinary inherited descriptor");
+            if (high >= 0) {
+                char what[128];
+
+                snprintf(what, sizeof(what),
+                         "the walk marks a high-numbered descriptor too (fd %d)",
+                         high);
+                check((fcntl(high, F_GETFD) & FD_CLOEXEC) != 0, what);
+                close(high);
+            } else {
+                printf("skip   high-numbered descriptor (RLIMIT_NOFILE too "
+                       "low to create one)\n");
+            }
+            /* stdio is not the walk's business, and a child that lost it would
+             * have no way to report anything. */
+            check((fcntl(STDOUT_FILENO, F_GETFD) & FD_CLOEXEC) == 0,
+                  "the walk leaves stdout alone");
+            close(low);
+        }
     }
 
     /*

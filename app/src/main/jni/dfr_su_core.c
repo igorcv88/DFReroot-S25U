@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
@@ -147,23 +148,112 @@ static int real_set_comm(const char *comm)
 #endif
 }
 
-static int dfr_parse_fd(const char *name, int *out)
+/*
+ * Classify one /proc/self/fd entry name.
+ *
+ * Three outcomes, not two, and the third is the whole point. This used to cap
+ * at 65535 and report anything above it the same way it reported "." and "..":
+ * -1. The quarantine below then skipped such an entry as if it were not a
+ * descriptor at all and still reported success - a descriptor left unmarked by
+ * a sweep that said it had swept. A cap is not a fact about the table either:
+ * system_server's RLIMIT_NOFILE is not this file's to assume, and a kernel is
+ * free to hand out any int.
+ *
+ * So the range is now the one the kernel actually uses - a descriptor is an int
+ * - and a name that does not fit one is DFR_FD_NAME_UNREPRESENTABLE: numeric,
+ * therefore a descriptor, therefore something this code must refuse rather than
+ * walk past. Only a non-numeric name is DFR_FD_NAME_NOT_NUMERIC, and only that
+ * one may be skipped.
+ */
+int dfr_parse_fd(const char *name, int *out)
 {
     int value = 0;
 
-    if (!*name) {
-        return -1;
+    if (!name || !out || !*name) {
+        return DFR_FD_NAME_NOT_NUMERIC;
     }
     for (; *name; name++) {
+        int digit = *name - '0';
+
         if (*name < '0' || *name > '9') {
-            return -1;
+            return DFR_FD_NAME_NOT_NUMERIC;
         }
-        value = value * 10 + (*name - '0');
-        if (value > 65535) {
-            return -1;
+        if (value > (INT_MAX - digit) / 10) {
+            return DFR_FD_NAME_UNREPRESENTABLE;
         }
+        value = value * 10 + digit;
     }
     *out = value;
+    return 0;
+}
+
+/*
+ * The /proc/self/fd walk, separate from dfr_fd_quarantine() so the host suite
+ * can drive it directly: on a host whose kernel has CLOSE_RANGE_CLOEXEC it is
+ * otherwise unreachable, and the device may be the only place it ever runs.
+ * Unreachable code in a fail-closed path is code nobody has checked.
+ *
+ * Every numeric entry is either marked or refused. Nothing is walked past: a
+ * name that does not parse as an int is numeric and therefore a descriptor this
+ * code cannot name, and an unmarkable descriptor means the table is in a state
+ * this code does not understand. Both are missing evidence about the rest of
+ * the table, so both refuse - "most of it was sanitised" is not a sanitised
+ * table (AGENTS.md 2).
+ */
+int dfr_fd_quarantine_proc_scan(void)
+{
+    char buf[4096];
+    int saved_errno;
+    int dir_fd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+
+    if (dir_fd < 0) {
+        return -1;
+    }
+    for (;;) {
+        long n = syscall(__NR_getdents64, dir_fd, buf, sizeof(buf));
+        long off;
+
+        if (n < 0) {
+            saved_errno = errno;
+            close(dir_fd);
+            errno = saved_errno;
+            return -1;
+        }
+        if (n == 0) {
+            break;
+        }
+        for (off = 0; off < n;) {
+            struct dfr_dirent64 *ent = (struct dfr_dirent64 *)(void *)(buf + off);
+            int candidate = -1;
+            int parsed;
+
+            off += ent->d_reclen;
+            parsed = dfr_parse_fd(ent->d_name, &candidate);
+            if (parsed == DFR_FD_NAME_NOT_NUMERIC) {
+                continue; /* "." and ".." - the only skippable entries */
+            }
+            if (parsed == DFR_FD_NAME_UNREPRESENTABLE) {
+                /* A numeric name this code cannot hold in an int. Skipping it
+                 * is what the old 65535 cap did, and it left a real descriptor
+                 * unmarked while the sweep reported success. */
+                close(dir_fd);
+                errno = ERANGE;
+                return -1;
+            }
+            if (candidate < DFR_SU_FD_QUARANTINE_FLOOR || candidate == dir_fd) {
+                /* stdin/stdout/stderr are this child's own, set up by dup2
+                 * before the call; dir_fd is already O_CLOEXEC. */
+                continue;
+            }
+            if (fcntl(candidate, F_SETFD, FD_CLOEXEC) != 0) {
+                saved_errno = errno;
+                close(dir_fd);
+                errno = saved_errno;
+                return -1;
+            }
+        }
+    }
+    close(dir_fd);
     return 0;
 }
 
@@ -199,10 +289,6 @@ static int dfr_parse_fd(const char *name, int *out)
  */
 int dfr_fd_quarantine(int *method_out)
 {
-    char buf[4096];
-    int dir_fd;
-    int saved_errno;
-
     if (!method_out) {
         errno = EINVAL;
         return -1;
@@ -215,49 +301,9 @@ int dfr_fd_quarantine(int *method_out)
         return 0;
     }
 
-    dir_fd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dir_fd < 0) {
+    if (dfr_fd_quarantine_proc_scan() != 0) {
         return -1;
     }
-    for (;;) {
-        long n = syscall(__NR_getdents64, dir_fd, buf, sizeof(buf));
-        long off;
-
-        if (n < 0) {
-            saved_errno = errno;
-            close(dir_fd);
-            errno = saved_errno;
-            return -1;
-        }
-        if (n == 0) {
-            break;
-        }
-        for (off = 0; off < n;) {
-            struct dfr_dirent64 *ent = (struct dfr_dirent64 *)(void *)(buf + off);
-            int candidate = -1;
-
-            off += ent->d_reclen;
-            if (dfr_parse_fd(ent->d_name, &candidate) != 0) {
-                continue; /* "." and ".." - not descriptors */
-            }
-            if (candidate < DFR_SU_FD_QUARANTINE_FLOOR || candidate == dir_fd) {
-                /* stdin/stdout/stderr are this child's own, set up by dup2
-                 * above; dir_fd is already O_CLOEXEC. */
-                continue;
-            }
-            if (fcntl(candidate, F_SETFD, FD_CLOEXEC) != 0) {
-                /* A descriptor this walk just enumerated and cannot mark means
-                 * the table is in a state this code does not understand. That
-                 * is missing evidence about the rest of it, so it refuses -
-                 * "most of it was sanitised" is not a sanitised table. */
-                saved_errno = errno;
-                close(dir_fd);
-                errno = saved_errno;
-                return -1;
-            }
-        }
-    }
-    close(dir_fd);
     *method_out = DFR_SU_FDQ_PROC_SCAN;
     return 0;
 }
@@ -287,6 +333,11 @@ static int real_scan_driver_fd(int *fd_out)
             int candidate = -1;
 
             off += ent->d_reclen;
+            /* Both non-zero outcomes skip here, and that is correct for this
+             * caller in a way it is not for the quarantine: a name too large
+             * for an int cannot be a descriptor the kernel would hand back, and
+             * missing one would mean this scan finds nothing, which ends at a
+             * DRIVER_FD refusal rather than at an unproven pass. */
             if (dfr_parse_fd(ent->d_name, &candidate) != 0 || candidate == dir_fd) {
                 continue;
             }

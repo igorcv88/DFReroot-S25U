@@ -1226,6 +1226,36 @@ def audit():
     if "int dfr_fd_quarantine(int *method_out)" not in su_core_code:
         fail("dfr_fd_quarantine is gone; the fork/exec would hand "
              "system_server's descriptor table to the daemon it starts")
+    # The entry classifier's three outcomes. Two would mean a numeric name the
+    # code cannot represent is reported exactly as "." is, which is how the first
+    # version of this change walked past a descriptor while reporting the sweep a
+    # success (found in review on PR #47). Only the non-numeric outcome may be
+    # skipped, and the walk must REFUSE on the other one - a host cannot create a
+    # descriptor named above INT_MAX, so this is not reachable from a test.
+    if "DFR_FD_NAME_UNREPRESENTABLE" not in su_core_code \
+            or "DFR_FD_NAME_NOT_NUMERIC" not in su_core_code:
+        fail("the descriptor-name classifier collapsed its outcomes; a numeric "
+             "name this code cannot represent must not be reported the same way "
+             "as '.', or the quarantine skips a real descriptor and still "
+             "reports success")
+    if "65535" in su_core_code:
+        fail("a descriptor-number cap is back in the transport. RLIMIT_NOFILE is "
+             "system_server's, not this file's to assume, and a capped name was "
+             "indistinguishable from '.' to the quarantine")
+    scan_at = su_core_code.find("int dfr_fd_quarantine_proc_scan(void)")
+    if scan_at < 0:
+        fail("the /proc/self/fd fallback is gone or no longer separable; on a "
+             "kernel with CLOSE_RANGE_CLOEXEC it is unreachable from a test "
+             "unless it is its own function")
+    else:
+        scan_end = su_core_code.find("int dfr_fd_quarantine(int *method_out)",
+                                     scan_at)
+        scan_code = su_core_code[scan_at:scan_end]
+        unrep = scan_code.find("parsed == DFR_FD_NAME_UNREPRESENTABLE")
+        if unrep < 0 or "return -1;" not in scan_code[unrep:unrep + 400]:
+            fail("the /proc walk no longer refuses a descriptor name it cannot "
+                 "represent; skipping one leaves it unmarked while the sweep "
+                 "reports PROC_SCAN success (AGENTS.md 2)")
     if "CLOSE_RANGE_CLOEXEC" not in su_core_code:
         fail("the descriptor quarantine no longer marks the table close-on-exec; "
              "closing descriptors here instead would break the grant, and "

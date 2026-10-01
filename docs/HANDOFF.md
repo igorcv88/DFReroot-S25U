@@ -1660,6 +1660,24 @@ costume.
   the exec below (the child re-marks its whole table anyway); it protects every
   *other* fork/exec happening concurrently inside `system_server`.
 
+### The hole review found in the first version
+
+`dfr_parse_fd()` capped a descriptor name at 65535 and reported anything larger
+with the same value it uses for `.` and `..`. The `/proc` walk then skipped such
+an entry as if it were not a descriptor **and still reported `PROC_SCAN`
+success** — a descriptor left unmarked by a sweep that said it had swept, which
+is the one shape AGENTS.md §2 exists to prevent. A cap is not a fact this file
+may assume either: `system_server`'s `RLIMIT_NOFILE` is not ours, and a
+descriptor is an `int`.
+
+Fixed by giving the classifier three outcomes instead of two. Only a
+**non-numeric** name is skippable; a numeric name too large for an `int` is
+`DFR_FD_NAME_UNREPRESENTABLE` and the walk refuses on it. The walk is also now
+its own exported function, because on any host with `CLOSE_RANGE_CLOEXEC` it is
+otherwise unreachable — unreached code in a fail-closed path is code nobody has
+checked. `profile_binding_audit.py` rejects a reinstated cap and asserts the
+refusing branch; the mutation that puts the cap back kills the suite.
+
 ### How it is verified with no device
 
 `tools/tests/test_su_core.sh` runs the **real** `dfr_fd_quarantine()` — it is
