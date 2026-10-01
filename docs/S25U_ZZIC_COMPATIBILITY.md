@@ -935,6 +935,328 @@ functional.
 The next implementation should move the positive `dfm1` milestone to after the
 expected helper return and check the marker syscall result.
 
+### Ninth physical run — `2.0.13-zzic`, Apply Modules dispatched; the firmware refused the boot
+
+This run moves three boundaries to physical PASS and opens a fourth as a
+physical FAIL. It also retires a causal claim this dossier and `AGENTS.md`
+3.6.1 had both carried, for the third time in this investigation's history.
+
+#### What the transport did
+
+Boot `85e3a031-42bb-49cc-8bbe-c276cb4b5c4e`, firmware `S938BXXUCZZIC`,
+KernelSU 32601 / UAPI 2, `transport_fix=kdp-cred-1`. Apply Modules was tapped
+after a manual `Run DirtyFrag` had produced a same-boot `POST_ROOT_COMPLETE`.
+
+The persistent records left behind:
+
+```text
+/data/system/dfreroot-softreboot-trace
+  boot_id=85e3a031-42bb-49cc-8bbe-c276cb4b5c4e
+  phase=EXEC_ENTER
+  path=/data/adb/ksud
+
+/data/system/dfreroot-softreboot-lock
+  boot_id=85e3a031-42bb-49cc-8bbe-c276cb4b5c4e
+  phase=CLAIMED
+  claimed_at_ms=1790856175413
+```
+
+`EXEC_ENTER` is the last phase written before `transport.execPinnedDaemon()`;
+`EXEC_RETURNED` is written immediately after it. The trace stopping at
+`EXEC_ENTER` while the framework demonstrably restarted is therefore not an
+incomplete run — it is what a successful handover looks like, because the
+command tears down the process that would have written the next line. The
+previous tap's state (`PROBE_RETURNED rc=-1`, `DRIVER_FD errno=1`, no lock) is
+superseded: the transport, the supercall, the driver fd and the grant all worked
+here.
+
+So `APPLY_MODULES_TRANSPORT`, `KSUD_EXEC_HANDOFF` and `FRAMEWORK_SOFT_REBOOT`
+are physical PASS. Nothing about module *correctness* follows from that, and the
+record deliberately does not claim it: ksud's own lifecycle output for this boot
+was in a log buffer that had rotated out.
+
+#### What happened next, and what the device itself says about why
+
+Minutes after the UI returned, the device full-rebooted unprompted. It looked
+like the 2026-09-29 panic. It was not.
+
+`dumpsys rollback`, read in the following boot:
+
+```text
+2026-10-01T14:03:19.497576: Rolling back all available. Reason: NATIVE_CRASH
+2026-10-01T14:03:19.500609: Rolling back bootchecker_timeout. Reason: NATIVE_CRASH
+2026-10-01T14:03:19.513751: Rolling back bootchecker_timeout. Reason: NATIVE_CRASH
+```
+
+The DropBox entry for the reboot itself, two minutes later:
+
+```text
+2026-10-01 14:05:39  SYSTEM_LAST_KMSG_0_20261001_140539_RP
+  Boot info:
+  Last boot reason: reboot,rollback_staged_install(bootchecker_timeout)
+```
+
+The suffix is load-bearing. This firmware writes `_KP` for a kernel panic — it
+holds `SYSTEM_LAST_KMSG_558_20260929_113259_KP` and
+`SYSTEM_LAST_KMSG_559_20260929_113432_KP` from the KDP credential crash — and
+`_RP` for an ordinary reboot record. `/sys/fs/pstore` was empty and no tombstone
+names `bootchecker`. So the 2026-10-01 reboot was a CrashRecovery-driven staged
+rollback, not a panic, and `NATIVE_CRASH` here is PackageWatchdog's own
+classification of a boot-health failure rather than a tombstone.
+
+It was also not a staged install that merely happened to be pending:
+`Package Watchdog` reported `# Failures: 0` / `Health check state: PASSED` for
+every monitored module in the next boot, Finsky reported
+`0 tracked staged sessions`, and `apexd.packages.updated=false` /
+`apexd.status=ready`. The rollback was the consequence of the boot-health
+failure, not a coincidence with it.
+
+#### The mechanism, read out of the firmware's own init script
+
+`/system/etc/init/bootchecker.rc` on this device:
+
+```text
+service bootchecker /system/bin/bootchecker
+    class late_start
+    user system
+    group system log
+    oneshot
+
+on property:init.svc.zygote=restarting
+    write /dev/freezer/olaf/freezer.state THAWED
+    write /dev/freezer/frozen/freezer.state THAWED
+    write /dev/freezer/abnormal/freezer.state THAWED
+    setprop dev.platform_bootcomplete 0
+    restart bootchecker
+
+on property:dev.bootcomplete=1
+    setprop dev.platform_bootcomplete 1
+    start bootchecker-bootc
+
+on property:crashrecovery.attempting_reboot=true
+    setprop dev.attempting_reboot true
+```
+
+Any transition of the zygote to `restarting` — which is exactly what an
+emulated soft reboot produces — zeroes Samsung's own `dev.platform_bootcomplete`
+and restarts Samsung's boot watchdog. `/system/bin/bootchecker` carries strings
+for `dev.platform_bootcomplete`, `bootchecker_timeout`, `sys.boot.reason`,
+`persist.sys.rescue_level`, `dev.attempting_reboot` and
+`sys.init.updatable_crashing`, so it is tracking Samsung's own notion of boot
+health, not merely observing `sys.boot_completed`.
+
+The flag is restored by a *different* rule: `on property:dev.bootcomplete=1`.
+KernelSU's `soft_reboot()` calls `reset_boot_completed()`, which resets
+`sys.boot_completed` — not `dev.bootcomplete`. On a healthy full boot this device
+converges to `sys.boot_completed=1` / `dev.bootcomplete=1` /
+`dev.platform_bootcomplete=1` with both bootchecker services `stopped`.
+
+**The open question, stated as a question.** An earlier draft of this section
+said that because the restoring rule is "edge triggered", a `dev.bootcomplete`
+that "stays at 1" can never re-fire it, so `dev.platform_bootcomplete` stays 0
+and `bootchecker` times out. That reads like a mechanism and is not one: init
+queues a matching action when a property is *set*, and whether a value-preserving
+set re-queues it was never read out of init's source by anyone here. It would
+have been the fourth causal claim in this investigation stated ahead of its
+evidence. What is actually open is:
+
+```text
+does anything on this firmware set dev.bootcomplete=1 again after an emulated
+soft reboot, and does dev.platform_bootcomplete come back?
+```
+
+Nobody has read those two properties after a soft reboot on this firmware. That
+is the measurement the next build takes (below), and it is the only thing that
+turns this into a mechanism either way.
+`ro.init.userspace_reboot.is_supported` reads empty on this firmware, so there is
+no officially declared userspace-reboot path to compare against either.
+
+Also relevant and not yet implicated: the restart re-runs the KernelSU module
+lifecycle a second time in one kernel, and several installed modules manipulate
+mounts inside the zygotes' namespaces (`meta-overlayfsx` holds an ext4 loop
+mount, ViPER binds ten `/vendor` and `/system` audio-effect paths through
+`nsenter -t 1 -m`, YouTube Morphe enters each zygote's namespace directly).
+Zygisk Next and LSPosed both ship `emulated-soft-reboot.sh`. None of this is
+evidence about the 2026-10-01 reboot; it is listed because any complete account
+of the second lifecycle has to cover it.
+
+#### What the next build adds, and what it deliberately does not
+
+Two things, and the distinction matters: one is a refusal, the other is a
+measurement. Neither is a fix, and neither may be described as one — the trigger
+lives in the firmware's init rc and the property that clears it is written by a
+daemon outside this app's control.
+
+- **A gate.** `SoftRebootHealthPolicy.verdict()` classifies the eight properties
+  that make up the handshake, and `SoftRebootPolicy` refuses the dispatch unless
+  the verdict is `BOOT_HEALTH_CONVERGED` (or the device runs no such handshake at
+  all). Be exact about what that adds: the per-boot soft-reboot lock **already**
+  makes a second DFR Apply Modules in one boot impossible, so "stops a second
+  teardown" was a job already done. What this gate adds is refusing the **first**
+  attempt in a boot whose health is already bad for some other reason — an
+  unrelated framework restart, a rollback already in flight, a watchdog still
+  waiting. `BOOT_HEALTH_UNKNOWN` refuses, because the worst outcome of this
+  operation is an unplanned full reboot with a staged rollback.
+- **A measurement.** `/data/system/dfreroot-softreboot-health` carries two
+  halves. The pre half is written before the exec; the post half is written by
+  the restarted framework in the *same* boot — the only observer *this app* has,
+  since the process that asked for the soft reboot is the one `stop` kills. (Not
+  the only one that could exist: ksud's `soft_reboot()` daemonises into PID 1's
+  mount namespace before `stop` and survives by construction, so a
+  module-side observer is possible and simply is not what this build uses.) The
+  record's `post_dev_platform_bootcomplete` and `post_dev_bootcomplete` are what
+  answer the question above.
+
+Eight properties of that record are not conveniences, and each closes a way the
+measurement would otherwise have lied:
+
+- **The observation window closes on TIME, never on a verdict.** This one was got
+  wrong first. `BOOT_COMPLETED` is the first moment a converged answer is
+  *possible*, and no single sample after it concludes anything in **either**
+  direction. A first `PENDING` may be the init trigger and the
+  `bootchecker-bootc` oneshot still in flight. A first `CONVERGED` proves just as
+  little: the device that produced this investigation had a working,
+  converged-looking userspace for *minutes* before CrashRecovery rolled it back,
+  so stopping at the first good answer would have reported the hypothesis refuted
+  on evidence that does not refute it. The window is therefore 5 minutes — sized
+  from the ~4 this incident took from restart to reboot — sampled every 15
+  seconds, and `post_settled` means *the window closed*, not *an answer arrived*.
+- **The deadline is anchored in the record, not in the observer.** It began as a
+  local variable in the polling loop, which made `post_settled=0` mean two
+  different things — "still inside the five minutes" and "the observer died and
+  nobody can tell" — and let a `system_server` restart begin a second five
+  minutes on top of the first, in an experiment whose whole subject is userspace
+  being re-created. `post_window_opened_ms` is the first observation's own
+  monotonic reading; `boot_id` is unchanged across a framework restart and
+  `elapsedRealtime` stays comparable within one kernel boot, so any later reader
+  — a fresh observer, or the UI — reaches the same expiry answer the dead one
+  would have. A window with no anchor is closed at the moment it is opened,
+  because nothing could ever decide that it had expired.
+- **The observer persists an evidence change, not a verdict change.** It used to
+  write only when the verdict moved, which discards exactly the transition being
+  measured: `dev.platform_bootcomplete` can go 0 → 1 while the verdict stays
+  `PENDING` because some other element has not settled, and the surviving record
+  would then still read `platform=0` after the observer had seen 1. Persistence
+  is now driven by any recorded property changing, and
+  `post_platform_bootcomplete_seen` / `post_dev_bootcomplete_seen` are sticky, so
+  a 0 → 1 → 0 excursion of the two properties the experiment actually asks about
+  cannot vanish.
+- **One mutation authority.** The post half is read-modify-written by two
+  independent callers — the observer, and the UI when the operator opens the app.
+  Unsynchronised, they could both read one record, both format a successor, and
+  the later write would silently discard the earlier one's observations and
+  sticky flags, or re-open a window the other had just closed. All mutations now
+  hold one lock across the whole read-modify-write, and `AutoRootStore` stages
+  each write under a unique temporary name: a shared `<target>.tmp` lets two
+  writers corrupt each other's read-back before any rename happens.
+- **The history is kept, not overwritten.** `post_first_verdict` holds the first
+  reading, `post_observations` counts the recorded ones, and
+  `post_converged_seen` / `post_crash_recovery_seen` are **sticky**, so a
+  `CONVERGED` that is later followed by a rollback is visible as both facts
+  rather than as whichever was sampled last.
+- **`exec_outcome` says whether anything was handed over.** The pre half is
+  written *before* the exec, so on its own it proves the exec was *reached* —
+  never that a soft reboot was dispatched. The refusal paths (a digest that
+  changed under us, a lost transport, a shell past its deadline, a non-zero exit,
+  a refusal landing between the record and the call, and the boundary re-read
+  below) all return with the process alive and record which one happened. Only
+  `NOT_REACHED` means "this process recorded nothing after the exec" — and even
+  that is three readings, not one, since a late refusal whose own best-effort
+  write also failed leaves it. There is deliberately no value for a successful
+  dispatch: that is the one case that never gets to write.
+- **The gate is taken again at the boundary it guards.** The decision snapshot is
+  read before the staging, the root transport, the privileged shell, two
+  candidate hashes and the durable claim — easily seconds. A CrashRecovery that
+  starts in the middle of that would be invisible to the only gate that looks. So
+  the decision snapshot stays in the pre half, unchanged, because it is what
+  authorised the dispatch; and a fresh reading immediately before the exec
+  decides whether the exec still happens, refusing with its own outcome
+  (`REFUSED_HEALTH`). "It was never allowed" and "it was allowed and then was
+  not" send the next investigation to different places.
+- **Scope is decided by identity, before anything is read.** Apply Modules is
+  reachable off-target — a generic device running the bundled daemon can satisfy
+  `PostRootStatus`, and §1 says an unrelated device takes the unchanged upstream
+  path. The first fix for this inferred scope from the properties alone
+  (`BOOT_HEALTH_NOT_APPLICABLE` when AOSP's flag says the boot completed and all
+  three OEM-only properties are positively unset), which removed the obvious
+  regression but not the real one: a failed `SystemProperties` lookup still read
+  `UNKNOWN` and refused the dispatch, a ROM reusing one of those names still read
+  "partially present" and refused it, and the record and the 5-minute observer
+  ran either way — on a path that previously made none of those readings. Scope
+  is now the profile's own anchor rule (`gate_target`'s
+  `anchor_hit = model_ok || device_ok`), asked first: a device asserting neither
+  the pinned model nor the pinned codename gets no sweep, no gate, no record and
+  no observer. *Unreadable* identity counts as in scope, because "I could not
+  tell what device this is" must never be what disables a check, and the Kotlin
+  mirrors of the two anchors are drift-guarded against both profiles.
+  `NOT_APPLICABLE` remains for the residual case it is actually evidence for: an
+  anchor-asserting device whose firmware runs no such watchdog.
+- **A stored verdict is re-derived from the stored evidence, and so is the
+  history's arithmetic.** The parser rebuilds each half's snapshot from that
+  half's own recorded properties and refuses unless the recomputed verdict equals
+  the stored one. Without it the file could assert
+  `pre_verdict=BOOT_HEALTH_CONVERGED` over `pre_dev_platform_bootcomplete=0` and
+  parse cleanly — a verdict with no evidence behind it, which §2 says must refuse.
+  The same standard now covers the stored history: a sticky flag must agree with
+  the **first** verdict as well as the latest (a record claiming its first reading
+  was a convergence while claiming none was ever seen is refused), the property
+  stickies must agree with the latest sample, and with one observation recorded
+  "first" and "latest" are the same observation and may not disagree. Numeric
+  fields carry the literal `UNKNOWN` rather than `-1` (the lesson
+  `EarlyBootProbePolicy` already records), and a property sweep may not end before
+  it began.
+- **What the record does not claim.** The sweep is N sequential property reads,
+  not one instant, so each half records `read_start_ms` *and* `read_end_ms` and a
+  reader can discount a verdict stitched across a wide one. Process identity
+  across the restart comes from `/proc/self/stat` field 22, not from the pid: pids
+  are reused, so an equal pid is `UNDECIDED`, never "the same process".
+  `sys.init.updatable_crashing_process_name` and `dev.attempting_reboot` are
+  recorded as **telemetry only** — `verdict()` never reads them, so an unreadable
+  diagnostic cannot refuse a dispatch. And the record carries `schema_version`,
+  because it outlives the build that wrote it: a record *declaring* another
+  version reads as `OTHER_SCHEMA`. A record with **no** version line does not —
+  that rule was wrong twice over, since this record shipped together with its
+  version line (so the "older format" it excused never existed) and a file
+  truncated at the front loses exactly that line, which turned unknown corruption
+  into the claim "intact, not corrupt".
+
+Every element of the verdict, every exec outcome, every way the post half may and
+may not be replaced, the window's expiry arithmetic and every cross-field
+contradiction have host tests with a negative case
+(`tools/tests/SoftRebootHealthPolicyTest.java`, 122 checks), and the wiring that
+cannot be unit-tested here is guarded by `tools/profile_binding_audit.py`, whose
+boot-health checks were each verified to fail when their property is removed.
+
+#### Two collateral defects found in the same cycle
+
+- **`native bootstrap returned 2` is not persistent.** The boot immediately after
+  the incident failed Auto Root with that code — the bootstrap did not observe
+  the complete `dfm1`+`dfm2`+`dfm3` helper/namespace/bind handoff. The next full
+  boot ran the same `2.0.13-zzic` to `BOOTSTRAP PASS` /
+  `POST_ROOT_COMPLETE=PASS` / `AUTO_ROOT_RESULT=SUCCESS`, boot
+  `68845faf-d5b9-4622-a5d9-c5e7885e1bc1`, Enforcing, `su` in `u:r:ksu:s0`. So the
+  code is not evidence of a deterministic exploit failure or of a damaged
+  KernelSU, and must not be recorded as one.
+- **The marker chip contradicted its own refusal.** After root is established the
+  `/dev/df*` probes return `EACCES`, not `ENOENT`:
+  `[DFR][MARKER] probe of /dev/df failed: errno=13`. `markerState()` correctly
+  returned `MARKER_UNKNOWN` and the run dialog correctly refused with "cannot
+  determine whether a stage marker exists", but the chip printed `HOOKED` —
+  a definite claim that a run had armed hooks — because it treated anything but
+  a positive `ABSENT` as `PRESENT`. Two facts behind one word is what AGENTS.md
+  3.7 forbids. The chip now has a third state and
+  `tools/profile_binding_audit.py` fails if the three are collapsed again.
+
+#### Per-boot hygiene confirmed as necessary, not theoretical
+
+In boot `68845faf…` the soft-reboot trace and lock from boot `85e3a031…` were
+still on disk. Soft-reboot artefacts survive a full reboot, so any reader of one
+has to compare `boot_id` before it means anything about the current boot. The
+lock and the post-root record already did; the new boot-health record does too,
+and reports a record from an earlier boot as `STALE_BOOT` rather than as
+`ABSENT` — "last boot dispatched one" and "nothing has ever dispatched one" are
+different facts.
+
 ## Gate matrix (never auto-promoted to global compatibility)
 
 "Physical PASS" below means observed on SM-S938B / `S938BXXUCZZIC`, not
@@ -958,6 +1280,11 @@ inferred from a nearby firmware.
 | H — Installer / packages.xml | **physical PASS** | injected key survived framework restart; write-path fixes regression-tested |
 | I — Automatic safe end state | **physical PASS** | `v2.0.5-zzic`, boot `62e8538c…`: the closeout ran unaided to a same-boot `POST_ROOT_COMPLETE`, and the operator independently read `Enforcing` / sysfs `1`, `su` in `u:r:ksu:s0`, and the pinned daemon installed at `/data/adb/ksud`. See the fourth physical run below |
 | AUTO_ROOT_FULL_BOOT — unattended run after a full boot | **PARTIALLY ACCEPTED (still ships disabled)** | `2.0.6-zzic`, boot `2e447aaf…`: the service completed an unattended attempt after a full reboot, its own per-boot journal reading `phase=COMPLETE` / `native_started=1` / `attempts=1` against the same `boot_id` as a valid post-root record, with `Enforcing` / sysfs `1` and `su` in `u:r:ksu:s0`. Of the three boundaries one successful boot cannot speak for: a framework restart triggers nothing (**done**, seventh run, two observations), the next full boot makes exactly one attempt (**done**, boot `7d1cea20…`, the boot's second broadcast refused in the log), and opting out suppresses the next boot (**still untested**). Step 7 was briefly promoted on the eighth run and is **withdrawn**: the refusal that run observed was logged by a line the receiver emitted for six different facts, so it did not identify the opt-out. The receiver now logs a classified verdict and the observation to make is `OPTED_OUT`. See the fifth, seventh and eighth physical runs below |
+| APPLY_MODULES_TRANSPORT — the soft-reboot dispatch reaches ksud | **physical PASS** | `2.0.13-zzic`, boot `85e3a031…`: the per-boot trace stopped at `phase=EXEC_ENTER path=/data/adb/ksud` with the lock at `phase=CLAIMED`, and the framework then restarted. `EXEC_RETURNED` was never written, which is what a successful handover looks like: the exec tore down the process that would have written it. Supersedes the `PROBE_RETURNED rc=-1` / `DRIVER_FD errno=1` state of the previous tap |
+| KSUD_EXEC_HANDOFF — the pinned daemon was launched | **physical PASS** | same boot: `EXEC_ENTER` carries the path the digest gate selected, and the framework restart is the first externally visible effect of `ksud soft-reboot` |
+| FRAMEWORK_SOFT_REBOOT — userspace was re-created without a kernel restart | **physical PASS** | same boot: zygote and `system_server` were replaced and the UI returned, with `boot_id` unchanged |
+| POST_SOFT_REBOOT_STABILITY — the boot stays healthy afterwards | **physical FAIL** | same cycle: minutes after the UI returned the device full-rebooted with `reboot,rollback_staged_install(bootchecker_timeout)`, preceded by CrashRecovery `Rolling back bootchecker_timeout. Reason: NATIVE_CRASH`. See the ninth physical run below |
+| POST_SOFT_REBOOT_KERNEL_PANIC — was the 2026-10-01 reboot a panic? | **NO EVIDENCE (and the evidence that exists says no)** | the DropBox entry for the event is `SYSTEM_LAST_KMSG_0_20261001_140539_RP`, a reboot record; this device writes `_KP` for a panic and has two from 2026-09-29. `/sys/fs/pstore` was empty and no tombstone names `bootchecker` |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
 remaining blocker to calling the automated flow complete is the post-root

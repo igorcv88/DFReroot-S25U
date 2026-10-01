@@ -1,6 +1,7 @@
 import com.polygraphene.df.reroot.AutoRootPolicy;
 import com.polygraphene.df.reroot.SoftRebootPolicy;
 import com.polygraphene.df.reroot.SoftRebootDispatchGuard;
+import com.polygraphene.df.reroot.SoftRebootHealthPolicy;
 import com.polygraphene.df.reroot.SoftRebootPolicy.Candidate;
 import com.polygraphene.df.reroot.SoftRebootPolicy.Decision;
 import com.polygraphene.df.reroot.SoftRebootPolicy.Inputs;
@@ -48,6 +49,13 @@ public class SoftRebootPolicyTest {
         in.pinnedKsudSha256 = PINNED;
         in.candidates.add(new Candidate(STAGED, PINNED));
         in.candidates.add(new Candidate(ADB, MANAGER));
+        /*
+         * The firmware's boot-health handshake, which defaults to the refusing
+         * value in Inputs. A test helper that left it unset would make every
+         * positive case below depend on a default, which is the one thing this
+         * field exists not to do.
+         */
+        in.bootHealthVerdict = SoftRebootHealthPolicy.CONVERGED;
         return in;
     }
 
@@ -290,6 +298,55 @@ public class SoftRebootPolicyTest {
         } else {
             fail++;
             System.out.println("  FAIL - durable claim released the guard");
+        }
+
+        // --- the Samsung boot-health gate: one negative case per verdict ----
+        // Its own file (SoftRebootHealthPolicyTest) proves how a verdict is
+        // reached; what matters here is that only CONVERGED reaches the dispatch.
+        for (String verdict : new String[] {
+                SoftRebootHealthPolicy.PENDING,
+                SoftRebootHealthPolicy.CRASH_RECOVERY,
+                SoftRebootHealthPolicy.HEALTH_UNKNOWN }) {
+            Inputs in = ok();
+            in.bootHealthVerdict = verdict;
+            refuse("boot health " + verdict, in);
+        }
+        Inputs nullHealth = ok();
+        nullHealth.bootHealthVerdict = null;
+        refuse("boot health absent entirely", nullHealth);
+        Inputs invented = ok();
+        invented.bootHealthVerdict = "BOOT_HEALTH_PROBABLY_FINE";
+        refuse("boot health verdict this build does not know", invented);
+        /*
+         * The one other verdict that may dispatch. This is a Samsung mechanism and
+         * the action is reachable off-target, so an unconditional Samsung gate
+         * would refuse Apply Modules on every device but this one (AGENTS.md
+         * section 1: an unrelated device takes the unchanged upstream path).
+         * SoftRebootHealthPolicyTest proves the verdict is unreachable on the
+         * target itself.
+         */
+        Inputs notApplicable = ok();
+        notApplicable.bootHealthVerdict = SoftRebootHealthPolicy.NOT_APPLICABLE;
+        allow("a device with no OEM boot watchdog still dispatches", notApplicable, STAGED);
+        Inputs defaulted = new Inputs();
+        defaulted.currentBootId = BOOT;
+        defaulted.requestBootId = BOOT;
+        defaulted.postRootRecord = postRoot(BOOT);
+        defaulted.liveSelinux = 1;
+        defaulted.pinnedKsudSha256 = PINNED;
+        defaulted.candidates.add(new Candidate(STAGED, PINNED));
+        refuse("boot health left at its default", defaulted);
+        // The precheck must refuse on it too, or the cheap path would hand a root
+        // shell to a dispatch the full evaluation is about to reject.
+        Inputs prePending = ok();
+        prePending.bootHealthVerdict = SoftRebootHealthPolicy.PENDING;
+        Decision pre = SoftRebootPolicy.precheck(prePending);
+        if (!pre.allow) {
+            pass++;
+            System.out.println("  ok   - precheck refuses on boot health -> " + pre.reason);
+        } else {
+            fail++;
+            System.out.println("  FAIL - precheck allowed a non-converged boot health");
         }
 
         System.out.println("");

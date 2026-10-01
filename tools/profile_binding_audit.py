@@ -1374,6 +1374,449 @@ def audit():
                    "INIT_MNT_NS=PASS", "EXEC_HANDOFF=ENTER"):
         if signal not in su_core_code:
             fail("the child transport lost physical diagnostic %r" % signal)
+    # --- Samsung boot-health handshake around the soft reboot ---------------
+    #
+    # The 2026-10-01 cycle: the dispatch WORKED (ksud ran, the framework
+    # restarted, the UI came back) and the device then full-rebooted on its own
+    # with reboot,rollback_staged_install(bootchecker_timeout) after CrashRecovery
+    # classified the stall as NATIVE_CRASH. The firmware's own bootchecker.rc
+    # zeroes dev.platform_bootcomplete and restarts its watchdog on
+    # init.svc.zygote=restarting, which an emulated soft reboot necessarily
+    # produces. None of this can be unit-tested through Kotlin here, and the two
+    # halves of the record are written by two different processes - the second
+    # exists only because the first was killed - so the wiring is guarded
+    # statically (AGENTS.md section 5).
+    health_policy_src = dfr_source("SoftRebootHealthPolicy.java")
+    health_src = dfr_source("SoftRebootHealth.kt")
+    health_policy_code = code_only(health_policy_src)
+    health_code = code_only(health_src)
+    for prop in ("sys.boot_completed", "dev.bootcomplete", "dev.platform_bootcomplete",
+                 "init.svc.zygote", "init.svc.bootchecker", "init.svc.bootchecker-bootc",
+                 "crashrecovery.attempting_reboot", "sys.init.updatable_crashing"):
+        if '"%s"' % prop not in health_policy_code:
+            fail("SoftRebootHealthPolicy no longer pins %r; the Samsung half of the "
+                 "boot-completion handshake is what timed out on 2026-10-01" % prop)
+    # An unset property and an unreadable one are different facts: collapsing them
+    # either makes the gate unsatisfiable (a healthy boot leaves the two crash
+    # signals unset) or makes an unreadable crash signal look like a clean one.
+    if 'ABSENT = "ABSENT"' not in health_policy_code \
+            or 'UNKNOWN = "UNKNOWN"' not in health_policy_code:
+        fail("SoftRebootHealthPolicy collapsed 'unset' and 'unreadable' into one "
+             "value; one of them is a reading and the other is a refusal")
+    for verdict in ("BOOT_HEALTH_CONVERGED", "BOOT_HEALTH_PENDING",
+                    "BOOT_HEALTH_CRASH_RECOVERY", "BOOT_HEALTH_UNKNOWN",
+                    "BOOT_HEALTH_NOT_APPLICABLE"):
+        if verdict not in health_policy_code:
+            fail("SoftRebootHealthPolicy lost the distinct verdict %r" % verdict)
+    # --- the off-target escape, and why it cannot be reached on the target ---
+    # This is a Samsung mechanism and Apply Modules is reachable off-target (a
+    # generic device running the bundled daemon can satisfy PostRootStatus), so an
+    # unconditional Samsung gate would refuse it on every device but this one -
+    # AGENTS.md section 1: an unrelated device takes the unchanged upstream path.
+    # The escape must stay narrow: ALL the OEM-only properties positively unset,
+    # with AOSP's own flag saying the boot completed.
+    if "OEM_ONLY" not in health_policy_code:
+        fail("SoftRebootHealthPolicy no longer names the OEM-only properties, so "
+             "NOT_APPLICABLE is no longer tied to the mechanism's absence")
+    else:
+        oem_block = health_policy_code[health_policy_code.find("OEM_ONLY = List.of("):]
+        oem_block = oem_block[:oem_block.find(");") + 2]
+        for prop in ("PROP_DEV_PLATFORM_BOOTCOMPLETE", "PROP_INIT_SVC_BOOTCHECKER",
+                     "PROP_INIT_SVC_BOOTCHECKER_BOOTC"):
+            if prop not in oem_block:
+                fail("%s is no longer one of the OEM-only properties; the "
+                     "NOT_APPLICABLE escape would widen" % prop)
+    if "if (!oemPresent) return NOT_APPLICABLE;" not in health_policy_code:
+        fail("NOT_APPLICABLE is no longer conditioned on the OEM mechanism being "
+             "positively absent; a partially present mechanism must stay PENDING")
+    # CrashRecovery is AOSP's, not the OEM's: a rollback in flight is a bad moment
+    # for a userspace teardown on any device, so it must outrank applicability.
+    crash_at = health_policy_code.find("return CRASH_RECOVERY;")
+    na_at = health_policy_code.find("if (!oemPresent) return NOT_APPLICABLE;")
+    unknown_at = health_policy_code.find("if (UNKNOWN.equals(s.get(p))) return HEALTH_UNKNOWN;")
+    if not (0 <= unknown_at < crash_at < na_at):
+        fail("verdict() no longer checks unreadable properties, then CrashRecovery, "
+             "then applicability in that order; an unreadable crash signal would "
+             "read as PENDING or a rollback as 'not a candidate'")
+    # --- the post half must be re-samplable until it settles ----------------
+    # BOOT_COMPLETED can arrive while dev.platform_bootcomplete is still 0 and
+    # bootchecker-bootc is still `running`. A record frozen on that first sample
+    # would make a transient PENDING indistinguishable from the minutes-long
+    # failure under investigation - the exact collapse this file exists to stop.
+    for required in ("post_first_verdict", "post_observations", "post_settled",
+                     "post_converged_seen", "post_crash_recovery_seen"):
+        if required not in health_policy_code:
+            fail("SoftRebootHealthPolicy no longer records the post half's history "
+                 "(%r missing); one sample would be reported as the answer" % required)
+    # The window closes on TIME, never on a verdict. A first CONVERGED proves no
+    # more than a first PENDING: the device that produced this investigation had a
+    # converged-looking userspace for minutes before CrashRecovery rolled it back,
+    # so stopping at the first good answer would report the hypothesis refuted on
+    # evidence that does not refute it.
+    if "terminal(" in health_policy_code:
+        fail("SoftRebootHealthPolicy is back to treating some verdict as terminal; "
+             "a first CONVERGED would close the window two minutes before the "
+             "observed failure arrived")
+    if 'if (!"0".equals(parsed.get(KEY_POST_SETTLED))) return null;' \
+            not in health_policy_code:
+        fail("a post half whose window has closed can be overwritten; a later "
+             "observation would be presented as the decisive one")
+    for sticky in ("convergedSeen = \"1\".equals(parsed.get(KEY_POST_CONVERGED_SEEN))",
+                   "crashSeen = \"1\".equals(parsed.get(KEY_POST_CRASH_SEEN))"):
+        if sticky not in health_policy_code:
+            fail("the post half's seen-flags are no longer sticky (%r missing); a "
+                 "CONVERGED later followed by a rollback would lose one of the two "
+                 "facts" % sticky)
+    # --- a stored verdict must be re-derivable from the stored evidence -------
+    # Without this a file could say pre_verdict=BOOT_HEALTH_CONVERGED over
+    # pre_dev_platform_bootcomplete=0 and parse cleanly: a verdict with no
+    # evidence behind it, which AGENTS.md section 2 says must refuse.
+    if "halfIsSelfConsistent" not in health_policy_code \
+            or "stored.equals(verdict(rebuilt))" not in health_policy_code:
+        fail("the parser trusts each half's stored verdict instead of recomputing "
+             "it from that half's own stored properties")
+    if "validNumeric" not in health_policy_code \
+            or "if (start >= 0 && end >= 0 && end < start) return false;" \
+            not in health_policy_code:
+        fail("numeric record fields are no longer domain-checked; junk would parse "
+             "and a property sweep could claim to end before it began")
+    # A failed reading is the literal UNKNOWN, never -1: the repository already
+    # learned that in EarlyBootProbePolicy.
+    if "numericField" not in health_policy_code:
+        fail("a failed reading is written as a number again; a numeric -1 is not a "
+             "second spelling of UNKNOWN and a parser cannot refuse it")
+    # --- telemetry is recorded, never gated on -------------------------------
+    for prop in ("sys.init.updatable_crashing_process_name", "dev.attempting_reboot"):
+        if '"%s"' % prop not in health_policy_code:
+            fail("SoftRebootHealthPolicy no longer records %r; the incident's "
+                 "CrashRecovery entry named bootchecker_timeout, which the boolean "
+                 "alone cannot say" % prop)
+    if "TELEMETRY" not in health_policy_code:
+        fail("the telemetry-only properties are no longer separated from the gating "
+             "ones; an unreadable diagnostic would refuse a dispatch")
+    verdict_body = health_policy_code[
+        health_policy_code.find("public static String verdict("):
+        health_policy_code.find("public static String formatPreExec(")]
+    if "TELEMETRY" in verdict_body or "ALL_PROPERTIES" in verdict_body:
+        fail("verdict() consults the telemetry-only properties; nothing decides "
+             "anything from them, so an unreadable one must refuse nothing")
+    # --- the format is versioned --------------------------------------------
+    # The record outlives the app version that wrote it, so "a build using another
+    # format" and "a corrupt file" are different facts.
+    if "SCHEMA_VERSION" not in health_policy_code \
+            or "OBS_OTHER_SCHEMA" not in health_policy_code:
+        fail("the boot-health record is no longer versioned; an older schema and a "
+             "damaged file would be the same observation")
+    # --- an equal pid is not evidence of the same process -------------------
+    if "PROC_UNDECIDED" not in health_policy_code \
+            or "proc_starttime" not in health_policy_code:
+        fail("process identity across the restart is inferred from the pid alone; "
+             "pids are reused, so an equal pid is not evidence of survival")
+    # --- what this process can say about the exec itself --------------------
+    # The pre half is written BEFORE the exec, so on its own it proves the exec was
+    # reached, never that a soft reboot was dispatched. Every path that returns
+    # alive must say so, or a record that executed nothing reads as a framework
+    # that never came back.
+    for required in ("EXEC_NOT_REACHED", "EXEC_NOT_ATTEMPTED", "EXEC_REFUSED_DIGEST",
+                     "EXEC_TRANSPORT_LOST", "EXEC_UNDETERMINED", "EXEC_FAILED",
+                     "EXEC_RETURNED"):
+        if required not in health_policy_code:
+            fail("SoftRebootHealthPolicy lost the exec outcome %r; a refusal and a "
+                 "teardown would leave the same record" % required)
+    if "EXEC_NOT_REACHED.equals(parsed.get(KEY_EXEC_OUTCOME))" not in health_policy_code:
+        fail("the exec outcome can be written twice; the first write came from the "
+             "code path that actually took the call")
+    # Set.of() is null-hostile: contains(null) throws, and a record missing the key
+    # arrives here with null. A parser whose job is to refuse must not throw.
+    if "execOutcome == null || !EXEC_OUTCOMES.contains(execOutcome)" \
+            not in health_policy_code:
+        fail("parse() calls Set.of().contains() on a possibly absent exec outcome; "
+             "that throws NullPointerException instead of refusing")
+    # The two halves must stay separable, and the post half must never be
+    # writable over another boot's record or over an already complete one.
+    for required in ('PHASE_PRE_EXEC = "PRE_EXEC"', 'PHASE_POST_EXEC = "POST_EXEC"',
+                     "if (!PHASE_PRE_EXEC.equals(parsed.get(KEY_PHASE))) return null;",
+                     "if (!currentBootId.equals(parsed.get(KEY_BOOT_ID))) return null;"):
+        if required not in health_policy_code:
+            fail("SoftRebootHealthPolicy no longer keeps the pre- and post-teardown "
+                 "halves apart (%r missing); a second observation would be written "
+                 "as the first" % required)
+    if "OBS_STALE_BOOT" not in health_policy_code \
+            or "OBS_PRE_EXEC_ONLY" not in health_policy_code:
+        fail("SoftRebootHealthPolicy no longer separates a record from an earlier "
+             "boot from a dispatch whose framework never came back; soft-reboot "
+             "artefacts survive a full reboot, so those are different facts")
+    # The Kotlin side observes and persists; it must never decide.
+    for banned in ('= SoftRebootHealthPolicy.CONVERGED', 'CONVERGED)',
+                   'bootHealthVerdict ='):
+        if banned in health_code:
+            fail("SoftRebootHealth derives or asserts the converged verdict (%r); "
+                 "the classification belongs to the pure, tested policy" % banned)
+    if "SoftRebootHealthPolicy.unreadableSnapshot(" not in health_code:
+        fail("SoftRebootHealth no longer produces an all-UNKNOWN snapshot when "
+             "SystemProperties cannot be reached; a partial read would gate")
+    # The bounded settle observer, and the two properties that keep it honest: it
+    # is not on the broadcast's thread (a pending result has a deadline in
+    # seconds), and only one may run (two would race each other into the record).
+    for required in ("SETTLE_DEADLINE_MS", "SETTLE_INTERVAL_MS", "settling",
+                     "compareAndSet(false, true)", "isDaemon = true",
+                     "readStartMs", "readEndMs", "procStarttime"):
+        if required not in health_code:
+            fail("SoftRebootHealth no longer runs exactly one bounded, detached "
+                 "settle observer (%r missing)" % required)
+    # The sweep is N sequential property reads, not one instant. Recording both
+    # ends is what keeps the record from claiming an atomicity it does not have.
+    if "snapshot.readEndMs = monotonic()" not in health_code:
+        fail("SoftRebootHealth records only one end of the property sweep; the "
+             "record would claim an instant it never had")
+    # --- the window's deadline is a property of the RECORD -------------------
+    # A deadline held in the observer's local memory made post_settled=0 mean both
+    # "still inside the window" and "the observer died and nobody can tell", and
+    # let a framework restart begin a second five minutes on top of the first.
+    if "post_window_opened_ms" not in health_policy_code \
+            or "windowExpired(" not in health_policy_code:
+        fail("the observation window has no durable anchor; nothing outside the "
+             "observing process could decide whether it had expired")
+    if "val startedAt = monotonic()" in health_code \
+            or "startedAt + SETTLE_DEADLINE_MS" in health_code:
+        fail("the settle observer is back to timing its window from a local start; "
+             "a process restart would start a second window on top of the first")
+    for caller in ("SoftRebootHealthPolicy.windowExpired(",):
+        if health_code.count(caller) < 2:
+            fail("the record's own deadline is not consulted by both the observer "
+                 "and the UI re-sample; a dead observer would leave the window "
+                 "open for the rest of the boot")
+    # A window that cannot be timed must not be left open.
+    if "windowClosed || windowOpenedMs < 0" not in health_policy_code:
+        fail("a boot-health window with no anchor stays open; nothing could ever "
+             "decide it had expired")
+    # --- the observer must persist an EVIDENCE change, not a verdict change ---
+    if "postEvidenceUnchanged(" not in health_policy_code \
+            or "postEvidenceUnchanged(" not in health_code:
+        fail("the settle observer persists only verdict changes; "
+             "dev.platform_bootcomplete can move 0 -> 1 while the verdict stays "
+             "PENDING, which is exactly the transition being measured")
+    if "verdict == before.postVerdict" in health_code:
+        fail("the settle observer is back to comparing verdicts to decide whether "
+             "to persist a sample")
+    for sticky in ("post_platform_bootcomplete_seen", "post_dev_bootcomplete_seen"):
+        if sticky not in health_policy_code:
+            fail("the record has no sticky for %r; a 0 -> 1 -> 0 excursion of the "
+                 "property the experiment asks about would vanish" % sticky)
+    # --- one mutation authority for the record -------------------------------
+    # Two unsynchronised read-modify-writers (the observer and the UI re-sample)
+    # could both read one record, both format a successor, and the later write
+    # would silently discard the earlier one's observations and sticky flags.
+    if "recordLock" not in health_code:
+        fail("the boot-health record has no single mutation authority; the "
+             "observer and the UI re-sample would lose each other's updates")
+    else:
+        for mutator in ("fun recordPreExec(", "fun recordExecOutcome(",
+                        "fun completePostExec(", "fun resample("):
+            at = health_code.find(mutator)
+            if at < 0:
+                fail("SoftRebootHealth no longer defines %s" % mutator)
+                continue
+            body = health_code[at:at + 900]
+            if "synchronized(recordLock)" not in body:
+                fail("%s mutates the boot-health record without holding the "
+                     "record lock across its read-modify-write" % mutator)
+    if 'target.name + ".tmp." + tempSequence' not in code_only(autoroot_store_src):
+        fail("AutoRootStore stages every write under one <target>.tmp again; two "
+             "writers of one record can interleave the write, the read-back and "
+             "the rename")
+    # --- the guard must not be able to stick --------------------------------
+    start_at = health_code.find("fun startSettleObserver(")
+    start_body = health_code[start_at:health_code.find("private fun settleLoop(")] \
+        if start_at >= 0 else ""
+    if "settling.set(false)" not in start_body.split("val thread = Thread(")[0] \
+            and start_body.count("settling.set(false)") < 2:
+        fail("a failed Thread.start() leaves the settle guard latched true for the "
+             "life of the process; every later observation would be skipped")
+    # --- an unversioned record is not evidence of an older format ------------
+    # This record shipped with its version line, so no build ever wrote one
+    # without it, and a truncated file loses exactly that line.
+    if "return false;\n    }" not in health_policy_code.split("otherSchema(String record)")[1][:1200]:
+        fail("otherSchema() still reports a record with no version line as another "
+             "build's format; that turns unknown corruption into 'intact'")
+    # --- the UI may not be more certain than the record ---------------------
+    for ambiguous in ("SoftRebootHealthPolicy.EXEC_UNDETERMINED ->",
+                      "SoftRebootHealthPolicy.EXEC_RETURNED ->"):
+        if ambiguous not in health_code:
+            fail("the operator line collapses %s into a definite 'nothing was "
+                 "handed over'; the policy documents it as ambiguous" % ambiguous)
+    if "lastIndexOf(')')" not in health_code:
+        fail("the /proc/self/stat parse no longer skips the comm field; field 2 can "
+             "contain spaces and parentheses, so splitting the line is wrong")
+    if "fun resample(" not in health_code:
+        fail("nothing re-samples the post half from the UI; the operator opening "
+             "the app minutes after a dispatch is the most valuable observation")
+    # --- the gate itself ----------------------------------------------------
+    if "public String bootHealthVerdict = SoftRebootHealthPolicy.HEALTH_UNKNOWN;" \
+            not in soft_policy_code:
+        fail("SoftRebootPolicy.Inputs no longer defaults the boot-health verdict to "
+             "the refusing value; a caller that forgot to supply it would be "
+             "permitted")
+    if "permitsDispatch" not in health_policy_code:
+        fail("SoftRebootHealthPolicy no longer owns the single definition of which "
+             "verdicts permit a dispatch; two copies are how the gate and the "
+             "boundary re-read drift apart")
+    if "if (!SoftRebootHealthPolicy.permitsDispatch(in.bootHealthVerdict))" \
+            not in soft_policy_code:
+        fail("SoftRebootPolicy no longer refuses a dispatch from a boot whose "
+             "firmware boot-health handshake does not permit one")
+    for banned in ("PENDING.equals(in.bootHealthVerdict)",
+                   "HEALTH_UNKNOWN.equals(in.bootHealthVerdict)",
+                   "CRASH_RECOVERY.equals(in.bootHealthVerdict)"):
+        if banned in soft_policy_code:
+            fail("SoftRebootPolicy admits a boot-health verdict other than the "
+                 "permitted ones (%r)" % banned)
+    # In preCandidateChecks, so the unprivileged precheck refuses on it too - a
+    # gate only in evaluate() would still have spawned a root shell first.
+    pre_checks = soft_policy_code.find("private static Decision preCandidateChecks(")
+    select = soft_policy_code.find("private static Decision selectBinary(")
+    gate_at = soft_policy_code.find("in.bootHealthVerdict))")
+    if pre_checks < 0 or select < 0 or not (pre_checks < gate_at < select):
+        fail("the boot-health gate is not in SoftRebootPolicy's unprivileged "
+             "precheck; a refused dispatch would obtain a root shell first")
+    # --- one reading, used twice -------------------------------------------
+    # The state that permitted the dispatch and the state the record reports have
+    # to be the same reading, or the record says nothing about the decision.
+    # Scope BEFORE measuring: the handshake is an OEM mechanism, and on a device
+    # that asserts neither the pinned model nor the codename there is nothing to
+    # measure (AGENTS.md section 1). Inferring that from the properties alone let a
+    # failed lookup (UNKNOWN) or a name-sharing ROM (PENDING) refuse a dispatch on
+    # a path that previously made no such reading.
+    if "SoftRebootHealth.targetAnchorAsserted()" not in soft_receiver_code \
+            or "if (anchorAsserted) SoftRebootHealth.snapshot() else null" \
+            not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver sweeps the OEM boot-health properties on every "
+             "device; an unrelated device must take the unchanged upstream path")
+    anchor_at = health_code.find("fun targetAnchorAsserted()")
+    anchor_body = health_code[anchor_at:anchor_at + 400] if anchor_at >= 0 else ""
+    if "Build.MODEL == TARGET_MODEL || Build.DEVICE == TARGET_DEVICE" not in anchor_body:
+        fail("the scope test is no longer the profile's own anchor rule "
+             "(model_ok || device_ok)")
+    if "catch" not in anchor_body or "true" not in anchor_body.split("catch")[1]:
+        fail("unreadable device identity takes the OUT-of-scope branch; 'I could "
+             "not tell what device this is' must never disable a safety check")
+    if "SoftRebootHealth.targetAnchorAsserted()" not in receiver_code:
+        fail("DfrBootReceiver completes the boot-health record off-target; that "
+             "path writes no record and has nothing to complete")
+    if "SoftRebootHealthPolicy.verdict(healthSnapshot)" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer gates on the one boot-health reading "
+             "it records")
+    # ... and the gate again at the boundary it guards. The decision snapshot is
+    # taken before staging, a root shell, two hashes and a durable claim, so it can
+    # be seconds stale by the time the exec happens.
+    if "SoftRebootHealth.liveVerdict()" not in soft_receiver_code \
+            or "SoftRebootHealthPolicy.permitsDispatch(finalVerdict)" \
+            not in soft_receiver_code \
+            or "SoftRebootHealthPolicy.EXEC_REFUSED_HEALTH" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver never re-reads the boot-health state at the "
+             "dispatch boundary; a rollback starting during the staging would be "
+             "missed by the only gate that looks")
+    boundary_at = soft_receiver_code.find("SoftRebootHealth.liveVerdict()")
+    pre_at = soft_receiver_code.find("SoftRebootHealth.recordPreExec(")
+    exec_at = soft_receiver_code.find("transport.execPinnedDaemon(")
+    if not (0 <= pre_at < boundary_at < exec_at):
+        fail("the boundary boot-health re-read is not between the pre-teardown "
+             "record and the exec; the decision snapshot must stay in the record "
+             "and the fresh reading must gate the call")
+    if soft_receiver_code.count("SoftRebootHealth.snapshot()") != 1:
+        fail("DfrSoftRebootReceiver takes more than one boot-health reading; the "
+             "gated state and the recorded state would be different states")
+    if "SoftRebootHealth.recordPreExec(bootId, healthSnapshot)" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer writes the pre-teardown boot-health "
+             "half; the process that could report the outcome is the one `stop` "
+             "kills")
+    # Before the exec, and a failure to persist it refuses - the same rule the
+    # soft-reboot trace already follows, for the same reason.
+    health_write = soft_receiver_code.find("SoftRebootHealth.recordPreExec(")
+    exec_call = soft_receiver_code.find("transport.execPinnedDaemon(")
+    if health_write < 0 or exec_call < 0 or health_write > exec_call:
+        fail("the pre-teardown boot-health record is written after the exec; it "
+             "exists to survive that exec, so it must precede it")
+    if "if (healthFailure != null) {" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver treats a failed boot-health write as telemetry; "
+             "it is the pre-operation record for an operation that has already "
+             "taken this device down once with nothing readable afterwards")
+    # Every path that returns with this process alive executed nothing (or cannot
+    # say), and has to record that: the pre half alone proves only that the exec
+    # was reached. Both the refusal before the call and the outcome after it.
+    if "SoftRebootHealthPolicy.EXEC_NOT_ATTEMPTED" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer records that a refusal landed before "
+             "the exec; that record would later read as a torn-down framework")
+    for required in ("SoftRebootHealth.recordExecOutcome(bootId, when {",
+                     "SoftRebootHealthPolicy.EXEC_REFUSED_DIGEST",
+                     "SoftRebootHealthPolicy.EXEC_TRANSPORT_LOST",
+                     "SoftRebootHealthPolicy.EXEC_UNDETERMINED",
+                     "SoftRebootHealthPolicy.EXEC_FAILED",
+                     "SoftRebootHealthPolicy.EXEC_RETURNED"):
+        if required not in soft_receiver_code:
+            fail("DfrSoftRebootReceiver no longer records what it saw of the exec "
+                 "(%r missing); an exec that refused and a teardown would leave "
+                 "the same record" % required)
+    outcome_at = soft_receiver_code.find("SoftRebootHealth.recordExecOutcome(bootId, when {")
+    if outcome_at < 0 or outcome_at < exec_call:
+        fail("the exec outcome is recorded before the exec; it is a fact about the "
+             "call's return and reaching it at all means no teardown took us")
+    # --- the post half, written by the only observer that exists ------------
+    if "SoftRebootHealth.completePostExec(bootId)" not in receiver_code:
+        fail("DfrBootReceiver no longer completes the soft-reboot boot-health "
+             "record; nothing would observe what the firmware made of the restart")
+    if "SoftRebootHealth.startSettleObserver(bootId)" not in receiver_code:
+        fail("DfrBootReceiver takes one post sample and stops; BOOT_COMPLETED is "
+             "the first moment convergence is POSSIBLE, not guaranteed, so a "
+             "transient PENDING would be frozen as the measurement")
+    if "!o.postWindowClosed" not in receiver_code \
+            or "SoftRebootHealthPolicy.OBS_POST_EXEC" not in receiver_code:
+        fail("DfrBootReceiver starts the settle observer without checking that "
+             "there is an open window to observe")
+    # The observer must not run on the receiver's shared single-thread worker: that
+    # executor also carries the early-boot evidence, and a goAsync() pending result
+    # has a deadline in seconds.
+    settle_src = health_code[health_code.find("private fun settleLoop("):]
+    if "Thread.sleep(" not in settle_src:
+        fail("the settle observer no longer paces itself")
+    if "worker.execute" in health_code:
+        fail("the settle observer runs on the BroadcastReceiver's shared worker; a "
+             "multi-minute poll there serialises unrelated work behind it")
+    if "if (booted) completeSoftRebootHealth()" not in receiver_code:
+        fail("DfrBootReceiver samples boot health outside BOOT_COMPLETED; "
+             "LOCKED_BOOT_COMPLETED arrives before sys.boot_completed is 1, so the "
+             "one write the record gets would be spent on a reading that cannot "
+             "converge")
+    post_at = receiver_code.find("if (booted) completeSoftRebootHealth()")
+    worker_at = receiver_code.find("val task = Runnable {")
+    if post_at < 0 or worker_at < 0 or post_at < worker_at:
+        fail("DfrBootReceiver completes the boot-health record on the main looper; "
+             "this app runs in system_server and the write costs two fsyncs")
+    if "/data/system/dfreroot-softreboot-health" not in autoroot_store_src:
+        fail("AutoRootStore no longer stores the soft-reboot boot-health record "
+             "where this process can write it before the teardown")
+    # --- the marker chip must say which of the three states it means --------
+    # Once root is established on ZZIC the /dev/df* probes return EACCES, not
+    # ENOENT, so the collapsed chip printed HOOKED - a definite claim - while the
+    # dialog refused with "cannot determine whether a stage marker exists".
+    main_code = code_only(main_src_holder[0])
+    chip_fn = main_code.find("private fun updateChip()")
+    chip_body = main_code[chip_fn:main_code.find("private fun showRunDialog()")] \
+        if chip_fn >= 0 else ""
+    if not chip_body:
+        fail("MainActivity.updateChip() not found; the marker chip cannot be checked")
+    else:
+        for required in ("AutoRootPolicy.MARKER_ABSENT", "AutoRootPolicy.MARKER_PRESENT",
+                         "R.string.chip_marker_unknown"):
+            if required not in chip_body:
+                fail("MainActivity.updateChip() no longer distinguishes all three "
+                     "marker states (%r missing); an undeterminable probe would be "
+                     "displayed as a definite HOOKED" % required)
+        if "markerState() != AutoRootPolicy.MARKER_ABSENT" in chip_body:
+            fail("MainActivity.updateChip() collapsed the marker states back into "
+                 "ABSENT-or-not; PRESENT and UNKNOWN are different facts")
+    autoroot["soft_reboot_boot_health"] = "gated+recorded"
+
     rcv2 = re.search(r"<receiver[^>]*DfrSoftRebootReceiver[^>]*/?>", manifest_code)
     if not rcv2:
         fail("DfrSoftRebootReceiver is not declared in the manifest")
@@ -1731,6 +2174,12 @@ def audit():
          r'NETWORK_STACK_CONTEXT\s*=\s*"([^"]+)"'),
         ("network_stack_cap_eff", "Diagnostics.kt",
          r'NETWORK_STACK_CAP_EFF\s*=\s*"([^"]+)"'),
+        # The scope test for the OEM boot-health policy. gate_target() already
+        # implements it natively as anchor_hit = model_ok || device_ok; these are
+        # the Kotlin mirror, and a drift here would either apply a Samsung-only
+        # gate to unrelated hardware or stop applying it to the real target.
+        ("model", "SoftRebootHealth.kt", r'TARGET_MODEL\s*=\s*"([^"]+)"'),
+        ("device", "SoftRebootHealth.kt", r'TARGET_DEVICE\s*=\s*"([^"]+)"'),
     ]
     KOTLIN_DIR = os.path.join(ROOT, "app", "src", "main", "java",
                               "com", "polygraphene", "df", "reroot")

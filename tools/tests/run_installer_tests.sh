@@ -53,11 +53,26 @@ java -cp "$OUT" RunHandoffTest
 # /data/adb/ksud the root manager replaced with its own build.
 $JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/SoftRebootPolicy.java \
+    app/src/main/java/com/polygraphene/df/reroot/SoftRebootHealthPolicy.java \
     app/src/main/java/com/polygraphene/df/reroot/SoftRebootDispatchGuard.java \
     app/src/main/java/com/polygraphene/df/reroot/PostRootStatus.java \
     app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
     tools/tests/SoftRebootPolicyTest.java
 java -cp "$OUT" SoftRebootPolicyTest
+
+# Samsung boot-health around a soft reboot. Every element of the verdict has its
+# negative case, and none of them can be produced on demand on a device:
+# dev.platform_bootcomplete is zeroed by the firmware's own zygote-restart
+# trigger, bootchecker is `running` only while its watchdog waits, and
+# crashrecovery.attempting_reboot is set moments before the device reboots. The
+# record's two halves are written by two different processes - the second one
+# only exists because the first was killed - so the merge rule is tested here
+# rather than discovered on hardware.
+$JAVAC -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/SoftRebootHealthPolicy.java \
+    app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
+    tools/tests/SoftRebootHealthPolicyTest.java
+java -cp "$OUT" SoftRebootHealthPolicyTest
 
 # Marker-only JobScheduler probe: strict arm parsing and the key semantic that a
 # callback in the arming boot is evidence only, never an early-trigger pass.

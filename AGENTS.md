@@ -440,6 +440,52 @@ paid off, and both belong in the next investigation:
   and the panic string.** `/proc/reset_summary`, `/proc/reset_history` and
   `extrc_info` carry the surrounding kernel log. Read them FIRST after any
   unexplained reboot; `pstore` and `logcat -L` are empty here and prove nothing.
+- **A reboot record is not a panic record, and this firmware labels which is
+  which.** The DropBox entries it writes are suffixed: `SYSTEM_LAST_KMSG_*_KP`
+  for a kernel panic, `SYSTEM_LAST_KMSG_*_RP` for an ordinary reboot, each
+  carrying `Last boot reason:`. Read the suffix before attributing a cause.
+  `dumpsys rollback` holds CrashRecovery's own timeline, and a
+  `Reason: NATIVE_CRASH` there is PackageWatchdog's classification of a
+  boot-health failure, **not** a tombstone - checking for the tombstone is how
+  you tell them apart. Reading `ro.boot.bootreason` in the next boot answers
+  about the *last* reboot, which may be the manual one taken afterwards; the
+  DropBox entry is timestamped and does not have that problem.
+
+### 3.6.2 A userspace teardown's postcondition is the firmware's, not the UI's
+
+Learned on this device, for the second time in one family of bugs. "Apply
+Modules" restarted the framework correctly, the UI came back, and minutes later
+the firmware rebooted the device with
+`reboot,rollback_staged_install(bootchecker_timeout)`.
+
+Samsung's `/system/etc/init/bootchecker.rc` reacts to
+`init.svc.zygote=restarting` by zeroing `dev.platform_bootcomplete` and
+restarting its own boot watchdog, and the rule that restores that flag is keyed
+on `dev.bootcomplete=1`. So a restart the framework survives can still leave the
+firmware believing the boot never completed.
+
+**What is observed there, and what is not.** The two init rules are read out of
+the device's own `bootchecker.rc`. Whether anything sets `dev.bootcomplete=1`
+again after a soft reboot — and therefore whether that rule runs again — has
+never been read on this firmware. An earlier version of this section called the
+rule "edge triggered" and concluded it "could not re-fire while the property
+stayed 1". That is a claim about init's property-change dispatch that nobody
+verified: init queues a matching action when a property is *set*, and whether a
+value-preserving set re-queues it was never read out of the source. This is the
+fourth causal claim in this investigation to be stated ahead of its evidence, so
+it is now stated as the question it is.
+
+The durable rules:
+
+- **An operation that re-creates userspace is not finished when the UI returns.**
+  Its postcondition includes whatever boot-health handshake the firmware runs,
+  and on an OEM build that is not the same thing as `sys.boot_completed`.
+  Anything that gates on "the framework came back" is gating on the wrong fact.
+- **The observer has to be a process the teardown did not kill.** The one that
+  asked for it is killed by definition, so a pre-operation record it writes and a
+  post-operation record written by the *restarted* framework in the same boot are
+  two different writers, and the absence of the second half is itself the
+  observation. One of them cannot do this job.
 
 ### 3.7 Signals are never collapsed
 

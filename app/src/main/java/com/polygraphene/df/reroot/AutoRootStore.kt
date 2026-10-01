@@ -118,7 +118,22 @@ object AutoRootStore {
     private fun write(path: String, body: String): String? = try {
         val target = File(path)
         val folder = target.parentFile ?: throw IllegalStateException("$path has no parent")
-        val tmp = File(folder, target.name + ".tmp")
+        /*
+         * A UNIQUE staging name, not "<target>.tmp".
+         *
+         * The fixed name is safe only while exactly one thread ever writes a
+         * given record, and that stopped being true: the boot-health record is
+         * read-modify-written by a background observer and by the UI. Two
+         * writers sharing one temp file can interleave the write, the read-back
+         * and the rename, so the read-back can compare against the OTHER
+         * writer's bytes or the rename can fail outright. The sequence number
+         * removes the collision; the record-level lock in SoftRebootHealth
+         * removes the lost update, and both are needed - this one alone would
+         * still let the later writer overwrite the earlier one's result.
+         *
+         * EarlyBootProbeStore already did exactly this for the same reason.
+         */
+        val tmp = File(folder, target.name + ".tmp." + tempSequence.incrementAndGet())
         FileOutputStream(tmp).use { out ->
             out.write(body.toByteArray())
             out.flush()
@@ -141,6 +156,9 @@ object AutoRootStore {
         Log.e(TAG, "[DFR][AUTOROOT] cannot write $path", t)
         "${t.javaClass.simpleName}: ${t.message}"
     }
+
+    /** Distinct staging names, so two writers of one record cannot collide. */
+    private val tempSequence = java.util.concurrent.atomic.AtomicLong()
 
     /**
      * Durability of the rename itself. A directory cannot be opened through
@@ -299,6 +317,30 @@ object AutoRootStore {
     }
 
     fun softRebootTrace(): String? = read(SOFT_REBOOT_TRACE_PATH)
+
+    /**
+     * Samsung boot-health around a soft reboot: the two-half record whose pre
+     * part is written before the teardown and whose post part is written by the
+     * restarted framework in the same boot.
+     *
+     * Separate from both the lock and the trace, because it answers a third
+     * question. The lock says this boot's one attempt is spent; the trace says
+     * how far the transport got; this says what the FIRMWARE thought of the boot
+     * afterwards - which is the fact that turned a working soft reboot into a
+     * `bootchecker_timeout` rollback and a full reboot on 2026-10-01.
+     */
+    const val SOFT_REBOOT_HEALTH_PATH = "/data/system/dfreroot-softreboot-health"
+
+    fun softRebootHealth(): String? = read(SOFT_REBOOT_HEALTH_PATH)
+
+    /**
+     * Persist a boot-health record atomically and durably.
+     *
+     * Goes through the same [write] as every other record here: staged, read
+     * back, fsync'd, renamed, directory fsync'd. The pre half has to survive the
+     * teardown it precedes, which is exactly what an unsynced write does not.
+     */
+    fun writeSoftRebootHealth(body: String): String? = write(SOFT_REBOOT_HEALTH_PATH, body)
 
     /**
      * Claim/spend this boot's single soft-reboot attempt, exclusively.

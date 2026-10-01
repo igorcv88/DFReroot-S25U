@@ -11,6 +11,7 @@
     <string name="run_failed">❌ Failed</string>
     <string name="chip_ready">READY</string>
     <string name="chip_hooked">HOOKED</string>
+    <string name="chip_marker_unknown">MARKER?</string>
     <string name="terminal_title">System Terminal</string>
     <string name="terminal_hint">Enter command</string>
     <string name="terminal_send">Send</string>
@@ -29,7 +30,7 @@
     <string name="notif_root_failed_detail">boot %1$s · %2$s</string>
     <string name="notif_apply_modules">Apply Modules (Soft Reboot)</string>
     <string name="notif_soft_reboot_dispatched">Soft reboot dispatched</string>
-    <string name="notif_soft_reboot_dispatched_detail">KernelSU is re-running the module lifecycle. This app cannot observe the result: the restart tears down the process that would have watched it.</string>
+    <string name="notif_soft_reboot_dispatched_detail">KernelSU is re-running the module lifecycle. This app cannot observe the result directly: the restart tears down the process that would have watched it. A boot-health record was written before the handover and the restarted framework completes it, so the outcome can be read afterwards instead of guessed.</string>
     <string name="notif_soft_reboot_undetermined">Soft reboot undetermined</string>
     <string name="notif_soft_reboot_undetermined_detail">The root shell outlived its deadline, so whether KernelSU received the request is unknown. Root is unaffected. A full reboot re-applies modules through post-fs-data; this action will not run again in this boot.</string>
     <string name="notif_soft_reboot_refused">Soft reboot refused</string>
