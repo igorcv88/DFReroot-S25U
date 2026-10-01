@@ -1470,22 +1470,37 @@ coordinator semantics and no retry after native execution begins.
   `PostRootStatus`), and AGENTS.md §1 says such a device takes the unchanged
   upstream path. It requires all three OEM-only properties positively unset, so
   it cannot be reached on the target.
-- `DfrSoftRebootReceiver` takes **one** reading, gates on it and records that
-  same reading as the pre half; a failed write is a refusal, like the trace. It
-  then records `exec_outcome` on every path that returns with the process alive,
-  because the pre half alone proves only that the exec was *reached*.
+- `DfrSoftRebootReceiver` asks the **scope** question first — the profile's own
+  anchor rule, `model_ok || device_ok` — and a device that answers no gets no
+  property sweep, no gate, no record and no observer. In scope it takes **one**
+  reading, gates on it and records that same reading as the pre half; a failed
+  write is a refusal, like the trace. It then re-reads the state immediately
+  before the exec and refuses with `exec_outcome=REFUSED_HEALTH` if it no longer
+  permits one — the decision snapshot is seconds old by then, taken before the
+  staging, the root shell, two hashes and the claim. `exec_outcome` is recorded on
+  every path that returns with the process alive, because the pre half alone
+  proves only that the exec was *reached*.
 - `DfrBootReceiver` takes the first post sample on `BOOT_COMPLETED` only
   (`LOCKED_BOOT_COMPLETED` arrives before `sys.boot_completed` is 1, so a
   converged answer is impossible there) and hands the record to a bounded
   observer — 5 minutes at 15-second intervals, on its **own** detached daemon
-  thread, writing only when the answer moves or on the last sample. Not on the
-  receiver's shared single-thread worker: that executor also carries the
-  early-boot evidence, and a `goAsync()` pending result has a deadline in seconds.
-  The window closes on time, never on a verdict — **including a good one** — and
-  `post_converged_seen` / `post_crash_recovery_seen` are sticky so a convergence
-  followed by a rollback keeps both facts. `MainActivity` re-samples while the
-  window is open, which covers the case the in-process observer cannot: a system
-  process killed before the deadline leaves the record honestly unclosed.
+  thread. Not on the receiver's shared single-thread worker: that executor also
+  carries the early-boot evidence, and a `goAsync()` pending result has a deadline
+  in seconds. The window closes on time, never on a verdict — **including a good
+  one** — and its deadline is anchored in the record (`post_window_opened_ms`),
+  not in the observer's memory, so a `system_server` restart cannot start a second
+  five minutes and a dead observer cannot leave a window nobody can decide has
+  expired. A sample is persisted when any recorded **property** moves, not when
+  the verdict moves, because `dev.platform_bootcomplete` can go 0 → 1 while the
+  verdict stays `PENDING`; `post_platform_bootcomplete_seen` /
+  `post_dev_bootcomplete_seen` and `post_converged_seen` /
+  `post_crash_recovery_seen` are sticky, so an excursion that reverts keeps both
+  facts. `MainActivity` re-samples while the window is open and closes it once the
+  record's own deadline has passed, which covers the case the in-process observer
+  cannot: a system process killed before the deadline would otherwise leave the
+  record open for the rest of the boot. Every mutation of the record holds one
+  lock across its read-modify-write, and `AutoRootStore` stages each write under a
+  unique temporary name.
 - `MainActivity` now has three marker chips. `MARKER?` is the `EACCES` case that
   used to print `HOOKED` while the dialog refused with "cannot determine".
 
@@ -1515,9 +1530,13 @@ One boot, one tap, no new build needed afterwards if it passes:
    to re-sample while it is open), then read the record **as root**:
    `cat /data/system/dfreroot-softreboot-health`.
    Read `post_settled` FIRST: `post_settled=0` means the window is still open and
-   **nothing** in the record is a conclusion yet. Then read the pair
-   `post_converged_seen` / `post_crash_recovery_seen` before the latest verdict —
-   the sequence matters more than the last sample.
+   **nothing** in the record is a conclusion yet (if it is still 0 long after the
+   dispatch, open the app once — the UI closes a window whose
+   `post_window_opened_ms` deadline has passed, which is what the observer could
+   not do if its process was killed). Then read the four sticky flags before the
+   latest verdict: the sequence matters more than the last sample, and
+   `post_platform_bootcomplete_seen` / `post_dev_bootcomplete_seen` answer the
+   open question directly even in a run where no verdict ever changed.
    - `post_settled=1`, `post_converged_seen=1`, `post_crash_recovery_seen=0`,
      latest `post_verdict=BOOT_HEALTH_CONVERGED`, `post_dev_platform_bootcomplete=1`:
      the handshake re-converged **and stayed converged for the whole window**.
@@ -1532,8 +1551,10 @@ One boot, one tap, no new build needed afterwards if it passes:
      anyway, which says the rollback is not simply "the flag never came back".
      Capture `post_read_start_ms` against `pre_read_start_ms` for the timing.
    - `post_settled=1`, `post_verdict=BOOT_HEALTH_PENDING`,
-     `post_converged_seen=0`, `post_dev_platform_bootcomplete=0`: the flag never
-     came back within the window the incident took. The next design question is
+     `post_platform_bootcomplete_seen=0`: the flag was **never once observed at
+     1** across the whole window — the strongest form of this result, and distinct
+     from "it came back and went away again", which that same sticky would have
+     recorded as 1. The next design question is
      whether `dev.bootcomplete` is re-set by anything, and whether that rule runs
      again — read it on the device before designing against it. Making this app
      write a firmware property is a policy decision for the owner, made in the

@@ -1107,7 +1107,7 @@ daemon outside this app's control.
   record's `post_dev_platform_bootcomplete` and `post_dev_bootcomplete` are what
   answer the question above.
 
-Five properties of that record are not conveniences, and each closes a way the
+Eight properties of that record are not conveniences, and each closes a way the
 measurement would otherwise have lied:
 
 - **The observation window closes on TIME, never on a verdict.** This one was got
@@ -1121,6 +1121,34 @@ measurement would otherwise have lied:
   on evidence that does not refute it. The window is therefore 5 minutes — sized
   from the ~4 this incident took from restart to reboot — sampled every 15
   seconds, and `post_settled` means *the window closed*, not *an answer arrived*.
+- **The deadline is anchored in the record, not in the observer.** It began as a
+  local variable in the polling loop, which made `post_settled=0` mean two
+  different things — "still inside the five minutes" and "the observer died and
+  nobody can tell" — and let a `system_server` restart begin a second five
+  minutes on top of the first, in an experiment whose whole subject is userspace
+  being re-created. `post_window_opened_ms` is the first observation's own
+  monotonic reading; `boot_id` is unchanged across a framework restart and
+  `elapsedRealtime` stays comparable within one kernel boot, so any later reader
+  — a fresh observer, or the UI — reaches the same expiry answer the dead one
+  would have. A window with no anchor is closed at the moment it is opened,
+  because nothing could ever decide that it had expired.
+- **The observer persists an evidence change, not a verdict change.** It used to
+  write only when the verdict moved, which discards exactly the transition being
+  measured: `dev.platform_bootcomplete` can go 0 → 1 while the verdict stays
+  `PENDING` because some other element has not settled, and the surviving record
+  would then still read `platform=0` after the observer had seen 1. Persistence
+  is now driven by any recorded property changing, and
+  `post_platform_bootcomplete_seen` / `post_dev_bootcomplete_seen` are sticky, so
+  a 0 → 1 → 0 excursion of the two properties the experiment actually asks about
+  cannot vanish.
+- **One mutation authority.** The post half is read-modify-written by two
+  independent callers — the observer, and the UI when the operator opens the app.
+  Unsynchronised, they could both read one record, both format a successor, and
+  the later write would silently discard the earlier one's observations and
+  sticky flags, or re-open a window the other had just closed. All mutations now
+  hold one lock across the whole read-modify-write, and `AutoRootStore` stages
+  each write under a unique temporary name: a shared `<target>.tmp` lets two
+  writers corrupt each other's read-back before any rename happens.
 - **The history is kept, not overwritten.** `post_first_verdict` holds the first
   reading, `post_observations` counts the recorded ones, and
   `post_converged_seen` / `post_crash_recovery_seen` are **sticky**, so a
@@ -1130,28 +1158,53 @@ measurement would otherwise have lied:
   written *before* the exec, so on its own it proves the exec was *reached* —
   never that a soft reboot was dispatched. The refusal paths (a digest that
   changed under us, a lost transport, a shell past its deadline, a non-zero exit,
-  a refusal landing between the record and the call) all return with the process
-  alive and record which one happened. Only `NOT_REACHED` means "this process
-  recorded nothing after the exec", which is what a real teardown looks like.
-  There is deliberately no value for a successful dispatch: that is the one case
-  that never gets to write.
-- **`BOOT_HEALTH_NOT_APPLICABLE` keeps the gate off unrelated devices.** This is
-  an OEM mechanism, and Apply Modules is reachable off-target — a generic
-  device running the bundled daemon can satisfy `PostRootStatus`, and AGENTS.md
-  §1 says an unrelated device takes the unchanged upstream path. The verdict is
-  reached only when AOSP's own flag says the boot completed **and** all three
-  OEM-only properties (`dev.platform_bootcomplete`, `init.svc.bootchecker`,
-  `init.svc.bootchecker-bootc`) are positively unset. On the target all three
-  exist, so it is unreachable there; a partially present mechanism is `PENDING`
-  and an unreadable one is `UNKNOWN`, and both still refuse.
-- **A stored verdict is re-derived from the stored evidence.** The parser rebuilds
-  each half's snapshot from that half's own recorded properties and refuses
-  unless the recomputed verdict equals the stored one. Without it the file could
-  assert `pre_verdict=BOOT_HEALTH_CONVERGED` over
-  `pre_dev_platform_bootcomplete=0` and parse cleanly — a verdict with no
-  evidence behind it, which §2 says must refuse. Numeric fields carry the literal
-  `UNKNOWN` rather than `-1` (the lesson `EarlyBootProbePolicy` already records),
-  and a property sweep may not end before it began.
+  a refusal landing between the record and the call, and the boundary re-read
+  below) all return with the process alive and record which one happened. Only
+  `NOT_REACHED` means "this process recorded nothing after the exec" — and even
+  that is three readings, not one, since a late refusal whose own best-effort
+  write also failed leaves it. There is deliberately no value for a successful
+  dispatch: that is the one case that never gets to write.
+- **The gate is taken again at the boundary it guards.** The decision snapshot is
+  read before the staging, the root transport, the privileged shell, two
+  candidate hashes and the durable claim — easily seconds. A CrashRecovery that
+  starts in the middle of that would be invisible to the only gate that looks. So
+  the decision snapshot stays in the pre half, unchanged, because it is what
+  authorised the dispatch; and a fresh reading immediately before the exec
+  decides whether the exec still happens, refusing with its own outcome
+  (`REFUSED_HEALTH`). "It was never allowed" and "it was allowed and then was
+  not" send the next investigation to different places.
+- **Scope is decided by identity, before anything is read.** Apply Modules is
+  reachable off-target — a generic device running the bundled daemon can satisfy
+  `PostRootStatus`, and §1 says an unrelated device takes the unchanged upstream
+  path. The first fix for this inferred scope from the properties alone
+  (`BOOT_HEALTH_NOT_APPLICABLE` when AOSP's flag says the boot completed and all
+  three OEM-only properties are positively unset), which removed the obvious
+  regression but not the real one: a failed `SystemProperties` lookup still read
+  `UNKNOWN` and refused the dispatch, a ROM reusing one of those names still read
+  "partially present" and refused it, and the record and the 5-minute observer
+  ran either way — on a path that previously made none of those readings. Scope
+  is now the profile's own anchor rule (`gate_target`'s
+  `anchor_hit = model_ok || device_ok`), asked first: a device asserting neither
+  the pinned model nor the pinned codename gets no sweep, no gate, no record and
+  no observer. *Unreadable* identity counts as in scope, because "I could not
+  tell what device this is" must never be what disables a check, and the Kotlin
+  mirrors of the two anchors are drift-guarded against both profiles.
+  `NOT_APPLICABLE` remains for the residual case it is actually evidence for: an
+  anchor-asserting device whose firmware runs no such watchdog.
+- **A stored verdict is re-derived from the stored evidence, and so is the
+  history's arithmetic.** The parser rebuilds each half's snapshot from that
+  half's own recorded properties and refuses unless the recomputed verdict equals
+  the stored one. Without it the file could assert
+  `pre_verdict=BOOT_HEALTH_CONVERGED` over `pre_dev_platform_bootcomplete=0` and
+  parse cleanly — a verdict with no evidence behind it, which §2 says must refuse.
+  The same standard now covers the stored history: a sticky flag must agree with
+  the **first** verdict as well as the latest (a record claiming its first reading
+  was a convergence while claiming none was ever seen is refused), the property
+  stickies must agree with the latest sample, and with one observation recorded
+  "first" and "latest" are the same observation and may not disagree. Numeric
+  fields carry the literal `UNKNOWN` rather than `-1` (the lesson
+  `EarlyBootProbePolicy` already records), and a property sweep may not end before
+  it began.
 - **What the record does not claim.** The sweep is N sequential property reads,
   not one instant, so each half records `read_start_ms` *and* `read_end_ms` and a
   reader can discount a verdict stitched across a wide one. Process identity
@@ -1160,14 +1213,19 @@ measurement would otherwise have lied:
   `sys.init.updatable_crashing_process_name` and `dev.attempting_reboot` are
   recorded as **telemetry only** — `verdict()` never reads them, so an unreadable
   diagnostic cannot refuse a dispatch. And the record carries `schema_version`,
-  because it outlives the build that wrote it: an older format reads as
-  `OTHER_SCHEMA`, not as corruption.
+  because it outlives the build that wrote it: a record *declaring* another
+  version reads as `OTHER_SCHEMA`. A record with **no** version line does not —
+  that rule was wrong twice over, since this record shipped together with its
+  version line (so the "older format" it excused never existed) and a file
+  truncated at the front loses exactly that line, which turned unknown corruption
+  into the claim "intact, not corrupt".
 
 Every element of the verdict, every exec outcome, every way the post half may and
-may not be replaced, and every cross-field contradiction have host tests with a
-negative case (`tools/tests/SoftRebootHealthPolicyTest.java`, 96 checks), and the
-wiring that cannot be unit-tested here is guarded by
-`tools/profile_binding_audit.py`.
+may not be replaced, the window's expiry arithmetic and every cross-field
+contradiction have host tests with a negative case
+(`tools/tests/SoftRebootHealthPolicyTest.java`, 122 checks), and the wiring that
+cannot be unit-tested here is guarded by `tools/profile_binding_audit.py`, whose
+boot-health checks were each verified to fail when their property is removed.
 
 #### Two collateral defects found in the same cycle
 

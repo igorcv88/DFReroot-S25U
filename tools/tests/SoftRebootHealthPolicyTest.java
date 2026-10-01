@@ -220,7 +220,8 @@ public class SoftRebootHealthPolicyTest {
                 SoftRebootHealthPolicy.EXEC_TRANSPORT_LOST,
                 SoftRebootHealthPolicy.EXEC_UNDETERMINED,
                 SoftRebootHealthPolicy.EXEC_FAILED,
-                SoftRebootHealthPolicy.EXEC_RETURNED }) {
+                SoftRebootHealthPolicy.EXEC_RETURNED,
+                SoftRebootHealthPolicy.EXEC_REFUSED_HEALTH }) {
             String updated = SoftRebootHealthPolicy.formatExecOutcome(pre(), BOOT, outcome);
             Observation o = SoftRebootHealthPolicy.observe(updated, BOOT);
             check("exec outcome " + outcome + " is recorded without a post half",
@@ -256,19 +257,27 @@ public class SoftRebootHealthPolicyTest {
                 SoftRebootHealthPolicy.OBS_UNREADABLE.equals(
                         SoftRebootHealthPolicy.observe(
                                 AutoRootPolicy.RECORD_UNREADABLE, BOOT).state), null);
-        // A record the app version before this one wrote is intact, not corrupt.
-        check("a record with no schema line is OTHER_SCHEMA, not MALFORMED",
-                SoftRebootHealthPolicy.OBS_OTHER_SCHEMA.equals(
+        /*
+         * An unversioned record is NOT "the format before versioning": this
+         * record shipped with its version line, so no build ever wrote one
+         * without it - and a schema-3 file truncated at the front loses exactly
+         * that line. Calling it intact would be unevidenced reassurance.
+         */
+        check("a record with no schema line is MALFORMED, not OTHER_SCHEMA",
+                SoftRebootHealthPolicy.OBS_MALFORMED.equals(
                         SoftRebootHealthPolicy.observe(
-                                pre().replace("schema_version=2\n", ""), BOOT).state), null);
+                                pre().replace("schema_version=3\n", ""), BOOT).state), null);
+        check("junk with no schema line is MALFORMED too",
+                SoftRebootHealthPolicy.OBS_MALFORMED.equals(
+                        SoftRebootHealthPolicy.observe("garbage=1\n", BOOT).state), null);
         check("a record from a future schema is OTHER_SCHEMA",
                 SoftRebootHealthPolicy.OBS_OTHER_SCHEMA.equals(
                         SoftRebootHealthPolicy.observe(
-                                pre().replace("schema_version=2", "schema_version=99"),
+                                pre().replace("schema_version=3", "schema_version=99"),
                                 BOOT).state), null);
         check("a truncated record of this schema is still MALFORMED",
                 SoftRebootHealthPolicy.OBS_MALFORMED.equals(
-                        SoftRebootHealthPolicy.observe("schema_version=2\nphase=PRE_EXEC\n",
+                        SoftRebootHealthPolicy.observe("schema_version=3\nphase=PRE_EXEC\n",
                                 BOOT).state), null);
 
         // --- a stored verdict must be re-derivable from the stored evidence --
@@ -441,7 +450,7 @@ public class SoftRebootHealthPolicyTest {
                 SoftRebootHealthPolicy.formatPostExec(pre(), "", healthy(), false) == null,
                 null);
         check("no post half over a malformed record",
-                SoftRebootHealthPolicy.formatPostExec("schema_version=2\nboot_id=" + BOOT + "\n",
+                SoftRebootHealthPolicy.formatPostExec("schema_version=3\nboot_id=" + BOOT + "\n",
                         BOOT, healthy(), false) == null, null);
 
         // --- the parser is strict in both directions -------------------------
@@ -457,6 +466,117 @@ public class SoftRebootHealthPolicyTest {
         malformed("an empty boot_id refuses",
                 pre().replace("boot_id=" + BOOT, "boot_id="));
         malformed("a line with no value refuses", pre() + "pre_note\n");
+
+        // --- the window's deadline is a property of the RECORD ---------------
+        // It used to be a local variable in the observer's loop, which made
+        // post_settled=0 mean both "still inside the window" and "the observer
+        // died and nobody can tell", and let a framework restart start a second
+        // five minutes on top of the first.
+        check("the window anchor is persisted",
+                first.contains("post_window_opened_ms=95000"), null);
+        check("the anchor survives a re-sample unchanged",
+                second.contains("post_window_opened_ms=95000"), null);
+        check("a window is not expired before its deadline",
+                !SoftRebootHealthPolicy.windowExpired(firstObs, 95_000L + 299_999L,
+                        300_000L), null);
+        check("a window IS expired at its deadline",
+                SoftRebootHealthPolicy.windowExpired(firstObs, 95_000L + 300_000L,
+                        300_000L), null);
+        check("a closed window is never 'expired' again",
+                !SoftRebootHealthPolicy.windowExpired(
+                        SoftRebootHealthPolicy.observe(third, BOOT), 10_000_000L, 300_000L),
+                null);
+        check("expiry is never claimed without a clock",
+                !SoftRebootHealthPolicy.windowExpired(firstObs, -1L, 300_000L), null);
+        check("expiry is never claimed on a record with no post half",
+                !SoftRebootHealthPolicy.windowExpired(preOnly, 10_000_000L, 300_000L), null);
+        // An unanchored window cannot be timed, so it must not be left open.
+        Snapshot noClock = healthy();
+        noClock.readStartMs = -1L;
+        noClock.readEndMs = -1L;
+        Observation anchorless = SoftRebootHealthPolicy.observe(
+                SoftRebootHealthPolicy.formatPostExec(pre(), BOOT, noClock, false), BOOT);
+        check("a window with no anchor is closed at the moment it opens",
+                anchorless.postWindowClosed && anchorless.postWindowOpenedMs < 0,
+                Long.toString(anchorless.postWindowOpenedMs));
+        malformed("a non-numeric window anchor refuses",
+                first.replace("post_window_opened_ms=95000",
+                        "post_window_opened_ms=soon"));
+
+        // --- the observer must persist an EVIDENCE change, not a verdict one --
+        // dev.platform_bootcomplete can go 0 -> 1 while the verdict stays
+        // PENDING, and that transition is the experiment's whole question.
+        check("an identical sample adds nothing",
+                SoftRebootHealthPolicy.postEvidenceUnchanged(first, transientPending), null);
+        Snapshot platformBack = healthy();
+        platformBack.put(SoftRebootHealthPolicy.PROP_INIT_SVC_BOOTCHECKER_BOOTC, "running");
+        platformBack.readStartMs = 100_000L;
+        platformBack.readEndMs = 100_020L;
+        platformBack.pid = 7711L;
+        platformBack.procStarttime = 94_000L;
+        check("the same verdict with a moved property is NOT unchanged",
+                SoftRebootHealthPolicy.PENDING.equals(
+                        SoftRebootHealthPolicy.verdict(platformBack))
+                        && !SoftRebootHealthPolicy.postEvidenceUnchanged(first, platformBack),
+                SoftRebootHealthPolicy.verdict(platformBack));
+        // ... and once persisted, the excursion survives even if it reverts.
+        String moved = SoftRebootHealthPolicy.formatPostExec(
+                first, BOOT, platformBack, false);
+        String reverted = SoftRebootHealthPolicy.formatPostExec(
+                moved, BOOT, transientPending, true);
+        Observation revertedObs = SoftRebootHealthPolicy.observe(reverted, BOOT);
+        check("a 0 -> 1 -> 0 excursion of the platform flag is not lost",
+                revertedObs.platformBootcompleteSeen
+                        && "0".equals("0")
+                        && SoftRebootHealthPolicy.PENDING.equals(revertedObs.postVerdict),
+                "platform_seen=" + revertedObs.platformBootcompleteSeen);
+        check("the dev.bootcomplete sticky tracks its own property",
+                revertedObs.devBootcompleteSeen, null);
+        check("a post half that never saw the platform flag at 1 says so",
+                !SoftRebootHealthPolicy.observe(
+                        SoftRebootHealthPolicy.formatPostExec(
+                                pre(), BOOT, transientPending, false),
+                        BOOT).platformBootcompleteSeen, null);
+        check("no evidence comparison against a record with no post half",
+                !SoftRebootHealthPolicy.postEvidenceUnchanged(pre(), healthy()), null);
+        check("no evidence comparison against no record at all",
+                !SoftRebootHealthPolicy.postEvidenceUnchanged(null, healthy()), null);
+        check("no evidence comparison against no sample",
+                !SoftRebootHealthPolicy.postEvidenceUnchanged(first, null), null);
+        malformed("a platform sticky contradicting the latest sample refuses",
+                second.replace("post_platform_bootcomplete_seen=1",
+                        "post_platform_bootcomplete_seen=0"));
+        malformed("a dev.bootcomplete sticky contradicting the latest sample refuses",
+                first.replace("post_dev_bootcomplete_seen=1",
+                        "post_dev_bootcomplete_seen=0"));
+
+        // --- the history's arithmetic ----------------------------------------
+        malformed("a first verdict of CONVERGED with converged_seen=0 refuses",
+                first.replace("post_first_verdict=" + SoftRebootHealthPolicy.PENDING,
+                              "post_first_verdict=" + SoftRebootHealthPolicy.CONVERGED));
+        malformed("a first verdict of CRASH_RECOVERY with crash_seen=0 refuses",
+                first.replace("post_first_verdict=" + SoftRebootHealthPolicy.PENDING,
+                              "post_first_verdict=" + SoftRebootHealthPolicy.CRASH_RECOVERY));
+        malformed("one observation cannot have first and latest disagree",
+                second.replace("post_observations=2", "post_observations=1"));
+        check("one observation with first == latest parses",
+                SoftRebootHealthPolicy.OBS_POST_EXEC.equals(firstObs.state)
+                        && firstObs.postObservations == 1
+                        && firstObs.postFirstVerdict.equals(firstObs.postVerdict), null);
+
+        // --- one definition of what may dispatch ------------------------------
+        check("only CONVERGED and NOT_APPLICABLE permit a dispatch",
+                SoftRebootHealthPolicy.permitsDispatch(SoftRebootHealthPolicy.CONVERGED)
+                        && SoftRebootHealthPolicy.permitsDispatch(
+                                SoftRebootHealthPolicy.NOT_APPLICABLE)
+                        && !SoftRebootHealthPolicy.permitsDispatch(
+                                SoftRebootHealthPolicy.PENDING)
+                        && !SoftRebootHealthPolicy.permitsDispatch(
+                                SoftRebootHealthPolicy.CRASH_RECOVERY)
+                        && !SoftRebootHealthPolicy.permitsDispatch(
+                                SoftRebootHealthPolicy.HEALTH_UNKNOWN)
+                        && !SoftRebootHealthPolicy.permitsDispatch(null)
+                        && !SoftRebootHealthPolicy.permitsDispatch("BOOT_HEALTH_FINE"), null);
 
         System.out.println("");
         System.out.println("SoftRebootHealthPolicyTest: " + pass + "/" + (pass + fail)

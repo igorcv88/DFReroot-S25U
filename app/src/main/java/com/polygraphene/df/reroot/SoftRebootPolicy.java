@@ -259,8 +259,7 @@ public final class SoftRebootPolicy {
          * target - a partially present mechanism is PENDING, and an unreadable
          * one is UNKNOWN. Both of those still refuse.
          */
-        if (!SoftRebootHealthPolicy.CONVERGED.equals(in.bootHealthVerdict)
-                && !SoftRebootHealthPolicy.NOT_APPLICABLE.equals(in.bootHealthVerdict)) {
+        if (!SoftRebootHealthPolicy.permitsDispatch(in.bootHealthVerdict)) {
             return refuse("the firmware's boot-health handshake is "
                     + (in.bootHealthVerdict == null
                             ? SoftRebootHealthPolicy.HEALTH_UNKNOWN : in.bootHealthVerdict)

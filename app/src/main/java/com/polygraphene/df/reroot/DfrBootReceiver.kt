@@ -193,6 +193,12 @@ class DfrBootReceiver : BroadcastReceiver() {
      */
     private fun completeSoftRebootHealth() {
         try {
+            /*
+             * Scoped the same way the dispatch is: a device that does not assert
+             * this target's model or codename never writes this record, so it has
+             * nothing to complete and takes the unchanged upstream path.
+             */
+            if (!SoftRebootHealth.targetAnchorAsserted()) return
             val bootId = DfrRootCoordinator.readBootId()
             val outcome = SoftRebootHealth.completePostExec(bootId)
             Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] $outcome boot_id=$bootId")

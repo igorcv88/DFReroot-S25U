@@ -1,5 +1,6 @@
 package com.polygraphene.df.reroot
 
+import android.os.Build
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
@@ -14,8 +15,24 @@ import java.util.concurrent.atomic.AtomicBoolean
  * policy, which has no Android imports and therefore has host tests with a
  * negative case per element. What is left here cannot be unit-tested in this
  * environment - reflection into `android.os.SystemProperties`, a monotonic
- * clock, `/proc/self/stat`, a thread - so it is guarded statically by
+ * clock, `/proc/self/stat`, `Build`, a thread - so it is guarded statically by
  * `tools/profile_binding_audit.py` instead (AGENTS.md section 5).
+ *
+ * ## One writer at a time, enforced here
+ *
+ * The post half is read-modify-written by two independent callers: the settle
+ * observer on its own thread, and the UI when the operator opens the app. With
+ * no serialisation they could both read the same record, both format a
+ * successor from it, and the later write would silently discard the earlier
+ * one - losing observations, losing sticky flags, and able to re-open a window
+ * the other had just closed. [recordLock] is the single mutation authority for
+ * this record; every function below that writes it holds the lock across its
+ * whole read-modify-write, not just across the write.
+ *
+ * That is one of two layers and neither is sufficient alone: `AutoRootStore`
+ * also stages each write under a unique temporary name, because a shared
+ * `<target>.tmp` lets two writers corrupt each other's read-back before any
+ * rename happens.
  *
  * ## Why the record is completed by a different process than the one that starts it
  *
@@ -28,21 +45,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  * only one that could exist: ksud's own `soft_reboot()` daemonises into PID 1's
  * mount namespace BEFORE `stop` and survives the teardown by construction, so a
  * paired-module-side observer is architecturally possible and simply is not what
- * this build uses. Earlier wording here called the restarted framework "the only
- * observer that exists", which overstated an implementation choice as a
- * constraint.
+ * this build uses.
  *
- * The absence of the post half is still evidence either way, which is why the two
- * halves are one file.
+ * ## Why the observation runs to a durable deadline
  *
- * ## Why the observation runs to a deadline and not to an answer
- *
- * `BOOT_COMPLETED` is the first moment a converged answer is POSSIBLE, and no
- * single sample after it is conclusive in EITHER direction. A first PENDING may
- * be the init trigger and the `bootchecker-bootc` oneshot still in flight; a
- * first CONVERGED may be a device that reboots two minutes later, which is
- * exactly what the incident did. So the window closes on time, never on a
- * verdict, and the sticky seen-flags preserve the sequence.
+ * No single sample after the restart is conclusive in EITHER direction: a first
+ * PENDING may be the init trigger still in flight, and a first CONVERGED may be
+ * a device that reboots two minutes later, which is exactly what the incident
+ * did. So the window closes on time - and the time is anchored IN THE RECORD,
+ * not in the observer's memory, because the thing being investigated is
+ * userspace being re-created. An observer that dies must not let a successor
+ * start a second five minutes, and must not leave a window nobody can ever
+ * decide has expired.
  */
 object SoftRebootHealth {
 
@@ -60,8 +74,54 @@ object SoftRebootHealth {
     const val SETTLE_DEADLINE_MS = 300_000L
     const val SETTLE_INTERVAL_MS = 15_000L
 
+    /**
+     * The pinned identity anchors, mirrored from `target_profile.c`.
+     *
+     * AGENTS.md section 3.1 defines the scope test and `gate_target()` already
+     * implements it natively as `anchor_hit = model_ok || device_ok`: a device
+     * asserting either of these is claiming to be this target. Drift between
+     * these two copies and the two profiles is guarded by
+     * `tools/profile_binding_audit.py`.
+     */
+    const val TARGET_MODEL = "SM-S938B"
+    const val TARGET_DEVICE = "pa3q"
+
     /** One settle observer per process. A second would race the first into the record. */
     private val settling = AtomicBoolean(false)
+
+    /**
+     * The single mutation authority for the boot-health record.
+     *
+     * Held across read-modify-write, never just across the write: the hazard is
+     * two passes over one record, not two passes over one file.
+     */
+    private val recordLock = Any()
+
+    /**
+     * Does this device assert the pinned model or codename?
+     *
+     * The scope test, and the reason it exists: the boot-health handshake is an
+     * OEM mechanism, so on an unrelated device there is nothing here to measure
+     * and AGENTS.md section 1 says such a device takes the unchanged upstream
+     * path. Inferring that from the properties alone was not enough - a failed
+     * `SystemProperties` lookup would read UNKNOWN and refuse the dispatch, and
+     * a ROM reusing one of these names would read "partially present" and refuse
+     * it too, on a path that previously made none of these readings at all.
+     *
+     * So the identity question is asked FIRST, and a device that answers no is
+     * left entirely alone: no property sweep, no gate, no record, no observer.
+     *
+     * Unreadable identity answers **true**, which is the gating side. "I could
+     * not tell what device this is" must never be the answer that disables a
+     * safety check (AGENTS.md section 2).
+     */
+    fun targetAnchorAsserted(): Boolean = try {
+        Build.MODEL == TARGET_MODEL || Build.DEVICE == TARGET_DEVICE
+    } catch (t: Throwable) {
+        Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] cannot read Build identity: $t;" +
+            " treating this device as in scope")
+        true
+    }
 
     /**
      * Read the properties, or produce a snapshot in which every one of them is
@@ -121,6 +181,9 @@ object SoftRebootHealth {
         return snapshot
     }
 
+    /** The live verdict, for the re-read taken at the dispatch boundary. */
+    fun liveVerdict(): String = SoftRebootHealthPolicy.verdict(snapshot())
+
     private fun monotonic(): Long = try {
         SystemClock.elapsedRealtime()
     } catch (t: Throwable) {
@@ -158,50 +221,51 @@ object SoftRebootHealth {
      * it precedes has already taken this device down once with nothing to read
      * afterwards.
      */
-    fun recordPreExec(bootId: String, snapshot: SoftRebootHealthPolicy.Snapshot): String? {
-        val failure = AutoRootStore.writeSoftRebootHealth(
-            SoftRebootHealthPolicy.formatPreExec(bootId, snapshot)
-        )
-        if (failure != null) {
-            Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] PRE_EXEC=FAIL $failure")
-        } else {
-            Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] PRE_EXEC=PASS boot_id=$bootId" +
-                " verdict=${SoftRebootHealthPolicy.verdict(snapshot)}")
+    fun recordPreExec(bootId: String, snapshot: SoftRebootHealthPolicy.Snapshot): String? =
+        synchronized(recordLock) {
+            val failure = AutoRootStore.writeSoftRebootHealth(
+                SoftRebootHealthPolicy.formatPreExec(bootId, snapshot)
+            )
+            if (failure != null) {
+                Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] PRE_EXEC=FAIL $failure")
+            } else {
+                Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] PRE_EXEC=PASS boot_id=$bootId" +
+                    " verdict=${SoftRebootHealthPolicy.verdict(snapshot)}")
+            }
+            failure
         }
-        return failure
-    }
 
     /**
      * Record what this process saw of the exec.
      *
      * The pre half is written BEFORE the exec, so on its own it proves the exec
      * was reached - never that a soft reboot was dispatched. Every path that
-     * returns with this process still alive (a digest that changed under us, a
-     * lost transport, a shell past its deadline, a non-zero exit, a refusal
-     * between the record and the call) therefore says so here, or a record that
-     * executed nothing would later read as a framework that never came back.
+     * returns with this process still alive therefore says so here, or a record
+     * that executed nothing would later read as a framework that never came back.
      *
      * Best-effort by design, and the only write in this file that is: the step it
      * describes has already happened, so refusing would not unhappen it, and the
      * caller is in the middle of reporting a refusal to the operator.
      */
     fun recordExecOutcome(bootId: String, outcome: String) {
-        val stored = AutoRootStore.softRebootHealth()
-        if (stored == null || stored == AutoRootPolicy.RECORD_UNREADABLE) {
-            Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] EXEC_OUTCOME=SKIP no readable record")
-            return
-        }
-        val updated = SoftRebootHealthPolicy.formatExecOutcome(stored, bootId, outcome)
-        if (updated == null) {
-            Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] EXEC_OUTCOME=SKIP record does not accept" +
-                " $outcome")
-            return
-        }
-        val failure = AutoRootStore.writeSoftRebootHealth(updated)
-        if (failure != null) {
-            Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] EXEC_OUTCOME=FAIL $outcome: $failure")
-        } else {
-            Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] EXEC_OUTCOME=$outcome boot_id=$bootId")
+        synchronized(recordLock) {
+            val stored = AutoRootStore.softRebootHealth()
+            if (stored == null || stored == AutoRootPolicy.RECORD_UNREADABLE) {
+                Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] EXEC_OUTCOME=SKIP no readable record")
+                return
+            }
+            val updated = SoftRebootHealthPolicy.formatExecOutcome(stored, bootId, outcome)
+            if (updated == null) {
+                Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] EXEC_OUTCOME=SKIP record does not" +
+                    " accept $outcome")
+                return
+            }
+            val failure = AutoRootStore.writeSoftRebootHealth(updated)
+            if (failure != null) {
+                Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] EXEC_OUTCOME=FAIL $outcome: $failure")
+            } else {
+                Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] EXEC_OUTCOME=$outcome boot_id=$bootId")
+            }
         }
     }
 
@@ -217,13 +281,23 @@ object SoftRebootHealth {
      * "another boot's record", "window already closed" and "an observation was
      * written" are four facts.
      */
-    fun completePostExec(bootId: String, windowClosed: Boolean = false): String {
-        if (bootId.isEmpty()) return "POST_EXEC=SKIP boot_id unavailable"
-        val stored = AutoRootStore.softRebootHealth()
-            ?: return "POST_EXEC=SKIP no pre-exec record"
-        if (stored == AutoRootPolicy.RECORD_UNREADABLE) {
-            return "POST_EXEC=SKIP the record exists but could not be read"
+    fun completePostExec(bootId: String, windowClosed: Boolean = false): String =
+        synchronized(recordLock) {
+            if (bootId.isEmpty()) {
+                "POST_EXEC=SKIP boot_id unavailable"
+            } else {
+                val stored = AutoRootStore.softRebootHealth()
+                if (stored == null) {
+                    "POST_EXEC=SKIP no pre-exec record"
+                } else if (stored == AutoRootPolicy.RECORD_UNREADABLE) {
+                    "POST_EXEC=SKIP the record exists but could not be read"
+                } else {
+                    writePostLocked(stored, bootId, windowClosed)
+                }
+            }
         }
+
+    private fun writePostLocked(stored: String, bootId: String, windowClosed: Boolean): String {
         val merged = SoftRebootHealthPolicy.formatPostExec(
             stored, bootId, snapshot(), windowClosed
         ) ?: return "POST_EXEC=SKIP no record for this boot with an open window"
@@ -235,27 +309,39 @@ object SoftRebootHealth {
             " window_closed=${if (o.postWindowClosed) 1 else 0}" +
             " converged_seen=${if (o.convergedSeen) 1 else 0}" +
             " crash_seen=${if (o.crashRecoverySeen) 1 else 0}" +
+            " platform_seen=${if (o.platformBootcompleteSeen) 1 else 0}" +
+            " dev_bootcomplete_seen=${if (o.devBootcompleteSeen) 1 else 0}" +
             " process=${o.processIdentity} read_span_ms=${o.postReadSpanMs}"
     }
 
     /**
-     * Take one more post observation if the window is still open.
+     * Take one more post observation, and close the window if its deadline has
+     * passed.
      *
-     * Called from the UI, where it costs nothing on the ordinary path and covers
-     * the case the in-process observer cannot: if the system process was killed
-     * between the restart and the deadline, the observer died with it and the
-     * record is left honestly unclosed. It cannot reopen a closed window.
+     * Called from the UI. It covers the case the in-process observer cannot: if
+     * the system process was killed between the restart and the deadline, the
+     * observer died with it, and without this the record would stay `window
+     * open` for the rest of the boot - a state a reader could never distinguish
+     * from "still inside the five minutes". The expiry is decided from the
+     * record's own durable anchor, so this reaches the same answer the dead
+     * observer would have.
      */
     fun resample(bootId: String) {
-        val o = observe(bootId)
-        if (o.state != SoftRebootHealthPolicy.OBS_POST_EXEC) return
-        if (o.postWindowClosed) return
-        Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] ${completePostExec(bootId)} (resample)")
+        synchronized(recordLock) {
+            val o = observe(bootId)
+            if (o.state != SoftRebootHealthPolicy.OBS_POST_EXEC) return
+            if (o.postWindowClosed) return
+            val expired = SoftRebootHealthPolicy.windowExpired(
+                o, monotonic(), SETTLE_DEADLINE_MS
+            )
+            Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] ${completePostExec(bootId, expired)}" +
+                " (resample, expired=${if (expired) 1 else 0})")
+        }
     }
 
     /**
-     * Re-read the post half until [SETTLE_DEADLINE_MS] passes, then close the
-     * window.
+     * Re-read the post half until the record's own deadline passes, then close
+     * the window.
      *
      * A detached daemon thread, started at most once per process and only when a
      * record for this boot has an open window. **Deliberately NOT the
@@ -275,37 +361,33 @@ object SoftRebootHealth {
             Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] SETTLE=SKIP an observer is already running")
             return
         }
-        val thread = Thread({
-            try {
-                settleLoop(bootId)
-            } catch (t: Throwable) {
-                Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] SETTLE=FAIL $t", t)
-            } finally {
-                settling.set(false)
-            }
-        }, "dfr-softreboot-health")
-        thread.isDaemon = true
-        thread.start()
+        /*
+         * The flag is released by the worker's `finally` - which never runs if
+         * `start()` itself throws. Without this catch a single failed thread
+         * creation would leave `settling` true for the life of the process and
+         * every later attempt would report "an observer is already running",
+         * which is the instrumentation getting permanently stuck on its own
+         * guard.
+         */
+        try {
+            val thread = Thread({
+                try {
+                    settleLoop(bootId)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] SETTLE=FAIL $t", t)
+                } finally {
+                    settling.set(false)
+                }
+            }, "dfr-softreboot-health")
+            thread.isDaemon = true
+            thread.start()
+        } catch (t: Throwable) {
+            settling.set(false)
+            Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] SETTLE=FAIL cannot start observer: $t", t)
+        }
     }
 
     private fun settleLoop(bootId: String) {
-        val startedAt = monotonic()
-        /*
-         * No clock, no window. Without a monotonic reading there is no way to
-         * know when five minutes have passed, and a loop that cannot reach its
-         * deadline would re-sample until the process dies - a daemon thread
-         * running forever inside system_server, which is a worse outcome than
-         * the missing observation (AGENTS.md 3.6.1: a watcher's worst case must
-         * be that it watched nothing). So it takes one sample, closes the window
-         * and stops.
-         */
-        if (startedAt < 0) {
-            Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] SETTLE=ABORT no monotonic clock;" +
-                " closing the window on one sample rather than polling forever")
-            Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] ${completePostExec(bootId, true)}")
-            return
-        }
-        val deadlineAt = startedAt + SETTLE_DEADLINE_MS
         while (true) {
             Thread.sleep(SETTLE_INTERVAL_MS)
             val before = observe(bootId)
@@ -317,44 +399,45 @@ object SoftRebootHealth {
                 Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] SETTLE=STOP window already closed")
                 return
             }
-            // A clock that fails mid-window closes it, for the reason above.
-            val now = monotonic()
-            val last = now < 0 || now >= deadlineAt
-            val sampled = snapshot()
-            val verdict = SoftRebootHealthPolicy.verdict(sampled)
             /*
-             * Write when the answer moved, or on the last sample - never on every
-             * tick, because a record re-written unchanged every fifteen seconds is
-             * twenty fsyncs to say nothing and the count would then measure the
-             * observer rather than the boot.
-             *
-             * A CONVERGED reading does NOT end the loop. That is the whole
-             * correction: the device that produced this investigation had a
-             * working, converged-looking userspace for minutes before CrashRecovery
-             * rolled it back, so stopping at the first good answer would report the
-             * hypothesis refuted on evidence that does not refute it.
+             * The deadline comes from the RECORD, not from a local start time.
+             * A local one made `post_settled=0` mean two different things - still
+             * inside the window, or the observer died and nobody can tell - and
+             * let a framework restart begin a second five minutes on top of the
+             * first. An anchorless record is closed by formatPostExec at the
+             * moment it is opened, so a window that is still open here always has
+             * one.
              */
-            if (!last && verdict == before.postVerdict) continue
-            val merged = SoftRebootHealthPolicy.formatPostExec(
-                AutoRootStore.softRebootHealth(), bootId, sampled, last
+            val now = monotonic()
+            val last = now < 0 || SoftRebootHealthPolicy.windowExpired(
+                before, now, SETTLE_DEADLINE_MS
             )
-            if (merged == null) {
-                Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] SETTLE=STOP record no longer accepts" +
-                    " an observation")
-                return
+            val sampled = snapshot()
+            /*
+             * Persist when the EVIDENCE moved, not when the verdict moved.
+             *
+             * The verdict is a summary, and the question this experiment asks is
+             * not a summary: `dev.platform_bootcomplete` can go 0 -> 1 while the
+             * verdict stays PENDING because some other element has not settled,
+             * and an observer that only wrote on verdict changes would discard
+             * exactly the transition it was watching for - and the surviving
+             * record would still read `platform=0` after the observer had seen 1.
+             */
+            val unchanged = SoftRebootHealthPolicy.postEvidenceUnchanged(
+                AutoRootStore.softRebootHealth(), sampled
+            )
+            if (!last && unchanged) continue
+            val outcome = synchronized(recordLock) {
+                val stored = AutoRootStore.softRebootHealth()
+                if (stored == null || stored == AutoRootPolicy.RECORD_UNREADABLE) {
+                    "POST_EXEC=SKIP the record is no longer readable"
+                } else {
+                    writePostLocked(stored, bootId, last)
+                }
             }
-            val failure = AutoRootStore.writeSoftRebootHealth(merged)
-            if (failure != null) {
-                Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] SETTLE=FAIL $failure")
-                return
-            }
-            val o = SoftRebootHealthPolicy.observe(merged, bootId)
-            Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] SETTLE post=${o.postVerdict}" +
-                " observations=${o.postObservations}" +
-                " converged_seen=${if (o.convergedSeen) 1 else 0}" +
-                " crash_seen=${if (o.crashRecoverySeen) 1 else 0}" +
-                " window_closed=${if (o.postWindowClosed) 1 else 0}")
-            if (o.postWindowClosed) return
+            Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] SETTLE $outcome")
+            if (!outcome.startsWith("POST_EXEC=PASS")) return
+            if (observe(bootId).postWindowClosed) return
         }
     }
 
@@ -367,10 +450,7 @@ object SoftRebootHealth {
      *
      * The reason this is not a chip or a colour: most of these states mean
      * "nothing to report" and two are the open question, so a colour would
-     * collapse them. In particular the pre-exec-only case says what it can prove
-     * and no more - the pre half is written BEFORE the exec, so on its own it
-     * proves the exec was reached, and `exec_outcome` is what says whether
-     * anything was actually handed over.
+     * collapse them.
      */
     fun report(bootId: String): String {
         val o = observe(bootId)
@@ -380,10 +460,11 @@ object SoftRebootHealth {
             SoftRebootHealthPolicy.OBS_UNREADABLE ->
                 "[x] SOFT_REBOOT_HEALTH=UNREADABLE the record exists and could not be read\n"
             SoftRebootHealthPolicy.OBS_MALFORMED ->
-                "[x] SOFT_REBOOT_HEALTH=MALFORMED the record is internally inconsistent\n"
+                "[x] SOFT_REBOOT_HEALTH=MALFORMED the record is internally inconsistent," +
+                    " truncated, or carries no format version\n"
             SoftRebootHealthPolicy.OBS_OTHER_SCHEMA ->
-                "[*] SOFT_REBOOT_HEALTH=OTHER_SCHEMA the record was written by a build" +
-                    " using a different format; it is intact, not corrupt\n"
+                "[*] SOFT_REBOOT_HEALTH=OTHER_SCHEMA the record declares a format version" +
+                    " this build does not write; nothing is claimed about its contents\n"
             SoftRebootHealthPolicy.OBS_STALE_BOOT ->
                 "[*] SOFT_REBOOT_HEALTH=STALE_BOOT the last record is from an earlier boot" +
                     " (exec=${o.execOutcome} pre=${o.preVerdict} post=${o.postVerdict})\n"
@@ -393,19 +474,49 @@ object SoftRebootHealth {
         }
     }
 
+    /**
+     * The pre-exec-only states, kept as distinct as the policy's own values.
+     *
+     * An earlier version grouped everything but the first two into "nothing was
+     * handed over". That is a claim the policy explicitly refuses to make for
+     * two of them: on a TIMEOUT nobody knows whether ksud received the command,
+     * and on RETURNED the exit status is ambiguous by construction, since
+     * `soft_reboot()` exits 0 both when it daemonises and when it skips the
+     * operation on a UAPI mismatch. The UI does not get to be more certain than
+     * the record.
+     */
     private fun preExecLine(o: SoftRebootHealthPolicy.Observation): String = when (o.execOutcome) {
         SoftRebootHealthPolicy.EXEC_NOT_REACHED ->
-            "[x] SOFT_REBOOT_HEALTH=EXEC_ENTERED this boot reached the exec" +
-                " (pre=${o.preVerdict}) and recorded nothing after it: either the" +
-                " framework did not come back far enough to report, or the outcome" +
-                " write was lost. The boot's one dispatch claim is spent either way\n"
+            /*
+             * Three readings, not one: the exec was entered and the teardown took
+             * this process; the exec was entered and the outcome write was lost;
+             * or a refusal landed after the pre half and its own best-effort
+             * record failed too. The pre half cannot tell them apart.
+             */
+            "[x] SOFT_REBOOT_HEALTH=NO_OUTCOME_RECORDED this boot wrote the pre-exec half" +
+                " (pre=${o.preVerdict}) and nothing after it. Either the exec was reached" +
+                " and this process did not survive to report, or a later refusal lost its" +
+                " own record. The boot's one dispatch claim is spent either way\n"
         SoftRebootHealthPolicy.EXEC_NOT_ATTEMPTED ->
             "[*] SOFT_REBOOT_HEALTH=NOT_ATTEMPTED a refusal landed before the exec;" +
                 " nothing was executed, and the boot's one dispatch claim is spent" +
                 " (pre=${o.preVerdict})\n"
+        SoftRebootHealthPolicy.EXEC_REFUSED_HEALTH ->
+            "[*] SOFT_REBOOT_HEALTH=REFUSED_AT_BOUNDARY the decision snapshot allowed the" +
+                " dispatch (pre=${o.preVerdict}) and the re-read taken immediately before" +
+                " the exec did not; nothing was executed and the claim is spent\n"
+        SoftRebootHealthPolicy.EXEC_UNDETERMINED ->
+            "[x] SOFT_REBOOT_HEALTH=UNDETERMINED the root shell outlived its deadline, so" +
+                " whether ksud received the command is unknown; no teardown was observed" +
+                " (pre=${o.preVerdict})\n"
+        SoftRebootHealthPolicy.EXEC_RETURNED ->
+            "[x] SOFT_REBOOT_HEALTH=EXEC_RETURNED ksud returned and this process survived." +
+                " Exit 0 is ambiguous by construction - it is also what a UAPI-mismatch" +
+                " skip returns - so this does not say whether the lifecycle was re-applied" +
+                " (pre=${o.preVerdict})\n"
         else ->
-            "[*] SOFT_REBOOT_HEALTH=EXEC_RETURNED exec=${o.execOutcome} with no teardown" +
-                " observed; nothing was handed over (pre=${o.preVerdict})\n"
+            "[*] SOFT_REBOOT_HEALTH=EXEC_REFUSED exec=${o.execOutcome}; nothing was handed" +
+                " over and no teardown was observed (pre=${o.preVerdict})\n"
     }
 
     private fun postExecLine(o: SoftRebootHealthPolicy.Observation): String {
@@ -418,7 +529,9 @@ object SoftRebootHealth {
         return "[*] SOFT_REBOOT_HEALTH=POST_EXEC exec=${o.execOutcome} pre=${o.preVerdict}" +
             " post=${o.postVerdict}$moved ($window, ${o.postObservations} observation(s)," +
             " converged_seen=${if (o.convergedSeen) 1 else 0}," +
-            " crash_seen=${if (o.crashRecoverySeen) 1 else 0})" +
+            " crash_seen=${if (o.crashRecoverySeen) 1 else 0}," +
+            " platform_bootcomplete_seen=${if (o.platformBootcompleteSeen) 1 else 0}," +
+            " dev_bootcomplete_seen=${if (o.devBootcompleteSeen) 1 else 0})" +
             " process=${o.processIdentity} read_span_ms=${o.postReadSpanMs}\n"
     }
 }

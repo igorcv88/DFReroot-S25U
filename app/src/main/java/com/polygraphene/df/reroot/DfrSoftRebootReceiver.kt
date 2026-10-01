@@ -95,16 +95,36 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         inputs.lockRecord = AutoRootStore.softRebootLock()
         inputs.pinnedKsudSha256 = KsudStage.pinnedKsudSha256()
         /*
-         * ONE reading of the firmware's boot-health state, used twice: it decides
-         * the gate below, and it is the pre-teardown half of the record written
-         * before the exec. Two readings would mean the state that permitted the
-         * dispatch and the state the record reports are different states, and the
-         * whole value of this record is that it says what the decision was made on.
+         * Scope first, then measure.
+         *
+         * The boot-health handshake is an OEM mechanism, so on a device that does
+         * not assert this target's model or codename there is nothing here to
+         * measure and AGENTS.md section 1 says it takes the unchanged upstream
+         * path. Inferring that from the properties alone was not enough: a failed
+         * SystemProperties lookup read UNKNOWN and refused the dispatch, and a ROM
+         * reusing one of those names read "partially present" and refused it too -
+         * on a path that previously made none of these readings. So an unrelated
+         * device gets no sweep, no gate, no record and no observer.
+         *
+         * Unreadable identity counts as in scope (see targetAnchorAsserted): "I
+         * could not tell what device this is" must not be what disables a check.
+         *
+         * In scope, it is ONE reading used twice: it decides the gate below, and
+         * it becomes the pre-teardown half of the record. Two readings would mean
+         * the state that permitted the dispatch and the state the record reports
+         * are different states, and the value of this record is that it says what
+         * the decision was made on. The state can still move before the exec,
+         * which is what the boundary re-read further down is for.
          */
-        val healthSnapshot = SoftRebootHealth.snapshot()
-        inputs.bootHealthVerdict = SoftRebootHealthPolicy.verdict(healthSnapshot)
+        val anchorAsserted = SoftRebootHealth.targetAnchorAsserted()
+        val healthSnapshot = if (anchorAsserted) SoftRebootHealth.snapshot() else null
+        inputs.bootHealthVerdict = if (anchorAsserted) {
+            SoftRebootHealthPolicy.verdict(healthSnapshot)
+        } else {
+            SoftRebootHealthPolicy.NOT_APPLICABLE
+        }
         Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] PRE_DISPATCH=${inputs.bootHealthVerdict}" +
-            " boot_id=$bootId")
+            " in_scope=${if (anchorAsserted) 1 else 0} boot_id=$bootId")
         /*
          * Everything decidable without privilege, first. A notification minted in
          * another boot, or a boot this build did not root, must be refused WITHOUT
@@ -275,19 +295,53 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          * is the pre-operation record for an operation that has already taken this
          * device down once with nothing readable afterwards (AGENTS.md 3.6.1).
          */
-        val healthFailure = SoftRebootHealth.recordPreExec(bootId, healthSnapshot)
-        if (healthFailure != null) {
-            Log.e(TAG, "[DFR][SOFT_REBOOT] REFUSED no durable boot-health record:" +
-                " $healthFailure")
-            RootNotifier.notifySoftReboot(
-                context, context.getString(R.string.notif_soft_reboot_refused),
-                "the pre-teardown boot-health record could not be written" +
-                    " ($healthFailure), so a firmware boot-health failure after the" +
-                    " restart would again leave nothing to diagnose. No teardown was" +
-                    " executed and root is unaffected, but this boot's one dispatch" +
-                    " claim is already spent: a retry needs a full reboot."
-            )
-            return
+        if (healthSnapshot != null) {
+            val healthFailure = SoftRebootHealth.recordPreExec(bootId, healthSnapshot)
+            if (healthFailure != null) {
+                Log.e(TAG, "[DFR][SOFT_REBOOT] REFUSED no durable boot-health record:" +
+                    " $healthFailure")
+                RootNotifier.notifySoftReboot(
+                    context, context.getString(R.string.notif_soft_reboot_refused),
+                    "the pre-teardown boot-health record could not be written" +
+                        " ($healthFailure), so a firmware boot-health failure after the" +
+                        " restart would again leave nothing to diagnose. No teardown was" +
+                        " executed and root is unaffected, but this boot's one dispatch" +
+                        " claim is already spent: a retry needs a full reboot."
+                )
+                return
+            }
+            /*
+             * The gate again, at the boundary it actually guards.
+             *
+             * The snapshot above decided the dispatch, and since then this code
+             * has staged a helper, built a root transport, taken a privileged
+             * shell, hashed two candidates and written a durable claim - easily
+             * seconds. The point of the gate is not to add a teardown to a boot
+             * that is already going wrong, and a reading taken before all of that
+             * can miss a CrashRecovery that started in the middle of it.
+             *
+             * So the decision snapshot stays in the pre half, unchanged - it is
+             * what authorised this - and a fresh reading decides whether the exec
+             * still happens. A refusal here gets its own exec outcome, because
+             * "it was never allowed" and "it was allowed and then was not" send
+             * the next investigation to different places.
+             */
+            val finalVerdict = SoftRebootHealth.liveVerdict()
+            if (!SoftRebootHealthPolicy.permitsDispatch(finalVerdict)) {
+                Log.e(TAG, "[DFR][SOFT_REBOOT] REFUSED boot health moved to $finalVerdict" +
+                    " before the exec")
+                SoftRebootHealth.recordExecOutcome(
+                    bootId, SoftRebootHealthPolicy.EXEC_REFUSED_HEALTH
+                )
+                RootNotifier.notifySoftReboot(
+                    context, context.getString(R.string.notif_soft_reboot_refused),
+                    "the firmware's boot-health state changed to $finalVerdict between the" +
+                        " decision and the handover, so nothing was executed. Root is" +
+                        " unaffected, but this boot's one dispatch claim is already spent:" +
+                        " a retry needs a full reboot."
+                )
+                return
+            }
         }
         if (refuseWithoutTrace(context, bootId, "EXEC_ENTER path=${decision.binaryPath}",
                 claimSpent = true)) {

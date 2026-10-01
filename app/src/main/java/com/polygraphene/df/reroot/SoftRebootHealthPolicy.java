@@ -150,7 +150,7 @@ public final class SoftRebootHealthPolicy {
      * record is corrupt". Without it, an older schema and a damaged file are the
      * same observation.
      */
-    public static final int SCHEMA_VERSION = 2;
+    public static final int SCHEMA_VERSION = 3;
 
     /** The property is set and this is its value - these are read, never guessed. */
     public static final String PROP_SYS_BOOT_COMPLETED = "sys.boot_completed";
@@ -274,6 +274,18 @@ public final class SoftRebootHealthPolicy {
      * both when it daemonises and when it skips the operation on a UAPI mismatch.
      */
     public static final String EXEC_RETURNED = "RETURNED";
+    /**
+     * The boot-health state was re-read immediately before the exec and no
+     * longer permitted it.
+     *
+     * Its own value because it is a different fact from every other refusal
+     * here: the decision snapshot DID authorise the dispatch (and is in the pre
+     * half, unchanged), and the state moved underneath it during the staging,
+     * the root probe, the candidate hashing and the claim. A reader has to be
+     * able to tell "it was never allowed" from "it was allowed and then was
+     * not".
+     */
+    public static final String EXEC_REFUSED_HEALTH = "REFUSED_HEALTH";
 
     /** No record at all: no Apply Modules dispatch has reached the exec in any boot. */
     public static final String OBS_ABSENT = "SOFT_REBOOT_HEALTH_ABSENT";
@@ -321,13 +333,37 @@ public final class SoftRebootHealthPolicy {
     private static final String KEY_POST_CONVERGED_SEEN = "post_converged_seen";
     /** Sticky: CrashRecovery was seen at least once during the window. */
     private static final String KEY_POST_CRASH_SEEN = "post_crash_recovery_seen";
+    /**
+     * The monotonic reading the observation window is measured from.
+     *
+     * Durable because the window has to outlive the process observing it. The
+     * deadline used to be a local variable in the observer's loop, which made
+     * {@code post_settled=0} mean two different things - "still inside the five
+     * minutes" and "the observer died and nobody closed it" - and let a
+     * system_server restart begin a second five minutes on top of the first.
+     * {@code boot_id} is unchanged across a framework restart and
+     * {@code elapsedRealtime} stays comparable within one kernel boot, so the
+     * anchor is meaningful to any later reader in the same boot.
+     */
+    private static final String KEY_POST_WINDOW_OPENED_MS = "post_window_opened_ms";
+    /**
+     * Sticky: {@code dev.platform_bootcomplete} / {@code dev.bootcomplete} were
+     * observed at 1 at least once during the window.
+     *
+     * These two are the experiment's actual question, and the verdict cannot
+     * carry them: a sample can move {@code dev.platform_bootcomplete} from 0 to
+     * 1 while the verdict stays PENDING for an unrelated reason, so a
+     * 0 -> 1 -> 0 excursion would otherwise vanish from the record entirely.
+     */
+    private static final String KEY_POST_PLATFORM_SEEN = "post_platform_bootcomplete_seen";
+    private static final String KEY_POST_DEV_BOOTCOMPLETE_SEEN = "post_dev_bootcomplete_seen";
 
     private static final Set<String> PHASES = Set.of(PHASE_PRE_EXEC, PHASE_POST_EXEC);
     private static final Set<String> VERDICTS = Set.of(
             CONVERGED, PENDING, CRASH_RECOVERY, HEALTH_UNKNOWN, NOT_APPLICABLE);
     private static final Set<String> EXEC_OUTCOMES = Set.of(
             EXEC_NOT_REACHED, EXEC_NOT_ATTEMPTED, EXEC_REFUSED_DIGEST, EXEC_TRANSPORT_LOST,
-            EXEC_UNDETERMINED, EXEC_FAILED, EXEC_RETURNED);
+            EXEC_UNDETERMINED, EXEC_FAILED, EXEC_RETURNED, EXEC_REFUSED_HEALTH);
 
     /** init's own service states. Anything else is a value this build cannot read. */
     private static final Set<String> INIT_SVC_STATES =
@@ -344,6 +380,18 @@ public final class SoftRebootHealthPolicy {
      */
     public static List<String> allProperties() {
         return ALL_PROPERTIES;
+    }
+
+    /**
+     * May a dispatch proceed on this verdict?
+     *
+     * One definition, used by the policy gate and by the re-read taken at the
+     * dispatch boundary itself. Two copies of this condition is how the two
+     * would drift apart, and the boundary check exists precisely because the
+     * first one can go stale.
+     */
+    public static boolean permitsDispatch(String verdict) {
+        return CONVERGED.equals(verdict) || NOT_APPLICABLE.equals(verdict);
     }
 
     private SoftRebootHealthPolicy() {}
@@ -531,25 +579,47 @@ public final class SoftRebootHealthPolicy {
         if (parsed == null) return null;
         if (!currentBootId.equals(parsed.get(KEY_BOOT_ID))) return null;
         String latest = verdict(post);
+        boolean platformNow = post != null
+                && "1".equals(post.get(PROP_DEV_PLATFORM_BOOTCOMPLETE));
+        boolean devBootcompleteNow = post != null
+                && "1".equals(post.get(PROP_DEV_BOOTCOMPLETE));
         String firstVerdict;
         long observations;
+        long windowOpenedMs;
         boolean convergedSeen;
         boolean crashSeen;
+        boolean platformSeen;
+        boolean devBootcompleteSeen;
         if (PHASE_PRE_EXEC.equals(parsed.get(KEY_PHASE))) {
             firstVerdict = latest;
             observations = 1;
+            // The first observation IS the anchor: the window opens when it is taken.
+            windowOpenedMs = post == null ? -1L : post.readStartMs;
             convergedSeen = CONVERGED.equals(latest);
             crashSeen = CRASH_RECOVERY.equals(latest);
+            platformSeen = platformNow;
+            devBootcompleteSeen = devBootcompleteNow;
         } else {
             if (!"0".equals(parsed.get(KEY_POST_SETTLED))) return null;
             firstVerdict = parsed.get(KEY_POST_FIRST_VERDICT);
             observations = numericValue(parsed.get(KEY_POST_OBSERVATIONS)) + 1;
             if (observations < 2) return null;
+            windowOpenedMs = numericValue(parsed.get(KEY_POST_WINDOW_OPENED_MS));
             convergedSeen = "1".equals(parsed.get(KEY_POST_CONVERGED_SEEN))
                     || CONVERGED.equals(latest);
             crashSeen = "1".equals(parsed.get(KEY_POST_CRASH_SEEN))
                     || CRASH_RECOVERY.equals(latest);
+            platformSeen = "1".equals(parsed.get(KEY_POST_PLATFORM_SEEN)) || platformNow;
+            devBootcompleteSeen =
+                    "1".equals(parsed.get(KEY_POST_DEV_BOOTCOMPLETE_SEEN))
+                            || devBootcompleteNow;
         }
+        /*
+         * A window with no anchor cannot be timed, so it must not be left open:
+         * nothing could ever decide that it had expired, and an open window is
+         * an invitation to keep writing to it forever.
+         */
+        boolean closed = windowClosed || windowOpenedMs < 0;
         StringBuilder sb = new StringBuilder();
         sb.append(KEY_SCHEMA).append('=').append(SCHEMA_VERSION).append('\n');
         sb.append(KEY_PHASE).append('=').append(PHASE_POST_EXEC).append('\n');
@@ -557,10 +627,16 @@ public final class SoftRebootHealthPolicy {
         sb.append(KEY_EXEC_OUTCOME).append('=').append(parsed.get(KEY_EXEC_OUTCOME)).append('\n');
         sb.append(KEY_POST_FIRST_VERDICT).append('=').append(firstVerdict).append('\n');
         sb.append(KEY_POST_OBSERVATIONS).append('=').append(observations).append('\n');
-        sb.append(KEY_POST_SETTLED).append('=').append(windowClosed ? "1" : "0").append('\n');
+        sb.append(KEY_POST_SETTLED).append('=').append(closed ? "1" : "0").append('\n');
+        sb.append(KEY_POST_WINDOW_OPENED_MS).append('=')
+                .append(numericField(windowOpenedMs)).append('\n');
         sb.append(KEY_POST_CONVERGED_SEEN).append('=')
                 .append(convergedSeen ? "1" : "0").append('\n');
         sb.append(KEY_POST_CRASH_SEEN).append('=').append(crashSeen ? "1" : "0").append('\n');
+        sb.append(KEY_POST_PLATFORM_SEEN).append('=')
+                .append(platformSeen ? "1" : "0").append('\n');
+        sb.append(KEY_POST_DEV_BOOTCOMPLETE_SEEN).append('=')
+                .append(devBootcompleteSeen ? "1" : "0").append('\n');
         for (String key : halfKeys(PRE)) {
             sb.append(key).append('=').append(parsed.get(key)).append('\n');
         }
@@ -623,6 +699,12 @@ public final class SoftRebootHealthPolicy {
         public final boolean convergedSeen;
         /** Sticky: CrashRecovery was observed at least once. */
         public final boolean crashRecoverySeen;
+        /** The monotonic anchor the window is measured from; -1 when unknown. */
+        public final long postWindowOpenedMs;
+        /** Sticky: {@code dev.platform_bootcomplete} was observed at 1. */
+        public final boolean platformBootcompleteSeen;
+        /** Sticky: {@code dev.bootcomplete} was observed at 1. */
+        public final boolean devBootcompleteSeen;
         /** What this app managed to record about the exec. Never null for a parsed record. */
         public final String execOutcome;
         /** {@link #PROC_REPLACED} / {@link #PROC_SAME} / {@link #PROC_UNDECIDED}. */
@@ -632,8 +714,9 @@ public final class SoftRebootHealthPolicy {
 
         private Observation(String state, String preVerdict, String postVerdict,
                 String postFirstVerdict, long postObservations, boolean postWindowClosed,
-                boolean convergedSeen, boolean crashRecoverySeen, String execOutcome,
-                String processIdentity, long postReadSpanMs) {
+                boolean convergedSeen, boolean crashRecoverySeen, long postWindowOpenedMs,
+                boolean platformBootcompleteSeen, boolean devBootcompleteSeen,
+                String execOutcome, String processIdentity, long postReadSpanMs) {
             this.state = state;
             this.preVerdict = preVerdict;
             this.postVerdict = postVerdict;
@@ -642,6 +725,9 @@ public final class SoftRebootHealthPolicy {
             this.postWindowClosed = postWindowClosed;
             this.convergedSeen = convergedSeen;
             this.crashRecoverySeen = crashRecoverySeen;
+            this.postWindowOpenedMs = postWindowOpenedMs;
+            this.platformBootcompleteSeen = platformBootcompleteSeen;
+            this.devBootcompleteSeen = devBootcompleteSeen;
             this.execOutcome = execOutcome;
             this.processIdentity = processIdentity;
             this.postReadSpanMs = postReadSpanMs;
@@ -649,8 +735,48 @@ public final class SoftRebootHealthPolicy {
     }
 
     private static Observation plain(String state) {
-        return new Observation(state, null, null, null, 0, false, false, false, null,
-                PROC_UNDECIDED, -1L);
+        return new Observation(state, null, null, null, 0, false, false, false, -1L,
+                false, false, null, PROC_UNDECIDED, -1L);
+    }
+
+    /**
+     * Has the observation window run out?
+     *
+     * Decided from the record's own durable anchor rather than from any
+     * observer's local clock, so a later process - the UI, a fresh observer
+     * after a framework restart - reaches the same answer the dead one would
+     * have. Without an anchor or a clock it answers false: a window is never
+     * declared expired on no evidence, and {@link #formatPostExec} already
+     * closes an anchorless one at the moment it is opened.
+     */
+    public static boolean windowExpired(Observation o, long nowMs, long deadlineMs) {
+        if (o == null || !OBS_POST_EXEC.equals(o.state)) return false;
+        if (o.postWindowClosed) return false;
+        if (o.postWindowOpenedMs < 0 || nowMs < 0) return false;
+        return nowMs - o.postWindowOpenedMs >= deadlineMs;
+    }
+
+    /**
+     * Would this sample add nothing to the record's post half?
+     *
+     * Compares every recorded property, not the verdict. The verdict is a
+     * summary and the question this experiment asks is not a summary:
+     * {@code dev.platform_bootcomplete} can move 0 -> 1 while the verdict stays
+     * PENDING for an unrelated reason, and an observer that only persisted
+     * verdict changes would discard exactly the transition it was watching for.
+     *
+     * False whenever the record has no post half, so a first observation is
+     * never suppressed.
+     */
+    public static boolean postEvidenceUnchanged(String record, Snapshot candidate) {
+        if (candidate == null) return false;
+        Map<String, String> parsed = parse(record);
+        if (parsed == null) return false;
+        if (!PHASE_POST_EXEC.equals(parsed.get(KEY_PHASE))) return false;
+        for (String p : ALL_PROPERTIES) {
+            if (!candidate.get(p).equals(parsed.get(keyFor(POST, p)))) return false;
+        }
+        return true;
     }
 
     /**
@@ -678,7 +804,7 @@ public final class SoftRebootHealthPolicy {
         }
         if (!post) {
             return new Observation(state, parsed.get(PRE + KEY_VERDICT), null, null, 0,
-                    false, false, false, exec, PROC_UNDECIDED, -1L);
+                    false, false, false, -1L, false, false, exec, PROC_UNDECIDED, -1L);
         }
         long readStart = numericValue(parsed.get(POST + KEY_READ_START_MS));
         long readEnd = numericValue(parsed.get(POST + KEY_READ_END_MS));
@@ -689,6 +815,9 @@ public final class SoftRebootHealthPolicy {
                 "1".equals(parsed.get(KEY_POST_SETTLED)),
                 "1".equals(parsed.get(KEY_POST_CONVERGED_SEEN)),
                 "1".equals(parsed.get(KEY_POST_CRASH_SEEN)),
+                numericValue(parsed.get(KEY_POST_WINDOW_OPENED_MS)),
+                "1".equals(parsed.get(KEY_POST_PLATFORM_SEEN)),
+                "1".equals(parsed.get(KEY_POST_DEV_BOOTCOMPLETE_SEEN)),
                 exec, processIdentity(parsed), span);
     }
 
@@ -745,11 +874,21 @@ public final class SoftRebootHealthPolicy {
     }
 
     /**
-     * A well-formed record carrying a schema this build does not write.
+     * A record that DECLARES a schema version this build does not write.
      *
-     * Read before {@link #parse}, so an older or newer format is reported as
-     * itself rather than as corruption. The record outlives the app version that
-     * wrote it, so those are genuinely different facts.
+     * Read before {@link #parse}, so a format from another build is reported as
+     * itself rather than as corruption - the record outlives the app version
+     * that wrote it, and those are different facts.
+     *
+     * An earlier version also returned true when there was NO schema line,
+     * reasoning that such a file came from the format before versioning. That
+     * was wrong twice over. First, this record was introduced together with its
+     * version line, so no shipped build ever wrote an unversioned one - the
+     * "older format" it was excusing does not exist. Second, a schema-3 file
+     * truncated at the front loses exactly that line, so the rule turned an
+     * unknown corruption into the claim "intact, not corrupt", which is the kind
+     * of unevidenced reassurance this file exists to refuse. A missing line now
+     * falls through to {@link #parse}, which refuses it.
      */
     private static boolean otherSchema(String record) {
         if (blank(record)) return false;
@@ -759,8 +898,7 @@ public final class SoftRebootHealthPolicy {
             return !Integer.toString(SCHEMA_VERSION)
                     .equals(line.substring(KEY_SCHEMA.length() + 1));
         }
-        // No schema line at all: schema 1, which this build no longer writes.
-        return true;
+        return false;
     }
 
     /**
@@ -812,8 +950,11 @@ public final class SoftRebootHealthPolicy {
             expected.add(KEY_POST_FIRST_VERDICT);
             expected.add(KEY_POST_OBSERVATIONS);
             expected.add(KEY_POST_SETTLED);
+            expected.add(KEY_POST_WINDOW_OPENED_MS);
             expected.add(KEY_POST_CONVERGED_SEEN);
             expected.add(KEY_POST_CRASH_SEEN);
+            expected.add(KEY_POST_PLATFORM_SEEN);
+            expected.add(KEY_POST_DEV_BOOTCOMPLETE_SEEN);
         }
         expected.addAll(halfKeys(PRE));
         if (post) expected.addAll(halfKeys(POST));
@@ -829,17 +970,49 @@ public final class SoftRebootHealthPolicy {
             if (!booleanField(values.get(KEY_POST_SETTLED))) return null;
             if (!booleanField(values.get(KEY_POST_CONVERGED_SEEN))) return null;
             if (!booleanField(values.get(KEY_POST_CRASH_SEEN))) return null;
+            if (!booleanField(values.get(KEY_POST_PLATFORM_SEEN))) return null;
+            if (!booleanField(values.get(KEY_POST_DEV_BOOTCOMPLETE_SEEN))) return null;
+            if (!validNumeric(values.get(KEY_POST_WINDOW_OPENED_MS))) return null;
             /*
-             * The sticky flags must agree with the latest verdict they summarise.
-             * A record saying "the latest reading is CONVERGED" while claiming
-             * converged was never seen is not a record whose history can be read.
+             * The stickies summarise a HISTORY, so they have to be consistent with
+             * every part of it the record still carries - not only with the last
+             * sample. An earlier version checked the latest verdict alone, which
+             * let `post_first_verdict=BOOT_HEALTH_CONVERGED` sit beside
+             * `post_converged_seen=0`: a record asserting that the very first
+             * reading was a convergence and that no convergence was ever seen.
              */
-            if (CONVERGED.equals(values.get(POST + KEY_VERDICT))
-                    && !"1".equals(values.get(KEY_POST_CONVERGED_SEEN))) {
+            for (String seenAt : List.of(POST + KEY_VERDICT, KEY_POST_FIRST_VERDICT)) {
+                if (CONVERGED.equals(values.get(seenAt))
+                        && !"1".equals(values.get(KEY_POST_CONVERGED_SEEN))) {
+                    return null;
+                }
+                if (CRASH_RECOVERY.equals(values.get(seenAt))
+                        && !"1".equals(values.get(KEY_POST_CRASH_SEEN))) {
+                    return null;
+                }
+            }
+            /*
+             * The property stickies have to agree with the latest sample too: a
+             * record whose post half shows dev.platform_bootcomplete=1 while
+             * claiming it was never seen at 1 contradicts itself.
+             */
+            if ("1".equals(values.get(keyFor(POST, PROP_DEV_PLATFORM_BOOTCOMPLETE)))
+                    && !"1".equals(values.get(KEY_POST_PLATFORM_SEEN))) {
                 return null;
             }
-            if (CRASH_RECOVERY.equals(values.get(POST + KEY_VERDICT))
-                    && !"1".equals(values.get(KEY_POST_CRASH_SEEN))) {
+            if ("1".equals(values.get(keyFor(POST, PROP_DEV_BOOTCOMPLETE)))
+                    && !"1".equals(values.get(KEY_POST_DEV_BOOTCOMPLETE_SEEN))) {
+                return null;
+            }
+            /*
+             * With one observation recorded, "first" and "latest" are the same
+             * observation and cannot disagree. This is arithmetic about the
+             * stored history, which is the same class of check as recomputing a
+             * verdict from its own properties.
+             */
+            if (numericValue(values.get(KEY_POST_OBSERVATIONS)) == 1
+                    && !values.get(KEY_POST_FIRST_VERDICT)
+                            .equals(values.get(POST + KEY_VERDICT))) {
                 return null;
             }
         }
