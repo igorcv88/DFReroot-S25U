@@ -231,19 +231,36 @@ public final class SoftRebootPolicy {
          *
          * This refusal does NOT fix that, and must never be described as if it
          * did - the trigger is in the firmware's init rc and the property that
-         * clears it is written by a daemon outside this app. What it prevents is
-         * strictly narrower and strictly worth having: asking for a SECOND
-         * userspace teardown while the previous handshake has not converged -
-         * `dev.platform_bootcomplete` still 0, `bootchecker` still running,
-         * CrashRecovery already attempting a reboot. On a healthy ZZIC full boot
-         * every element reads positive and this costs nothing.
+         * clears it is written by a daemon outside this app.
+         *
+         * And it is worth being exact about what it adds, because an earlier
+         * version of this comment claimed more than it does. It said this stops a
+         * SECOND userspace teardown stacked on an unconverged handshake - but the
+         * per-boot soft-reboot lock above ALREADY makes a second DFR Apply Modules
+         * in one boot impossible, so that was a job already done. What this gate
+         * actually adds is refusing the FIRST attempt in a boot whose health is
+         * already bad for some other reason: an unrelated framework restart, a
+         * rollback already in flight, a watchdog still waiting. On a healthy full
+         * boot every element reads positive and this costs nothing.
          *
          * BOOT_HEALTH_UNKNOWN refuses for AGENTS.md section 2's reason: the worst
          * outcome of this operation is an unplanned full reboot with a staged
          * rollback, so a state that could not be read is not permission to add a
          * teardown to it.
+         *
+         * BOOT_HEALTH_NOT_APPLICABLE passes, and has to. This is a Samsung
+         * mechanism, and this action is reachable off-target: an unrelated device
+         * running the bundled daemon can satisfy PostRootStatus, and AGENTS.md
+         * section 1 says such a device takes the unchanged upstream path. A
+         * Samsung-only gate applied unconditionally would therefore refuse Apply
+         * Modules on every device but this one. The policy only reaches that
+         * verdict when AOSP itself calls the boot complete AND the whole OEM
+         * mechanism is positively unset, which cannot happen on the pinned
+         * target - a partially present mechanism is PENDING, and an unreadable
+         * one is UNKNOWN. Both of those still refuse.
          */
-        if (!SoftRebootHealthPolicy.CONVERGED.equals(in.bootHealthVerdict)) {
+        if (!SoftRebootHealthPolicy.CONVERGED.equals(in.bootHealthVerdict)
+                && !SoftRebootHealthPolicy.NOT_APPLICABLE.equals(in.bootHealthVerdict)) {
             return refuse("the firmware's boot-health handshake is "
                     + (in.bootHealthVerdict == null
                             ? SoftRebootHealthPolicy.HEALTH_UNKNOWN : in.bootHealthVerdict)

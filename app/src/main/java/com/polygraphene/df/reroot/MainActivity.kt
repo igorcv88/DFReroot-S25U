@@ -80,7 +80,18 @@ class MainActivity : Activity() {
          * PRE_EXEC_ONLY record - the state that says the framework was torn down
          * and never came back far enough to report on itself.
          */
-        append(SoftRebootHealth.report(DfrRootCoordinator.readBootId()))
+        runBg {
+            /*
+             * Re-sample before reporting. The operator opening the app minutes
+             * after a dispatch is the most valuable post observation there is -
+             * it is exactly the window in which the 2026-10-01 failure played
+             * out - and it is a no-op once the record has settled. Off the main
+             * thread because it may write.
+             */
+            val bootId = DfrRootCoordinator.readBootId()
+            SoftRebootHealth.resample(bootId)
+            append(SoftRebootHealth.report(bootId))
+        }
     }
 
     override fun onResume() {

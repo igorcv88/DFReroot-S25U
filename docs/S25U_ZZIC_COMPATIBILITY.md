@@ -1045,22 +1045,31 @@ for `dev.platform_bootcomplete`, `bootchecker_timeout`, `sys.boot.reason`,
 `sys.init.updatable_crashing`, so it is tracking Samsung's own notion of boot
 health, not merely observing `sys.boot_completed`.
 
-The flag is restored by a *different*, edge-triggered rule:
-`on property:dev.bootcomplete=1`. KernelSU's `soft_reboot()` calls
-`reset_boot_completed()`, which resets `sys.boot_completed` — not
-`dev.bootcomplete`. **If `dev.bootcomplete` therefore stays at 1 across the
-restart, that trigger never re-fires, `dev.platform_bootcomplete` stays 0, and
-the restarted `bootchecker` times out waiting for a boot it believes never
-completed.** On a healthy full boot this device converges to
-`sys.boot_completed=1` / `dev.bootcomplete=1` / `dev.platform_bootcomplete=1`
-with both bootchecker services `stopped`.
+The flag is restored by a *different* rule: `on property:dev.bootcomplete=1`.
+KernelSU's `soft_reboot()` calls `reset_boot_completed()`, which resets
+`sys.boot_completed` — not `dev.bootcomplete`. On a healthy full boot this device
+converges to `sys.boot_completed=1` / `dev.bootcomplete=1` /
+`dev.platform_bootcomplete=1` with both bootchecker services `stopped`.
 
-That last paragraph is the **leading hypothesis, not an observation**: nobody has
-yet read `dev.platform_bootcomplete` after an emulated soft reboot on this
-firmware. It is stated here because it is testable, and the next build makes the
-measurement (below). `ro.init.userspace_reboot.is_supported` reads empty on this
-firmware, so there is no officially declared userspace-reboot path to compare
-against either.
+**The open question, stated as a question.** An earlier draft of this section
+said that because the restoring rule is "edge triggered", a `dev.bootcomplete`
+that "stays at 1" can never re-fire it, so `dev.platform_bootcomplete` stays 0
+and `bootchecker` times out. That reads like a mechanism and is not one: init
+queues a matching action when a property is *set*, and whether a value-preserving
+set re-queues it was never read out of init's source by anyone here. It would
+have been the fourth causal claim in this investigation stated ahead of its
+evidence. What is actually open is:
+
+```text
+does anything on this firmware set dev.bootcomplete=1 again after an emulated
+soft reboot, and does dev.platform_bootcomplete come back?
+```
+
+Nobody has read those two properties after a soft reboot on this firmware. That
+is the measurement the next build takes (below), and it is the only thing that
+turns this into a mechanism either way.
+`ro.init.userspace_reboot.is_supported` reads empty on this firmware, so there is
+no officially declared userspace-reboot path to compare against either.
 
 Also relevant and not yet implicated: the restart re-runs the KernelSU module
 lifecycle a second time in one kernel, and several installed modules manipulate
@@ -1080,22 +1089,85 @@ daemon outside this app's control.
 
 - **A gate.** `SoftRebootHealthPolicy.verdict()` classifies the eight properties
   that make up the handshake, and `SoftRebootPolicy` refuses the dispatch unless
-  the verdict is `BOOT_HEALTH_CONVERGED`. What this prevents is narrow and real:
-  asking for a *second* userspace teardown while the previous handshake has not
-  converged. `BOOT_HEALTH_UNKNOWN` refuses, because the worst outcome of this
+  the verdict is `BOOT_HEALTH_CONVERGED` (or the device runs no such handshake at
+  all). Be exact about what that adds: the per-boot soft-reboot lock **already**
+  makes a second DFR Apply Modules in one boot impossible, so "stops a second
+  teardown" was a job already done. What this gate adds is refusing the **first**
+  attempt in a boot whose health is already bad for some other reason — an
+  unrelated framework restart, a rollback already in flight, a watchdog still
+  waiting. `BOOT_HEALTH_UNKNOWN` refuses, because the worst outcome of this
   operation is an unplanned full reboot with a staged rollback.
 - **A measurement.** `/data/system/dfreroot-softreboot-health` carries two
   halves. The pre half is written before the exec; the post half is written by
-  the restarted framework's own `BOOT_COMPLETED` in the *same* boot, which is
-  the only observer of the outcome that exists — the process that asked for the
-  soft reboot is the one `stop` kills. Its `post_dev_platform_bootcomplete` and
-  `post_dev_bootcomplete` are what settle the hypothesis above. A standing
-  `phase=PRE_EXEC` with no post half is itself the observation that the framework
-  did not come back far enough to report on itself.
+  the restarted framework in the *same* boot — the only observer *this app* has,
+  since the process that asked for the soft reboot is the one `stop` kills. (Not
+  the only one that could exist: ksud's `soft_reboot()` daemonises into PID 1's
+  mount namespace before `stop` and survives by construction, so a
+  module-side observer is possible and simply is not what this build uses.) The
+  record's `post_dev_platform_bootcomplete` and `post_dev_bootcomplete` are what
+  answer the question above.
 
-Every element of the verdict and both halves of the record have host tests with
-a negative case (`tools/tests/SoftRebootHealthPolicyTest.java`), and the wiring
-that cannot be unit-tested here is guarded by `tools/profile_binding_audit.py`.
+Five properties of that record are not conveniences, and each closes a way the
+measurement would otherwise have lied:
+
+- **The observation window closes on TIME, never on a verdict.** This one was got
+  wrong first. `BOOT_COMPLETED` is the first moment a converged answer is
+  *possible*, and no single sample after it concludes anything in **either**
+  direction. A first `PENDING` may be the init trigger and the
+  `bootchecker-bootc` oneshot still in flight. A first `CONVERGED` proves just as
+  little: the device that produced this investigation had a working,
+  converged-looking userspace for *minutes* before CrashRecovery rolled it back,
+  so stopping at the first good answer would have reported the hypothesis refuted
+  on evidence that does not refute it. The window is therefore 5 minutes — sized
+  from the ~4 this incident took from restart to reboot — sampled every 15
+  seconds, and `post_settled` means *the window closed*, not *an answer arrived*.
+- **The history is kept, not overwritten.** `post_first_verdict` holds the first
+  reading, `post_observations` counts the recorded ones, and
+  `post_converged_seen` / `post_crash_recovery_seen` are **sticky**, so a
+  `CONVERGED` that is later followed by a rollback is visible as both facts
+  rather than as whichever was sampled last.
+- **`exec_outcome` says whether anything was handed over.** The pre half is
+  written *before* the exec, so on its own it proves the exec was *reached* —
+  never that a soft reboot was dispatched. The refusal paths (a digest that
+  changed under us, a lost transport, a shell past its deadline, a non-zero exit,
+  a refusal landing between the record and the call) all return with the process
+  alive and record which one happened. Only `NOT_REACHED` means "this process
+  recorded nothing after the exec", which is what a real teardown looks like.
+  There is deliberately no value for a successful dispatch: that is the one case
+  that never gets to write.
+- **`BOOT_HEALTH_NOT_APPLICABLE` keeps the gate off unrelated devices.** This is
+  an OEM mechanism, and Apply Modules is reachable off-target — a generic
+  device running the bundled daemon can satisfy `PostRootStatus`, and AGENTS.md
+  §1 says an unrelated device takes the unchanged upstream path. The verdict is
+  reached only when AOSP's own flag says the boot completed **and** all three
+  OEM-only properties (`dev.platform_bootcomplete`, `init.svc.bootchecker`,
+  `init.svc.bootchecker-bootc`) are positively unset. On the target all three
+  exist, so it is unreachable there; a partially present mechanism is `PENDING`
+  and an unreadable one is `UNKNOWN`, and both still refuse.
+- **A stored verdict is re-derived from the stored evidence.** The parser rebuilds
+  each half's snapshot from that half's own recorded properties and refuses
+  unless the recomputed verdict equals the stored one. Without it the file could
+  assert `pre_verdict=BOOT_HEALTH_CONVERGED` over
+  `pre_dev_platform_bootcomplete=0` and parse cleanly — a verdict with no
+  evidence behind it, which §2 says must refuse. Numeric fields carry the literal
+  `UNKNOWN` rather than `-1` (the lesson `EarlyBootProbePolicy` already records),
+  and a property sweep may not end before it began.
+- **What the record does not claim.** The sweep is N sequential property reads,
+  not one instant, so each half records `read_start_ms` *and* `read_end_ms` and a
+  reader can discount a verdict stitched across a wide one. Process identity
+  across the restart comes from `/proc/self/stat` field 22, not from the pid: pids
+  are reused, so an equal pid is `UNDECIDED`, never "the same process".
+  `sys.init.updatable_crashing_process_name` and `dev.attempting_reboot` are
+  recorded as **telemetry only** — `verdict()` never reads them, so an unreadable
+  diagnostic cannot refuse a dispatch. And the record carries `schema_version`,
+  because it outlives the build that wrote it: an older format reads as
+  `OTHER_SCHEMA`, not as corruption.
+
+Every element of the verdict, every exec outcome, every way the post half may and
+may not be replaced, and every cross-field contradiction have host tests with a
+negative case (`tools/tests/SoftRebootHealthPolicyTest.java`, 96 checks), and the
+wiring that cannot be unit-tested here is guarded by
+`tools/profile_binding_audit.py`.
 
 #### Two collateral defects found in the same cycle
 

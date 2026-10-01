@@ -317,6 +317,17 @@ public class SoftRebootPolicyTest {
         Inputs invented = ok();
         invented.bootHealthVerdict = "BOOT_HEALTH_PROBABLY_FINE";
         refuse("boot health verdict this build does not know", invented);
+        /*
+         * The one other verdict that may dispatch. This is a Samsung mechanism and
+         * the action is reachable off-target, so an unconditional Samsung gate
+         * would refuse Apply Modules on every device but this one (AGENTS.md
+         * section 1: an unrelated device takes the unchanged upstream path).
+         * SoftRebootHealthPolicyTest proves the verdict is unreachable on the
+         * target itself.
+         */
+        Inputs notApplicable = ok();
+        notApplicable.bootHealthVerdict = SoftRebootHealthPolicy.NOT_APPLICABLE;
+        allow("a device with no OEM boot watchdog still dispatches", notApplicable, STAGED);
         Inputs defaulted = new Inputs();
         defaulted.currentBootId = BOOT;
         defaulted.requestBootId = BOOT;

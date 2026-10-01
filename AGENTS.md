@@ -460,10 +460,20 @@ the firmware rebooted the device with
 
 Samsung's `/system/etc/init/bootchecker.rc` reacts to
 `init.svc.zygote=restarting` by zeroing `dev.platform_bootcomplete` and
-restarting its own boot watchdog, and the rule that restores that flag is edge
-triggered on `dev.bootcomplete=1` - a property AOSP's and KernelSU's
-`boot_completed` handling does not touch. So a restart the framework survives can
-still leave the firmware believing the boot never completed.
+restarting its own boot watchdog, and the rule that restores that flag is keyed
+on `dev.bootcomplete=1`. So a restart the framework survives can still leave the
+firmware believing the boot never completed.
+
+**What is observed there, and what is not.** The two init rules are read out of
+the device's own `bootchecker.rc`. Whether anything sets `dev.bootcomplete=1`
+again after a soft reboot — and therefore whether that rule runs again — has
+never been read on this firmware. An earlier version of this section called the
+rule "edge triggered" and concluded it "could not re-fire while the property
+stayed 1". That is a claim about init's property-change dispatch that nobody
+verified: init queues a matching action when a property is *set*, and whether a
+value-preserving set re-queues it was never read out of the source. This is the
+fourth causal claim in this investigation to be stated ahead of its evidence, so
+it is now stated as the question it is.
 
 The durable rules:
 

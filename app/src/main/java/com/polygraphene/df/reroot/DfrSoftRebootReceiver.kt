@@ -283,18 +283,44 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
                 context, context.getString(R.string.notif_soft_reboot_refused),
                 "the pre-teardown boot-health record could not be written" +
                     " ($healthFailure), so a firmware boot-health failure after the" +
-                    " restart would again leave nothing to diagnose. Nothing was" +
-                    " attempted; root is unaffected."
+                    " restart would again leave nothing to diagnose. No teardown was" +
+                    " executed and root is unaffected, but this boot's one dispatch" +
+                    " claim is already spent: a retry needs a full reboot."
             )
             return
         }
-        if (refuseWithoutTrace(context, bootId, "EXEC_ENTER path=${decision.binaryPath}")) {
+        if (refuseWithoutTrace(context, bootId, "EXEC_ENTER path=${decision.binaryPath}",
+                claimSpent = true)) {
+            /*
+             * The boot-health record is already on disk and nothing was executed.
+             * Saying so is the difference between "the framework was torn down and
+             * never reported" and "a refusal landed before the call": both leave a
+             * pre-exec half, and only this line tells them apart.
+             */
+            SoftRebootHealth.recordExecOutcome(
+                bootId, SoftRebootHealthPolicy.EXEC_NOT_ATTEMPTED
+            )
             return
         }
         val outcome = transport.execPinnedDaemon(
             decision.binaryPath, "soft-reboot", TRANSPORT_TIMEOUT_MS
         )
         AutoRootStore.traceSoftReboot(bootId, "EXEC_RETURNED rc=${outcome.rc}")
+        /*
+         * Reaching this line at all means the teardown did not take this process,
+         * so the record must stop implying one. Every outcome below is a fact this
+         * process observed about the call; a dispatch that succeeds is precisely
+         * the case that never gets here, which is why there is no value for it.
+         */
+        SoftRebootHealth.recordExecOutcome(bootId, when {
+            outcome.rc == RootTransport.RC_DIGEST_CHANGED ->
+                SoftRebootHealthPolicy.EXEC_REFUSED_DIGEST
+            outcome.rc == RootTransport.RC_NO_TRANSPORT ->
+                SoftRebootHealthPolicy.EXEC_TRANSPORT_LOST
+            outcome.rc == RootTransport.RC_TIMEOUT -> SoftRebootHealthPolicy.EXEC_UNDETERMINED
+            outcome.ran -> SoftRebootHealthPolicy.EXEC_RETURNED
+            else -> SoftRebootHealthPolicy.EXEC_FAILED
+        })
         when {
             outcome.rc == RootTransport.RC_DIGEST_CHANGED -> {
                 /*
@@ -379,14 +405,32 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
      *
      * Returns true when the caller must stop.
      */
-    private fun refuseWithoutTrace(context: Context, bootId: String, phase: String): Boolean {
+    private fun refuseWithoutTrace(
+        context: Context,
+        bootId: String,
+        phase: String,
+        claimSpent: Boolean = false,
+    ): Boolean {
         val failure = AutoRootStore.traceSoftReboot(bootId, phase) ?: return false
         Log.e(TAG, "[DFR][SOFT_REBOOT] REFUSED no durable trace for $phase: $failure")
+        /*
+         * "Nothing was attempted" stops being true once claimSoftReboot has
+         * succeeded. No teardown ran either way - but the boot's one-shot claim is
+         * durable and spent, so a message implying nothing changed would send the
+         * operator to tap again, in a boot that will now refuse. The claim is
+         * deliberately not released (a retry could race a teardown already in
+         * flight); what has to change is what the operator is told.
+         */
+        val consequence = if (claimSpent) {
+            " No teardown was executed and root is unaffected, but this boot's one" +
+                " dispatch claim is already spent: a retry needs a full reboot."
+        } else {
+            " Nothing was attempted; root is unaffected."
+        }
         RootNotifier.notifySoftReboot(
             context, context.getString(R.string.notif_soft_reboot_refused),
             "the dispatch record could not be written ($failure), so a failure" +
-                " here would leave nothing to diagnose. Nothing was attempted;" +
-                " root is unaffected."
+                " here would leave nothing to diagnose.$consequence"
         )
         return true
     }

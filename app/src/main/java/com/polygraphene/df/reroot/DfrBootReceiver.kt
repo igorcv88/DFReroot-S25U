@@ -196,6 +196,24 @@ class DfrBootReceiver : BroadcastReceiver() {
             val bootId = DfrRootCoordinator.readBootId()
             val outcome = SoftRebootHealth.completePostExec(bootId)
             Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] $outcome boot_id=$bootId")
+            /*
+             * This broadcast is the first moment a converged answer is POSSIBLE,
+             * and no single sample after it concludes anything in EITHER
+             * direction. A first PENDING may be the init trigger and the
+             * `bootchecker-bootc` oneshot still in flight; a first CONVERGED may
+             * be a device that reboots two minutes later, which is what the
+             * incident did. So the observation is handed to a bounded observer
+             * that outlives this broadcast and closes its window on TIME, never
+             * on a verdict - including a good one.
+             *
+             * The observer is not started on this receiver's shared worker: that
+             * executor also carries the early-boot evidence, and a multi-minute
+             * poll on it would serialise unrelated work behind this one.
+             */
+            val o = SoftRebootHealth.observe(bootId)
+            if (o.state == SoftRebootHealthPolicy.OBS_POST_EXEC && !o.postWindowClosed) {
+                SoftRebootHealth.startSettleObserver(bootId)
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] POST_EXEC=FAIL $t", t)
         }
