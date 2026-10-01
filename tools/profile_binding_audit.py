@@ -1180,7 +1180,8 @@ def audit():
     # credential is checked, before the namespace switch that needs it, and
     # before either exec - and the check must come before the execs too, because
     # a returned success is not evidence of root (AGENTS.md 3.5).
-    order = ("if (!transport_fix_allowed)",
+    order = ("ops->fd_quarantine(&fdq_method)",
+             "if (!transport_fix_allowed)",
              "ops->driver_fd(&driver_fd, &diag)",
              "ops->grant_root(driver_fd)",
              "uid = ops->current_uid()", "if (uid != 0)",
@@ -1194,13 +1195,179 @@ def audit():
         fail("the native transport performs the grant-before-exec sequence out "
              "of order; obtaining root after an exec is the shape the device "
              "refused, and executing before the uid check trusts a boolean")
+
+    # The descriptor boundary of the fork/exec, asserted the same way the
+    # supercall gate is: by ownership and by position.
+    #
+    # The child is a forked copy of system_server, so it starts with
+    # system_server's whole descriptor table - Binder, the HALs, the logging
+    # sockets, the control socket to lmkd. Anything its owner did not mark
+    # FD_CLOEXEC crosses the exec and outlives the generation of system_server
+    # that opened it. On this device the lmkd endpoint of the system_server a
+    # soft reboot destroyed (inode 47482) was still held as fd 148 by this
+    # transport's descendants, and later that boot lmkd's main thread stopped
+    # progressing in sock_alloc_send_pskb and took the framework down with it.
+    #
+    # The leak is proven; its role in the stall is not, and this guard does not
+    # assume one. It asserts the hermetic property instead, which is the only
+    # form a fail-closed boundary can take here: no descriptor crosses the exec
+    # unless dfr_su_core.c names it. Naming lmkd's socket specifically would be
+    # the same defect in a smaller costume.
+    #
+    # Four properties, mirroring the supercall gate, because any one of them
+    # lapsing makes the exec porous again:
+    #   1. the quarantine is the FIRST thing after stdio, so no path between
+    #      fork and exec - present or future - can reach an exec without it;
+    #   2. its failure is its own refusal step, never a logged inconvenience;
+    #   3. exactly one shipped source forks and execs at all, so there is no
+    #      second fork/exec that could skip the call (AGENTS.md 3.2);
+    #   4. the transport's own pipes are O_CLOEXEC at creation, so they do not
+    #      leak through anything ELSE inside system_server that forks.
+    if "int dfr_fd_quarantine(int *method_out)" not in su_core_code:
+        fail("dfr_fd_quarantine is gone; the fork/exec would hand "
+             "system_server's descriptor table to the daemon it starts")
+    # The entry classifier's three outcomes. Two would mean a numeric name the
+    # code cannot represent is reported exactly as "." is, which is how the first
+    # version of this change walked past a descriptor while reporting the sweep a
+    # success (found in review on PR #47). Only the non-numeric outcome may be
+    # skipped, and the walk must REFUSE on the other one - a host cannot create a
+    # descriptor named above INT_MAX, so this is not reachable from a test.
+    if "DFR_FD_NAME_UNREPRESENTABLE" not in su_core_code \
+            or "DFR_FD_NAME_NOT_NUMERIC" not in su_core_code:
+        fail("the descriptor-name classifier collapsed its outcomes; a numeric "
+             "name this code cannot represent must not be reported the same way "
+             "as '.', or the quarantine skips a real descriptor and still "
+             "reports success")
+    if "65535" in su_core_code:
+        fail("a descriptor-number cap is back in the transport. RLIMIT_NOFILE is "
+             "system_server's, not this file's to assume, and a capped name was "
+             "indistinguishable from '.' to the quarantine")
+    scan_at = su_core_code.find("int dfr_fd_quarantine_proc_scan(void)")
+    if scan_at < 0:
+        fail("the /proc/self/fd fallback is gone or no longer separable; on a "
+             "kernel with CLOSE_RANGE_CLOEXEC it is unreachable from a test "
+             "unless it is its own function")
+    else:
+        scan_end = su_core_code.find("int dfr_fd_quarantine(int *method_out)",
+                                     scan_at)
+        scan_code = su_core_code[scan_at:scan_end]
+        unrep = scan_code.find("parsed == DFR_FD_NAME_UNREPRESENTABLE")
+        if unrep < 0 or "return -1;" not in scan_code[unrep:unrep + 400]:
+            fail("the /proc walk no longer refuses a descriptor name it cannot "
+                 "represent; skipping one leaves it unmarked while the sweep "
+                 "reports PROC_SCAN success (AGENTS.md 2)")
+    if "CLOSE_RANGE_CLOEXEC" not in su_core_code:
+        fail("the descriptor quarantine no longer marks the table close-on-exec; "
+             "closing descriptors here instead would break the grant, and "
+             "skipping them is the leak it exists to remove")
+    child_main_at = su_core_code.find("static void child_main(")
+    if child_main_at < 0:
+        fail("child_main is gone; the pre-exec sequence has no owner to prove")
+    else:
+        quarantine_at = su_core_code.find("ops->fd_quarantine(&fdq_method)",
+                                          child_main_at)
+        comm_at = su_core_code.find("ops->set_comm(comm)", child_main_at)
+        if quarantine_at < 0 or comm_at < 0 or quarantine_at > comm_at:
+            fail("the descriptor quarantine is no longer the first thing the "
+                 "child does after stdio; a refusal path or a future step "
+                 "placed before it could reach an exec with system_server's "
+                 "descriptor table behind it")
+    # The single deliberate exception, and the fact that it IS deliberate: the
+    # flag is cleared after the quarantine rather than the descriptor being left
+    # out of it, so a reader finds the exception written down.
+    keep_at = su_core_code.find("fcntl(driver_fd, F_SETFD, 0)")
+    driver_at = su_core_code.find("ops->driver_fd(&driver_fd, &diag)")
+    grant_at = su_core_code.find("ops->grant_root(driver_fd)")
+    if keep_at < 0:
+        fail("the KernelSU driver descriptor is no longer kept across the exec. "
+             "Without it the pinned daemon's own init_driver_fd finds nothing "
+             "and issues the supercall itself, from outside the gate of "
+             "AGENTS.md 3.6.1 that stands in front of ours")
+    elif not (driver_at < keep_at < grant_at):
+        fail("the driver-descriptor exception is not applied between "
+             "acquisition and the grant; an exception that is not where the "
+             "quarantine can be seen to permit it is an oversight")
+    if su_core_code.count("fcntl(driver_fd, F_SETFD, 0)") != 1:
+        fail("more than one descriptor is exempted from the quarantine by hand; "
+             "exactly one exception exists and it is the driver descriptor")
+    if re.search(r"(?<![a-z_])pipe\(", su_core_code):
+        fail("the native transport creates a pipe without O_CLOEXEC again; a "
+             "write end inherited by any other fork inside system_server stays "
+             "open after this child is gone")
+    if "pipe2(out_pipe, O_CLOEXEC)" not in su_core_code \
+            or "pipe2(status_pipe, O_CLOEXEC)" not in su_core_code:
+        fail("the native transport's own channels are no longer O_CLOEXEC at "
+             "creation")
+    # Property 3: the transport forks in exactly one place, so there is no
+    # second fork/exec that could skip the quarantine (AGENTS.md 3.2, which is
+    # where this failure mode lives - a boundary enforced in one entry point is
+    # a boundary the other entry point defeats).
+    #
+    # Scope is the transport, not the whole tree. exp.c also forks, but it does
+    # so inside com.android.networkstack.process as part of the Dirty Frag
+    # chain: a different parent, a different descriptor table, and not what the
+    # device's leak came out of. Widening this guard to cover it would be a
+    # claim about a process this change has not looked at.
+    if "fork()" not in su_core_code:
+        fail("dfr_su_core.c no longer forks; the transport's single spawn point "
+             "is what makes the descriptor quarantine unbypassable")
+    if su_core_code.count("fork()") != 1:
+        fail("dfr_su_core.c forks in more than one place; each fork is another "
+             "exec the quarantine can be forgotten in front of (AGENTS.md 3.2)")
+    for token in ("fork(", "vfork(", "posix_spawn", "execv", "execl", "execve"):
+        if token in su_jni_code:
+            fail("dfr_su_jni.c names %r: the JNI layer marshals and nothing "
+                 "else, so the forking child stays the one in dfr_su_core.c "
+                 "that quarantines its descriptors first" % token)
+    # And no NEW Kotlin source may start a process. Every component of this app
+    # runs at android:process="system", so a process started from Kotlin is a
+    # fork of system_server with whatever descriptor hygiene the platform's own
+    # exec machinery happens to do - which this change did not read and
+    # therefore does not vouch for either way.
+    #
+    # TerminalActivity is the one pre-existing site and is listed, not excused:
+    # it is a developer terminal, not exported, reached only from MainActivity,
+    # and its Runtime.exec() goes through ART rather than through this file's
+    # transport. Whether libcore's child closes inherited descriptors is an
+    # open question recorded in docs/HANDOFF.md, not a fact asserted here. The
+    # allowlist exists so the count cannot grow while that is unanswered.
+    PROCESS_START_TOKENS = ("ProcessBuilder", "Runtime.getRuntime().exec")
+    KNOWN_PROCESS_STARTERS = {"TerminalActivity.kt"}
+    for name in sorted(os.listdir(DFR_JAVA_DIR)):
+        if not name.endswith((".kt", ".java")) or name in KNOWN_PROCESS_STARTERS:
+            continue
+        try:
+            with open(os.path.join(DFR_JAVA_DIR, name), encoding="utf-8") as f:
+                code = code_only(f.read())
+        except OSError as ex:
+            fail("cannot read %s: %s" % (name, ex))
+            continue
+        for token in PROCESS_START_TOKENS:
+            if token in code:
+                fail("%s starts a process from the app's own domain (%r). "
+                     "Besides the SELinux refusal that retired that shape, it "
+                     "is a fork of system_server with no descriptor quarantine "
+                     "in front of it; the transport in dfr_su_core.c is the one "
+                     "place this app starts a process" % (name, token))
+    for name in sorted(KNOWN_PROCESS_STARTERS):
+        try:
+            with open(os.path.join(DFR_JAVA_DIR, name), encoding="utf-8") as f:
+                code = code_only(f.read())
+        except OSError as ex:
+            fail("cannot read %s: %s" % (name, ex))
+            continue
+        if not any(token in code for token in PROCESS_START_TOKENS):
+            fail("%s no longer starts a process; remove it from "
+                 "KNOWN_PROCESS_STARTERS so the allowlist keeps naming only "
+                 "what is actually there" % name)
     try:
         with open(os.path.join(JNI_DIR, "dfr_su_core.h"), encoding="utf-8") as f:
             su_header_code = code_only(f.read())
     except OSError as ex:
         fail("cannot read dfr_su_core.h: %s" % ex)
         su_header_code = ""
-    for step in ("DFR_SU_STEP_DRIVER_FD", "DFR_SU_STEP_GRANT",
+    for step in ("DFR_SU_STEP_FD_QUARANTINE",
+                 "DFR_SU_STEP_DRIVER_FD", "DFR_SU_STEP_GRANT",
                  "DFR_SU_STEP_NOT_ROOT", "DFR_SU_STEP_MNT_NS",
                  "DFR_SU_STEP_DIGEST", "DFR_SU_STEP_TIMEOUT"):
         if step not in su_header_code or step not in su_core_code:
