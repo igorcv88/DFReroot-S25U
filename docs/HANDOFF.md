@@ -5,23 +5,39 @@ what is physically proven now, what still needs to be implemented, and the
 acceptance criteria for the next signed build. If this file disagrees with
 `docs/S25U_ZZIC_COMPATIBILITY.md` about evidence, the compatibility dossier wins.
 
-> **Open, and where to start: one release, two physical discriminators.** The
-> current boot `30e61b44-267d-4f60-bb64-0a758f2eeedf` is verified
-> `POST_ROOT_COMPLETE`, Enforcing, UAPI 2, and carries
-> `transport_fix=kdp-cred-1`; both daemon candidates match the pinned digest.
-> The last Apply Modules tap stopped at `PROBE_RETURNED rc=-1`, wrote no lock,
-> and reported `DRIVER_FD errno=1`. It proved `SUPERCALL_GATE_OPEN=CONFIRMED`
-> and `SUPERCALL_SYSCALL_RESULT=REFUSED_EPERM`, while
-> `DRIVER_FD_INSTALL_ON_THIS_RUN=UNDETERMINED`. The pre-handler can install the
-> fd and still let real `sys_reboot` return EPERM, so those facts remain separate.
+> **Open, and where to start: the soft reboot works and the firmware rejects the
+> boot it produces.** The conclusive Apply Modules rerun happened, in boot
+> `85e3a031-42bb-49cc-8bbe-c276cb4b5c4e`, and it settled the old question the
+> wrong way round: the transport, the supercall, the driver fd and the grant all
+> worked. The trace stopped at `phase=EXEC_ENTER path=/data/adb/ksud` with the
+> lock at `phase=CLAIMED`, `EXEC_RETURNED` was never written, and the framework
+> restarted — which is what a successful handover looks like, because the exec
+> kills the process that would have written the next line.
+> `APPLY_MODULES_TRANSPORT`, `KSUD_EXEC_HANDOFF` and `FRAMEWORK_SOFT_REBOOT` are
+> physical PASS; the previous `PROBE_RETURNED rc=-1` / `DRIVER_FD errno=1` state
+> is superseded.
 >
-> This branch prepares the conclusive rerun: the post-call scan remains
-> unconditional and now records `FD_SOURCE`, `SUPERCALL_RC`, and
-> `SUPERCALL_ERRNO`; the `transport_fix` gate dominates both inherited-fd and
-> grant paths; the per-process guard is retryable only before the durable
-> `phase=CLAIMED` lock. The same APK adds an explicitly armed, persisted,
-> marker-only JobService plus a read-only StageHop readiness probe. It cannot
-> root, hop, soft-reboot, or reschedule itself.
+> What fails now is `POST_SOFT_REBOOT_STABILITY`. Minutes after the UI returned
+> the device full-rebooted with
+> `reboot,rollback_staged_install(bootchecker_timeout)`, preceded by CrashRecovery
+> `Rolling back bootchecker_timeout. Reason: NATIVE_CRASH`. It was **not** a
+> kernel panic: the DropBox entry is `..._RP`, this firmware writes `..._KP` for a
+> panic and holds two from 2026-09-29, `/sys/fs/pstore` was empty and no tombstone
+> names `bootchecker`. The dossier's ninth physical run carries the full record.
+>
+> The mechanism is `/system/etc/init/bootchecker.rc`: any
+> `init.svc.zygote=restarting` zeroes Samsung's `dev.platform_bootcomplete` and
+> restarts Samsung's boot watchdog, and the rule that restores that flag is edge
+> triggered on `dev.bootcomplete=1` — a property KernelSU's
+> `reset_boot_completed()` does not touch.
+>
+> **The one measurement that closes this is not yet taken:** nobody has read
+> `dev.platform_bootcomplete` or `dev.bootcomplete` after an emulated soft reboot
+> on this firmware. This branch adds the gate that refuses a dispatch from a boot
+> the firmware does not consider complete, and the two-half record that takes that
+> reading from the only observer that exists — the restarted framework's own
+> `BOOT_COMPLETED` in the same boot. Until that record comes back from hardware,
+> every coordination design for the Samsung handshake is a guess.
 
 ## Current state
 
@@ -1423,3 +1439,76 @@ After that exact sequence passes physically, the next code target is the
 DFReroot-owned Auto Root receiver/service plan above: explicit post-manual-PASS
 opt-in, full-boot detection by new `boot_id`, one attempt per boot, shared
 coordinator semantics and no retry after native execution begins.
+
+## Soft-reboot boot-health checkpoint — 2026-10-01
+
+### What is implemented on this branch
+
+- `SoftRebootHealthPolicy` (pure, host-tested): the eight properties of the
+  Samsung handshake, the four-way verdict, and the two-half record with its
+  merge rule. An unset property (`ABSENT`) and an unreadable one (`UNKNOWN`) are
+  separate values on purpose — the two CrashRecovery signals are unset on a
+  healthy boot, so collapsing them would either make the gate unsatisfiable or
+  make an unreadable crash signal read as a clean one.
+- `SoftRebootPolicy` refuses a dispatch unless the verdict is
+  `BOOT_HEALTH_CONVERGED`, in `preCandidateChecks` so the unprivileged precheck
+  refuses too — a gate only in `evaluate()` would have obtained a root shell
+  first. `Inputs.bootHealthVerdict` defaults to the refusing value.
+- `DfrSoftRebootReceiver` takes **one** reading, gates on it and records that
+  same reading as the pre half; a failed write is a refusal, like the trace.
+- `DfrBootReceiver` completes the post half on `BOOT_COMPLETED` only
+  (`LOCKED_BOOT_COMPLETED` arrives before `sys.boot_completed` is 1, so a
+  converged answer is impossible there and the record writes once).
+- `MainActivity` now has three marker chips. `MARKER?` is the `EACCES` case that
+  used to print `HOOKED` while the dialog refused with "cannot determine".
+
+### What this does NOT do
+
+It does not fix `bootchecker_timeout`, and no release note or commit message may
+suggest it does. The trigger is in the firmware's init rc; the property that
+clears it is written by a daemon outside this app. What the gate prevents is one
+specific thing: a *second* userspace teardown stacked on a handshake that has not
+converged.
+
+### The acceptance run that closes this
+
+One boot, one tap, no new build needed afterwards if it passes:
+
+1. Full reboot. Confirm `AUTO_ROOT_RESULT=SUCCESS` and
+   `[DFR][SOFT_REBOOT_HEALTH]` is absent (no dispatch yet).
+2. Open the app. The startup line must read
+   `SOFT_REBOOT_HEALTH=ABSENT` or `=STALE_BOOT`, never `POST_EXEC`.
+3. Tap Apply Modules. Expect
+   `[DFR][SOFT_REBOOT_HEALTH] PRE_DISPATCH=BOOT_HEALTH_CONVERGED` and then
+   `PRE_EXEC=PASS`. A refusal here is also a result: it means a healthy ZZIC boot
+   does not satisfy the verdict, and the element that refused is named in the
+   notification — correct the policy from the observed values, never the reverse
+   (AGENTS.md section 4).
+4. After the framework returns, read the record **as root**:
+   `cat /data/system/dfreroot-softreboot-health`.
+   - `phase=POST_EXEC` with `post_dev_platform_bootcomplete=1` and
+     `post_dev_bootcomplete=1`: the hypothesis is **refuted**; the handshake does
+     re-converge and the 2026-10-01 timeout had another cause. Look at the second
+     module lifecycle next (`meta-overlayfsx`, ViPER's `nsenter -t 1 -m` binds,
+     YouTube Morphe's per-zygote namespace mounts).
+   - `phase=POST_EXEC` with `post_dev_platform_bootcomplete=0`: the hypothesis is
+     **confirmed**. The next design question is whether `dev.bootcomplete` can be
+     made to re-transition, and that is a policy decision for the owner, made in
+     the open — it means writing a firmware property from this app, which nothing
+     here does today.
+   - `phase=PRE_EXEC` still standing: the framework did not come back far enough
+     to run our receiver. That is a third outcome and must not be read as either
+     of the above.
+5. Whatever happens, record `dumpsys rollback`, `getprop | grep -E
+   'bootcomplete|bootchecker|crashrecovery|rescue_level'` and, after any
+   unexplained reboot, `/sys/class/sec/sec_hw_param/extra_info`,
+   `/proc/reset_summary` and the DropBox `SYSTEM_LAST_KMSG_*` suffix (`_RP` vs
+   `_KP`) **before** anything else.
+
+### What is still owed, and what it is blocked on
+
+| Owed | Blocked on |
+|---|---|
+| A coordination design for the Samsung handshake (handoff front 1 and 3) | step 4 above. Every design is a guess until that record comes back |
+| The second module lifecycle in one kernel (front 5) | mostly module-side, not this repository; and step 4 may make it the primary suspect |
+| `POST_ROOT_LSPOSED_COMPAT`, and the negative half of Auto Root (opt-out suppressing the next boot) | unchanged by this work |

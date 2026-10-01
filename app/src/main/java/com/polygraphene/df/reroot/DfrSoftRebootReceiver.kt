@@ -95,6 +95,17 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         inputs.lockRecord = AutoRootStore.softRebootLock()
         inputs.pinnedKsudSha256 = KsudStage.pinnedKsudSha256()
         /*
+         * ONE reading of the firmware's boot-health state, used twice: it decides
+         * the gate below, and it is the pre-teardown half of the record written
+         * before the exec. Two readings would mean the state that permitted the
+         * dispatch and the state the record reports are different states, and the
+         * whole value of this record is that it says what the decision was made on.
+         */
+        val healthSnapshot = SoftRebootHealth.snapshot()
+        inputs.bootHealthVerdict = SoftRebootHealthPolicy.verdict(healthSnapshot)
+        Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] PRE_DISPATCH=${inputs.bootHealthVerdict}" +
+            " boot_id=$bootId")
+        /*
          * Everything decidable without privilege, first. A notification minted in
          * another boot, or a boot this build did not root, must be refused WITHOUT
          * asking for a root shell - the cheap refusals cost nothing and the shell
@@ -252,6 +263,31 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
          * descriptor. A replacement landing after the open cannot change the bytes
          * that run.
          */
+        /*
+         * The pre-teardown boot-health half, written BEFORE the exec for exactly
+         * the reason the trace is: the process that would report what happened
+         * next is the process `stop` kills. Its companion half is written by the
+         * restarted framework's own BOOT_COMPLETED in this same boot
+         * (SoftRebootHealth.completePostExec), and the absence of that half is
+         * itself the observation that the framework did not come back far enough.
+         *
+         * A failure to persist it is a refusal, not a logged inconvenience: this
+         * is the pre-operation record for an operation that has already taken this
+         * device down once with nothing readable afterwards (AGENTS.md 3.6.1).
+         */
+        val healthFailure = SoftRebootHealth.recordPreExec(bootId, healthSnapshot)
+        if (healthFailure != null) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT] REFUSED no durable boot-health record:" +
+                " $healthFailure")
+            RootNotifier.notifySoftReboot(
+                context, context.getString(R.string.notif_soft_reboot_refused),
+                "the pre-teardown boot-health record could not be written" +
+                    " ($healthFailure), so a firmware boot-health failure after the" +
+                    " restart would again leave nothing to diagnose. Nothing was" +
+                    " attempted; root is unaffected."
+            )
+            return
+        }
         if (refuseWithoutTrace(context, bootId, "EXEC_ENTER path=${decision.binaryPath}")) {
             return
         }

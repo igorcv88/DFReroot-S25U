@@ -301,6 +301,30 @@ object AutoRootStore {
     fun softRebootTrace(): String? = read(SOFT_REBOOT_TRACE_PATH)
 
     /**
+     * Samsung boot-health around a soft reboot: the two-half record whose pre
+     * part is written before the teardown and whose post part is written by the
+     * restarted framework in the same boot.
+     *
+     * Separate from both the lock and the trace, because it answers a third
+     * question. The lock says this boot's one attempt is spent; the trace says
+     * how far the transport got; this says what the FIRMWARE thought of the boot
+     * afterwards - which is the fact that turned a working soft reboot into a
+     * `bootchecker_timeout` rollback and a full reboot on 2026-10-01.
+     */
+    const val SOFT_REBOOT_HEALTH_PATH = "/data/system/dfreroot-softreboot-health"
+
+    fun softRebootHealth(): String? = read(SOFT_REBOOT_HEALTH_PATH)
+
+    /**
+     * Persist a boot-health record atomically and durably.
+     *
+     * Goes through the same [write] as every other record here: staged, read
+     * back, fsync'd, renamed, directory fsync'd. The pre half has to survive the
+     * teardown it precedes, which is exactly what an unsynced write does not.
+     */
+    fun writeSoftRebootHealth(body: String): String? = write(SOFT_REBOOT_HEALTH_PATH, body)
+
+    /**
      * Claim/spend this boot's single soft-reboot attempt, exclusively.
      *
      * Written BEFORE ksud is invoked, because a lock written afterwards would not

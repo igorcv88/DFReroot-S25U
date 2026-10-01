@@ -99,6 +99,15 @@ public final class SoftRebootPolicy {
         /** null when no attempt was claimed in any boot; never "" for that. */
         public String lockRecord;
         public String pinnedKsudSha256;
+        /**
+         * The Samsung boot-health verdict for the current moment, from
+         * {@link SoftRebootHealthPolicy#verdict}.
+         *
+         * Defaults to the refusing value for the same reason {@code liveSelinux}
+         * defaults to -1: a caller that forgets to supply it must be refused,
+         * never permitted. Only {@link SoftRebootHealthPolicy#CONVERGED} passes.
+         */
+        public String bootHealthVerdict = SoftRebootHealthPolicy.HEALTH_UNKNOWN;
         /** In preference order. The first digest match wins; no match refuses. */
         public final List<Candidate> candidates = new ArrayList<>();
     }
@@ -206,6 +215,41 @@ public final class SoftRebootPolicy {
                         + lock.get("phase") + ")");
             }
             // A lock naming another boot is last boot's record and locks nothing.
+        }
+
+        /*
+         * The Samsung boot-health handshake, and the one gate on this action that
+         * came out of a physical failure rather than a reading of source.
+         *
+         * On 2026-10-01 this dispatch worked: ksud ran, the framework restarted,
+         * the UI came back. Minutes later the device full-rebooted with
+         * `reboot,rollback_staged_install(bootchecker_timeout)` after CrashRecovery
+         * classified the stall as NATIVE_CRASH. The firmware's own
+         * /system/etc/init/bootchecker.rc zeroes `dev.platform_bootcomplete` and
+         * restarts its boot watchdog on `init.svc.zygote=restarting`, which an
+         * emulated soft reboot necessarily produces.
+         *
+         * This refusal does NOT fix that, and must never be described as if it
+         * did - the trigger is in the firmware's init rc and the property that
+         * clears it is written by a daemon outside this app. What it prevents is
+         * strictly narrower and strictly worth having: asking for a SECOND
+         * userspace teardown while the previous handshake has not converged -
+         * `dev.platform_bootcomplete` still 0, `bootchecker` still running,
+         * CrashRecovery already attempting a reboot. On a healthy ZZIC full boot
+         * every element reads positive and this costs nothing.
+         *
+         * BOOT_HEALTH_UNKNOWN refuses for AGENTS.md section 2's reason: the worst
+         * outcome of this operation is an unplanned full reboot with a staged
+         * rollback, so a state that could not be read is not permission to add a
+         * teardown to it.
+         */
+        if (!SoftRebootHealthPolicy.CONVERGED.equals(in.bootHealthVerdict)) {
+            return refuse("the firmware's boot-health handshake is "
+                    + (in.bootHealthVerdict == null
+                            ? SoftRebootHealthPolicy.HEALTH_UNKNOWN : in.bootHealthVerdict)
+                    + "; a soft reboot is only dispatched from a boot this firmware"
+                    + " itself considers complete. A full reboot re-applies modules"
+                    + " through post-fs-data");
         }
         return null;
     }

@@ -72,6 +72,15 @@ class MainActivity : Activity() {
         }
         refreshAutoRoot()
         refreshEarlyBootProbe()
+        /*
+         * The soft-reboot boot-health observation for THIS boot, printed once at
+         * startup rather than painted into a chip: four of its six states mean
+         * "nothing to report" and two are the open question, so a colour would
+         * collapse them. It is also the only place the operator can see a
+         * PRE_EXEC_ONLY record - the state that says the framework was torn down
+         * and never came back far enough to report on itself.
+         */
+        append(SoftRebootHealth.report(DfrRootCoordinator.readBootId()))
     }
 
     override fun onResume() {
@@ -125,15 +134,34 @@ class MainActivity : Activity() {
         showRunDialog()
     }
 
+    /**
+     * Three marker states, three chips. Never two.
+     *
+     * This used to print HOOKED for anything that was not a positive ABSENT,
+     * which is fail-closed in the right direction and still wrong: on ZZIC, once
+     * root is established, the /dev/df* probes return EACCES rather than ENOENT,
+     * so the operator read HOOKED - a definite claim that a run armed hooks -
+     * while the dialog said "cannot determine whether a stage marker exists".
+     * Two different facts behind one word is exactly what AGENTS.md 3.7 forbids,
+     * and here it made the UI contradict the refusal it was about to show.
+     *
+     * The colour stays `chip_warn` for both non-ABSENT states, because both of
+     * them refuse a run; the TEXT is what has to tell them apart.
+     */
     private fun updateChip() {
-        // Anything but a positive ABSENT shows the warning chip: an undeterminable
-        // probe must not look like a clean device.
-        if (DfrRootCoordinator.markerState() != AutoRootPolicy.MARKER_ABSENT) {
-            statusChip.text = getString(R.string.chip_hooked)
-            statusChip.setBackgroundResource(R.drawable.chip_warn)
-        } else {
-            statusChip.text = getString(R.string.chip_ready)
-            statusChip.setBackgroundResource(R.drawable.chip_ok)
+        when (DfrRootCoordinator.markerState()) {
+            AutoRootPolicy.MARKER_ABSENT -> {
+                statusChip.text = getString(R.string.chip_ready)
+                statusChip.setBackgroundResource(R.drawable.chip_ok)
+            }
+            AutoRootPolicy.MARKER_PRESENT -> {
+                statusChip.text = getString(R.string.chip_hooked)
+                statusChip.setBackgroundResource(R.drawable.chip_warn)
+            }
+            else -> {
+                statusChip.text = getString(R.string.chip_marker_unknown)
+                statusChip.setBackgroundResource(R.drawable.chip_warn)
+            }
         }
     }
 

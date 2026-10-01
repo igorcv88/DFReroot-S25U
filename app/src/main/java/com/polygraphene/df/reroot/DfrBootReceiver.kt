@@ -126,6 +126,20 @@ class DfrBootReceiver : BroadcastReceiver() {
         }
         val task = Runnable {
             try {
+                /*
+                 * The post-restart half of the soft-reboot boot-health record,
+                 * and only on BOOT_COMPLETED.
+                 *
+                 * An emulated soft reboot re-delivers BOTH broadcasts in the same
+                 * boot, and LOCKED_BOOT_COMPLETED is the earlier one - it arrives
+                 * before `sys.boot_completed` is 1, so Samsung's handshake cannot
+                 * have converged yet by construction. Sampling there would record
+                 * BOOT_HEALTH_PENDING on every run and the record writes once, so
+                 * the measurement would be spent on a reading that cannot answer
+                 * the question. BOOT_COMPLETED is the first point at which a
+                 * converged answer is even possible.
+                 */
+                if (booted) completeSoftRebootHealth()
                 if (locked) recordLockedBoot(arrivalMs) else retryPendingFinalize()
             } catch (t: Throwable) {
                 Log.e(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=FAIL $t", t)
@@ -159,6 +173,31 @@ class DfrBootReceiver : BroadcastReceiver() {
             } catch (f: Throwable) {
                 Log.e(TAG, "[DFR][EARLY_JOB] pending result finish failed: $f")
             }
+        }
+    }
+
+    /**
+     * Complete the soft-reboot boot-health record, if this boot has a pending
+     * pre-exec half.
+     *
+     * Self-contained and fully guarded, because it runs on the shared worker
+     * ahead of the early-job evidence and must not be able to take that with it.
+     * It never creates a record: a BOOT_COMPLETED that follows no dispatch leaves
+     * nothing behind, so a record's existence keeps meaning "a dispatch reached
+     * the exec in the boot it names".
+     *
+     * This is the only observation of what the firmware made of the restart that
+     * exists anywhere. The process that asked for the soft reboot was killed by
+     * it, and on 2026-10-01 that left the device's own `bootchecker_timeout`
+     * rollback with nothing in this app to correlate it against.
+     */
+    private fun completeSoftRebootHealth() {
+        try {
+            val bootId = DfrRootCoordinator.readBootId()
+            val outcome = SoftRebootHealth.completePostExec(bootId)
+            Log.i(TAG, "[DFR][SOFT_REBOOT_HEALTH] $outcome boot_id=$bootId")
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT_HEALTH] POST_EXEC=FAIL $t", t)
         }
     }
 
