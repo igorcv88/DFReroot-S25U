@@ -50,6 +50,38 @@
  * in for the marker. That reasoning - the scan found nothing, so ask - is what
  * panicked the device, and dfr_su_core.c is written so the call cannot be
  * reached by it.
+ *
+ * ## Why the child quarantines the descriptor table
+ *
+ * The fork above is a fork of system_server, so the child starts life holding
+ * system_server's whole descriptor table: Binder, the logging sockets, the
+ * HAL channels, and the control socket to lmkd. Every one of those that its
+ * owner did not mark FD_CLOEXEC survives the exec below and lives on for as
+ * long as the daemon does.
+ *
+ * That is not hypothetical here. After an Apply Modules on this device the
+ * lmkd endpoint of the generation of system_server that the soft reboot
+ * destroyed (inode 47482, lmkd fd 16) was still open as fd 148 in the
+ * descendants of this transport - busybox, the root manager's daemon,
+ * zygisk_lsposed, nsdaemon-zygote. The peer of a socket belonging to a dead
+ * system_server cannot be collected while a descriptor for it exists, so the
+ * old channel stayed half-alive across the restart. Roughly an hour later
+ * lmkd's main thread left do_epoll_wait for sock_alloc_send_pskb and never
+ * came back, its own watchdog began firing every two seconds, and the new
+ * system_server then blocked in LmkdConnection.write while holding
+ * ActivityManagerProcLock - which is what the user experiences as the device
+ * going dark with only the power key still vibrating.
+ *
+ * Whether the leaked descriptor is what put lmkd in that state is NOT
+ * established, and this file must not claim it is: a stable run showed the
+ * same two endpoints and never failed. What IS established is that descriptors
+ * from a privileged process leave through this exec, and the repository's rule
+ * is that the transport does not get to be the layer whose correctness nobody
+ * can state. So the boundary is hermetic by construction rather than by
+ * knowing which descriptor mattered: no descriptor crosses the exec unless
+ * this file names it and says why.
+ *
+ * Exactly one is named - the KernelSU driver descriptor, see dfr_su_core.c.
  */
 #ifndef DFR_SU_CORE_H
 #define DFR_SU_CORE_H
@@ -65,6 +97,8 @@ enum dfr_su_step {
     DFR_SU_OK = 0,
     DFR_SU_STEP_PIPE,       /* could not build the status/output channel */
     DFR_SU_STEP_FORK,
+    DFR_SU_STEP_FD_QUARANTINE, /* the inherited descriptor table could not be
+                                * made hermetic across the exec */
     DFR_SU_STEP_COMM,       /* prctl(PR_SET_NAME) */
     DFR_SU_STEP_TRANSPORT_FIX_GATED, /* the paired transport/grant predicate
                                       * was not authorised for this boot */
@@ -77,6 +111,36 @@ enum dfr_su_step {
     DFR_SU_STEP_TIMEOUT,
     DFR_SU_STEP_INTERNAL
 };
+
+/*
+ * How the descriptor table was made hermetic. Two mechanisms, named apart
+ * because they are different evidence: close_range(2) is one syscall that
+ * covers every descriptor that exists, while the /proc scan enumerates them
+ * and is only as complete as /proc/self/fd. A reader of the log must never
+ * have to guess which one spoke (AGENTS.md 3.7).
+ */
+enum dfr_su_fd_quarantine_method {
+    DFR_SU_FDQ_NONE = 0,
+    DFR_SU_FDQ_CLOSE_RANGE,
+    DFR_SU_FDQ_PROC_SCAN
+};
+
+/*
+ * Mark every descriptor at or above DFR_SU_FD_QUARANTINE_FLOOR close-on-exec.
+ *
+ * Marking, not closing: everything between fork() and exec() still needs the
+ * status pipe, the output pipe and - on the EXISTING path - an inherited
+ * [ksu_driver] descriptor, so closing here would break the grant the exec
+ * depends on. FD_CLOEXEC moves the closure to the one boundary that matters.
+ *
+ * Returns 0 and names the mechanism in method_out, or -1 with errno and
+ * DFR_SU_FDQ_NONE. There is no partial success: a table this cannot account
+ * for is reported as a failure, because "most of it was sanitised" is the
+ * absence of evidence about the rest (AGENTS.md 2).
+ */
+#define DFR_SU_FD_QUARANTINE_FLOOR 3
+
+int dfr_fd_quarantine(int *method_out);
 
 enum dfr_su_fd_source {
     DFR_SU_FD_SOURCE_NONE = 0,
@@ -110,6 +174,12 @@ int dfr_acquire_driver_fd(const struct dfr_driver_fd_ops *ops, int *fd_out,
  * only reachable on hardware. AGENTS.md 5 requires exactly this shape.
  */
 struct dfr_su_ops {
+    /* First, because nothing else in the child may run with a descriptor table
+     * it has not accounted for. Injectable for the same reason as the rest: a
+     * gate that cannot fail is not a gate (AGENTS.md 5), and the real
+     * implementation is unprivileged, so the host suite exercises both it and
+     * its refusal. */
+    int (*fd_quarantine)(int *method_out);
     int (*set_comm)(const char *comm);        /* 0, or -1 with errno */
     int (*driver_fd)(int *fd_out, struct dfr_su_transport_diag *diag);
     int (*grant_root)(int driver_fd);         /* 0, or -1 with errno */

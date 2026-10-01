@@ -1583,3 +1583,133 @@ One boot, one tap, no new build needed afterwards if it passes:
 | A coordination design for the Samsung handshake (handoff front 1 and 3) | step 4 above. Every design is a guess until that record comes back |
 | The second module lifecycle in one kernel (front 5) | mostly module-side, not this repository; and step 4 may make it the primary suspect |
 | `POST_ROOT_LSPOSED_COMPAT`, and the negative half of Auto Root (opt-out suppressing the next boot) | unchanged by this work |
+
+## Descriptor boundary of the root transport — 2026-10-01
+
+### The observation this comes from
+
+A watched Apply Modules run in boot `35157e19-efad-46a5-9211-451bacb6941f`
+(`DFR_lmkd_20261001_210454_watch.txt`, `_deep.txt`, `_logcat.txt`,
+`anr_2026-10-01-22-12-49-698`) showed the soft reboot itself working: the boot id
+never changed, `system_server` went from pid 3116 to pid 23749, and `lmkd` stayed
+pid 966 throughout. The new `system_server` built a fresh control channel
+(`system_server:fd150` inode 274405 ↔ `lmkd:fd246` inode 274406) and
+`lmkd --reinit` ran and was acknowledged (`Properties reinitilized`, client
+`lmkd updated properties successfully`).
+
+What also stayed is the point. The **previous** generation's endpoint,
+`lmkd fd16` inode 47482, was still open, and its peer — the descriptor that
+belonged to the destroyed `system_server` — appeared as **fd 148** in this
+transport's descendants: `busybox`, the root manager's `daemon`, `zygisk_lsposed`,
+`nsdaemon-zygote`. The device was then normal for ~66 minutes. At 22:11:19
+`lmkd`'s main thread was in `do_epoll_wait`; at 22:11:25 it was in
+`sock_alloc_send_pskb` and stayed there for every later sample. `lmkd watchdog
+timed out!` then fired roughly every two seconds, killing processes at
+progressively lower `oom_score_adj`, and the `pre_watchdog` at 22:12:49 has AMS,
+`main`, `android.io` and `ActivityManager` blocked. An earlier incident
+(`DFR_watchdog_20261001.txt`) has the other end of the same channel: a
+`system_server` binder thread in `__sendmsg` → `netdClientSendmsg` →
+`socket_write_all` → `LocalSocketImpl.write` → `LmkdConnection.write` →
+`ProcessList.writeLmkd`, holding `ActivityManagerProcLock`. That is the blackout
+the owner sees: power key vibrating, nothing drawing, full reboot needed.
+
+### What is proven, and what is not
+
+**Proven.** The soft reboot replaces `system_server` without restarting `lmkd`.
+Descriptors belonging to the replaced `system_server` — the old `lmkd` channel
+among them — cross this transport's `fork`/`exec` and live on in the daemon tree.
+`lmkd`'s main thread did stop progressing in `sock_alloc_send_pskb`, its own
+watchdog did fire, and the framework did then block writing to `lmkd`.
+
+**Not proven, and not asserted anywhere in the code or the audit.** That the
+leaked descriptor is what put `lmkd` in that state. A stable monitored run showed
+the same two endpoints for over 31 minutes with no watchdog failure, so "two
+endpoints exist" is not sufficient. Memory pressure is a plausible trigger
+(reclaim events and reaps immediately precede the stall, and the latency has been
+~20, >31 and ~66 minutes) but is not evidence of the mechanism. `bootchecker` is
+not implicated in *this* failure: no full reboot happened at the Apply,
+`sys.boot_completed` returned to 1, and the device ran for an hour. Auto Root
+correlates with the reproductions and remains an A/B variable, not a cause.
+
+### What this branch changes
+
+The transport no longer hands its child an inherited descriptor table, and the
+rule is stated as a property rather than as a list of descriptors to close —
+naming `lmkd`'s socket specifically would be the same defect in a smaller
+costume.
+
+- `dfr_fd_quarantine()` (`app/src/main/jni/dfr_su_core.c`) marks every descriptor
+  at or above 3 `FD_CLOEXEC`, by `close_range(3, ~0U, CLOSE_RANGE_CLOEXEC)` or, on
+  a kernel without the flag, by a `getdents64` walk of `/proc/self/fd`. The two
+  mechanisms are named apart in the log (`FD_QUARANTINE=CLOSE_RANGE` /
+  `=PROC_SCAN`) because they are different evidence. **Marking, not closing:** the
+  status pipe is still the handoff signal, the output pipe is still stdout, and on
+  the `EXISTING` path an inherited `[ksu_driver]` descriptor is still what the
+  grant is sent to.
+- It is the **first** thing the child does after stdio, so no path between
+  `fork()` and `exec()` — present or future — can reach an exec with
+  `system_server`'s table behind it. A table it cannot account for is
+  `DFR_SU_STEP_FD_QUARANTINE`, a refusal with its own token, not a logged
+  inconvenience: "most of it was sanitised" is not a sanitised table.
+- **Exactly one exception**, written down rather than left out: the KernelSU
+  driver descriptor, whose `FD_CLOEXEC` is cleared deliberately after acquisition
+  (`DRIVER_FD_KEEP=PASS`). Dropping it is worse than keeping it — the pinned
+  daemon's own `init_driver_fd` would find nothing and issue the magic supercall
+  itself, from outside the gate of AGENTS.md 3.6.1 that stands in front of ours.
+- `out_pipe` is created with `pipe2(..., O_CLOEXEC)`. This is not what protects
+  the exec below (the child re-marks its whole table anyway); it protects every
+  *other* fork/exec happening concurrently inside `system_server`.
+
+### How it is verified with no device
+
+`tools/tests/test_su_core.sh` runs the **real** `dfr_fd_quarantine()` — it is
+unprivileged, so the host suite exercises the code the device runs. The parent
+opens the two shapes the device showed, without `FD_CLOEXEC`: a regular file
+identifiable by a unique path, and a `socketpair` identifiable by its inode,
+which is how the leak was identified on the device. The exec'd process lists
+`/proc/$$/fd`; neither marker may appear, `/dev/null` must (the positive control,
+so an empty listing cannot pass the two absences), and the driver descriptor —
+opened `O_CLOEXEC` by the fake — must, which can only happen because the
+exception clears the flag. The refusal has its own case via the injected op.
+
+Three mutations must each kill the suite: the marker branch, the quarantine call,
+and the driver-fd exception. `tools/profile_binding_audit.py` asserts position
+(quarantine before `set_comm`), ownership (one `fork()` in the transport, nothing
+forking in `dfr_su_jni.c`), the single hand-written exception between acquisition
+and grant, and that both pipes are `O_CLOEXEC` at creation.
+
+### Physical acceptance — and why the previous windows were too short
+
+Not accepted until a long run passes. After a full boot and root, with the
+watcher running: Apply Modules, confirm the old `system_server` goes, the new one
+appears, a new `lmkd` channel is created, and — the point of this change — that
+**no descriptor of the replaced `system_server` appears in `busybox`, `daemon`,
+`ksud`, `zygisk_lsposed`, `nsdaemon-zygote` or any other descendant of the
+transport.** Then observe for **≥90 minutes** under normal use and some real
+memory pressure, because the reproductions landed at ~20 and ~66 minutes and a
+31-minute clean run proved nothing. Throughout: `lmkd` main `wchan`
+predominantly `do_epoll_wait`, zero `lmkd watchdog timed out!`, zero
+`pre_watchdog`, no `LmkdConnection.write` blocked, the new `system_server` still
+alive.
+
+Per AGENTS.md 3.6.1's posture: a clean 90 minutes is "did not reproduce in one
+window", not a proof that the descriptor leak was the cause. The proof this run
+*can* give is the hermetic boundary — the absent peer — which is checkable
+directly and does not depend on the stall's mechanism.
+
+### What is still owed
+
+| Owed | Blocked on |
+|---|---|
+| The ≥90-minute physical run above | a signed build and one device session |
+| Which socket `lmkd` was sending on in `sock_alloc_send_pskb`, and whether its queue was full, its peer had stopped draining, or socket-buffer allocation was under pressure | device capture; nothing in this repository can answer it |
+| Whether Samsung's `lmkd --boot_completed` being one-shot per process lifetime matters (the restarted framework gets `lmkd already handled boot-completed operations`) | the run above. This is the **next** axis only if the hang survives a verified-clean descriptor boundary — and restarting a `class core` daemon during a framework teardown is an experiment to design, not a first fix |
+| Whether `TerminalActivity`'s `Runtime.exec()` leaks descriptors too | reading what libcore's child process does on this platform. It is a non-exported developer terminal reached only from `MainActivity`, its exec goes through ART and not through this transport, and this change neither read nor vouches for that path. `profile_binding_audit.py` allowlists it by name so the count cannot grow while the question is open |
+| Whether Auto Root changes the probability of the stall | an A/B *after* the boundary is verified clean. Spending device cycles on Auto Root ON/OFF first buys nothing: the leak needed removing either way |
+
+### Operational note while this is unaccepted
+
+Apply Modules (soft reboot) is not a reliable path for normal use on the current
+build. Applying modules through a **full reboot** recreates the kernel,
+userspace, `lmkd` and the whole socket topology instead of preserving one
+daemon's state across two generations of `system_server`.

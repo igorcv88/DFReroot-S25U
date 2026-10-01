@@ -15,7 +15,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -36,6 +38,22 @@ static void check(int ok, const char *what)
     }
 }
 
+/*
+ * The quarantine is NOT faked for the positive cases: the real implementation
+ * is unprivileged, so the host suite runs the code the device runs. The fake
+ * exists only to produce the refusal, which no host condition can provoke -
+ * and a gate that cannot fail is not a gate (AGENTS.md 5).
+ */
+static int fake_fd_quarantine(int *method_out)
+{
+    if (fail_step == DFR_SU_STEP_FD_QUARANTINE) {
+        *method_out = DFR_SU_FDQ_NONE;
+        errno = EMFILE;
+        return -1;
+    }
+    return dfr_fd_quarantine(method_out);
+}
+
 static int fake_set_comm(const char *comm)
 {
     (void)comm;
@@ -45,6 +63,12 @@ static int fake_set_comm(const char *comm)
     }
     return 0;
 }
+
+/* When set, the fake acquisition hands back a descriptor for this path, opened
+ * O_CLOEXEC on purpose: the exec must see it only because child_main clears the
+ * flag deliberately. Unset, the cheap stand-in is used, as for every case that
+ * is not about the exception. */
+static const char *fake_driver_fd_path;
 
 static int fake_driver_fd(int *fd_out, struct dfr_su_transport_diag *diag)
 {
@@ -58,6 +82,15 @@ static int fake_driver_fd(int *fd_out, struct dfr_su_transport_diag *diag)
          * reported as the gate. */
         errno = ENOTTY;
         return -1;
+    }
+    if (fake_driver_fd_path) {
+        int fd = open(fake_driver_fd_path, O_RDONLY | O_CLOEXEC);
+
+        if (fd < 0) {
+            return -1;
+        }
+        *fd_out = fd;
+        return 0;
     }
     *fd_out = STDERR_FILENO;
     return 0;
@@ -89,8 +122,8 @@ static int fake_enter_init_mnt_ns(void)
 }
 
 static const struct dfr_su_ops fake_ops = {
-    fake_set_comm, fake_driver_fd, fake_grant_root, fake_current_uid,
-    fake_enter_init_mnt_ns,
+    fake_fd_quarantine, fake_set_comm, fake_driver_fd, fake_grant_root,
+    fake_current_uid, fake_enter_init_mnt_ns,
 };
 
 static void reset(void)
@@ -98,6 +131,7 @@ static void reset(void)
     fake_uid = 0;
     fail_step = -1;
     fake_fd_source = DFR_SU_FD_SOURCE_EXISTING;
+    fake_driver_fd_path = NULL;
     *fake_driver_calls = 0;
     *fake_grant_calls = 0;
 }
@@ -301,6 +335,119 @@ int main(void)
         }
     } else {
         printf("skip   unreadable case (running as root)\n");
+    }
+
+
+    /*
+     * The descriptor boundary. This is the one case in this file that asks a
+     * question about the device's actual failure rather than about a step's
+     * bookkeeping: after a soft reboot, descriptors belonging to the destroyed
+     * system_server were still open in this transport's descendants, the old
+     * lmkd channel among them (dfr_su_core.h records the inode and the fd
+     * numbers). The property that has to hold is not "the lmkd socket is
+     * closed" - naming one descriptor would be the same defect in a smaller
+     * costume - but that NOTHING arbitrary crosses the exec.
+     *
+     * So the parent opens the two shapes the device showed, without
+     * FD_CLOEXEC, exactly as system_server's own code would leave them, and
+     * the exec'd process is asked to list what it holds. The stray regular
+     * file is identifiable by its unique path; the stray socket by its inode,
+     * which is how it was identified on the device too.
+     */
+    reset();
+    {
+        char stray_path[] = "/tmp/dfr_su_test_strayXXXXXX";
+        char driver_path[] = "/tmp/dfr_su_test_driverXXXXXX";
+        int stray_fd = mkstemp(stray_path);
+        int driver_seed = mkstemp(driver_path);
+        int sv[2] = { -1, -1 };
+        struct stat sb;
+        char socket_marker[64] = "";
+        char *list_argv[] = { (char *)"/bin/sh", (char *)"-c",
+                              (char *)"ls -l /proc/$$/fd", NULL };
+        char big[8192];
+
+        check(stray_fd >= 0 && driver_seed >= 0 &&
+                  socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0,
+              "the stray descriptors under test could be created");
+        close(driver_seed);
+        if (stray_fd >= 0 && sv[0] >= 0 && fstat(sv[0], &sb) == 0) {
+            snprintf(socket_marker, sizeof(socket_marker), "socket:[%llu]",
+                     (unsigned long long)sb.st_ino);
+            /* No FD_CLOEXEC on either, deliberately: a descriptor whose owner
+             * already marked it needs no boundary, and the ones that caused
+             * this bug are precisely the ones nobody marked. */
+            check(!(fcntl(stray_fd, F_GETFD) & FD_CLOEXEC) &&
+                      !(fcntl(sv[0], F_GETFD) & FD_CLOEXEC),
+                  "the strays start without FD_CLOEXEC, as system_server's do");
+
+            fake_driver_fd_path = driver_path;
+            check(run(list_argv, NULL, 5000, 1, big, sizeof(big), &res) == 0 &&
+                      res.step == DFR_SU_OK,
+                  "a child with a quarantined table still reaches the exec");
+            check(strstr(big, "FD_QUARANTINE=CLOSE_RANGE") ||
+                      strstr(big, "FD_QUARANTINE=PROC_SCAN"),
+                  "the mechanism that sanitised the table is named in the log");
+            check(!res.truncated,
+                  "the descriptor listing was captured whole, so an absence "
+                  "below is an absence and not a truncation");
+            check(strstr(big, stray_path) == NULL,
+                  "an inherited regular-file descriptor does not survive the "
+                  "exec");
+            check(socket_marker[0] && strstr(big, socket_marker) == NULL,
+                  "an inherited unix socket does not survive the exec - the "
+                  "shape the old lmkd channel had");
+            /* The named exception, proven as an exception: the fake opened it
+             * O_CLOEXEC, so it can only be here because child_main cleared the
+             * flag on purpose. */
+            check(strstr(big, "DRIVER_FD_KEEP=PASS") != NULL,
+                  "the driver descriptor's exception is recorded");
+            check(strstr(big, driver_path) != NULL,
+                  "the KernelSU driver descriptor is the one exception, and it "
+                  "does survive, so the daemon issues no supercall of its own");
+            /* The positive control for the two absences above: stdin is this
+             * child's own /dev/null, so a listing naming it is a listing that
+             * really enumerated the table. Without this, a command that printed
+             * nothing would pass both absence checks. */
+            check(strstr(big, "/dev/null") != NULL,
+                  "the listing enumerated a real descriptor table, so the "
+                  "absences above are absences and not an empty listing");
+            close(stray_fd);
+            close(sv[0]);
+            close(sv[1]);
+        }
+        unlink(stray_path);
+        unlink(driver_path);
+    }
+
+    /* And the refusal. Nothing may be executed with a table this code could not
+     * account for; "most of it was sanitised" is not a sanitised table. */
+    reset();
+    fail_step = DFR_SU_STEP_FD_QUARANTINE;
+    check(run(echo_argv, NULL, 5000, 1, out, sizeof(out), &res) == -1 &&
+              res.step == DFR_SU_STEP_FD_QUARANTINE && res.err == EMFILE,
+          "a table that cannot be quarantined refuses at FD_QUARANTINE");
+    check(!strstr(out, "uid=0") && *fake_driver_calls == 0 &&
+              *fake_grant_calls == 0,
+          "the refusal precedes the grant and executes nothing");
+    check(strstr(out, "FD_QUARANTINE=NONE") != NULL,
+          "the refusal says no mechanism spoke, rather than leaving a gap");
+    dfr_su_status_token(&res, token, sizeof(token));
+    check(strcmp(token, "DFR_SU_STEP=FD_QUARANTINE errno=24") == 0 ||
+              strstr(token, "DFR_SU_STEP=FD_QUARANTINE errno=") == token,
+          "the quarantine refusal renders its own token");
+
+    /* The real implementation on its own, away from the fork: it must name a
+     * mechanism, and it must never report success with NONE. */
+    {
+        int method = DFR_SU_FDQ_CLOSE_RANGE;
+
+        check(dfr_fd_quarantine(NULL) == -1 && errno == EINVAL,
+              "the quarantine refuses a call it cannot report through");
+        check(dfr_fd_quarantine(&method) == 0 &&
+                  (method == DFR_SU_FDQ_CLOSE_RANGE ||
+                   method == DFR_SU_FDQ_PROC_SCAN),
+              "the quarantine names the mechanism it used");
     }
 
     /*

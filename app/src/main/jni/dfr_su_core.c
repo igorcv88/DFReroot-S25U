@@ -26,6 +26,20 @@
 #define CLONE_NEWNS 0x00020000
 #endif
 
+/*
+ * close_range(2) and its CLOSE_RANGE_CLOEXEC flag. Declared here rather than
+ * taken from a header because bionic's exposure of both depends on the API
+ * level the module is compiled against, while the syscall exists on every
+ * kernel this chain can target (5.9+; the pinned kernel is 6.6). The number is
+ * the asm-generic one, which is what arm64 uses.
+ */
+#ifndef __NR_close_range
+#define __NR_close_range 436
+#endif
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
+
 extern char **environ;
 
 /*
@@ -150,6 +164,101 @@ static int dfr_parse_fd(const char *name, int *out)
         }
     }
     *out = value;
+    return 0;
+}
+
+/*
+ * Make every inherited descriptor close-on-exec.
+ *
+ * Why this is a gate and not housekeeping: the parent of this child is
+ * system_server, so "whatever was open" is an open-ended set the app neither
+ * chose nor can enumerate in advance. See dfr_su_core.h for what that cost on
+ * this device. The requirement is therefore stated the only way a fail-closed
+ * boundary can state it - no descriptor crosses the exec unless this file
+ * names it - and a table that cannot be accounted for refuses.
+ *
+ * Two mechanisms, reported apart (AGENTS.md 3.7):
+ *
+ *   close_range(3, ~0U, CLOSE_RANGE_CLOEXEC) is one syscall that covers every
+ *   descriptor in the table, including ones no directory read would show. It
+ *   is tried first because its completeness is a property of the kernel rather
+ *   than of /proc.
+ *
+ *   The /proc/self/fd walk is the fallback for a kernel without the flag. It is
+ *   weaker - it is only as complete as /proc - so it is named differently in
+ *   the log rather than folded into the same token.
+ *
+ * Marking, never closing. The status pipe is still the handoff signal, the
+ * output pipe is still stdout, and on the EXISTING path an inherited
+ * [ksu_driver] descriptor is still what the grant is sent to. Closing here
+ * would break the very steps the exec depends on; FD_CLOEXEC moves the closure
+ * to the boundary that matters and leaves the pre-exec sequence intact.
+ *
+ * Runs between fork() and exec(), so getdents64 directly rather than
+ * opendir/readdir, for the same reason real_scan_driver_fd does.
+ */
+int dfr_fd_quarantine(int *method_out)
+{
+    char buf[4096];
+    int dir_fd;
+    int saved_errno;
+
+    if (!method_out) {
+        errno = EINVAL;
+        return -1;
+    }
+    *method_out = DFR_SU_FDQ_NONE;
+
+    if (syscall(__NR_close_range, (unsigned int)DFR_SU_FD_QUARANTINE_FLOOR,
+                ~0U, (unsigned int)CLOSE_RANGE_CLOEXEC) == 0) {
+        *method_out = DFR_SU_FDQ_CLOSE_RANGE;
+        return 0;
+    }
+
+    dir_fd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0) {
+        return -1;
+    }
+    for (;;) {
+        long n = syscall(__NR_getdents64, dir_fd, buf, sizeof(buf));
+        long off;
+
+        if (n < 0) {
+            saved_errno = errno;
+            close(dir_fd);
+            errno = saved_errno;
+            return -1;
+        }
+        if (n == 0) {
+            break;
+        }
+        for (off = 0; off < n;) {
+            struct dfr_dirent64 *ent = (struct dfr_dirent64 *)(void *)(buf + off);
+            int candidate = -1;
+
+            off += ent->d_reclen;
+            if (dfr_parse_fd(ent->d_name, &candidate) != 0) {
+                continue; /* "." and ".." - not descriptors */
+            }
+            if (candidate < DFR_SU_FD_QUARANTINE_FLOOR || candidate == dir_fd) {
+                /* stdin/stdout/stderr are this child's own, set up by dup2
+                 * above; dir_fd is already O_CLOEXEC. */
+                continue;
+            }
+            if (fcntl(candidate, F_SETFD, FD_CLOEXEC) != 0) {
+                /* A descriptor this walk just enumerated and cannot mark means
+                 * the table is in a state this code does not understand. That
+                 * is missing evidence about the rest of it, so it refuses -
+                 * "most of it was sanitised" is not a sanitised table. */
+                saved_errno = errno;
+                close(dir_fd);
+                errno = saved_errno;
+                return -1;
+            }
+        }
+    }
+    close(dir_fd);
+    *method_out = DFR_SU_FDQ_PROC_SCAN;
     return 0;
 }
 
@@ -313,6 +422,7 @@ static int real_enter_init_mnt_ns(void)
 }
 
 const struct dfr_su_ops dfr_su_real_ops = {
+    dfr_fd_quarantine,
     real_set_comm,
     real_driver_fd,
     real_grant_root,
@@ -374,6 +484,25 @@ static void child_write_long(int fd, long value)
     child_write_all(fd, digits + pos, sizeof(digits) - pos);
 }
 
+static void child_emit_fd_quarantine(int out_fd, int method)
+{
+    CHILD_WRITE_LITERAL(out_fd, "FD_QUARANTINE=");
+    switch (method) {
+    case DFR_SU_FDQ_CLOSE_RANGE:
+        CHILD_WRITE_LITERAL(out_fd, "CLOSE_RANGE\n");
+        break;
+    case DFR_SU_FDQ_PROC_SCAN:
+        CHILD_WRITE_LITERAL(out_fd, "PROC_SCAN\n");
+        break;
+    default:
+        /* Reached only on the refusing path: the mechanism is NONE precisely
+         * because neither one spoke. Named rather than omitted, so the next
+         * physical run reads a refusal and not a gap. */
+        CHILD_WRITE_LITERAL(out_fd, "NONE\n");
+        break;
+    }
+}
+
 static void child_emit_transport_diag(int out_fd,
                                       const struct dfr_su_transport_diag *diag)
 {
@@ -419,6 +548,7 @@ static void child_main(const struct dfr_su_ops *ops, const char *comm,
     };
     char found[65];
     int driver_fd = -1;
+    int fdq_method = DFR_SU_FDQ_NONE;
     int err = 0;
     int rc;
     int uid;
@@ -429,6 +559,21 @@ static void child_main(const struct dfr_su_ops *ops, const char *comm,
         dup2(out_fd, STDERR_FILENO) < 0) {
         child_fail(status_fd, DFR_SU_STEP_PIPE, errno, NULL);
     }
+
+    /*
+     * Immediately after stdio and before anything else, because this is the one
+     * ordering that makes the property unconditional: from here to exec there
+     * is no path - refusal, success, or a future edit between them - that can
+     * reach an exec with system_server's descriptor table behind it. The
+     * descriptors this child still needs are unaffected; see dfr_fd_quarantine.
+     */
+    if (ops->fd_quarantine(&fdq_method) != 0) {
+        int quarantine_errno = errno;
+
+        child_emit_fd_quarantine(out_fd, fdq_method);
+        child_fail(status_fd, DFR_SU_STEP_FD_QUARANTINE, quarantine_errno, NULL);
+    }
+    child_emit_fd_quarantine(out_fd, fdq_method);
 
     if (ops->set_comm(comm) != 0) {
         child_fail(status_fd, DFR_SU_STEP_COMM, errno, NULL);
@@ -447,6 +592,31 @@ static void child_main(const struct dfr_su_ops *ops, const char *comm,
         child_fail(status_fd, DFR_SU_STEP_DRIVER_FD, driver_errno, NULL);
     }
     child_emit_transport_diag(out_fd, &diag);
+    /*
+     * The one descriptor named as an exception to the quarantine above, and the
+     * reason it is an exception rather than an oversight.
+     *
+     * The pinned daemon's own ksucalls::init_driver_fd scans /proc/self/fd for
+     * "[ksu_driver]" and, finding none, issues the magic supercall itself. Let
+     * this descriptor die at the exec and that is what happens: a second
+     * privileged request for the same thing, made from outside this file and
+     * therefore outside the gate of AGENTS.md 3.6.1 that stands in front of the
+     * first one. Handing the daemon the descriptor we already hold means the
+     * scan succeeds and the daemon asks nothing - strictly fewer privileged
+     * calls, and the marker keeps governing all of them.
+     *
+     * So the flag is cleared deliberately, after the quarantine rather than by
+     * being left out of it, because the exception has to be written down
+     * somewhere a reader will find it. A descriptor that cannot be put into the
+     * state this code requires is the quarantine's own failure, named as such.
+     */
+    if (fcntl(driver_fd, F_SETFD, 0) != 0) {
+        int keep_errno = errno;
+
+        CHILD_WRITE_LITERAL(out_fd, "DRIVER_FD_KEEP=FAILED\n");
+        child_fail(status_fd, DFR_SU_STEP_FD_QUARANTINE, keep_errno, NULL);
+    }
+    CHILD_WRITE_LITERAL(out_fd, "DRIVER_FD_KEEP=PASS\n");
     if (ops->grant_root(driver_fd) != 0) {
         child_fail(status_fd, DFR_SU_STEP_GRANT, errno, NULL);
     }
@@ -533,7 +703,15 @@ int dfr_su_spawn(const struct dfr_su_ops *ops, const char *comm,
         set_result(res, DFR_SU_STEP_PIPE, errno);
         return -1;
     }
-    if (pipe(out_pipe) != 0) {
+    /*
+     * O_CLOEXEC on the output channel too. The child re-marks its whole table
+     * anyway, so this is not what protects the exec below; what it protects is
+     * every OTHER fork/exec happening concurrently inside system_server, which
+     * would otherwise inherit a write end of this pipe and keep it open after
+     * the child is gone. The same reasoning applies to null_fd, which has
+     * carried O_CLOEXEC since it was added.
+     */
+    if (pipe2(out_pipe, O_CLOEXEC) != 0) {
         set_result(res, DFR_SU_STEP_PIPE, errno);
         close(status_pipe[0]);
         close(status_pipe[1]);
@@ -682,7 +860,7 @@ int dfr_su_spawn(const struct dfr_su_ops *ops, const char *comm,
 void dfr_su_status_token(const struct dfr_su_result *res, char *buf, size_t cap)
 {
     static const char *const names[] = {
-        "OK", "PIPE", "FORK", "COMM", "TRANSPORT_FIX_GATED",
+        "OK", "PIPE", "FORK", "FD_QUARANTINE", "COMM", "TRANSPORT_FIX_GATED",
         "DRIVER_FD", "GRANT", "NOT_ROOT",
         "MNT_NS", "EXEC", "DIGEST", "TIMEOUT", "INTERNAL"
     };
