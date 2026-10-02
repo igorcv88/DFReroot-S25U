@@ -5,8 +5,42 @@ what is physically proven now, what still needs to be implemented, and the
 acceptance criteria for the next signed build. If this file disagrees with
 `docs/S25U_ZZIC_COMPATIBILITY.md` about evidence, the compatibility dossier wins.
 
-> **Open, and where to start: the soft reboot works and the firmware rejects the
-> boot it produces.** The conclusive Apply Modules rerun happened, in boot
+> **Open, and where to start — two independent threads now.**
+>
+> **(1) Early Integrated Root is implemented and has no physical evidence.** The
+> probe question is closed: over three consecutive full boots
+> (`48bf5c32…`, `9af4b55f…`, `ab10e200…`, `2.0.15-zzic`) an armed persisted DFR
+> JobService was called back at **14.6-16.9 s** after kernel boot, in a *new*
+> boot, with `bootanim_exit=0` and `user_unlocked=0`, and all four StageHop
+> prerequisites already resolved - 2.69-2.90 s before `LOCKED_BOOT_COMPLETED`.
+> `DFR_PERSISTED_JOB_EARLY_CALLBACK` and `DFR_JOB_STAGEHOP_READY` are
+> `PHYSICAL_PASS` 3/3; the dossier carries the record.
+>
+> This branch turns that observation point into a dispatch: a **second**
+> persisted job (`0x44465252` / `dfr-early-root`, the probe stays
+> observation-only), a non-exported service that re-derives the whole gate on
+> its own observations, one shared `DfrRootCoordinator`, and
+> `/data/system/dfreroot-early-root-trace` - append-only, fsync'd per step,
+> boot-scoped, written *before* each step it announces. `EarlyRootPolicy` is
+> pure and host-tested with one negative case per element (73 checks).
+>
+> **Nothing of it has run on hardware.** The acceptance procedure, the collection
+> order and what each truncation of the trace means are in
+> `docs/EARLY_ROOT.md`. The exact command that closes the first milestone is
+> there: qualify manually, tap **Arm Early Integrated Root (one boot)**, start a
+> full reboot within ~10 s, and read the trace before anything else. Three
+> consecutive boots, not one.
+>
+> The open risk is named rather than hidden: the page-cache writes land while
+> Samsung's boot watchdog is still deciding whether this boot completed, and
+> nobody has observed what that costs. The early path deliberately does **not**
+> restart the framework, apply modules or touch the soft-reboot transport, so it
+> does not enter thread (2)'s failure mode - but that is an argument about which
+> mode it avoids, not evidence that it is safe. Arming is therefore one-shot and
+> owner-driven (AGENTS.md 3.6.1); a persistent "always root early" switch is a
+> promotion for after the first runs come back, decided in the open.
+>
+> **(2) The soft reboot works and the firmware rejects the boot it produces.** The conclusive Apply Modules rerun happened, in boot
 > `85e3a031-42bb-49cc-8bbe-c276cb4b5c4e`, and it settled the old question the
 > wrong way round: the transport, the supercall, the driver fd and the grant all
 > worked. The trace stopped at `phase=EXEC_ENTER path=/data/adb/ksud` with the
@@ -79,6 +113,12 @@ Version numbers are no longer part of the state to hand over: nothing in the
 tree names one (see *The version is derived per release run*, below).
 
 ### Early-job probe in the next APK
+
+> **Answered.** This section was written while DFR eligibility was open. It is
+> now `PHYSICAL_PASS` 3/3 - see the opening block and the dossier's *Early-job
+> probe acceptance*. What follows is the description of the probe that produced
+> that answer, kept because the next thing to read is what it does and does not
+> measure; `docs/EARLY_ROOT.md` carries what was built on top of it.
 
 `JOBSCHEDULER_CAN_DISPATCH_PRE_LOCKED_BOOT=PHYSICAL_PASS`: the latest boot
 capture contains other components' JobScheduler callbacks before boot animation

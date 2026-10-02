@@ -77,6 +77,35 @@
             android:exported="true"
             android:directBootAware="true" />
         <!--
+          Early Integrated Root. A SECOND, separate persisted job, not a mode of
+          the probe above: the probe exists to time itself against
+          LOCKED_BOOT_COMPLETED and must stay observation-only for that
+          measurement to remain repeatable, and a callback that can dispatch the
+          chain must not be reachable by arming a probe.
+
+          exported="true" is the standard JobService boundary - JobScheduler binds
+          from the system - and BIND_JOB_SERVICE, a signature permission, remains
+          the authorization gate. It authorises nothing on arrival either: the
+          callback re-derives everything from EarlyRootPolicy, whose first
+          requirement is a one-shot arm record bound to a previous boot and a
+          qualification no external sender can produce.
+        -->
+        <service
+            android:name=".DfrEarlyRootJobService"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="true"
+            android:directBootAware="true" />
+        <!--
+          Never exported. Only DfrEarlyRootJobService, in this package, may start
+          it, and it re-derives the whole policy from its own observations - an
+          external component asking for a root run inside the boot animation is
+          exactly what this must not offer.
+        -->
+        <service
+            android:name=".DfrEarlyRootService"
+            android:exported="false"
+            android:directBootAware="true" />
+        <!--
           The notification action for "Apply Modules (Soft Reboot)". Never
           exported: the PendingIntent names this component explicitly, so the
           platform delivers it with this app's own identity and no external caller
