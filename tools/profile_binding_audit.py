@@ -2245,6 +2245,249 @@ def audit():
             or "scheduler.schedule(job)" not in code_only(early_arm_src):
         fail("the early-job probe is no longer explicit, one-shot owner arming")
 
+    # --- Early Integrated Root: the dispatch inside the boot animation -------
+    #
+    # None of this compiles or unit-tests here: it is Kotlin that needs an
+    # Android runtime, and the paths that matter happen once per full reboot at
+    # 15 seconds into boot, in direct boot, on system_server's main looper. So
+    # AGENTS.md 5's rule applies - the shape is asserted statically or not at
+    # all. The pure half of the feature is EarlyRootPolicy, driven by
+    # tools/tests/EarlyRootPolicyTest.java with one negative case per element;
+    # what is left for here is the wiring that test cannot see.
+    early_root_policy_src = dfr_source("EarlyRootPolicy.java")
+    early_root_job_src = code_only(dfr_source("DfrEarlyRootJobService.kt"))
+    early_root_service_src = code_only(dfr_source("DfrEarlyRootService.kt"))
+    early_root_arm_src = code_only(dfr_source("DfrEarlyRoot.kt"))
+    early_root_store_src = code_only(dfr_source("EarlyRootStore.kt"))
+
+    # The two jobs stay two jobs. The probe exists to time itself against
+    # LOCKED_BOOT_COMPLETED, so a root chain on that looper would move the
+    # quantity it measures; and a callback that can reach transaction 5 must not
+    # be reachable by arming a probe. One shared job id or one service with a
+    # mode is how both properties are lost in a single edit.
+    for forbidden in ("EarlyRootPolicy", "EarlyRootStore", "DfrEarlyRootService",
+                      "DfrEarlyRoot."):
+        if forbidden in early_job_code:
+            fail("the observation-only probe references the dispatching early-root "
+                 "path (%r); the measurement that found this window would stop "
+                 "being repeatable and arming a probe could reach the chain"
+                 % forbidden)
+    probe_ids = re.search(r"EXPECTED_JOB_ID\s*=\s*(0x[0-9a-fA-F]+)",
+                          dfr_source("EarlyBootProbePolicy.java"))
+    root_ids = re.search(r"EXPECTED_JOB_ID\s*=\s*(0x[0-9a-fA-F]+)",
+                         early_root_policy_src)
+    if not probe_ids or not root_ids:
+        fail("cannot read the probe/early-root job ids")
+    elif int(probe_ids.group(1), 16) == int(root_ids.group(1), 16):
+        fail("the dispatching job shares the probe's job id; arming a probe would "
+             "schedule the chain")
+
+    # Manifest boundaries. The JobService binding is the standard exported one
+    # under the signature BIND_JOB_SERVICE permission; the service it starts must
+    # never be reachable from outside this package.
+    root_job_decl = re.search(
+        r"<service[^>]*DfrEarlyRootJobService[^>]*/>", manifest_code, flags=re.S)
+    if not root_job_decl:
+        fail("DfrEarlyRootJobService is not declared in the manifest")
+    else:
+        for required in ('android:permission="android.permission.BIND_JOB_SERVICE"',
+                         'android:directBootAware="true"',
+                         'android:exported="true"'):
+            if required not in root_job_decl.group(0):
+                fail("DfrEarlyRootJobService manifest boundary is missing %s" % required)
+    root_service_decl = re.search(
+        r"<service[^>]*DfrEarlyRootService[^>]*/>", manifest_code, flags=re.S)
+    if not root_service_decl:
+        fail("DfrEarlyRootService is not declared in the manifest")
+    else:
+        if 'android:exported="false"' not in root_service_decl.group(0):
+            fail("DfrEarlyRootService is exported; an external component must not be "
+                 "able to ask for a root run inside the boot animation")
+        if 'android:directBootAware="true"' not in root_service_decl.group(0):
+            fail("DfrEarlyRootService is not directBootAware; it is started before "
+                 "the user unlocks and would not be instantiable")
+
+    # The callback gates, then dispatches. It must not become a second copy of
+    # the chain: the single execution path is DfrRootCoordinator, reached through
+    # the service, which re-derives the whole policy on its own observations.
+    for forbidden in ("transact(5", "hopToNetworkStack", "DirtyFrag", "RootTransport",
+                      "DfrRootCoordinator.run("):
+        if forbidden in early_root_job_src:
+            fail("the early-root callback reaches the chain directly (%r) instead of "
+                 "dispatching the service that re-derives the gate" % forbidden)
+    gate_order = order(early_root_job_src,
+                       "EarlyRootPolicy.STEP_JOB_ENTERED",
+                       "EarlyRootPolicy.evaluateBeforeReadiness(",
+                       "StageHop.probeReadiness(",
+                       "EarlyRootPolicy.evaluate(",
+                       "EarlyRootPolicy.STEP_DISPATCHED",
+                       "context.startService(")
+    if gate_order is None or gate_order != sorted(gate_order):
+        fail("the early-root callback's order drifted: it must record the entry "
+             "breadcrumb, refuse on the durable evidence before paying for the AMS "
+             "sweep, re-evaluate the full gate with that sweep's result, record the "
+             "dispatch, and only then start the service")
+    # A trace that cannot be written is the pre-operation record missing before
+    # the operation - the exact condition AGENTS.md 3.6.1 exists to end. The
+    # breadcrumb failure must refuse, not log and continue.
+    breadcrumb = early_root_job_src.find("val breadcrumb = EarlyRootStore.trace(")
+    if breadcrumb < 0 or not re.search(
+            r"if \(breadcrumb != null\) \{[^}]*return", early_root_job_src[breadcrumb:],
+            flags=re.S):
+        fail("the early-root callback continues after a failed entry trace; a "
+             "privileged step nobody could have diagnosed is what 3.6.1 forbids")
+    if "EarlyRootPolicy.STEP_REFUSED" not in early_root_job_src:
+        fail("the early-root callback records no durable refusal; a refusal nobody "
+             "can read afterwards is indistinguishable from a callback that never "
+             "happened, and the owner just spent a full reboot on it")
+    # Same main-looper discipline as the probe, and for a stronger reason: this
+    # callback is trying to get AHEAD of the boot's own broadcasts.
+    root_start = early_root_job_src.find("override fun onStartJob")
+    root_start_body = early_root_job_src[
+        root_start:early_root_job_src.find("override fun onStopJob")]
+    for banned in ("StageHop.", "EarlyRootStore.", "readBootId()",
+                   "EarlyRootPolicy.evaluate"):
+        if banned in root_start_body.split("val task = Runnable {")[0]:
+            fail("early-root onStartJob does blocking work (%r) before handing off "
+                 "to the worker; it would delay the very broadcasts it is trying to "
+                 "run ahead of" % banned)
+    if "val callbackElapsedMs = EarlyRootEnv.monotonicNow()" not in root_start_body:
+        fail("the early-root callback no longer reads its clock as the first "
+             "statement; the early window is defined relative to that reading")
+    if early_root_job_src.count("jobFinished(params, false)") != 1 \
+            or "completionHandler.post" not in early_root_job_src \
+            or "override fun onStopJob" not in early_root_job_src:
+        fail("early-root job completion is not serialized with onStopJob on the "
+             "main looper, or the one-shot no-reschedule contract was lost")
+    if "JobInfo" in early_root_job_src:
+        fail("the early-root callback builds a JobInfo; a self-rescheduling root "
+             "attempt is exactly the shape that must not exist")
+    if early_root_job_src.count("if (abandonIfStopped(") < 3:
+        fail("the early-root callback does not check for cancellation at its "
+             "boundaries; a run the scheduler took back would still walk into a "
+             "dispatch")
+
+    # The service re-derives everything. A gate enforced at one of two entry
+    # points is the defect AGENTS.md 3.2 describes for the native stages.
+    service_order = order(early_root_service_src,
+                          "EarlyRootPolicy.STEP_SERVICE_ENTERED",
+                          "StageHop.probeReadiness(",
+                          "EarlyRootPolicy.evaluate(",
+                          "EarlyRootPolicy.STEP_PREFLIGHT_PASS",
+                          "EarlyRootStore.journalPhase(",
+                          "DfrRootCoordinator.run(")
+    if service_order is None or service_order != sorted(service_order):
+        fail("the early-root service no longer re-derives the gate before claiming "
+             "the boot's single attempt and running the chain; an intent that "
+             "reaches it is a request, never an authorisation")
+    if "AutoRootPolicy.PHASE_STARTED" not in early_root_service_src \
+            or "EarlyRootPolicy.STEP_BEFORE_NATIVE" not in early_root_service_src:
+        fail("the early-root service takes no pre-record before transaction 5")
+    before_native = early_root_service_src.find("override fun beforeNativeRun()")
+    if before_native < 0:
+        fail("the early-root service does not implement beforeNativeRun; the "
+             "one-attempt-per-boot guarantee would rest on nothing")
+    else:
+        body = early_root_service_src[before_native:]
+        body = body[:body.find("DfrRootCoordinator.run(")] if \
+            body.find("DfrRootCoordinator.run(") > 0 else body
+        native_order = order(body, "AutoRootPolicy.PHASE_STARTED",
+                             "EarlyRootPolicy.STEP_BEFORE_NATIVE", "return true")
+        if native_order is None or native_order != sorted(native_order):
+            fail("beforeNativeRun returns true before both durable pre-records are "
+                 "written; a crash after transaction 5 could then be followed by a "
+                 "second attempt in this boot, or by a reboot nobody can attribute")
+        if body.count("return false") < 2:
+            fail("beforeNativeRun does not abort on a failed pre-record; the run "
+                 "would proceed without the guarantee the record exists to give")
+    # The second half of the integrated-boot goal is deliberately NOT here. A
+    # teardown stacked on an unproven early root makes a failure impossible to
+    # attribute to either, and the soft reboot has its own gate, lock and
+    # boot-health record.
+    for forbidden in ("RootTransport", "DfrSoftRebootReceiver", "SoftRebootPolicy",
+                      "__NR_reboot", "APPLY_MODULES"):
+        if forbidden in early_root_service_src:
+            fail("the early-root service reaches the soft-reboot/module-lifecycle "
+                 "path (%r); that is a separate operation with its own gate and its "
+                 "own unanswered boot-health question" % forbidden)
+    # ...and it does not OFFER it either. The soft reboot is a physical FAIL
+    # twice with a cause nobody has measured; the early path has no evidence at
+    # all. A notification action is one tap, mid-boot, and the owner has just
+    # watched the device come up.
+    if "offerApplyModules = false" not in early_root_service_src:
+        fail("the early-root verdict may carry the Apply Modules action; a "
+             "known-failing operation must not be offered from a path with no "
+             "physical evidence, least of all while the boot animation is up")
+    if "offerApplyModules: Boolean = true" not in code_only(notifier_src):
+        fail("RootNotifier lost the Apply Modules opt-out, so the early path "
+             "cannot suppress an action it must not offer")
+    for forbidden in ("while (true)", "Thread.sleep("):
+        if forbidden in early_root_service_src:
+            fail("the early-root service polls or retries (%r); it has one attempt "
+                 "per boot by construction and Auto Root's trigger owns the budget "
+                 "for the rest of the boot" % forbidden)
+
+    # Arming: one cycle at a time, bound to the component and to this build.
+    for required in ("setPersisted(true)", "setMinimumLatency(MINIMUM_LATENCY_MS)",
+                     "forNamespace(NAMESPACE)", "getPendingJob(JOB_ID)",
+                     "existing.service != component", "AutoRootStore.isQualified()"):
+        if required not in early_root_arm_src:
+            fail("early-root arming lost identity/persistence guard %r" % required)
+    arm_order = order(early_root_arm_src, "EarlyRootStore.archivePreviousCycle()",
+                      "EarlyRootStore.writeArm(record)")
+    if arm_order is None or arm_order != sorted(arm_order):
+        fail("early-root arming writes the new arm record before archiving the "
+             "previous cycle; the two must never be live together, or the row the "
+             "owner reads before spending a reboot describes the wrong cycle")
+    if "ARM_SAME_BOOT" not in early_root_policy_src:
+        fail("the early-root policy no longer refuses a callback in its own arming "
+             "boot; a framework restart keeps boot_id and is not a full reboot")
+
+    # The trace store: serialised, boot-scoped, and honest about a failed clock.
+    if "synchronized(lock)" not in early_root_store_src:
+        fail("EarlyRootStore no longer serialises its read-modify-write sequences; "
+             'the callback worker and the service thread share process "system"')
+    if 'if (elapsedMs < 0) return "monotonic_clock_unavailable"' \
+            not in early_root_store_src:
+        fail("a failed monotonic reading can still be appended to the early-root "
+             "trace; a successful write is not timing evidence")
+    if "EarlyRootPolicy.traceBelongsToBoot(" not in early_root_store_src \
+            or "$TRACE_PATH.prev" not in early_root_store_src:
+        fail("the early-root trace is appended across boots instead of rotated; one "
+             "apparent sequence spanning two boots is what AGENTS.md 3.8 forbids")
+    if "EarlyRootPolicy.traceHasRoom(" not in early_root_store_src:
+        fail("the early-root trace is unbounded; something re-entering would grow a "
+             "file in /data/system without limit")
+
+    # One answer per boot to "has the chain already run here". The marker probe
+    # cannot give it: once root is established on this firmware the /dev/df*
+    # lookups answer EACCES rather than ENOENT and read as MARKER_UNKNOWN.
+    # Anchored on the refusals themselves, not on the field name: a field can be
+    # renamed and still be read, while a deleted check takes its reason strings
+    # with it. The two below are the whole content of the rule - an unreadable
+    # record refuses, and a boot the early path already reached refuses by name.
+    for required in ("earlyRootJournalRecord",
+                     "the Early Root journal exists but could not be read",
+                     "Early Integrated Root already reached phase "):
+        if required not in autoroot_policy_src:
+            fail("AutoRootPolicy no longer refuses on the early-root journal (%r "
+                 "missing); a boot in which the early path already ran the chain "
+                 "would refuse only via MARKER_UNKNOWN, which cannot say why"
+                 % required)
+    if "q.earlyRootJournalRecord = EarlyRootStore.readJournal()" \
+            not in code_only(autoroot_service_src):
+        fail("the Auto Root service does not supply the early-root journal, so the "
+             "policy's check is fed nothing and refuses nothing")
+
+    r["checks"]["early_root"] = {
+        "job_service_exported": "true (BIND_JOB_SERVICE)",
+        "run_service_exported": "false",
+        "gate": "EarlyRootPolicy.evaluate in both entry points",
+        "readiness_required": "NETWORKSTACK_READY",
+        "attempts_per_boot": 1,
+        "trace": "append-only, fsync'd, boot-scoped, bounded",
+    }
+
     # --- Kotlin that no compiler in this environment will ever see -----------
     # There is no Kotlin compiler, SDK or Gradle here, so the signed release run is
     # the first thing that compiles this app - which means a syntax rule costs a
@@ -2266,7 +2509,9 @@ def audit():
                  "MainActivity.kt", "KsudStage.kt", "StageHop.kt", "Diagnostics.kt",
                  "StageReceiver.kt", "DfrBootReceiver.kt", "TerminalActivity.kt",
                  "DfrEarlyBootProbe.kt", "DfrEarlyBootJobService.kt",
-                 "EarlyBootProbeStore.kt"):
+                 "EarlyBootProbeStore.kt", "DfrEarlyRoot.kt",
+                 "DfrEarlyRootJobService.kt", "DfrEarlyRootService.kt",
+                 "EarlyRootStore.kt", "EarlyRootEnv.kt"):
         try:
             kotlin_bodies[name] = dfr_source(name)
         except Exception:

@@ -1287,6 +1287,11 @@ inferred from a nearby firmware.
 | POST_SOFT_REBOOT_STABILITY, second failure shape | **physical FAIL** | boot `35157e19-efad-46a5-9211-451bacb6941f`: no reboot at the Apply and no bootchecker rollback — the device ran ~66 minutes, then `lmkd` (pid 966, unchanged across the soft reboot) left `do_epoll_wait` for `sock_alloc_send_pskb` at 22:11:25 and never returned; its own watchdog fired every ~2 s, and `pre_watchdog` at 22:12:49 has AMS, `main`, `android.io` and `ActivityManager` blocked. The matching `system_server` side is in `DFR_watchdog_20261001.txt`: a binder thread in `LmkdConnection.write` → `__sendmsg` holding `ActivityManagerProcLock` |
 | TRANSPORT_FD_BOUNDARY — nothing arbitrary crosses the transport's exec | **UNVERIFIED** (host PASS, no physical run) | same boot: the replaced `system_server`'s `lmkd` endpoint (peer of `lmkd fd16`, inode 47482) was open as **fd 148** in `busybox`, the root manager's `daemon`, `zygisk_lsposed` and `nsdaemon-zygote` — all descendants of `dfr_su_spawn()`, which forked `system_server` without sanitising its descriptor table. Closed in code by `dfr_fd_quarantine()`, with one named exception (the KernelSU driver fd); `tools/tests/test_su_core.sh` proves a stray file and a stray unix socket do not survive the exec while the driver fd does, and three mutations kill the suite. **The leak is proven; its role in the `lmkd` stall is not** — a monitored run showed the same two endpoints for >31 minutes with no failure. Physical acceptance is the absent peer plus ≥90 minutes clean under memory pressure; see `docs/HANDOFF.md`, "Descriptor boundary of the root transport" |
 | POST_SOFT_REBOOT_KERNEL_PANIC — was the 2026-10-01 reboot a panic? | **NO EVIDENCE (and the evidence that exists says no)** | the DropBox entry for the event is `SYSTEM_LAST_KMSG_0_20261001_140539_RP`, a reboot record; this device writes `_KP` for a panic and has two from 2026-09-29. `/sys/fs/pstore` was empty and no tombstone names `bootchecker` |
+| DFR_PERSISTED_JOB_EARLY_CALLBACK — an armed DFR JobService is called back in a new boot before `LOCKED_BOOT_COMPLETED` | **physical PASS** | `2.0.15-zzic`, three consecutive full boots (`48bf5c32…`, `9af4b55f…`, `ab10e200…`): `EARLY_JOB_FIRED_NEW_BOOT` / `EARLY_JOB_PRE_LOCKED_BOOT` / `same_boot=0` / `namespace_binding=PASS` in 3/3, callback at 14.6-16.9 s with `bootanim_exit=0` and `user_unlocked=0`, and logcat ordering corroborating the marker file independently. See *Early-job probe acceptance* below |
+| DFR_JOB_STAGEHOP_READY — the hop's prerequisites are resolvable at that callback | **physical PASS** | same three boots: `networkstack_proc` / `ams_process_record` / `application_thread` / `schedule_receiver_12` all `PASS`, rolling up to `NETWORKSTACK_READY`, 2.69-2.90 s before the DFR locked-boot marker. Resolving `scheduleReceiver/12` is **not** invoking it (AGENTS.md 3.7): this says the lookup succeeds, not that the hop lands |
+| EARLY_ROOT_DISPATCH — the chain actually runs from that callback | **UNVERIFIED** (source + 73 host checks, no physical run) | `EarlyRootPolicy` plus a second persisted job and a non-exported service, both re-deriving the full gate; `/data/system/dfreroot-early-root-trace` records each step before it is taken. Nothing has run on hardware. See *Early Integrated Root source implementation checkpoint* below and `docs/EARLY_ROOT.md` for the acceptance procedure |
+| EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED — the first milestone | **UNVERIFIED** | needs one boot's trace holding `EARLY_ROOT_POST_ROOT_COMPLETE` and `EARLY_ROOT_SELINUX_ENFORCING` at a smaller `elapsed_ms` than `EARLY_ROOT_BOOT_COMPLETED_OBSERVED`, all under one `boot_id` |
+| EARLY_ROOT_BOOT_HEALTH — the page-cache writes are survivable that early | **UNVERIFIED, and the open risk** | the early path does not restart the framework, so it does not enter the `bootchecker_timeout` mode the two `POST_SOFT_REBOOT_STABILITY` failures did — but it writes to the page cache while Samsung's boot watchdog is still deciding whether this boot completed, and nobody has observed what that costs. This is why arming is one-shot and owner-driven (AGENTS.md 3.6.1) |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
 remaining blocker to calling the automated flow complete is the post-root
@@ -2811,14 +2816,20 @@ The durable per-boot lock now says `phase=CLAIMED`: it means the one attempt is
 spent, not that ksud received the command. `EXEC_ENTER`, `EXEC_RETURNED`,
 `DISPATCHED`, and `UNDETERMINED` remain separate trace/execution evidence.
 
-General JobScheduler timing has one physical promotion and two deliberately
-open DFR questions:
+General JobScheduler timing has one physical promotion and two DFR questions
+that were open when this section was written:
 
 ```text
 JOBSCHEDULER_CAN_DISPATCH_PRE_LOCKED_BOOT=PHYSICAL_PASS
 DFR_PERSISTED_JOB_EARLY_CALLBACK=UNVERIFIED
 DFR_JOB_STAGEHOP_READY=UNVERIFIED
 ```
+
+> **Superseded for the two DFR rows.** Both are `PHYSICAL_PASS` as of the
+> `2.0.15-zzic` capture over three consecutive full boots; see *Early-job probe
+> acceptance* at the end of this file, which is the authoritative copy. The
+> paragraph below describes the state of the package and the JobStore *before*
+> that probe ran and is kept for that reason.
 
 The package is `/data/app`, shared uid 1000, `PRIVILEGED`,
 `PARTIALLY_DIRECT_BOOT_AWARE`, not `FLAG_SYSTEM`, with
@@ -2833,3 +2844,122 @@ Current system_server evidence is `NoNewPrivs=0`, `Seccomp=2`,
 searched policy files under system, system_ext, product, vendor, or APEX. This
 does not prove reboot is allowed, and seccomp is not assigned as the cause of
 the old EPERM; that cause remains `UNKNOWN`.
+
+### Early-job probe acceptance — three consecutive full boots
+
+Owner capture, APK line `2.0.15-zzic` / versionCode 20015, on the pinned target
+(`SM-S938B` / `pa3q`, Android 17, One UI 9 Beta 3, `S938BXXUCZZIC`, kernel
+`6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCZZIC-4k`, 4096-byte pages). Three
+independent full reboots, each with its own arming cycle. The probe is the
+observation-only `DfrEarlyBootJobService`; it rooted nothing, dispatched nothing
+and read `StageHop.probeReadiness()` without invoking `scheduleReceiver`.
+
+| Boot | `callback_elapsed_ms` | `readiness_elapsed_ms` | `marker_write_elapsed_ms` | DFR locked-boot marker | READY → marker |
+|---|---:|---:|---:|---:|---:|
+| `48bf5c32-e843-4467-aa9b-9d5b7afce614` | 15121 | 15308 | 15308 | 18015 | 2707 ms |
+| `9af4b55f-2e8e-45bf-8f65-e8fca25b2564` | 14587 | 14757 | 14759 | 17655 | 2898 ms |
+| `ab10e200-4dce-4754-addf-bf61e81ac9cf` | 16914 | 17051 | 17055 | 19739 | 2825 ms |
+
+Boot 1 was armed in `bbce4f35-fc5f-4a41-896f-49dc93a94a5e`; all three records
+read `same_boot=0`, so none of them is an arming-boot firing.
+
+Every boot recorded the same verdicts:
+
+```text
+EARLY_JOB_FIRED_NEW_BOOT
+EARLY_JOB_PRE_LOCKED_BOOT
+NETWORKSTACK_READY
+namespace_binding=PASS
+
+networkstack_proc=PASS
+ams_process_record=PASS
+application_thread=PASS
+schedule_receiver_12=PASS
+```
+
+Android state at the callback, in all three: `user_unlocked=0`,
+`bootanim_exit=0`, `sys_boot_completed=UNKNOWN`, callback SELinux context
+`u:r:system_server:s0`. Logcat corroborates the ordering independently of the
+marker file — boot 2: `20:17:07.921` `EARLY_JOB … NETWORKSTACK_READY` against
+`20:17:09.635` `android.intent.action.LOCKED_BOOT_COMPLETED`; boot 3:
+`20:19:25.101` against `20:19:26.624`.
+
+So both open DFR questions are closed, each by the evidence it was defined to
+need:
+
+```text
+JOBSCHEDULER_CAN_DISPATCH_PRE_LOCKED_BOOT=PHYSICAL_PASS   (unchanged)
+DFR_PERSISTED_JOB_EARLY_CALLBACK=PHYSICAL_PASS   3/3 boots
+DFR_JOB_STAGEHOP_READY=PHYSICAL_PASS             3/3 boots
+```
+
+**What this establishes:** a persisted, namespaced, explicitly armed DFR
+JobService is called back in a *new* boot, 14.6-16.9 s after kernel boot, while
+the boot animation is still running and the user is still locked, and at that
+instant all four components the hop uses - the NetworkStack process, its AMS
+`ProcessRecord`, its `IApplicationThread` and `scheduleReceiver/12` - are
+already resolvable. The margin to `LOCKED_BOOT_COMPLETED` was 2.69-2.90 s from
+completed readiness in every boot.
+
+**What it does not establish, and must not be read as claiming.** Resolving
+`scheduleReceiver/12` is not invoking it: `NATIVE_LIBRARY_DISCOVERABLE` versus
+`LIBEXP_LOADED` is the same distinction AGENTS.md 3.7 draws, and nothing here
+says the hop lands, that `network_stack` can `dlopen` libexp.so that early, or
+that the page-cache writes are survivable while Samsung's boot watchdog is still
+deciding whether this boot completed. Those are what the early-root run owes.
+The probe also measures a window; it is not itself a pre-zygote vector -
+`system_server`, AMS and NetworkStack all exist by then, so
+`TRUE_PRE_ZYGOTE` is untouched by this.
+
+### Early Integrated Root source implementation checkpoint (not physical evidence)
+
+The dispatching path exists in source as of this change and has **no physical
+evidence of any kind**. Nothing below is a gate promotion.
+
+```text
+EARLY_ROOT_DISPATCH=UNVERIFIED            (no physical run)
+EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED=UNVERIFIED
+EARLY_ROOT_BOOT_HEALTH=UNVERIFIED         (the open question below)
+EARLY_ROOT_MODULE_LIFECYCLE=NOT_IMPLEMENTED
+```
+
+What shipped:
+
+- `EarlyRootPolicy` (pure, no Android imports), driven by
+  `tools/tests/EarlyRootPolicyTest.java` — 73 host checks, one negative case per
+  element: an arm record from the current boot, a scheduler callback naming
+  another job id or namespace, an app update or a repinned ksud between the
+  arming and the boot, a firmware change, a build with no manual qualification,
+  a callback past the early window, an unreadable or malformed journal, each of
+  the four journal phases, `/dev/df` present, a marker probe that answered
+  neither way, a non-enforcing or unreadable SELinux state, and `PARTIAL` /
+  `NOT_READY` / unsampled readiness;
+- `DfrEarlyRootJobService` — a **second** persisted job (`0x44465252`, namespace
+  `dfr-early-root`), not a mode of the probe. The probe stays observation-only
+  so the measurement above remains repeatable, and a callback that can reach
+  `transact(5)` is not reachable by arming a probe;
+- `DfrEarlyRootService` — not exported, re-derives the whole policy on its own
+  fresh readiness sweep, marker probe, SELinux read and monotonic reading, then
+  claims the boot's single attempt and calls the one shared
+  `DfrRootCoordinator`;
+- `/data/system/dfreroot-early-root-trace` — append-only, fsync'd per step,
+  boot-scoped (rotated, never appended across boots), bounded at 64 steps, with
+  a closed step vocabulary. Each step is written **before** the step it
+  announces, and a step that cannot be persisted refuses the step rather than
+  logging an inconvenience;
+- `AutoRootPolicy` now reads the early journal, because once root is established
+  on this firmware the `/dev/df*` probes answer EACCES rather than ENOENT and
+  Auto Root would otherwise refuse only via `MARKER_UNKNOWN`, which cannot say
+  why.
+
+**The open question this path does not answer.** `POST_SOFT_REBOOT_STABILITY`
+above is a physical FAIL twice, and AGENTS.md 3.6.2 states what is *observed*
+there and what is not: Samsung's `bootchecker.rc` zeroes
+`dev.platform_bootcomplete` on `init.svc.zygote=restarting`, and whether
+anything sets `dev.bootcomplete=1` again afterwards has never been read. The
+early-root path deliberately does **not** restart the framework, apply modules
+or touch the soft-reboot transport, so it does not enter that failure mode - but
+it does write to the page cache *while the same boot watchdog is still running*,
+and nobody has observed what that costs. That is why arming is one-shot and
+owner-driven rather than a persistent switch: AGENTS.md 3.6.1's rule is that an
+operation whose worst outcome is not a refusal needs an operation's evidence.

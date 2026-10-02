@@ -122,6 +122,23 @@ public final class AutoRootPolicy {
     public static final class Inputs {
         public String qualificationRecord;
         public String journalRecord;
+        /**
+         * The Early Integrated Root journal, if any, for THIS boot.
+         *
+         * Auto Root and Early Root are two triggers for one chain, so the boot
+         * they share needs one answer to "has the chain already run here". The
+         * marker probe is the primary guard and keeps working, but it is not
+         * enough on its own in the direction that matters: once root is
+         * established on this firmware the `/dev/df*` probes return EACCES
+         * rather than ENOENT, so a successful early run leaves Auto Root with
+         * MARKER_UNKNOWN - a refusal, but one that cannot say why. Reading the
+         * early journal makes the real reason nameable.
+         *
+         * Like every other record here it can only REMOVE permission. Absent is
+         * the normal state - almost no boot has an early attempt in it - and it
+         * grants nothing; unreadable refuses, because it may say STARTED.
+         */
+        public String earlyRootJournalRecord;
         public String currentBootId;
         public String deviceFingerprint;
         public String ksudSha256;
@@ -508,6 +525,51 @@ public final class AutoRootPolicy {
             }
             // A journal naming another boot is last boot's record: it says
             // nothing about this one and must not lock it.
+        }
+
+        /*
+         * And the other trigger's journal for this boot.
+         *
+         * A PREFLIGHT with native_started=0 is the one shape that does NOT
+         * refuse, and that asymmetry is the R1 correction restated across the
+         * two paths: it means the early dispatch claimed the boot's attempt and
+         * gave up before transaction 5, so provably nothing was written - no
+         * marker, no patched libc, no staged handoff - and the states that make
+         * a second run dangerous cannot exist. Refusing there would let a
+         * callback that lost a race at 15 seconds cost the whole boot on a
+         * device whose owner is not watching, which is exactly the defect the
+         * Auto Root audit found in its own journal handling.
+         *
+         * Every other shape refuses: the page cache may already carry the early
+         * run's writes.
+         */
+        if (RECORD_UNREADABLE.equals(in.earlyRootJournalRecord)) {
+            return refuse("the Early Root journal exists but could not be read;"
+                    + " refusing this boot");
+        }
+        if (in.earlyRootJournalRecord != null && !blank(in.earlyRootJournalRecord)) {
+            Map<String, String> e = parse(in.earlyRootJournalRecord, JOURNAL_KEYS);
+            if (e == null) {
+                return refuse("the Early Root journal is unreadable; refusing this boot");
+            }
+            if (in.currentBootId.equals(e.get("boot_id"))) {
+                String phase = e.get("phase");
+                String nativeStarted = e.get("native_started");
+                if (!"0".equals(nativeStarted) && !"1".equals(nativeStarted)) {
+                    return refuse("Early Root journal native_started is " + nativeStarted
+                            + ", not 0 or 1");
+                }
+                if (!PHASE_PREFLIGHT.equals(phase) && !PHASE_STARTED.equals(phase)
+                        && !PHASE_COMPLETE.equals(phase)
+                        && !PHASE_FAILED_LOCKED.equals(phase)) {
+                    return refuse("Early Root journal phase is not a known state: "
+                            + phase);
+                }
+                if (!PHASE_PREFLIGHT.equals(phase) || "1".equals(nativeStarted)) {
+                    return refuse("Early Integrated Root already reached phase " + phase
+                            + " in this boot; a hard reboot is the recovery boundary");
+                }
+            }
         }
 
         /*

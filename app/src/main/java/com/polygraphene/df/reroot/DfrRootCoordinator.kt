@@ -68,8 +68,22 @@ object DfrRootCoordinator {
     const val BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
     const val SELINUX_ENFORCE_PATH = "/sys/fs/selinux/enforce"
 
-    /** Where the run is. Reported so a caller can paint or journal it. */
-    enum class Phase { PREFLIGHT, STAGE_KSUD, WAIT_CONTROLLER, RUN_NATIVE, WAIT_POST_ROOT, DONE }
+    /**
+     * Where the run is. Reported so a caller can paint, journal or trace it.
+     *
+     * CONTROLLER_READY is deliberately its own value rather than something a
+     * caller infers from RUN_NATIVE. The two are separated by
+     * [Host.beforeNativeRun], which is where a caller takes its own durable
+     * pre-record, so "the hop landed and network_stack answered" and "the
+     * destructive transaction is about to be issued" are different facts with a
+     * decision between them (AGENTS.md 3.7). A trace that reported only
+     * RUN_NATIVE could not distinguish a hop that never came back from a
+     * pre-record that refused.
+     */
+    enum class Phase {
+        PREFLIGHT, STAGE_KSUD, WAIT_CONTROLLER, CONTROLLER_READY, RUN_NATIVE,
+        WAIT_POST_ROOT, DONE
+    }
 
     interface Host {
         fun log(line: String)
@@ -301,6 +315,10 @@ object DfrRootCoordinator {
                     "(hop failed or network_stack too slow; see logcat)\n")
                 return refused("no CONTROLLER binder from network_stack", bootId)
             }
+            // The hop landed and network_stack answered. Reported before the
+            // caller's pre-record, so a caller that refuses in beforeNativeRun
+            // still has it on file that the remote side was reached.
+            host.phase(Phase.CONTROLLER_READY)
 
             if (!host.beforeNativeRun()) {
                 return refused("the caller withdrew before the native run", bootId)
