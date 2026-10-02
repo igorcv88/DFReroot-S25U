@@ -2383,6 +2383,70 @@ def audit():
     if "AutoRootPolicy.PHASE_STARTED" not in early_root_service_src \
             or "EarlyRootPolicy.STEP_BEFORE_NATIVE" not in early_root_service_src:
         fail("the early-root service takes no pre-record before transaction 5")
+
+    # --- the hop is a privileged step too -----------------------------------
+    # Phase.WAIT_CONTROLLER is reported only after hopToNetworkStack RETURNED,
+    # so a caller taking its record from a phase callback has none for the hop
+    # itself: a process that died inside it leaves a trace ending at staging,
+    # which reads exactly like a hop that was never attempted. The hop runs our
+    # code in network_stack, where it dlopens libexp.so and arms stage 2, so
+    # 3.6.1 covers it - record first, and a record that cannot be written
+    # refuses the step.
+    hop_order = order(coord_src, "if (!host.beforeHop())",
+                      "StageHop.hopToNetworkStack(context)",
+                      "host.phase(Phase.WAIT_CONTROLLER)")
+    if hop_order is None or hop_order != sorted(hop_order):
+        fail("DfrRootCoordinator no longer offers an abortable pre-hop boundary "
+             "before StageHop.hopToNetworkStack; a caller's durable record of the "
+             "hop would be a post-record, and a death inside the hop would be "
+             "indistinguishable from a hop never attempted")
+    before_hop = early_root_service_src.find("override fun beforeHop()")
+    if before_hop < 0:
+        fail("the early-root service does not implement beforeHop, so it takes no "
+             "pre-record for the hop")
+    else:
+        hop_body = early_root_service_src[before_hop:]
+        hop_body = hop_body[:hop_body.find("override fun beforeNativeRun()")]
+        if "EarlyRootPolicy.STEP_STAGEHOP_SENDING" not in hop_body \
+                or "return false" not in hop_body:
+            fail("beforeHop does not record the pre-hop step, or does not refuse "
+                 "when it cannot be persisted")
+    # The regression this rename fixed: the coordinator reports STAGE_KSUD BEFORE
+    # it calls stageFromAssets and before the KSUD_STAGED_VERIFY=PASS check, so a
+    # step named STAGED claimed the daemon was staged in exactly the runs where
+    # staging threw or failed its digest - replacing the real failure boundary
+    # with an invented one.
+    if "EARLY_ROOT_KSUD_STAGED" in early_root_policy_src:
+        fail("the ksud trace step claims STAGED again; the coordinator reports "
+             "that phase before staging is attempted, so the name is false in "
+             "every failing run")
+    if "EarlyRootPolicy.STEP_KSUD_STAGING" not in early_root_service_src:
+        fail("the early-root service no longer records that it reached staging")
+
+    # --- the two triggers guard each other in BOTH directions ---------------
+    # One direction only is 3.2 at the scale of the feature. The reachable hole:
+    # Auto Root is triggered by LOCKED_BOOT_COMPLETED (17.6-19.7 s on this
+    # device) and a persisted job can be restored any time inside the 120 s
+    # window, so Auto Root can reach transaction 5 first; if its native side
+    # failed before stage1 created /dev/df, the marker probe answers a clean
+    # ENOENT and nothing else would refuse.
+    # Substrings that survive the source's own line wrapping: a guard anchored
+    # on a reflowed literal fails on correct code, and a guard that fails on
+    # correct code gets weakened or deleted, which is how the property is really
+    # lost.
+    for required in ("autoRootJournalRecord",
+                     "AUTO_JOURNAL_UNREADABLE, \"the Auto Root journal exists but\"",
+                     "\"Auto Root already reached phase \""):
+        if required not in early_root_policy_src:
+            fail("EarlyRootPolicy no longer refuses on Auto Root's journal (%r "
+                 "missing); a failed Auto Root attempt that wrote no marker would "
+                 "let the early callback issue a second native transaction in the "
+                 "same boot" % required)
+    for name, src in (("DfrEarlyRootService", early_root_service_src),
+                      ("DfrEarlyRootJobService", early_root_job_src)):
+        if "in0.autoRootJournalRecord = AutoRootStore.journal()" not in src:
+            fail("%s does not supply Auto Root's journal, so the policy's check is "
+                 "fed nothing and refuses nothing" % name)
     before_native = early_root_service_src.find("override fun beforeNativeRun()")
     if before_native < 0:
         fail("the early-root service does not implement beforeNativeRun; the "

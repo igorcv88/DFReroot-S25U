@@ -178,8 +178,18 @@ class DfrEarlyRootService : Service() {
                 val step = when (phase) {
                     DfrRootCoordinator.Phase.PREFLIGHT ->
                         EarlyRootPolicy.STEP_COORDINATOR_ENTERED
+                    /*
+                     * STAGING, not STAGED. The coordinator reports this phase
+                     * BEFORE it calls stageFromAssets and before the
+                     * KSUD_STAGED_VERIFY=PASS check, so a step claiming the
+                     * daemon was staged would be false in exactly the runs where
+                     * staging failed - replacing the real failure boundary with
+                     * an invented one.
+                     */
                     DfrRootCoordinator.Phase.STAGE_KSUD ->
-                        EarlyRootPolicy.STEP_KSUD_STAGED
+                        EarlyRootPolicy.STEP_KSUD_STAGING
+                    // Reported only after hopToNetworkStack RETURNED. The
+                    // pre-record for the hop is written in beforeHop below.
                     DfrRootCoordinator.Phase.WAIT_CONTROLLER ->
                         EarlyRootPolicy.STEP_STAGEHOP_SENT
                     DfrRootCoordinator.Phase.CONTROLLER_READY ->
@@ -203,6 +213,29 @@ class DfrEarlyRootService : Service() {
                     else -> null
                 }
                 if (step != null) trace(bootId, step, "phase=$phase")
+            }
+
+            override fun beforeHop(): Boolean {
+                /*
+                 * The hop's pre-record, before the hop.
+                 *
+                 * The hop is a privileged step in its own right: it runs our
+                 * code in network_stack, where it dlopens libexp.so and arms
+                 * stage 2. 3.6.1's rule therefore covers it - the record goes
+                 * first, and a record that cannot be written refuses the step
+                 * rather than being logged as an inconvenience. Without this,
+                 * a process that died inside the hop would leave a trace ending
+                 * at staging, which reads exactly like a hop that was never
+                 * attempted.
+                 */
+                val traced = trace(bootId, EarlyRootPolicy.STEP_STAGEHOP_SENDING,
+                    "scheduleReceiver/12 about to be invoked")
+                if (traced != null) {
+                    Log.e(TAG, "[DFR][EARLY_ROOT] REFUSED cannot record the" +
+                        " pre-hop trace step")
+                    return false
+                }
+                return true
             }
 
             override fun beforeNativeRun(): Boolean {
@@ -318,6 +351,14 @@ class DfrEarlyRootService : Service() {
         val in0 = EarlyRootPolicy.Inputs()
         in0.armRecord = EarlyRootStore.readArm()
         in0.journalRecord = EarlyRootStore.readJournal()
+        /*
+         * And Auto Root's journal for this boot. Auto Root is triggered by
+         * LOCKED_BOOT_COMPLETED, which arrives at 17.6-19.7 s on this device,
+         * so it can reach transaction 5 before a late-restored early callback -
+         * and if its native side failed before stage1 created /dev/df, the
+         * marker probe answers a clean ENOENT and nothing else would refuse.
+         */
+        in0.autoRootJournalRecord = AutoRootStore.journal()
         in0.qualificationRecord = AutoRootStore.qualification()
         in0.currentBootId = bootId
         /*

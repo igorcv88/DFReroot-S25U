@@ -120,6 +120,11 @@ public final class EarlyRootPolicy {
     public static final String JOURNAL_UNREADABLE = "EARLY_ROOT_JOURNAL_UNREADABLE";
     public static final String JOURNAL_MALFORMED = "EARLY_ROOT_JOURNAL_MALFORMED";
     public static final String BOOT_SPENT = "EARLY_ROOT_BOOT_ALREADY_ATTEMPTED";
+    public static final String AUTO_JOURNAL_UNREADABLE =
+            "EARLY_ROOT_AUTO_ROOT_JOURNAL_UNREADABLE";
+    public static final String AUTO_JOURNAL_MALFORMED =
+            "EARLY_ROOT_AUTO_ROOT_JOURNAL_MALFORMED";
+    public static final String AUTO_BOOT_SPENT = "EARLY_ROOT_AUTO_ROOT_ALREADY_ATTEMPTED";
     public static final String MARKER_PRESENT = "EARLY_ROOT_MARKER_PRESENT";
     public static final String MARKER_UNKNOWN = "EARLY_ROOT_MARKER_UNKNOWN";
     public static final String SELINUX_NOT_ENFORCING = "EARLY_ROOT_SELINUX_NOT_ENFORCING";
@@ -140,7 +145,32 @@ public final class EarlyRootPolicy {
     public static final String STEP_SERVICE_ENTERED = "EARLY_ROOT_SERVICE_ENTERED";
     public static final String STEP_PREFLIGHT_PASS = "EARLY_ROOT_PREFLIGHT_PASS";
     public static final String STEP_COORDINATOR_ENTERED = "EARLY_ROOT_COORDINATOR_ENTERED";
-    public static final String STEP_KSUD_STAGED = "EARLY_ROOT_KSUD_STAGED";
+    /**
+     * Staging is ABOUT to be attempted, not done.
+     *
+     * The coordinator reports {@code Phase.STAGE_KSUD} before it calls
+     * {@code KsudStage.stageFromAssets()} and before the
+     * {@code KSUD_STAGED_VERIFY=PASS} check, so a step called "STAGED" here
+     * would claim the daemon was staged in exactly the runs where staging threw
+     * or failed its digest - obscuring the real failure boundary with a false
+     * one. The honest name is the pre-record it actually is; a later
+     * {@code STEP_STAGEHOP_SENDING} is what implies staging passed, because the
+     * coordinator refuses before the hop otherwise.
+     */
+    public static final String STEP_KSUD_STAGING = "EARLY_ROOT_KSUD_STAGING";
+    /**
+     * The hop is about to be sent, written before it is.
+     *
+     * Separate from {@link #STEP_STAGEHOP_SENT} because they are separate facts
+     * (3.7): the coordinator reports {@code Phase.WAIT_CONTROLLER} only after
+     * {@code StageHop.hopToNetworkStack()} has returned, so without this one a
+     * process that died inside the hop would leave a trace ending at staging -
+     * indistinguishable from a hop that was never attempted. The hop executes
+     * our code in another security domain, so it is a privileged step, and
+     * 3.6.1's rule applies to it: the record goes first, and a record that
+     * cannot be written refuses the step.
+     */
+    public static final String STEP_STAGEHOP_SENDING = "EARLY_ROOT_STAGEHOP_SENDING";
     public static final String STEP_STAGEHOP_SENT = "EARLY_ROOT_STAGEHOP_SENT";
     public static final String STEP_CONTROLLER_RECEIVED = "EARLY_ROOT_CONTROLLER_RECEIVED";
     public static final String STEP_BEFORE_NATIVE = "EARLY_ROOT_BEFORE_NATIVE";
@@ -166,7 +196,8 @@ public final class EarlyRootPolicy {
     private static final Set<String> STEPS = Set.of(
             STEP_JOB_ENTERED, STEP_READINESS_PASS, STEP_DISPATCHED,
             STEP_SERVICE_ENTERED, STEP_PREFLIGHT_PASS, STEP_COORDINATOR_ENTERED,
-            STEP_KSUD_STAGED, STEP_STAGEHOP_SENT, STEP_CONTROLLER_RECEIVED,
+            STEP_KSUD_STAGING, STEP_STAGEHOP_SENDING, STEP_STAGEHOP_SENT,
+            STEP_CONTROLLER_RECEIVED,
             STEP_BEFORE_NATIVE, STEP_NATIVE_RETURNED, STEP_POST_ROOT_COMPLETE,
             STEP_SELINUX_ENFORCING, STEP_FAILED, STEP_REFUSED,
             STEP_BOOT_COMPLETED_OBSERVED);
@@ -268,6 +299,26 @@ public final class EarlyRootPolicy {
     public static final class Inputs {
         public String armRecord;
         public String journalRecord;
+        /**
+         * The AUTO ROOT journal, if any, for this boot.
+         *
+         * The symmetric half of what {@code AutoRootPolicy} reads from the early
+         * journal, and it is not decoration: without it the two triggers guard
+         * each other in one direction only, which is 3.2 at the scale of the
+         * whole feature.
+         *
+         * The reachable hole it closes: Auto Root is triggered by
+         * {@code LOCKED_BOOT_COMPLETED}, which on this device arrives at
+         * 17.6-19.7 s, and a persisted job restored late can be called back any
+         * time inside the 120 s window. So Auto Root can reach transaction 5 and
+         * record {@code STARTED} / {@code FAILED_LOCKED} FIRST. If its native
+         * side then failed before {@code stage1} created {@code /dev/df}, the
+         * marker probe answers a clean ENOENT, the coordinator's run guard has
+         * been released, and the early journal is empty - every remaining
+         * condition passes, and a second native transaction runs in a boot whose
+         * page cache may already have been written.
+         */
+        public String autoRootJournalRecord;
         public String qualificationRecord;
         public String currentBootId;
         /** The job id the scheduler actually called back with. */
@@ -659,6 +710,41 @@ public final class EarlyRootPolicy {
             }
             // A journal naming another boot is last boot's record: it says
             // nothing about this one and must not lock it.
+        }
+        /*
+         * And the other trigger's journal, for the same boot.
+         *
+         * Same rule, same exception, stated in the other direction: a
+         * PREFLIGHT with native_started=0 means Auto Root polled readiness or
+         * gave up before transaction 5, so provably nothing was written, and
+         * refusing there would let a slow framework cost the early window for
+         * no gain. Every other shape refuses - including FAILED_LOCKED with no
+         * marker on disk, which is the interleaving this check exists for.
+         *
+         * Auto Root may still be mid-poll when this runs, so two callers can
+         * both pass here and race; that is what DfrRootCoordinator's run guard
+         * is for, and the loser gets a refusal with nothing written.
+         */
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(in.autoRootJournalRecord)) {
+            return refuse(AUTO_JOURNAL_UNREADABLE, "the Auto Root journal exists but"
+                    + " could not be read; it may say STARTED, so this boot refuses");
+        }
+        if (!blank(in.autoRootJournalRecord)) {
+            Journal auto = parseJournal(in.autoRootJournalRecord);
+            if (auto == null) {
+                return refuse(AUTO_JOURNAL_MALFORMED, "the Auto Root journal is"
+                        + " unreadable; it may have been written by a run that died"
+                        + " mid-write");
+            }
+            if (in.currentBootId.equals(auto.bootId)
+                    && (!AutoRootPolicy.PHASE_PREFLIGHT.equals(auto.phase)
+                        || auto.nativeStarted)) {
+                return refuse(AUTO_BOOT_SPENT, "Auto Root already reached phase "
+                        + auto.phase + " in this boot (native_started="
+                        + (auto.nativeStarted ? 1 : 0) + "); the page cache may"
+                        + " already carry its writes, with or without a /dev/df"
+                        + " marker");
+            }
         }
         return new Decision(true, ALLOW, "EARLY_ROOT_PREFLIGHT=PASS (pre-readiness)");
     }

@@ -90,6 +90,23 @@ object DfrRootCoordinator {
         fun phase(phase: Phase)
 
         /**
+         * Last call before the hop into network_stack.
+         *
+         * Separate from [beforeNativeRun] because the hop is its own privileged
+         * step: it executes our code in another security domain, where it
+         * dlopens libexp.so and arms stage 2. [Phase.WAIT_CONTROLLER] is
+         * reported only after `hopToNetworkStack` has RETURNED, so a caller that
+         * takes its durable pre-record from a phase callback has none for the
+         * hop itself - a process that died inside it would leave a record ending
+         * at staging, indistinguishable from a hop that was never attempted.
+         *
+         * Returning false aborts the run before the hop, with nothing written.
+         * The default is true, so callers that keep no durable record are
+         * unaffected.
+         */
+        fun beforeHop(): Boolean = true
+
+        /**
          * Last call before the destructive transaction.
          *
          * The boot service uses it to record STARTED for this boot id, so a
@@ -307,6 +324,12 @@ object DfrRootCoordinator {
         }
 
         try {
+            // The caller's pre-record for the hop, before the hop. Its refusal
+            // costs a run that was going to be undiagnosable anyway; see
+            // Host.beforeHop.
+            if (!host.beforeHop()) {
+                return refused("the caller withdrew before the hop", bootId)
+            }
             host.log(StageHop.hopToNetworkStack(context))
             host.phase(Phase.WAIT_CONTROLLER)
             val c = awaitController(controllerTimeoutMs, host)
