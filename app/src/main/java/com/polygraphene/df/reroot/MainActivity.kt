@@ -25,6 +25,7 @@ class MainActivity : Activity() {
     private lateinit var autoRoot: CheckBox
     private lateinit var autoRootState: TextView
     private lateinit var earlyBootProbeState: TextView
+    private lateinit var earlyRootState: TextView
 
     private var runDialogLog: TextView? = null
     private var runDialogScroll: ScrollView? = null
@@ -44,6 +45,7 @@ class MainActivity : Activity() {
         autoRoot = findViewById(R.id.autoRoot)
         autoRootState = findViewById(R.id.autoRootState)
         earlyBootProbeState = findViewById(R.id.earlyBootProbeState)
+        earlyRootState = findViewById(R.id.earlyRootState)
 
         status.text = myIdentity()
         updateChip()
@@ -70,8 +72,28 @@ class MainActivity : Activity() {
                 runOnUiThread { refreshEarlyBootProbe() }
             }
         }
+        /*
+         * Early Integrated Root is armed one boot at a time, never switched on.
+         *
+         * Auto Root gets a checkbox because "after a full boot" is a settled
+         * state the device returns to every time. The early window is not that:
+         * the page-cache writes land while the firmware's own boot watchdog is
+         * still deciding whether this boot completed, and what that costs has
+         * never been observed here. AGENTS.md 3.6.1 is the rule - an operation
+         * whose worst outcome is not a refusal needs an operation's evidence -
+         * so the owner arms one boot, in the open, and the scheduler consumes
+         * the arming. A persistent form is a promotion for after the first
+         * physical run comes back.
+         */
+        findViewById<Button>(R.id.btnArmEarlyRoot).setOnClickListener {
+            runBg {
+                append(DfrEarlyRoot.arm(applicationContext))
+                runOnUiThread { refreshEarlyRoot() }
+            }
+        }
         refreshAutoRoot()
         refreshEarlyBootProbe()
+        refreshEarlyRoot()
         /*
          * The soft-reboot boot-health observation for THIS boot, printed once at
          * startup rather than painted into a chip: four of its six states mean
@@ -99,6 +121,7 @@ class MainActivity : Activity() {
         updateChip()
         refreshAutoRoot()
         refreshEarlyBootProbe()
+        refreshEarlyRoot()
     }
 
     /**
@@ -121,6 +144,19 @@ class MainActivity : Activity() {
 
     private fun refreshEarlyBootProbe() {
         earlyBootProbeState.text = DfrEarlyBootProbe.armState()
+    }
+
+    /**
+     * Painted from the stored records, never from memory.
+     *
+     * The row has to be able to say "this cycle is spent" as well as "a cycle is
+     * waiting", because the one-shot job leaves its arm record behind after
+     * firing and an owner who reads ARMED over a consumed cycle spends a full
+     * reboot on a run that cannot happen. [DfrEarlyRoot.armState] derives that
+     * from the journal and the trace, not from boot ids.
+     */
+    private fun refreshEarlyRoot() {
+        earlyRootState.text = DfrEarlyRoot.armState()
     }
 
     private fun runDfAll() {

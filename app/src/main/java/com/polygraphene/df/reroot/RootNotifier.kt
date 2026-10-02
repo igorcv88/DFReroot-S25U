@@ -93,7 +93,26 @@ object RootNotifier {
      * [SoftRebootPolicy] re-derives before dispatching anything. The button is an
      * offer, never an authorisation: tapping it re-runs the whole precheck.
      */
-    fun notifyRunVerdict(context: Context, result: DfrRootCoordinator.Result, who: String) {
+    fun notifyRunVerdict(
+        context: Context,
+        result: DfrRootCoordinator.Result,
+        who: String,
+        /*
+         * Whether the verdict may carry the Apply Modules action.
+         *
+         * Default true, so the button and Auto Root are unchanged. The early-boot
+         * dispatch passes false, and that is not timidity about a notification:
+         * POST_SOFT_REBOOT_STABILITY is a physical FAIL twice with a cause
+         * AGENTS.md 3.6.2 states nobody has measured, and the early path's own
+         * stability has no evidence at all. Offering the known-failing operation
+         * from the unproven path - while the boot animation is still running, to
+         * an owner who has just watched the device come up - would be inviting a
+         * tap at the worst available moment. It becomes an offer again when the
+         * early path has runs behind it, which is the owner's decision to make
+         * in the open.
+         */
+        offerApplyModules: Boolean = true,
+    ) {
         val b = base(context)
         if (result.success) {
             b.setContentTitle(context.getString(R.string.notif_root_restored))
@@ -115,7 +134,7 @@ object RootNotifier {
                 Log.e(TAG, "[DFR][NOTIFY] cannot build the action: $t")
                 null
             }
-            if (pending != null) {
+            if (pending != null && offerApplyModules) {
                 /*
                  * An explicit Icon rather than null. Notification.Action.Builder has
                  * a second, deprecated (int, ...) overload, so a bare null leans on
@@ -139,7 +158,7 @@ object RootNotifier {
             b.setStyle(Notification.BigTextStyle().bigText(result.reason))
         }
         Log.i(TAG, "[DFR][NOTIFY] verdict who=$who success=${result.success}" +
-            " boot_id=${result.bootId}")
+            " boot_id=${result.bootId} apply_modules_offered=$offerApplyModules")
         post(context, b)
     }
 

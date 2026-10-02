@@ -16,6 +16,22 @@
 > `scheduleReceiver/12`. Um disparo no mesmo boot de arming é registrado como
 > `EARLY_JOB_FIRED_SAME_BOOT` e nunca promovido a PASS.
 
+> **Atualização 2026-10-02 — a pergunta observacional foi respondida.** Em três
+> full boots consecutivos (`48bf5c32…`, `9af4b55f…`, `ab10e200…`, APK
+> `2.0.15-zzic`) o callback armado ocorreu a **14,6-16,9 s** do boot do kernel,
+> em boot novo, com `bootanim_exit=0` e `user_unlocked=0`, e com os quatro
+> componentes do StageHop já resolvidos - 2,69-2,90 s antes de
+> `LOCKED_BOOT_COMPLETED`. Portanto
+> `DFR_PERSISTED_JOB_EARLY_CALLBACK=PHYSICAL_PASS` e
+> `DFR_JOB_STAGEHOP_READY=PHYSICAL_PASS`, 3/3. O registro autoritativo está em
+> `docs/S25U_ZZIC_COMPATIBILITY.md` § *Early-job probe acceptance*.
+>
+> Isso **não** muda o veredito pre-zygote desta avaliação. O ponto medido é
+> posterior a `system_server`, ao AMS e ao NetworkStack; `TRUE_PRE_ZYGOTE`
+> continua não comprovado e esta rodada continua NO-GO para aquele caminho. O
+> que foi construído sobre a janela medida - um despacho *dentro* da animação de
+> boot, sem evidência física ainda - está em `docs/EARLY_ROOT.md`.
+
 ## Escopo e decisão
 
 Esta rodada é uma revisão documental do `main` de `igorcv88/DFReroot-S25U`. Não houve acesso ao Galaxy S25 Ultra, captura de um full boot, inventário do firmware em execução ou ensaio físico. Por isso, nenhum horário, daemon candidato, capability observada ou vetor de execução anterior ao zygote é declarado como provado.

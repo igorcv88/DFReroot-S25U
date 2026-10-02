@@ -300,6 +300,14 @@ class DfrAutoRootService : Service() {
         val q = AutoRootPolicy.Inputs()
         q.qualificationRecord = AutoRootStore.qualification()
         q.journalRecord = AutoRootStore.journal()
+        /*
+         * The other trigger's record for this boot. Auto Root and Early Root run
+         * the same chain, so the boot they share needs one answer to "has it
+         * already run here" - and the marker probe cannot give it once root is
+         * established, because the /dev/df* lookups then return EACCES rather
+         * than ENOENT and read as MARKER_UNKNOWN.
+         */
+        q.earlyRootJournalRecord = EarlyRootStore.readJournal()
         q.currentBootId = bootId
         q.deviceFingerprint = AutoRootStore.deviceFingerprint()
         q.ksudSha256 = KsudStage.pinnedKsudSha256()

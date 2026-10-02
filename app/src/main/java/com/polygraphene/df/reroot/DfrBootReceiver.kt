@@ -141,6 +141,17 @@ class DfrBootReceiver : BroadcastReceiver() {
                  */
                 if (booted) completeSoftRebootHealth()
                 if (locked) recordLockedBoot(arrivalMs) else retryPendingFinalize()
+                /*
+                 * The comparison point for Early Integrated Root, taken by the
+                 * one component that is not part of what it measures.
+                 *
+                 * The first milestone is an ORDERING - POST_ROOT_COMPLETE before
+                 * BOOT_COMPLETED - and the early path cannot time itself against
+                 * a broadcast it never receives. This is the uninvolved observer:
+                 * it writes no decision, reads nothing it then acts on, and only
+                 * appends when this boot already has an early-root trace.
+                 */
+                if (booted) recordEarlyRootBootCompleted(arrivalMs)
             } catch (t: Throwable) {
                 Log.e(TAG, "[DFR][EARLY_JOB] LOCKED_BOOT_MARKER=FAIL $t", t)
             } finally {
@@ -269,6 +280,51 @@ class DfrBootReceiver : BroadcastReceiver() {
         } else {
             Log.i(TAG, "[DFR][EARLY_JOB] LATE_FINALIZE=ATTEMPTED boot_id=$bootId")
         }
+    }
+
+    /**
+     * Append `BOOT_COMPLETED` to this boot's early-root trace, if there is one.
+     *
+     * The gate is "this boot already has a trace", not "an arm record exists",
+     * and the difference matters. The arm record outlives its cycle, so keying on
+     * it would make every boot of every install pay two writes for a cycle that
+     * is spent - instrumentation changing the system it instruments long after
+     * the question was answered. A trace whose first step names THIS boot means a
+     * dispatch happened here and the ordering is still being established.
+     *
+     * It can only ever add one line. It writes no verdict, takes no decision from
+     * what it reads, and a failure costs the comparison, never the run.
+     */
+    private fun recordEarlyRootBootCompleted(arrivalMs: Long) {
+        val trace = EarlyRootStore.readTrace() ?: return
+        if (trace == AutoRootPolicy.RECORD_UNREADABLE) {
+            Log.i(TAG, "[DFR][EARLY_ROOT] BOOT_COMPLETED_OBSERVED=SKIP trace unreadable")
+            return
+        }
+        val bootId = DfrRootCoordinator.readBootId()
+        if (bootId.isEmpty()) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] BOOT_COMPLETED_OBSERVED=FAIL boot_id unavailable")
+            return
+        }
+        // A trace opening on another boot is last boot's record. Appending to it
+        // would build one apparent sequence out of two boots (AGENTS.md 3.8);
+        // EarlyRootStore rotates it instead when the early path next writes.
+        if (!EarlyRootPolicy.traceBelongsToBoot(trace, bootId)) return
+        if (arrivalMs < 0) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] BOOT_COMPLETED_OBSERVED=UNKNOWN" +
+                " reason=monotonic_clock_unavailable boot_id=$bootId")
+            return
+        }
+        val failure = EarlyRootStore.trace(
+            bootId, EarlyRootPolicy.STEP_BOOT_COMPLETED_OBSERVED, arrivalMs,
+            EarlyRootEnv.bootState(null), "action=BOOT_COMPLETED"
+        )
+        if (failure != null) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] BOOT_COMPLETED_OBSERVED=FAIL $failure")
+            return
+        }
+        Log.i(TAG, "[DFR][EARLY_ROOT] BOOT_COMPLETED_OBSERVED=PASS boot_id=$bootId" +
+            " elapsed_ms=$arrivalMs")
     }
 
     private fun recordLockedBoot(arrivalMs: Long) {

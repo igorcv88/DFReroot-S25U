@@ -80,3 +80,16 @@ $JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/EarlyBootProbePolicy.java \
     tools/tests/EarlyBootProbePolicyTest.java
 java -cp "$OUT" EarlyBootProbePolicyTest
+
+# Early Integrated Root: the dispatch gate for the pre-LOCKED_BOOT window, with
+# one negative case per element. None of them is reachable on a device without
+# spending a full reboot each - a callback that fires in its own arming boot, a
+# persisted job restored after the window closed, an app update between the
+# arming and the boot, a journal from a run that died after transaction 5, a
+# /dev/df* probe that answers EACCES rather than ENOENT.
+$JAVAC -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
+    app/src/main/java/com/polygraphene/df/reroot/EarlyBootProbePolicy.java \
+    app/src/main/java/com/polygraphene/df/reroot/EarlyRootPolicy.java \
+    tools/tests/EarlyRootPolicyTest.java
+java -cp "$OUT" EarlyRootPolicyTest

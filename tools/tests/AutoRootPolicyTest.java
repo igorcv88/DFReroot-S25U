@@ -421,6 +421,73 @@ public class AutoRootPolicyTest {
                                 AutoRootPolicy.optInVerdict(off, CODE, NAME, KSUD, FP)),
                 "isOptedIn agrees with the verdict it is derived from");
 
+        // --- the other trigger's journal for this boot -----------------------
+        // Auto Root and Early Root run the same chain, so the boot they share
+        // needs one answer to "has it already run here". The marker probe cannot
+        // give it: once root is established on this firmware the /dev/df* probes
+        // answer EACCES rather than ENOENT, which reads as MARKER_UNKNOWN - a
+        // refusal that cannot say why. None of these states is reachable on a
+        // device without spending a full reboot on an early dispatch first.
+        AutoRootPolicy.Inputs early = ready();
+        early.earlyRootJournalRecord = null;
+        allowed(early, "no early-root journal grants nothing and removes nothing:"
+                + " absence is the normal state of that record");
+
+        early = ready();
+        early.earlyRootJournalRecord = AutoRootPolicy.RECORD_UNREADABLE;
+        refused(early, "an unreadable early-root journal refuses this boot; it may"
+                + " say STARTED");
+
+        early = ready();
+        early.earlyRootJournalRecord = "boot_id=" + BOOT + "\n";
+        refused(early, "a malformed early-root journal refuses this boot");
+
+        early = ready();
+        early.earlyRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_COMPLETE, 1, true);
+        refused(early, "an early run that COMPLETED in this boot refuses Auto Root,"
+                + " by name rather than via MARKER_UNKNOWN");
+
+        early = ready();
+        early.earlyRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_STARTED, 1, true);
+        refused(early, "an early run that issued transaction 5 refuses Auto Root");
+
+        early = ready();
+        early.earlyRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_FAILED_LOCKED, 1, true);
+        refused(early, "an early run that failed after transaction 5 locks the boot");
+
+        early = ready();
+        early.earlyRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_PREFLIGHT, 1, true);
+        refused(early, "native_started=1 outranks a PREFLIGHT phase: the page cache"
+                + " may already carry the early run's writes");
+
+        early = ready();
+        early.earlyRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_PREFLIGHT, 1, false);
+        allowed(early, "an early dispatch that gave up BEFORE transaction 5 provably"
+                + " wrote nothing, so Auto Root may still try later in this boot");
+
+        early = ready();
+        early.earlyRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                "HALFWAY", 1, false);
+        refused(early, "an early-root phase this build does not know refuses rather"
+                + " than falling through to allow");
+
+        early = ready();
+        early.earlyRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_PREFLIGHT, 1, false)
+                .replace("native_started=0", "native_started=2");
+        refused(early, "an early-root native_started that is neither 0 nor 1 refuses");
+
+        early = ready();
+        early.earlyRootJournalRecord = AutoRootPolicy.formatJournal(QUAL_BOOT,
+                AutoRootPolicy.PHASE_COMPLETE, 1, true);
+        allowed(early, "an early-root journal naming another boot says nothing about"
+                + " this one and must not lock it");
+
         check(AutoRootPolicy.MAX_ATTEMPTS_PER_BOOT >= 8,
                 "the readiness poll cap leaves room for a slow boot instead of"
                         + " closing the window in the first minute");
