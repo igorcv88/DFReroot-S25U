@@ -170,6 +170,28 @@ public class EarlyRootPolicyTest {
                 "a step whose clock could not be read orders nothing and refuses");
         check(EarlyRootPolicy.parseTraceLine("a\tb\tc") == null,
                 "a truncated trace line refuses");
+        // The staging step says STAGING, not STAGED: the coordinator reports
+        // that phase before staging is attempted and before its digest check,
+        // so the old name was false in exactly the failing runs.
+        check(EarlyRootPolicy.STEP_KSUD_STAGING.endsWith("STAGING")
+                        && EarlyRootPolicy.parseTraceLine(
+                                EarlyRootPolicy.formatTraceStep(
+                                        EarlyRootPolicy.STEP_KSUD_STAGING, BOOT, 5L,
+                                        "x", "y")) != null,
+                "the ksud step is a pre-record and is in the vocabulary");
+        check(EarlyRootPolicy.parseTraceLine(
+                        EarlyRootPolicy.formatTraceStep(
+                                "EARLY_ROOT_KSUD_STAGED", BOOT, 5L, "x", "y")) == null,
+                "the old STAGED spelling is gone from the vocabulary, so a stale"
+                        + " writer cannot resurrect the false claim");
+        check(!EarlyRootPolicy.STEP_STAGEHOP_SENDING.equals(
+                        EarlyRootPolicy.STEP_STAGEHOP_SENT)
+                        && EarlyRootPolicy.parseTraceLine(
+                                EarlyRootPolicy.formatTraceStep(
+                                        EarlyRootPolicy.STEP_STAGEHOP_SENDING, BOOT,
+                                        6L, "x", "y")) != null,
+                "the hop has a pre-record step distinct from its post-record one:"
+                        + " WAIT_CONTROLLER is only reported after the hop returned");
         check(EarlyRootPolicy.parseTraceLine(
                         EarlyRootPolicy.STEP_JOB_ENTERED + "\t" + BOOT
                                 + "\tnotanumber\tx\ty") == null,
@@ -341,6 +363,90 @@ public class EarlyRootPolicyTest {
                 AutoRootPolicy.PHASE_COMPLETE, 1, true);
         allowed(in, "a journal naming another boot says nothing about this one and"
                 + " must not lock it");
+
+        // --- the other trigger's journal, in this direction too --------------
+        // Auto Root is triggered by LOCKED_BOOT_COMPLETED (17.6-19.7 s on this
+        // device) and a persisted job can be restored any time inside the 120 s
+        // window, so Auto Root can reach transaction 5 FIRST. If its native side
+        // failed before stage1 created /dev/df, the marker probe answers a clean
+        // ENOENT and the run guard has been released - so without this check
+        // every remaining condition passes and a second native transaction runs
+        // in a boot whose page cache may already have been written. None of this
+        // is reachable on a device: it needs a failed Auto Root attempt that
+        // wrote no marker plus a late job restore in the same boot.
+        in = ready();
+        in.autoRootJournalRecord = null;
+        allowed(in, "no Auto Root journal grants nothing and removes nothing");
+
+        in = ready();
+        in.autoRootJournalRecord = AutoRootPolicy.RECORD_UNREADABLE;
+        refused(in, EarlyRootPolicy.AUTO_JOURNAL_UNREADABLE,
+                "an unreadable Auto Root journal refuses; it may say STARTED");
+
+        in = ready();
+        in.autoRootJournalRecord = "boot_id=" + BOOT + "\n";
+        refused(in, EarlyRootPolicy.AUTO_JOURNAL_MALFORMED,
+                "a malformed Auto Root journal refuses");
+
+        in = ready();
+        in.autoRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_FAILED_LOCKED, 1, true);
+        refused(in, EarlyRootPolicy.AUTO_BOOT_SPENT,
+                "the interleaving this exists for: Auto Root issued transaction 5,"
+                        + " failed before any /dev/df marker, and the early callback"
+                        + " must not run a second one");
+
+        in = ready();
+        in.autoRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_STARTED, 1, true);
+        refused(in, EarlyRootPolicy.AUTO_BOOT_SPENT,
+                "an Auto Root run that began native execution refuses the early"
+                        + " dispatch");
+
+        in = ready();
+        in.autoRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_COMPLETE, 1, true);
+        refused(in, EarlyRootPolicy.AUTO_BOOT_SPENT,
+                "an Auto Root run that completed in this boot refuses the early"
+                        + " dispatch");
+
+        in = ready();
+        in.autoRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_PREFLIGHT, 3, true);
+        refused(in, EarlyRootPolicy.AUTO_BOOT_SPENT,
+                "native_started=1 outranks a PREFLIGHT phase in this direction too");
+
+        in = ready();
+        in.autoRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_PREFLIGHT, 4, false);
+        allowed(in, "Auto Root still polling readiness, nothing written: the early"
+                + " window is not spent, and the run guard settles the race");
+
+        in = ready();
+        in.autoRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                "HALFWAY", 1, false);
+        refused(in, EarlyRootPolicy.AUTO_JOURNAL_MALFORMED,
+                "an Auto Root phase this build does not know refuses rather than"
+                        + " falling through to allow");
+
+        in = ready();
+        in.autoRootJournalRecord = AutoRootPolicy.formatJournal(ARMED_BOOT,
+                AutoRootPolicy.PHASE_FAILED_LOCKED, 1, true);
+        allowed(in, "an Auto Root journal naming another boot says nothing about"
+                + " this one and must not lock it");
+
+        // The guard has to hold in both directions or it is 3.2 at the scale of
+        // the whole feature: one trigger reading the other and not the reverse.
+        AutoRootPolicy.Inputs mirror = new AutoRootPolicy.Inputs();
+        mirror.earlyRootJournalRecord = EarlyRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_FAILED_LOCKED, 1, true);
+        in = ready();
+        in.autoRootJournalRecord = AutoRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_FAILED_LOCKED, 1, true);
+        check(!EarlyRootPolicy.evaluate(in).allow
+                        && mirror.earlyRootJournalRecord != null,
+                "each trigger refuses on the other's spent boot, not just one of"
+                        + " them (AutoRootPolicyTest drives the opposite direction)");
 
         in = ready();
         in.markerState = AutoRootPolicy.MARKER_PRESENT;

@@ -2947,10 +2947,17 @@ What shipped:
   a closed step vocabulary. Each step is written **before** the step it
   announces, and a step that cannot be persisted refuses the step rather than
   logging an inconvenience;
-- `AutoRootPolicy` now reads the early journal, because once root is established
-  on this firmware the `/dev/df*` probes answer EACCES rather than ENOENT and
-  Auto Root would otherwise refuse only via `MARKER_UNKNOWN`, which cannot say
-  why.
+- the two triggers refuse on each other's spent boot, in **both** directions.
+  `AutoRootPolicy` reads the early journal because once root is established here
+  the `/dev/df*` probes answer EACCES rather than ENOENT and Auto Root would
+  otherwise refuse only via `MARKER_UNKNOWN`, which cannot say why; and
+  `EarlyRootPolicy` reads Auto Root's, because Auto Root is triggered at
+  17.6-19.7 s while a persisted job can be restored any time inside the 120 s
+  window - so Auto Root can reach transaction 5 first, and if its native side
+  failed before `stage1` created `/dev/df` the marker probe answers a clean
+  ENOENT and nothing else would have refused. One direction only would have been
+  3.2 at the scale of the feature; the second direction was found by Codex
+  review on PR #48 and is covered by its own negative cases.
 
 **The open question this path does not answer.** `POST_SOFT_REBOOT_STABILITY`
 above is a physical FAIL twice, and AGENTS.md 3.6.2 states what is *observed*

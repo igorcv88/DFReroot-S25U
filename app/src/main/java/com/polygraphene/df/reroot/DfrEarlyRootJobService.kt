@@ -281,6 +281,10 @@ class DfrEarlyRootJobService : JobService() {
         val in0 = EarlyRootPolicy.Inputs()
         in0.armRecord = EarlyRootStore.readArm()
         in0.journalRecord = EarlyRootStore.readJournal()
+        // The other trigger's journal for this boot: Auto Root can reach
+        // transaction 5 first and leave no /dev/df marker behind. See
+        // EarlyRootPolicy.Inputs.autoRootJournalRecord.
+        in0.autoRootJournalRecord = AutoRootStore.journal()
         in0.qualificationRecord = AutoRootStore.qualification()
         in0.currentBootId = bootId
         in0.callbackJobId = jobId

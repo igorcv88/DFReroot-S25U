@@ -113,6 +113,7 @@ refused:
 | `EARLY_ROOT_NOT_QUALIFIED` | the chain must have completed manually on this exact build first. The early window is not where that is discovered |
 | `EARLY_ROOT_CLOCK_UNAVAILABLE` / `PAST_EARLY_WINDOW` | 120 s is a **bound**, not a proof. Past it, Auto Root's own trigger is the correct path, and falling through to it would be a second copy of its policy |
 | `EARLY_ROOT_JOURNAL_UNREADABLE` / `JOURNAL_MALFORMED` / `BOOT_ALREADY_ATTEMPTED` | one attempt per boot. An unreadable journal may say `STARTED`, i.e. the page cache was already written |
+| `EARLY_ROOT_AUTO_ROOT_*` | the same rule for *Auto Root's* journal. Auto Root is triggered at 17.6-19.7 s and a persisted job can be restored any time inside the 120 s window, so Auto Root can reach transaction 5 first; if its native side failed before `stage1` created `/dev/df`, the marker probe answers a clean ENOENT and nothing else would refuse. A `PREFLIGHT` with `native_started=0` still allows — Auto Root polling readiness wrote nothing, and `DfrRootCoordinator`'s run guard settles the race |
 | `EARLY_ROOT_MARKER_PRESENT` / `MARKER_UNKNOWN` | `/dev/df` means hooks are armed; a probe that answered neither way is not an empty `/dev` (on this firmware it answers EACCES once rooted) |
 | `EARLY_ROOT_SELINUX_NOT_ENFORCING` | `-1` is an unreadable sysfs, never agreement |
 | `EARLY_ROOT_NETWORKSTACK_NOT_READY` | see §3 |
@@ -158,7 +159,8 @@ EARLY_ROOT_DISPATCHED
 EARLY_ROOT_SERVICE_ENTERED
 EARLY_ROOT_PREFLIGHT_PASS
 EARLY_ROOT_COORDINATOR_ENTERED
-EARLY_ROOT_KSUD_STAGED
+EARLY_ROOT_KSUD_STAGING
+EARLY_ROOT_STAGEHOP_SENDING
 EARLY_ROOT_STAGEHOP_SENT
 EARLY_ROOT_CONTROLLER_RECEIVED
 EARLY_ROOT_BEFORE_NATIVE
@@ -228,7 +230,9 @@ that investigation does not have.
 | nothing at all | the scheduler never called back in this boot. The arm record and the JobStore are the next thing to read, not the chain |
 | `EARLY_ROOT_JOB_ENTERED` then `EARLY_ROOT_REFUSED` | the gate refused; the detail field names the code. This is the tool working |
 | `EARLY_ROOT_DISPATCHED`, no `EARLY_ROOT_SERVICE_ENTERED` | the platform did not honour a `startService` that early, in direct boot. This is the first genuinely unknown property of this path and it is a refusal, not a hazard |
-| `EARLY_ROOT_STAGEHOP_SENT`, no `EARLY_ROOT_CONTROLLER_RECEIVED` | the hop did not land, or `network_stack` could not answer inside 90 s. Nothing was written: `native_started=0`, so Auto Root may still try later in this boot |
+| `EARLY_ROOT_KSUD_STAGING` and nothing after | staging itself threw or failed its digest check. The step says STAGING, not STAGED, because the coordinator reports that phase *before* it stages — a step claiming STAGED would be false in exactly this run |
+| `EARLY_ROOT_STAGEHOP_SENDING`, no `EARLY_ROOT_STAGEHOP_SENT` | the process did not survive the hop. This pair exists to separate that from a hop that was never attempted: `WAIT_CONTROLLER` is reported only after `hopToNetworkStack` returned |
+| `EARLY_ROOT_STAGEHOP_SENT`, no `EARLY_ROOT_CONTROLLER_RECEIVED` | the hop landed and returned, but `network_stack` could not answer inside 90 s. Nothing was written: `native_started=0`, so Auto Root may still try later in this boot |
 | `EARLY_ROOT_BEFORE_NATIVE` and nothing after | **the important one.** Transaction 5 was issued and the process did not survive the call. Read the panic record first; `journal phase=STARTED` / `native_started=1` means a hard reboot is the recovery boundary |
 | `EARLY_ROOT_NATIVE_RETURNED` and nothing after | a different failure, and the step exists to separate them: the native call came back **clean** (the coordinator only reports that phase on result 0) and the process died during the 120 s post-root wait. Root may be established with nobody left to verify it |
 | `EARLY_ROOT_POST_ROOT_COMPLETE`, no `EARLY_ROOT_SELINUX_ENFORCING` | the same-boot record verified and the final `/sys/fs/selinux/enforce` read back as something other than `1`. The coordinator refuses to call that success |

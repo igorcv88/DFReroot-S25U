@@ -569,8 +569,12 @@ What must stay separate:
   marker probe cannot give it: once root is established on this firmware those
   lookups answer EACCES rather than ENOENT, so a successful run leaves the other
   trigger at `MARKER_UNKNOWN` - a refusal that cannot say why. Each trigger
-  therefore reads the other's per-boot journal, and that record can only ever
-  REMOVE permission.
+  therefore reads the other's per-boot journal, **in both directions**, and that
+  record can only ever REMOVE permission. One direction is not half the rule, it
+  is none of it: Auto Root fires from `LOCKED_BOOT_COMPLETED` while a persisted
+  job can be restored anywhere inside the early window, so either one can be the
+  one that reached `transact(5)` first - and a native failure before `stage1`
+  creates `/dev/df` leaves the marker probe answering a clean ENOENT.
 - **A pre-transaction failure does not spend the boot.** `native_started == 0`
   means transaction 5 was never issued, so provably nothing was written. This is
   the R1 correction and it holds across triggers: an early dispatch that lost a
