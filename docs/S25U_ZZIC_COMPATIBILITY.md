@@ -14,6 +14,11 @@ The rules this evidence is judged against — fail-closed, exact identity, proof
 may change form but never be skipped — are in **`AGENTS.md`** at the repository
 root, not restated here.
 
+**This dossier is about `S938BXXUCZZIC` only.** The One UI 9 Stable firmware
+`S938BXXUCDZIF` has its own, offline-only record in
+`docs/S25U_DZIF_COMPATIBILITY.md`. No physical PASS below transfers to it: they
+are two different kernel images, and a DZIF device classifies `MISMATCH`.
+
 **No gate is auto-promoted to global compatibility.** `SUPPORTED` is still
 intentionally *not* granted. Gate G1 (loader/import ABI) is now closed offline
 with the exact bundled ZZIC module (`COMPLETE (5/5)` / `COMPATIBLE`), while
