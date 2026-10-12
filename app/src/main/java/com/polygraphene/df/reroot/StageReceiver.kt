@@ -96,6 +96,12 @@ class StageReceiver : BroadcastReceiver() {
                             reply?.writeInt(df.runAll())
                             return true
                         }
+                        6 -> {
+                            Log.d(TAG, "non-destructive remote preflight")
+                            val df = DirtyFrag(data.readStrongBinder())
+                            reply?.writeInt(df.preflight())
+                            return true
+                        }
                     }
                 } catch (e: RemoteException) {
                     throw e
