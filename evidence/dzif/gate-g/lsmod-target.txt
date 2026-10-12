@@ -1,0 +1,589 @@
+kernelsu 180224 4 - Live 0x0000000000000000 (O)
+camera 5169152 42 - Live 0x0000000000000000 (O)
+max77775_charger 77824 0 - Live 0x0000000000000000
+pdic_max77775 233472 1 max77775_charger, Live 0x0000000000000000
+max77775_fuelgauge 53248 0 - Live 0x0000000000000000
+qca_cld3_kiwi_v2 13144064 0 - Live 0x0000000000000000 (O)
+rmnet_aps 36864 0 - Live 0x0000000000000000 (O)
+machine_dlkm 110592 0 - Live 0x0000000000000000 (O)
+swr_dmic_dlkm 24576 0 - Live 0x0000000000000000 (O)
+rmnet_offload 28672 0 - Live 0x0000000000000000 (O)
+rmnet_perf_tether 20480 0 - Live 0x0000000000000000 (O)
+rmnet_shs 192512 0 - Live 0x0000000000000000 (O)
+rmnet_perf 57344 0 - Live 0x0000000000000000 (O)
+rmnet_wlan 53248 0 - Live 0x0000000000000000 (O)
+rmnet_core 294912 7 rmnet_aps,rmnet_offload,rmnet_perf_tether,rmnet_shs,rmnet_perf,rmnet_wlan, Live 0x0000000000000000 (O)
+ipanetm 12288 0 - Live 0x0000000000000000 (O)
+wcd939x_dlkm 180224 2 machine_dlkm,swr_dmic_dlkm, Live 0x0000000000000000 (O)
+wcd938x_dlkm 151552 0 - Live 0x0000000000000000 (O)
+rmnet_ctl 20480 1 rmnet_core, Live 0x0000000000000000 (O)
+msm_drm 15519744 25 - Live 0x0000000000000000 (O)
+lpass_bt_swr_dlkm 20480 0 - Live 0x0000000000000000 (O)
+wcd9xxx_dlkm 36864 18 wcd939x_dlkm,wcd938x_dlkm, Live 0x0000000000000000 (O)
+lpass_cdc_va_macro_dlkm 73728 0 - Live 0x0000000000000000 (O)
+ipam 4448256 20 qca_cld3_kiwi_v2,rmnet_core,ipanetm,rmnet_ctl, Live 0x0000000000000000 (O)
+lpass_cdc_wsa_macro_dlkm 135168 0 - Live 0x0000000000000000 (O)
+lpass_cdc_wsa2_macro_dlkm 135168 0 - Live 0x0000000000000000 (O)
+lpass_cdc_rx_macro_dlkm 139264 1 machine_dlkm, Live 0x0000000000000000 (O)
+lpass_cdc_tx_macro_dlkm 94208 0 - Live 0x0000000000000000 (O)
+msm_kgsl 1867776 39 - Live 0x0000000000000000 (O)
+msm_eva 462848 0 - Live 0x0000000000000000 (O)
+pinctrl_lpi_dlkm 32768 2 - Live 0x0000000000000000 (O)
+lpass_cdc_dlkm 81920 7 machine_dlkm,lpass_cdc_va_macro_dlkm,lpass_cdc_wsa2_macro_dlkm,lpass_cdc_wsa_macro_dlkm,lpass_cdc_rx_macro_dlkm,lpass_cdc_tx_macro_dlkm, Live 0x0000000000000000 (O)
+adsp_loader_dlkm 12288 0 - Live 0x0000000000000000 (O)
+audio_pkt_dlkm 24576 2 - Live 0x0000000000000000 (O)
+swr_ctrl_dlkm 77824 5 lpass_bt_swr_dlkm,lpass_cdc_va_macro_dlkm,lpass_cdc_wsa2_macro_dlkm,lpass_cdc_wsa_macro_dlkm,lpass_cdc_rx_macro_dlkm, Live 0x0000000000000000 (O)
+audio_prm_dlkm 20480 2 machine_dlkm,wcd9xxx_dlkm, Live 0x0000000000000000 (O)
+synx_driver 131072 4 camera,msm_drm,msm_kgsl,msm_eva, Live 0x0000000000000000 (O)
+spf_core_dlkm 20480 8 machine_dlkm,lpass_bt_swr_dlkm,pinctrl_lpi_dlkm,lpass_cdc_dlkm,adsp_loader_dlkm,audio_pkt_dlkm,swr_ctrl_dlkm,audio_prm_dlkm, Live 0x0000000000000000 (O)
+coresight_tmc 73728 0 - Live 0x0000000000000000
+gpr_dlkm 28672 3 audio_pkt_dlkm,audio_prm_dlkm,spf_core_dlkm, Live 0x0000000000000000 (O)
+adsp_sleepmon 45056 1 - Live 0x0000000000000000
+usb_notifier 16384 0 - Live 0x0000000000000000
+msm_hw_fence 180224 2 msm_drm,synx_driver, Live 0x0000000000000000 (O)
+usb_f_gsi 77824 8 ipam, Live 0x0000000000000000
+q6_notifier_dlkm 28672 3 pinctrl_lpi_dlkm,audio_prm_dlkm,gpr_dlkm, Live 0x0000000000000000 (O)
+usb_f_qdss 28672 7 coresight_tmc, Live 0x0000000000000000
+cps4038_charger 172032 0 - Live 0x0000000000000000
+max77968_charger 106496 0 - Live 0x0000000000000000
+sm5443_charger 94208 0 - Live 0x0000000000000000
+stwlc89_charger 167936 0 - Live 0x0000000000000000
+sec_direct_charger 57344 0 - Live 0x0000000000000000
+dwc3_msm 118784 4 msm_drm,usb_f_gsi,usb_notifier,usb_f_qdss, Live 0x0000000000000000
+wez02 188416 1 camera, Live 0x0000000000000000
+synaptics_s3916t_spi 221184 0 - Live 0x0000000000000000
+akm 36864 0 - Live 0x0000000000000000
+phy_msm_snps_eusb2 32768 0 - Live 0x0000000000000000
+wonder 65536 0 - Live 0x0000000000000000 (O)
+phy_msm_m31_eusb2 28672 2 - Live 0x0000000000000000
+sec_battery 430080 7 max77775_charger,max77775_fuelgauge,sm5443_charger,stwlc89_charger,cps4038_charger,max77968_charger,sec_direct_charger, Live 0x0000000000000000
+qcom_q6v5_pas 73728 8 msm_kgsl,adsp_loader_dlkm,msm_hw_fence,adsp_sleepmon, Live 0x0000000000000000
+usb_f_ss_mon_gadget 24576 13 dwc3_msm,phy_msm_snps_eusb2,phy_msm_m31_eusb2, Live 0x0000000000000000
+cnss2 471040 1 qca_cld3_kiwi_v2, Live 0x0000000000000000 (O)
+sec_common_fn 192512 3 wez02,synaptics_s3916t_spi,akm, Live 0x0000000000000000
+spcom 73728 6 - Live 0x0000000000000000 (O)
+mhi_dev_uci 24576 0 - Live 0x0000000000000000
+qrtr_mhi 16384 0 - Live 0x0000000000000000
+mhi_dev_satellite 24576 0 - Live 0x0000000000000000
+mac80211 1118208 1 wonder, Live 0x0000000000000000
+coresight_stm 24576 0 - Live 0x0000000000000000
+uwb 294912 1 - Live 0x0000000000000000
+usb_typec_manager 40960 7 pdic_max77775,msm_drm,usb_notifier,dwc3_msm,sec_battery,usb_f_ss_mon_gadget,sec_common_fn, Live 0x0000000000000000
+stm_p_ost 16384 0 - Live 0x0000000000000000
+qcom_q6v5 28672 1 qcom_q6v5_pas, Live 0x0000000000000000
+stm_ftrace 16384 0 - Live 0x0000000000000000
+stm_console 12288 0 - Live 0x0000000000000000
+snd_soc_cs40l26 28672 1 - Live 0x0000000000000000
+mhi 139264 4 cnss2,mhi_dev_uci,mhi_dev_satellite,qrtr_mhi, Live 0x0000000000000000
+spss_utils 36864 0 - Live 0x0000000000000000 (O)
+sec_auth_ds28e30 114688 0 - Live 0x0000000000000000
+mfd_max77775 53248 38 max77775_charger,pdic_max77775,max77775_fuelgauge, Live 0x0000000000000000
+stm_heartbeat 16384 0 - Live 0x0000000000000000
+stmvl53l8 110592 0 - Live 0x0000000000000000
+btfm_slim_codec 32768 0 - Live 0x0000000000000000 (O)
+qcom_spss 28672 2 spss_utils, Live 0x0000000000000000
+bt_fm_swr 16384 0 - Live 0x0000000000000000 (O)
+coresight_tpdm 81920 0 - Live 0x0000000000000000
+tas25xx_dlkm 102400 2 machine_dlkm, Live 0x0000000000000000 (O)
+coresight_uetm 20480 0 - Live 0x0000000000000000
+sec_qc_hw_param 49152 1 sec_battery, Live 0x0000000000000000
+hdcp_qseecom_dlkm 49152 1 msm_drm, Live 0x0000000000000000 (O)
+smmu_proxy_dlkm 24576 1 camera,[permanent], Live 0x0000000000000000 (O)
+pdic_notifier_module 49152 3 pdic_max77775,mfd_max77775,usb_typec_manager, Live 0x0000000000000000
+coresight_dummy 12288 0 - Live 0x0000000000000000
+coresight_tmc_sec 24576 0 - Live 0x0000000000000000
+coresight_remote_etm 12288 0 - Live 0x0000000000000000
+slim_qcom_ngd_ctrl 57344 0 - Live 0x0000000000000000
+q6_pdr_dlkm 16384 1 q6_notifier_dlkm, Live 0x0000000000000000 (O)
+wsa884x_dlkm 110592 1 machine_dlkm, Live 0x0000000000000000 (O)
+pci_msm_drv 286720 2 cnss2,mhi, Live 0x0000000000000000
+qcedev_mod_dlkm 90112 0 - Live 0x0000000000000000 (O)
+common_muic 32768 4 pdic_max77775,usb_notifier,sec_battery,usb_typec_manager, Live 0x0000000000000000
+snd_usb_audio_qmi 45056 0 - Live 0x0000000000000000
+smcinvoke_dlkm 36864 87 camera,hdcp_qseecom_dlkm,smmu_proxy_dlkm, Live 0x0000000000000000 (O)
+btfmcodec 49152 5 btfm_slim_codec,bt_fm_swr, Live 0x0000000000000000 (O)
+frpc_adsprpc 147456 1 msm_eva, Live 0x0000000000000000 (O)
+hdmi_dlkm 28672 1 - Live 0x0000000000000000 (O)
+wsa883x_dlkm 65536 1 machine_dlkm, Live 0x0000000000000000 (O)
+adsp_factory_module 122880 4 adsp_sleepmon,qcom_q6v5,stmvl53l8, Live 0x0000000000000000
+s2mpb02_regulator 20480 34 - Live 0x0000000000000000
+s2dos07 28672 2 - Live 0x0000000000000000
+s2mpb03 28672 6 - Live 0x0000000000000000
+dio8018 32768 0 - Live 0x0000000000000000
+repeater_i2c_eusb2 12288 1 - Live 0x0000000000000000
+qcrypto_msm_dlkm 86016 0 - Live 0x0000000000000000 (O)
+sec_qc_smem 36864 1 sec_qc_hw_param, Live 0x0000000000000000
+input_cs40l26_i2c 151552 1 snd_soc_cs40l26, Live 0x0000000000000000
+cfg80211 1142784 3 qca_cld3_kiwi_v2,wonder,mac80211, Live 0x0000000000000000
+gsim 278528 1 ipam, Live 0x0000000000000000 (O)
+hall_ic 24576 0 - Live 0x0000000000000000
+coresight_tgu 20480 0 - Live 0x0000000000000000
+flicker_sensor 147456 0 - Live 0x0000000000000000
+sec_audio_sysfs 45056 2 machine_dlkm,qcom_q6v5, Live 0x0000000000000000
+sec_audio_debug_dlkm 28672 5 machine_dlkm,lpass_cdc_va_macro_dlkm,lpass_cdc_dlkm,tas25xx_dlkm, Live 0x0000000000000000 (O)
+coresight_tpda 28672 0 - Live 0x0000000000000000
+mbhc_dlkm 57344 2 wcd939x_dlkm,wcd938x_dlkm, Live 0x0000000000000000 (O)
+sb_wireless 16384 2 stwlc89_charger,cps4038_charger,[permanent], Live 0x0000000000000000
+qce50_dlkm 94208 2 qcrypto_msm_dlkm,qcedev_mod_dlkm, Live 0x0000000000000000 (O)
+sec_qc_qcom_wdt_core 20480 0 - Live 0x0000000000000000
+sdp 16384 1 msm_drm, Live 0x0000000000000000
+qcom_pon 12288 0 - Live 0x0000000000000000
+mem_object 20480 1 smcinvoke_dlkm, Live 0x0000000000000000
+sec_vibrator_inputff_module 45056 1 input_cs40l26_i2c, Live 0x0000000000000000
+stub_dlkm 12288 1 - Live 0x0000000000000000 (O)
+tz_log_dlkm 36864 0 - Live 0x0000000000000000 (O)
+qmp_dlkm 45056 0 - Live 0x0000000000000000 (O)
+wcd938x_slave_dlkm 20480 0 - Live 0x0000000000000000 (O)
+cnss_utils 28672 2 qca_cld3_kiwi_v2,cnss2, Live 0x0000000000000000 (O)
+coresight_csr 28672 7 coresight_tmc,coresight_stm,coresight_remote_etm,coresight_tpdm,coresight_tmc_sec,coresight_uetm,coresight_dummy, Live 0x0000000000000000
+coresight_cti 57344 0 - Live 0x0000000000000000
+coresight_funnel 28672 0 - Live 0x0000000000000000
+coresight_trace_noc 24576 0 - Live 0x0000000000000000
+hwmon 45056 0 - Live 0x0000000000000000
+fingerprint 36864 4 - Live 0x0000000000000000
+flicker_test 20480 1 flicker_sensor, Live 0x0000000000000000
+sec_panel_notifier_v2 16384 2 msm_drm,adsp_factory_module, Live 0x0000000000000000
+governor_msm_adreno_tz 20480 0 - Live 0x0000000000000000
+sensors_core 20480 3 stmvl53l8,adsp_factory_module,flicker_sensor, Live 0x0000000000000000
+sec_switch_class 16384 3 msm_drm,pdic_notifier_module,common_muic, Live 0x0000000000000000 (C)
+sb_core 36864 4 max77775_charger,sec_direct_charger,sec_battery,sb_wireless, Live 0x0000000000000000
+slc_mpam 16384 0 - Live 0x0000000000000000
+qti_qmi_ss_cdev 20480 0 - Live 0x0000000000000000
+nb7vpq904m 24576 0 - Live 0x0000000000000000
+qrtr_smd 12288 0 - Live 0x0000000000000000
+msm_video 598016 0 - Live 0x0000000000000000 (O)
+cl_dsp_debugfs 20480 1 input_cs40l26_i2c, Live 0x0000000000000000
+i3c_master_msm_geni 77824 0 - Live 0x0000000000000000
+sec_ap_pmic 20480 0 - Live 0x0000000000000000
+msm_performance 40960 1 msm_kgsl,[permanent], Live 0x0000000000000000
+qcom_spmi_adc5_gen3 45056 0 - Live 0x0000000000000000
+usb_vendor_receiver 12288 0 - Live 0x0000000000000000
+usb_vendor_hook_receiver 12288 0 - Live 0x0000000000000000
+si_core_module 36864 2 smcinvoke_dlkm,mem_object, Live 0x0000000000000000
+qrng_dlkm 24576 0 - Live 0x0000000000000000 (O)
+mpam_msc_slc 16384 0 - Live 0x0000000000000000
+radio_i2c_rtc6226_qca 49152 0 - Live 0x0000000000000000 (O)
+cnss_nl 24576 1 qca_cld3_kiwi_v2, Live 0x0000000000000000 (O)
+sync_fence 24576 3 msm_drm, Live 0x0000000000000000 (O)
+msm_ext_display 20480 2 msm_drm,hdmi_dlkm,[permanent], Live 0x0000000000000000 (O)
+wcd939x_slave_dlkm 20480 1 wcd939x_dlkm, Live 0x0000000000000000 (O)
+swr_haptics_dlkm 24576 0 - Live 0x0000000000000000 (O)
+btpower 69632 2 btfm_slim_codec,bt_fm_swr, Live 0x0000000000000000 (O)
+rmnet_mem 32768 2 rmnet_core,ipam, Live 0x0000000000000000 (O)
+cnss_prealloc 20480 2 qca_cld3_kiwi_v2,cnss2, Live 0x0000000000000000 (O)
+rmnet_sch 20480 0 - Live 0x0000000000000000 (O)
+snd_event_dlkm 20480 5 machine_dlkm,lpass_bt_swr_dlkm,pinctrl_lpi_dlkm,lpass_cdc_dlkm,gpr_dlkm, Live 0x0000000000000000 (O)
+coresight_replicator 28672 0 - Live 0x0000000000000000
+cnss_plat_ipc_qmi_svc 28672 1 cnss2, Live 0x0000000000000000 (O)
+qrtr_tun 12288 0 - Live 0x0000000000000000
+q6_dlkm 20480 0 - Live 0x0000000000000000 (O)
+audpkt_ion_dlkm 24576 2 audio_pkt_dlkm, Live 0x0000000000000000 (O)
+snd_soc_hdmi_codec 20480 0 - Live 0x0000000000000000
+swr_dlkm 40960 11 swr_dmic_dlkm,wcd939x_dlkm,wcd938x_dlkm,swr_ctrl_dlkm,bt_fm_swr,wsa884x_dlkm,wsa883x_dlkm,qmp_dlkm,wcd938x_slave_dlkm,wcd939x_slave_dlkm,swr_haptics_dlkm, Live 0x0000000000000000 (O)
+wlan_firmware_service 102400 1 cnss2,[permanent], Live 0x0000000000000000 (O)
+coresight_qmi 20480 3 coresight_remote_etm,coresight_dummy,coresight_tmc_sec, Live 0x0000000000000000
+smem_mailbox 20480 1 cnss_utils, Live 0x0000000000000000 (O)
+snvm 36864 0 - Live 0x0000000000000000
+glink_probe 20480 0 - Live 0x0000000000000000
+qcom_sysmon 28672 3 qcom_q6v5_pas,qcom_q6v5,qcom_spss, Live 0x0000000000000000
+pdr_interface 24576 3 slim_qcom_ngd_ctrl,q6_pdr_dlkm,frpc_adsprpc, Live 0x0000000000000000
+slimbus 36864 2 btfm_slim_codec,slim_qcom_ngd_ctrl, Live 0x0000000000000000
+wcd_core_dlkm 45056 10 machine_dlkm,wcd939x_dlkm,wcd938x_dlkm,lpass_bt_swr_dlkm,lpass_cdc_va_macro_dlkm,lpass_cdc_wsa2_macro_dlkm,lpass_cdc_wsa_macro_dlkm,lpass_cdc_rx_macro_dlkm,wsa884x_dlkm,wsa883x_dlkm, Live 0x0000000000000000 (O)
+snd_debug_proc 151552 10 machine_dlkm,lpass_cdc_va_macro_dlkm,lpass_cdc_tx_macro_dlkm,lpass_cdc_dlkm,adsp_loader_dlkm,spf_core_dlkm,gpr_dlkm,qcom_q6v5,sec_audio_sysfs,sec_audio_debug_dlkm, Live 0x0000000000000000
+sec_pd 24576 4 sm5443_charger,max77968_charger,sec_direct_charger,sec_battery,[permanent], Live 0x0000000000000000
+hall_ic_notifier 16384 5 wez02,akm,sec_battery,adsp_factory_module,hall_ic, Live 0x0000000000000000
+stm_core 36864 5 coresight_stm,stm_p_ost,stm_heartbeat,stm_ftrace,stm_console, Live 0x0000000000000000
+abc_hub 20480 0 - Live 0x0000000000000000
+sec_thermistor 12288 0 - Live 0x0000000000000000
+coresight 98304 16 msm_kgsl,coresight_tmc,coresight_stm,coresight_uetm,coresight_tmc_sec,coresight_tpdm,coresight_dummy,coresight_remote_etm,coresight_tgu,coresight_tpda,coresight_funnel,coresight_csr,coresight_cti,coresight_trace_noc,coresight_replicator,coresight_qmi, Live 0x0000000000000000
+delayed_sack 16384 0 - Live 0x0000000000000000
+nfc_nxp_sec 212992 2 uwb, Live 0x0000000000000000
+qfs4008_spidev 16384 0 - Live 0x0000000000000000
+vbus_notifier 16384 5 pdic_max77775,usb_notifier,sec_battery,sec_common_fn,usb_typec_manager, Live 0x0000000000000000
+fingerprint_sysfs 16384 1 fingerprint, Live 0x0000000000000000
+mfd_s2mpb02 20480 1 s2mpb02_regulator, Live 0x0000000000000000
+hdm 16384 2 qca_cld3_kiwi_v2,cnss2,[permanent], Live 0x0000000000000000
+pmic_class 16384 4 dio8018,s2mpb03,s2mpb02_regulator,s2dos07,[permanent], Live 0x0000000000000000
+glink_pkt 40960 4 - Live 0x0000000000000000
+lvstest 20480 0 - Live 0x0000000000000000
+sec_auth_sle956681 102400 1 sec_auth_ds28e30, Live 0x0000000000000000
+sec_reloc_gpio 12288 0 - Live 0x0000000000000000
+qcom_pil_info 20480 1 qcom_q6v5_pas, Live 0x0000000000000000
+sec_abc_detect_conn 24576 1 abc_hub, Live 0x0000000000000000
+ngksm 24576 0 - Live 0x0000000000000000
+kzt 16384 0 [permanent], Live 0x0000000000000000
+ddr_cdev 12288 0 - Live 0x0000000000000000
+qti_devfreq_cdev 12288 0 - Live 0x0000000000000000
+thermal_config 16384 0 - Live 0x0000000000000000
+leds_qcom_lpg 24576 0 - Live 0x0000000000000000
+qcom_cpufreq_hw_debug 20480 0 - Live 0x0000000000000000
+repeater 20480 4 dwc3_msm,phy_msm_snps_eusb2,phy_msm_m31_eusb2,repeater_i2c_eusb2, Live 0x0000000000000000
+if_cb_manager 20480 4 pdic_max77775,msm_drm,dwc3_msm,lvstest, Live 0x0000000000000000
+rdbg 20480 0 - Live 0x0000000000000000
+drm_display_helper 172032 1 msm_drm, Live 0x0000000000000000
+vibrator_vib_info 12288 0 - Live 0x0000000000000000
+sec_pm_regulator 12288 0 - Live 0x0000000000000000
+sec_qc_user_reset 49152 3 pci_msm_drv,sec_qc_hw_param,sec_qc_smem, Live 0x0000000000000000
+dev_ril_bridge 20480 4 camera,msm_drm,sdp, Live 0x0000000000000000
+msm_mmrm 53248 4 camera,msm_drm,msm_eva,msm_video, Live 0x0000000000000000 (O)
+gh_tlmm_vm_mem_access 12288 0 - Live 0x0000000000000000
+governor_gpubw_mon 12288 0 - Live 0x0000000000000000
+qcom_lpm 61440 1 sec_qc_qcom_wdt_core,[permanent], Live 0x0000000000000000
+ehset 12288 0 - Live 0x0000000000000000
+msm_memshare 28672 0 - Live 0x0000000000000000
+qsee_ipc_irq_bridge 12288 0 - Live 0x0000000000000000
+kperfmon 24576 0 - Live 0x0000000000000000
+sec_pon_alarm 16384 0 - Live 0x0000000000000000
+gh_rm_booster 12288 0 - Live 0x0000000000000000
+gh_ctrl 20480 0 - Live 0x0000000000000000
+sec_qc_soc_id 12288 0 - Live 0x0000000000000000
+msm_show_epoch 12288 0 [permanent], Live 0x0000000000000000
+sec_input_notifier 16384 4 msm_drm,synaptics_s3916t_spi,wez02,sec_common_fn, Live 0x0000000000000000
+wcd_usbss_i2c 45056 4 machine_dlkm,wcd939x_dlkm,dwc3_msm,mbhc_dlkm, Live 0x0000000000000000
+drm_dp_aux_bus 20480 0 - Live 0x0000000000000000
+redriver 20480 2 dwc3_msm,nb7vpq904m, Live 0x0000000000000000
+max31760_fan 16384 0 - Live 0x0000000000000000
+leds_qti_flash 32768 2 camera,flicker_test, Live 0x0000000000000000
+qti_qmi_sensor_v2 24576 0 - Live 0x0000000000000000
+leds_qpnp_vibrator_ldo 12288 0 - Live 0x0000000000000000
+qcom_rng 24576 0 - Live 0x0000000000000000
+sec_arm64_fsimd_debug 12288 0 - Live 0x0000000000000000
+qti_dmof_scmi 20480 0 - Live 0x0000000000000000
+sec_rdx_bootdev 24576 0 - Live 0x0000000000000000
+cpufreq_limit 32768 0 - Live 0x0000000000000000
+qti_cpufreq_cdev 12288 0 - Live 0x0000000000000000
+gpu_dump_skip_cdev 12288 0 - Live 0x0000000000000000
+cl_dsp 28672 3 snd_soc_cs40l26,input_cs40l26_i2c,cl_dsp_debugfs, Live 0x0000000000000000
+cdsprm 53248 0 - Live 0x0000000000000000
+sec_arm64_debug 16384 0 - Live 0x0000000000000000
+qcom_edac 12288 0 - Live 0x0000000000000000
+usb_f_ss_acm 28672 2 - Live 0x0000000000000000
+msm_geni_serial 122880 0 - Live 0x0000000000000000
+qti_qmi_cdev 20480 0 - Live 0x0000000000000000
+qti_userspace_cdev 12288 0 - Live 0x0000000000000000
+gh_irq_lend 20480 2 msm_drm,sec_common_fn, Live 0x0000000000000000
+q2spi_geni 135168 0 - Live 0x0000000000000000
+qcom_vadc_common 32768 1 qcom_spmi_adc5_gen3, Live 0x0000000000000000
+bcl_soc 12288 0 - Live 0x0000000000000000
+zram 77824 2 - Live 0x0000000000000000
+reboot_mode 16384 1 qcom_pon, Live 0x0000000000000000
+pm8941_pwrkey 20480 1 sec_ap_pmic, Live 0x0000000000000000
+qcom_glink_spss 20480 2 qcom_spss,glink_probe, Live 0x0000000000000000
+usb_f_ccid 24576 2 - Live 0x0000000000000000
+usb_f_cdev 32768 6 - Live 0x0000000000000000
+gh_mem_notifier 16384 3 msm_drm,sec_common_fn,gh_tlmm_vm_mem_access, Live 0x0000000000000000
+mem_offline 36864 0 - Live 0x0000000000000000
+leds_qcom_flash 16384 0 - Live 0x0000000000000000
+f_fs_ipc_log 40960 0 - Live 0x0000000000000000
+qcom_spmi_temp_alarm 16384 0 - Live 0x0000000000000000
+spi_msm_geni 61440 0 - Live 0x0000000000000000
+usb_notify_layer 356352 13 max77775_charger,pdic_max77775,usb_notifier,dwc3_msm,usb_f_ss_mon_gadget,usb_typec_manager,mfd_max77775,pdic_notifier_module,common_muic,snd_usb_audio_qmi,sec_vibrator_inputff_module,usb_vendor_receiver,usb_vendor_hook_receiver, Live 0x0000000000000000
+usb_f_conn_gadget 32768 2 - Live 0x0000000000000000
+msm_sharedmem 12288 1 - Live 0x0000000000000000
+at803x 36864 0 - Live 0x0000000000000000
+phy_msm_ssusb_qmp 28672 2 - Live 0x0000000000000000
+sysmon_subsystem_stats 32768 1 qti_qmi_ss_cdev, Live 0x0000000000000000
+spmi_pmic_arb_debug 20480 0 - Live 0x0000000000000000
+qcom_i2c_pmic 20480 0 - Live 0x0000000000000000
+lt9611uxc 36864 0 - Live 0x0000000000000000
+qseecom_proxy 20480 3 hdcp_qseecom_dlkm,smcinvoke_dlkm,si_core_module, Live 0x0000000000000000
+phy_qcom_emu 20480 0 - Live 0x0000000000000000
+cpu_mpam 20480 0 - Live 0x0000000000000000
+qcom_iommu_debug 49152 0 - Live 0x0000000000000000
+spmi_pmic_err_debug 20480 0 - Live 0x0000000000000000
+dmesg_dumper 20480 0 - Live 0x0000000000000000
+platform_mpam 20480 1 slc_mpam, Live 0x0000000000000000
+tps62864_regulator 12288 1 - Live 0x0000000000000000
+panel_event_notifier 16384 1 msm_drm, Live 0x0000000000000000
+mpam_msc 20480 2 slc_mpam,mpam_msc_slc, Live 0x0000000000000000
+xhci_sideband 20480 1 snd_usb_audio_qmi, Live 0x0000000000000000
+mem_hooks 12288 0 [permanent], Live 0x0000000000000000
+qti_fixed_regulator 12288 0 - Live 0x0000000000000000
+rproc_qcom_common 40960 17 ipam,synx_driver,msm_hw_fence,adsp_sleepmon,q6_notifier_dlkm,qcom_q6v5_pas,qcom_q6v5,spss_utils,qcom_spss,slim_qcom_ngd_ctrl,pci_msm_drv,btfmcodec,qcom_sysmon,glink_probe,pdr_interface,msm_memshare,qsee_ipc_irq_bridge, Live 0x0000000000000000
+dynpf_scmi 12288 0 - Live 0x0000000000000000
+phy_generic 20480 0 - Live 0x0000000000000000
+max77816 12288 0 - Live 0x0000000000000000
+qti_ocp_notifier 12288 0 - Live 0x0000000000000000
+sys_pm_vx 32768 0 - Live 0x0000000000000000
+hvc_gunyah 24576 0 - Live 0x0000000000000000
+mpam 20480 2 cpu_mpam,platform_mpam, Live 0x0000000000000000
+qcom_stats 49152 2 sec_ap_pmic,sys_pm_vx, Live 0x0000000000000000
+c1dcvs_scmi_v2 20480 0 - Live 0x0000000000000000
+bwmon 53248 0 - Live 0x0000000000000000
+memlat 49152 0 - Live 0x0000000000000000
+cpufreq_stats_scmi_v2 20480 0 - Live 0x0000000000000000
+qcom_ramdump 20480 4 ipam,cnss2,qcom_q6v5_pas,qcom_stats, Live 0x0000000000000000
+gh_panic_notifier 24576 1 dmesg_dumper, Live 0x0000000000000000
+cpufreq_stats_scmi_v3 20480 0 - Live 0x0000000000000000
+sps_drv 212992 1 qce50_dlkm, Live 0x0000000000000000
+llcc_heuristics 12288 0 - Live 0x0000000000000000
+eud 28672 0 - Live 0x0000000000000000
+qcom_dynamic_ramoops 12288 0 - Live 0x0000000000000000
+boot_stats 20480 0 - Live 0x0000000000000000
+smp2p 28672 0 - Live 0x0000000000000000
+tmecom_intf 16384 1 tz_log_dlkm, Live 0x0000000000000000
+hung_task_enh 16384 0 - Live 0x0000000000000000
+qcom_va_minidump 24576 6 camera,qca_cld3_kiwi_v2,msm_drm,ipam,msm_kgsl,gsim, Live 0x0000000000000000
+cpucp_log 36864 0 [permanent], Live 0x0000000000000000
+debugcc_tuna 40960 0 [permanent], Live 0x0000000000000000
+qcom_cpuss_sleep_stats_v4 20480 0 - Live 0x0000000000000000
+heap_mem_ext_v01 16384 1 msm_memshare, Live 0x0000000000000000
+debugcc_sun 40960 0 [permanent], Live 0x0000000000000000
+bam_dma 36864 0 - Live 0x0000000000000000
+videocc_tuna 20480 0 - Live 0x0000000000000000
+qcom_smd 28672 1 rproc_qcom_common, Live 0x0000000000000000
+qmi_helpers 32768 15 rmnet_core,ipam,cnss2,slim_qcom_ngd_ctrl,snd_usb_audio_qmi,qcom_sysmon,qti_qmi_ss_cdev,cnss_plat_ipc_qmi_svc,wlan_firmware_service,coresight_qmi,pdr_interface,msm_memshare,qti_qmi_sensor_v2,qti_qmi_cdev,heap_mem_ext_v01, Live 0x0000000000000000
+qcom_cpuss_sleep_stats 28672 0 - Live 0x0000000000000000
+pcie_pdc 20480 1 pci_msm_drv, Live 0x0000000000000000
+debugcc_kera 40960 0 [permanent], Live 0x0000000000000000
+pinctrl_spmi_mpp 24576 0 - Live 0x0000000000000000
+hpp 32768 0 - Live 0x0000000000000000
+qcom_glink_smem 20480 2 glink_probe,rproc_qcom_common, Live 0x0000000000000000
+smp2p_sleepstate 12288 0 [permanent], Live 0x0000000000000000
+zsmalloc 45056 1 zram, Live 0x0000000000000000
+evacc_tuna 20480 0 - Live 0x0000000000000000
+pinctrl_spmi_gpio 40960 29 sec_ap_pmic, Live 0x0000000000000000
+clk_scmi 12288 35 - Live 0x0000000000000000
+gpio_pca953x 28672 0 - Live 0x0000000000000000
+qcom_glink 61440 8 qcom_spss,glink_pkt,glink_probe,qrtr_smd,msm_memshare,qcom_glink_spss,rproc_qcom_common,qcom_glink_smem, Live 0x0000000000000000
+msm_show_resume_irq 20480 0 - Live 0x0000000000000000
+sec_mm 57344 2 zram,hpp, Live 0x0000000000000000
+msm_sysstats 28672 1 msm_kgsl, Live 0x0000000000000000
+r8153_ecm 12288 0 - Live 0x0000000000000000
+regmap_kunit 57344 0 - Live 0x0000000000000000
+smsc95xx 36864 0 - Live 0x0000000000000000
+ieee802154_6lowpan 32768 0 - Live 0x0000000000000000
+vcan 16384 0 - Live 0x0000000000000000
+cdc_ncm 32768 0 - Live 0x0000000000000000
+hci_uart 81920 0 - Live 0x0000000000000000
+virtio_pci 36864 0 - Live 0x0000000000000000
+smsc75xx 40960 0 - Live 0x0000000000000000
+pptp 32768 0 - Live 0x0000000000000000
+ppp_mppe 12288 0 - Live 0x0000000000000000
+r8152 155648 1 r8153_ecm, Live 0x0000000000000000
+rfcomm 73728 0 - Live 0x0000000000000000
+virtio_console 40960 0 - Live 0x0000000000000000
+soc_utils_test 12288 0 - Live 0x0000000000000000
+nhc_ipv6 12288 0 - Live 0x0000000000000000
+ptp 40960 0 - Live 0x0000000000000000
+l2tp_ppp 32768 0 - Live 0x0000000000000000
+mac802154 147456 0 - Live 0x0000000000000000
+vmw_vsock_virtio_transport 28672 0 - Live 0x0000000000000000
+nhc_routing 12288 0 - Live 0x0000000000000000
+nhc_dest 12288 0 - Live 0x0000000000000000
+macsec 73728 0 - Live 0x0000000000000000
+diag 12288 0 - Live 0x0000000000000000
+virtio_blk 32768 0 - Live 0x0000000000000000
+ieee802154_socket 32768 0 - Live 0x0000000000000000
+virtio_balloon 32768 0 - Live 0x0000000000000000
+libarc4 16384 2 mac80211,ppp_mppe, Live 0x0000000000000000
+regmap_ram 16384 1 regmap_kunit, Live 0x0000000000000000
+wwan 32768 0 - Live 0x0000000000000000
+ftdi_sio 57344 0 - Live 0x0000000000000000
+vcpu_stall_detector 20480 0 - Live 0x0000000000000000
+usbmon 45056 0 - Live 0x0000000000000000
+kunit_test 49152 0 - Live 0x0000000000000000
+open_dice 12288 0 - Live 0x0000000000000000
+kunit_example_test 20480 0 - Live 0x0000000000000000
+input_test 16384 0 - Live 0x0000000000000000
+nfc 102400 0 - Live 0x0000000000000000
+rtl8150 24576 0 - Live 0x0000000000000000
+time_test 12288 0 - Live 0x0000000000000000
+ppp_deflate 12288 0 - Live 0x0000000000000000
+virtio_pci_legacy_dev 24576 1 virtio_pci, Live 0x0000000000000000
+soc_topology_test 28672 0 - Live 0x0000000000000000
+regmap_raw_ram 16384 1 regmap_kunit, Live 0x0000000000000000
+nhc_mobility 12288 0 - Live 0x0000000000000000
+nhc_udp 12288 0 - Live 0x0000000000000000
+virtio_pci_modern_dev 32768 1 virtio_pci, Live 0x0000000000000000
+slcan 24576 0 - Live 0x0000000000000000
+nhc_fragment 12288 0 - Live 0x0000000000000000
+pps_core 24576 1 ptp, Live 0x0000000000000000
+lib_test 12288 0 - Live 0x0000000000000000
+ext4_inode_test 12288 0 - Live 0x0000000000000000
+fat_test 24576 0 - Live 0x0000000000000000
+nhc_hop 12288 0 - Live 0x0000000000000000
+hidp 36864 0 - Live 0x0000000000000000
+pppox 20480 2 pptp,l2tp_ppp, Live 0x0000000000000000
+tipc 372736 5 diag, Live 0x0000000000000000
+btbcm 24576 1 hci_uart, Live 0x0000000000000000
+ieee802154 147456 3 ieee802154_6lowpan,mac802154,ieee802154_socket, Live 0x0000000000000000
+iio_test_format 32768 0 - Live 0x0000000000000000
+usbserial 45056 1 ftdi_sio, Live 0x0000000000000000
+dev_addr_lists_test 20480 0 - Live 0x0000000000000000
+l2tp_core 69632 1 l2tp_ppp, Live 0x0000000000000000
+btsdio 16384 0 - Live 0x0000000000000000
+cdc_ether 20480 2 r8153_ecm,cdc_ncm, Live 0x0000000000000000
+hid_uclogic_test 28672 0 - Live 0x0000000000000000
+clk_gate_test 32768 0 - Live 0x0000000000000000
+gzvm 61440 0 - Live 0x0000000000000000
+clk_test 106496 0 - Live 0x0000000000000000
+btqca 20480 1 hci_uart, Live 0x0000000000000000
+cdc_eem 12288 0 - Live 0x0000000000000000
+kunit 57344 15 regmap_kunit,soc_utils_test,soc_topology_test,kunit_test,kunit_example_test,input_test,time_test,lib_test,ext4_inode_test,fat_test,iio_test_format,dev_addr_lists_test,hid_uclogic_test,clk_gate_test,clk_test, Live 0x0000000000000000
+bsd_comp 12288 0 - Live 0x0000000000000000
+cdc_acm 40960 0 - Live 0x0000000000000000
+bluetooth 716800 8 hci_uart,rfcomm,hidp,btbcm,btsdio,btqca, Live 0x0000000000000000
+can_dev 49152 2 vcan,slcan, Live 0x0000000000000000
+ppp_generic 45056 6 pptp,ppp_mppe,l2tp_ppp,ppp_deflate,pppox,bsd_comp, Live 0x0000000000000000
+cctrng 20480 0 - Live 0x0000000000000000
+can 28672 0 - Live 0x0000000000000000
+asix 49152 0 - Live 0x0000000000000000
+9pnet_fd 28672 0 - Live 0x0000000000000000
+ax88179_178a 40960 0 - Live 0x0000000000000000
+aqc111 24576 0 - Live 0x0000000000000000
+slhc 24576 1 ppp_generic, Live 0x0000000000000000
+usbnet 53248 9 r8153_ecm,smsc95xx,cdc_ncm,smsc75xx,cdc_ether,cdc_eem,asix,ax88179_178a,aqc111, Live 0x0000000000000000
+rfkill 36864 4 cfg80211,btpower,nfc,bluetooth, Live 0x0000000000000000
+mii 24576 5 smsc75xx,r8152,ax88179_178a,asix,usbnet, Live 0x0000000000000000
+9pnet 94208 1 9pnet_fd, Live 0x0000000000000000
+8021q 40960 0 - Live 0x0000000000000000
+6lowpan 32768 8 ieee802154_6lowpan,nhc_ipv6,nhc_routing,nhc_dest,nhc_mobility,nhc_udp,nhc_fragment,nhc_hop, Live 0x0000000000000000
+ipclite 57344 1 synx_driver, Live 0x0000000000000000 (O)
+sec_qc_param 24576 0 - Live 0x0000000000000000
+qrtr_gunyah 20480 0 - Live 0x0000000000000000
+qrtr 65536 666 qrtr_mhi,qrtr_smd,qrtr_tun,qrtr_gunyah, Live 0x0000000000000000
+sec_ipc_tiantong 36864 1 msm_geni_serial, Live 0x0000000000000000
+sec_crashkey 24576 0 - Live 0x0000000000000000
+sec_pmsg 28672 0 - Live 0x0000000000000000
+sec_qc_summary 32768 1 sec_qc_user_reset, Live 0x0000000000000000
+sec_qc_logger 28672 0 - Live 0x0000000000000000
+sec_qc_debug 28672 0 - Live 0x0000000000000000
+sec_qc_dbg_partition 28672 4 msm_drm,sec_qc_hw_param,sec_qc_user_reset,sec_qc_debug, Live 0x0000000000000000
+sec_blk_helper 16384 2 sec_qc_param,sec_qc_dbg_partition,[permanent], Live 0x0000000000000000
+sec_param 20480 4 sec_qc_user_reset,sec_pon_alarm,sec_qc_param,sec_qc_debug, Live 0x0000000000000000
+qnoc_tuna 532480 0 [permanent], Live 0x0000000000000000
+qnoc_kera 393216 0 [permanent], Live 0x0000000000000000
+qnoc_sun 577536 0 [permanent], Live 0x0000000000000000
+qnoc_qos 16384 3 qnoc_tuna,qnoc_kera,qnoc_sun, Live 0x0000000000000000
+icc_rpmh 24576 3 qnoc_tuna,qnoc_kera,qnoc_sun, Live 0x0000000000000000
+icc_debug 16384 1 icc_rpmh, Live 0x0000000000000000
+icc_bcm_voter 28672 1 icc_rpmh,[permanent], Live 0x0000000000000000
+nvmem_qcom_spmi_sdam 12288 7 - Live 0x0000000000000000
+nvmem_qfprom 24576 0 - Live 0x0000000000000000
+gunyah_loader 102400 6 gh_irq_lend,dmesg_dumper,hvc_gunyah,gh_panic_notifier,qrtr_gunyah, Live 0x0000000000000000
+gh_virt_wdt 16384 0 - Live 0x0000000000000000
+msm_qmp 32768 1 - Live 0x0000000000000000
+qcom_ipcc 24576 34 [permanent], Live 0x0000000000000000
+sdhci_msm 65536 0 - Live 0x0000000000000000
+cqhci 45056 1 sdhci_msm, Live 0x0000000000000000
+qcom_cpufreq_thermal 20480 0 [permanent], Live 0x0000000000000000
+qcom_cpufreq_hw 36864 1 sec_qc_smem, Live 0x0000000000000000
+softdog 20480 2 - Live 0x0000000000000000
+thermal_pause 20480 0 - Live 0x0000000000000000
+cpu_hotplug 12288 0 - Live 0x0000000000000000
+sec_pm_log 413696 6 qti_qmi_ss_cdev,sec_ap_pmic,qti_qmi_cdev,qcom_cpufreq_thermal,thermal_pause,cpu_hotplug, Live 0x0000000000000000
+bcl_pmic5 28672 0 - Live 0x0000000000000000
+qcom_tsens 61440 0 - Live 0x0000000000000000
+qti_thermal_vendor_hooks 12288 0 - Live 0x0000000000000000
+qcom_reboot_reason 12288 0 - Live 0x0000000000000000
+i2c_msm_geni 69632 0 - Live 0x0000000000000000
+i2c_gpio 12288 0 - Live 0x0000000000000000
+i2c_algo_bit 20480 1 i2c_gpio, Live 0x0000000000000000
+rtc_pm8xxx 20480 2 sec_pon_alarm, Live 0x0000000000000000
+spmi_pmic_arb 40960 1 msm_drm, Live 0x0000000000000000
+sg 53248 0 - Live 0x0000000000000000
+qcom_spmi_pmic 20480 0 - Live 0x0000000000000000
+qti_regmap_debugfs 24576 10 wcd939x_dlkm,wcd938x_dlkm,lpass_cdc_dlkm,wsa884x_dlkm,wsa883x_dlkm,repeater_i2c_eusb2,qmp_dlkm,wcd_usbss_i2c,qcom_i2c_pmic,qcom_spmi_pmic, Live 0x0000000000000000
+arm_smmu 151552 56 - Live 0x0000000000000000
+iommu_logger 16384 1 arm_smmu, Live 0x0000000000000000
+qcom_iommu_util 86016 9 camera,qca_cld3_kiwi_v2,msm_drm,ipam,msm_kgsl,coresight_tmc,cnss2,qcom_iommu_debug,arm_smmu,[permanent], Live 0x0000000000000000
+stub_regulator 12288 0 - Live 0x0000000000000000
+rpmh_regulator 28672 112 - Live 0x0000000000000000
+qfprom_sys 12288 0 - Live 0x0000000000000000
+pmic_pon_log 16384 0 - Live 0x0000000000000000
+qcom_cpu_vendor_hooks 16384 0 - Live 0x0000000000000000
+mem_buf 40960 0 - Live 0x0000000000000000
+mem_buf_msgq 24576 1 mem_buf, Live 0x0000000000000000
+cpucp_fast 12288 0 - Live 0x0000000000000000
+qcom_dcvs 73728 3 msm_kgsl,bwmon,memlat, Live 0x0000000000000000
+dcvs_fp 16384 1 qcom_dcvs, Live 0x0000000000000000
+qcom_pmu_lib 36864 2 msm_performance,memlat, Live 0x0000000000000000
+qcom_llcc_pmu 24576 1 qcom_pmu_lib, Live 0x0000000000000000
+qcom_scmi_client 16384 11 coresight_uetm,mpam_msc_slc,qti_dmof_scmi,dynpf_scmi,mpam,c1dcvs_scmi_v2,memlat,cpufreq_stats_scmi_v2,llcc_heuristics,cpucp_log,qcom_pmu_lib, Live 0x0000000000000000
+qcom_scmi_vendor 12288 1 - Live 0x0000000000000000
+qcom_cpucp 24576 9 - Live 0x0000000000000000
+gic_intr_routing 28672 0 - Live 0x0000000000000000
+memory_dump_v2 32768 2 cnss2,sec_qc_summary, Live 0x0000000000000000
+llcc_qcom 53248 5 camera,msm_drm,msm_kgsl,msm_eva,msm_video, Live 0x0000000000000000
+qcom_wdt_core 24576 4 sec_qc_qcom_wdt_core,sec_qc_summary,sec_qc_debug,gh_virt_wdt, Live 0x0000000000000000
+dcc_v2 45056 0 - Live 0x0000000000000000
+cpu_phys_log_map 16384 4 qti_dmof_scmi,memlat,qcom_pmu_lib,qcom_llcc_pmu,[permanent], Live 0x0000000000000000
+mdt_loader 16384 8 camera,ipam,msm_kgsl,msm_eva,qcom_q6v5_pas,qcom_spss,msm_video,gunyah_loader, Live 0x0000000000000000
+qcom_aoss 28672 129 msm_kgsl,cnss2,qcom_q6v5,qcom_spss,btpower,mem_offline,sys_pm_vx,qcom_stats,msm_qmp, Live 0x0000000000000000
+msm_gpi 77824 9 i3c_master_msm_geni,q2spi_geni,i2c_msm_geni, Live 0x0000000000000000
+videocc_sun 20480 7 - Live 0x0000000000000000
+tcsrcc_sun 12288 4 - Live 0x0000000000000000
+cambistmclkcc_sun 20480 10 - Live 0x0000000000000000
+dispcc_sun 61440 21 - Live 0x0000000000000000
+gpucc_sun 36864 6 - Live 0x0000000000000000
+evacc_sun 20480 6 - Live 0x0000000000000000
+camcc_sun 77824 142 camera, Live 0x0000000000000000
+camcc_kera 69632 0 - Live 0x0000000000000000
+tcsrcc_tuna 16384 0 - Live 0x0000000000000000
+camcc_tuna 69632 0 - Live 0x0000000000000000
+cambistmclkcc_tuna 20480 0 - Live 0x0000000000000000
+gpucc_kera 28672 0 - Live 0x0000000000000000
+gpucc_tuna 36864 0 - Live 0x0000000000000000
+gcc_tuna 77824 0 - Live 0x0000000000000000
+gcc_kera 81920 0 - Live 0x0000000000000000
+gcc_sun 86016 100 - Live 0x0000000000000000
+dispcc_tuna 65536 0 - Live 0x0000000000000000
+clk_rpmh 49152 14 - Live 0x0000000000000000
+qcom_rpmh 65536 5 camera,icc_bcm_voter,rpmh_regulator,dcvs_fp,clk_rpmh,[permanent], Live 0x0000000000000000
+cmd_db 20480 7 msm_kgsl,cnss2,icc_rpmh,rpmh_regulator,dcvs_fp,clk_rpmh,qcom_rpmh,[permanent], Live 0x0000000000000000
+clk_dummy 16384 3 debugcc_tuna,debugcc_sun,debugcc_kera, Live 0x0000000000000000
+lcd 20480 1 msm_drm, Live 0x0000000000000000
+pinctrl_sun 94208 30 - Live 0x0000000000000000
+pinctrl_kera 86016 0 - Live 0x0000000000000000
+pinctrl_tuna 86016 0 - Live 0x0000000000000000
+pinctrl_msm 45056 172 msm_drm,cnss2,sec_common_fn,pci_msm_drv,gh_tlmm_vm_mem_access,wcd_core_dlkm,i3c_master_msm_geni,sec_ap_pmic,btpower,sdhci_msm,pinctrl_sun,pinctrl_kera,pinctrl_tuna, Live 0x0000000000000000
+phy_qcom_ufs_qrbtc_sdm845 24576 0 - Live 0x0000000000000000
+phy_qcom_ufs_qmp_v4_sun 24576 1 - Live 0x0000000000000000
+phy_qcom_ufs_qmp_v4_niobe 24576 0 - Live 0x0000000000000000
+qcom_pdc 24576 0 [permanent], Live 0x0000000000000000
+ssg 49152 4 - Live 0x0000000000000000
+blk_sec_wb 20480 1 ssg, Live 0x0000000000000000
+blk_sec_stats 28672 1 ssg, Live 0x0000000000000000
+blk_sec_common 16384 3 ssg,blk_sec_wb,blk_sec_stats, Live 0x0000000000000000
+ufs_qcom 176128 3 blk_sec_wb,blk_sec_common, Live 0x0000000000000000
+ufshcd_crypto_qti 20480 1 ufs_qcom, Live 0x0000000000000000
+qcom_ice 28672 4 sdhci_msm,cqhci,ufs_qcom,ufshcd_crypto_qti, Live 0x0000000000000000
+phy_qcom_ufs 32768 4 phy_qcom_ufs_qrbtc_sdm845,phy_qcom_ufs_qmp_v4_sun,phy_qcom_ufs_qmp_v4_niobe,ufs_qcom, Live 0x0000000000000000
+abc 65536 19 camera,max77775_charger,pdic_max77775,machine_dlkm,msm_drm,msm_kgsl,max77968_charger,sec_direct_charger,sm5443_charger,synaptics_s3916t_spi,sec_battery,usb_typec_manager,mfd_max77775,input_cs40l26_i2c,msm_video,sec_vibrator_inputff_module,abc_hub,sec_abc_detect_conn,ufs_qcom, Live 0x0000000000000000
+clk_qcom 249856 33 camera,msm_drm,msm_kgsl,dwc3_msm,msm_video,pci_msm_drv,msm_mmrm,debugcc_tuna,debugcc_sun,videocc_tuna,debugcc_kera,evacc_tuna,sdhci_msm,videocc_sun,tcsrcc_sun,cambistmclkcc_sun,dispcc_sun,gpucc_sun,evacc_sun,camcc_sun,camcc_kera,tcsrcc_tuna,camcc_tuna,cambistmclkcc_tuna,gpucc_kera,gpucc_tuna,gcc_tuna,gcc_kera,gcc_sun,dispcc_tuna,clk_rpmh,clk_dummy,ufs_qcom, Live 0x0000000000000000
+gdsc_regulator 32768 58 clk_qcom, Live 0x0000000000000000
+proxy_consumer 20480 3 qti_fixed_regulator,rpmh_regulator,gdsc_regulator, Live 0x0000000000000000
+crm_v2 49152 6 camera,msm_drm,pci_msm_drv,icc_bcm_voter,qcom_rpmh,clk_qcom, Live 0x0000000000000000
+debug_regulator 24576 10 dio8018,s2mpb03,s2mpb02_regulator,s2dos07,tps62864_regulator,qti_fixed_regulator,max77816,stub_regulator,rpmh_regulator,gdsc_regulator, Live 0x0000000000000000
+qcom_ipc_logging 36864 49 rmnet_core,ipanetm,rmnet_ctl,msm_drm,ipam,audio_pkt_dlkm,usb_f_gsi,usb_f_qdss,dwc3_msm,cnss2,mhi_dev_uci,spcom,mhi_dev_satellite,mhi,slim_qcom_ngd_ctrl,pci_msm_drv,snd_usb_audio_qmi,gsim,qcom_spmi_adc5_gen3,glink_probe,glink_pkt,i3c_master_msm_geni,cnss_plat_ipc_qmi_svc,qsee_ipc_irq_bridge,msm_geni_serial,q2spi_geni,f_fs_ipc_log,spi_msm_geni,qti_ocp_notifier,sps_drv,smp2p,bam_dma,qcom_glink_smem,qcom_glink,qrtr,msm_qmp,qcom_ipcc,sdhci_msm,bcl_pmic5,qcom_tsens,i2c_msm_geni,rpmh_regulator,pmic_pon_log,qcom_aoss,msm_gpi,qcom_rpmh,qcom_pdc,ufs_qcom,crm_v2, Live 0x0000000000000000
+sched_walt 524288 12 qca_cld3_kiwi_v2,rmnet_shs,msm_performance,qcom_lpm,cpufreq_limit,bwmon,sec_qc_summary,thermal_pause,cpucp_fast,ufs_qcom,[permanent], Live 0x0000000000000000
+socinfo 53248 6 camera,machine_dlkm,msm_kgsl,sec_qc_hw_param,icc_rpmh,sched_walt, Live 0x0000000000000000
+sec_qc_rst_exinfo 28672 0 - Live 0x0000000000000000
+sec_arm64_ap_context 20480 0 - Live 0x0000000000000000
+sec_debug_region 24576 3 sec_qc_summary,sec_qc_logger,sec_arm64_ap_context, Live 0x0000000000000000
+sec_qc_qcom_reboot_reason 16384 0 - Live 0x0000000000000000
+sec_qc_rbcmd 28672 2 sec_qc_qcom_wdt_core,sec_qc_qcom_reboot_reason, Live 0x0000000000000000
+sec_reboot_cmd 24576 1 sec_qc_rbcmd, Live 0x0000000000000000
+qcom_dload_mode 20480 1 sec_qc_qcom_reboot_reason, Live 0x0000000000000000
+minidump 208896 10 msm_kgsl,cnss2,dmesg_dumper,qcom_va_minidump,memory_dump_v2,qcom_wdt_core,dcc_v2,ufs_qcom,qcom_ipc_logging,qcom_dload_mode, Live 0x0000000000000000
+qcom_dma_heaps 98304 319 smmu_proxy_dlkm,sec_mm,msm_sysstats,minidump,[permanent], Live 0x0000000000000000
+msm_dma_iommu_mapping 20480 2 msm_drm,qcom_dma_heaps, Live 0x0000000000000000
+mem_buf_dev 110592 12 camera,msm_drm,msm_kgsl,msm_eva,smmu_proxy_dlkm,qcedev_mod_dlkm,frpc_adsprpc,msm_video,mem_object,mem_buf,mem_buf_msgq,qcom_dma_heaps, Live 0x0000000000000000
+secure_buffer 36864 5 msm_kgsl,hdm,gunyah_loader,qcom_dma_heaps,mem_buf_dev, Live 0x0000000000000000
+qcom_scm 98304 43 camera,msm_drm,ipam,msm_kgsl,msm_eva,msm_hw_fence,phy_msm_snps_eusb2,phy_msm_m31_eusb2,qcom_q6v5_pas,qcom_spss,coresight_tpdm,hdcp_qseecom_dlkm,coresight_tmc_sec,smcinvoke_dlkm,frpc_adsprpc,mem_object,tz_log_dlkm,hdm,governor_msm_adreno_tz,msm_video,si_core_module,audpkt_ion_dlkm,msm_memshare,msm_sharedmem,spmi_pmic_err_debug,dmesg_dumper,gh_panic_notifier,eud,qcom_cpuss_sleep_stats,qrtr_gunyah,sec_qc_debug,gunyah_loader,arm_smmu,qcom_iommu_util,memory_dump_v2,qcom_wdt_core,mdt_loader,pinctrl_msm,qcom_pdc,qcom_ice,qcom_dload_mode,qcom_dma_heaps,secure_buffer, Live 0x0000000000000000
+gh_rm_drv 110592 17 msm_drm,msm_eva,msm_hw_fence,sec_common_fn,gh_tlmm_vm_mem_access,gh_rm_booster,gh_irq_lend,gh_mem_notifier,dmesg_dumper,hvc_gunyah,gh_panic_notifier,qrtr_gunyah,gunyah_loader,minidump,mem_buf_dev,secure_buffer,qcom_scm, Live 0x0000000000000000
+gh_msgq 24576 5 msm_drm,msm_eva,smmu_proxy_dlkm,mem_buf_msgq,gh_rm_drv, Live 0x0000000000000000
+gh_dbl 24576 5 msm_hw_fence,dmesg_dumper,gh_panic_notifier,qrtr_gunyah,gh_rm_drv, Live 0x0000000000000000
+gh_arm_drv 20480 1 gh_rm_drv, Live 0x0000000000000000
+debug_symbol 16384 2 sec_qc_summary,minidump,[permanent], Live 0x0000000000000000
+smem 28672 17 ipam,adsp_sleepmon,qcom_q6v5,sec_qc_smem,rdbg,smem_mailbox,qcom_glink_spss,sysmon_subsystem_stats,smp2p,rproc_qcom_common,qcom_stats,qcom_smd,qcom_glink_smem,sec_qc_summary,msm_qmp,socinfo,minidump, Live 0x0000000000000000
+qcom_hwspinlock 12288 3 - Live 0x0000000000000000
+sec_qc_upload_cause 24576 2 sec_qc_hw_param,sec_qc_qcom_wdt_core, Live 0x0000000000000000
+sec_crashkey_long 24576 2 sec_ap_pmic,sec_qc_upload_cause, Live 0x0000000000000000
+sec_key_notifier 20480 2 sec_crashkey,sec_crashkey_long, Live 0x0000000000000000
+sec_upload_cause 20480 1 sec_qc_upload_cause, Live 0x0000000000000000
+sec_debug 32768 20 msm_drm,dwc3_msm,sec_arm64_fsimd_debug,sec_rdx_bootdev,msm_geni_serial,qcom_stats,sec_mm,sec_crashkey,sec_pmsg,sec_qc_summary,sec_qc_debug,memory_dump_v2,dcc_v2,ufs_qcom,qcom_ipc_logging,sched_walt,socinfo,sec_debug_region,minidump,sec_crashkey_long, Live 0x0000000000000000
+sec_log_buf 36864 2 sec_qc_debug,sec_qc_rst_exinfo, Live 0x0000000000000000
+sec_boot_stat 28672 2 sec_pmsg,sec_qc_debug, Live 0x0000000000000000
+sec_class 16384 22 msm_drm,dwc3_msm,akm,sec_common_fn,pci_msm_drv,pdic_notifier_module,sec_qc_hw_param,common_muic,s2dos07,hall_ic,hdm,sb_core,sec_ap_pmic,abc_hub,sec_thermistor,sec_abc_detect_conn,sec_qc_user_reset,sec_qc_param,blk_sec_common,ufs_qcom,abc,sec_boot_stat,[permanent], Live 0x0000000000000000
