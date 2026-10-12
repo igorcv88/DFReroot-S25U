@@ -58,10 +58,13 @@ system/product/system_ext/system_dlkm/vendor_dlkm file tree.
 | `kernel_image_sha256` | known: `b1b300e7e70d1aea03fcaff33dfc203b06f6322ac7ca177e6b9a39b6599713aa` |
 | `btf_sha256` | known: `e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c` (byte-identical to ZZIC, by extraction) |
 | `fingerprint` | **UNKNOWN** — `Build.FINGERPRINT` carries the CSC suffix and lives in `/vendor/build.prop`; `vendor_a.img` was not extracted |
-| `crashdump_sha256` | **UNKNOWN** — `/system/bin/crash_dump64` is not in the file tree |
-| `vendor_target_sha256`, `vendor_target_size`, `vendor_target_context` | **UNKNOWN** — `/vendor/lib64/libstagefrighthw.so` needs `vendor_a.img` |
-| `vbmeta_digest`, `vbmeta_avb_version`, `vbmeta_hash_alg`, `verified_boot_state`, `vbmeta_device_state`, `flash_locked`, `verity_mode`, `vendor_fstype`, `vendor_mount_ro` | **UNKNOWN** — the whole AVB chain is a per-device runtime capture; no `vbmeta.img` was in the AP either |
-| `libc_sha256`, `libcxx_sha256` | **UNKNOWN** — not in the file tree |
+| `crashdump_sha256` | **UNKNOWN, but obtainable offline** — the path the chain hashes is `/apex/com.android.runtime/bin/crash_dump64` (`exp.c:82`, `target_profile.h:105`), *not* `/system/bin/`. The runtime APEX is not in the bundle (only the ART and Tethering ones are), but it ships inside `system_a.img`, which was extracted and hashed — so this needs an APEX extraction, not a device |
+| `vendor_target_sha256`, `vendor_target_size` | **UNKNOWN** — `/vendor/lib64/libstagefrighthw.so` needs `vendor_a.img`, which was not extracted. Offline once it is |
+| `vendor_target_context` | **UNKNOWN, device-only** — the live SELinux label |
+| `vbmeta_digest`, `vbmeta_avb_version`, `vbmeta_hash_alg` | **UNKNOWN, but obtainable offline** — `tools/verify_zzic_avb.py` re-derives the digest from committed vbmeta blobs (`evidence/zzic/avb/vbmeta.img` plus the `dtbo-`, `optics-` and `prism-` children) rather than trusting a device observation. DZIF's blobs are in neither bundle, so they need extracting from the firmware |
+| the signed `vendor` hashtree descriptor (root digest, salt, dm-verity geometry) | **UNKNOWN, but obtainable offline** — same tool, same blobs; these live in `tools/zzic_profile.json` and are deliberately not runtime-compared |
+| `verified_boot_state`, `vbmeta_device_state`, `flash_locked`, `verity_mode`, `vendor_fstype`, `vendor_mount_ro` | **UNKNOWN, device-only** — boot-state properties and the live mount, which no firmware file can answer |
+| `libc_sha256`, `libcxx_sha256` | **UNKNOWN, but obtainable offline** — bionic ships in the runtime APEX, same extraction as `crash_dump64` |
 | `network_stack_cap_eff` | **UNKNOWN** — a runtime `CapEff` read |
 | `ksud_sha256`, `ksud_size` | **UNKNOWN** — the exact RMG DZIF daemon has not been built |
 
@@ -72,9 +75,25 @@ behind it. In particular the vendor-ELF provenance chain (§3.3) cannot be
 chain with unknown elements is not a weaker gate, it is an unsatisfiable one.
 
 **The correct state is therefore the current one: no DZIF profile, and a DZIF
-device classifying `MISMATCH`.** Creating the profile is a post-update task
-that needs a rooted DZIF device, which is what the RMG DZIF port exists to
-produce — the dependency runs that way round and not the other.
+device classifying `MISMATCH`.**
+
+But "not pinned yet" is not the same as "needs a device", and the table above
+now says which is which, because conflating them sends the next investigation
+to the wrong place. Most of the artefact set is **offline work on firmware
+material nobody has extracted yet**: the runtime APEX out of `system_a.img`
+gives `crash_dump64`, `libc` and `libc++`; `vendor_a.img` gives the vendor ELF
+and its size; the firmware's vbmeta blobs give the digest, the AVB metadata and
+the signed `vendor` hashtree descriptor, re-derived by
+`tools/verify_zzic_avb.py` exactly as the ZZIC chain was. That tool exists
+*because* a digest that was only ever observed once on a device is not the
+standard this repository holds anywhere else, and treating DZIF's whole AVB
+chain as device-only would throw that away.
+
+What genuinely needs a booted DZIF device is narrow: `Build.FINGERPRINT`, the
+boot-state properties (`verifiedbootstate`, `device_state`, `flash.locked`,
+`veritymode`), `/vendor`'s live filesystem type, read-only flag and SELinux
+label, and `network_stack`'s runtime `CapEff`. Plus the `ksud` digest, which
+needs the RMG DZIF build rather than a device.
 
 ## 3. Kernel-side reference-fix state — re-derived, not quoted
 
@@ -206,15 +225,24 @@ Two blockers are independent of firmware and are unchanged by this document:
 2. **Read `Build.FINGERPRINT`** (`getprop ro.build.fingerprint`). It is the one
    identity field missing here, in the RMG feed, and in the OneUILiquidGlass
    allowlist — one read closes all three.
-3. **Capture the artefact set from a rooted DZIF device**: `crash_dump64`,
-   `libc.so`, `libc++.so`, `/vendor/lib64/libstagefrighthw.so` size and
-   context, the complete AVB chain, and `network_stack`'s runtime uid, SELinux
-   context and `CapEff`. Only then can a `DFR_PROFILE_DZIF` be written, and it
-   must be written from observed values — `AGENTS.md` §4: if the device
-   disagrees with the profile, the profile is wrong.
-4. **Build the exact RMG DZIF KernelSU pair** and pin its digest, rather than
+3. **Do the offline half of the artefact set first — it needs no device.**
+   Extract `com.android.runtime` from `system_a.img` for `crash_dump64`,
+   `libc.so` and `libc++.so`; extract `vendor_a.img` for
+   `/vendor/lib64/libstagefrighthw.so` and its size; extract the firmware's
+   vbmeta blobs and run `tools/verify_zzic_avb.py` against them for the digest,
+   the AVB metadata and the signed `vendor` hashtree descriptor. All of that is
+   firmware material that simply has not been unpacked yet, and doing it before
+   the update means fewer things to get right on a device with no rollback.
+4. **Then capture what only a booted device can answer**: `Build.FINGERPRINT`,
+   the boot-state properties (`verifiedbootstate`, `device_state`,
+   `flash.locked`, `veritymode`), `/vendor`'s live filesystem type, read-only
+   flag and SELinux label, and `network_stack`'s runtime uid, SELinux context
+   and `CapEff`. Only then can a `DFR_PROFILE_DZIF` be written, and it must be
+   written from observed values — `AGENTS.md` §4: if the device disagrees with
+   the profile, the profile is wrong.
+5. **Build the exact RMG DZIF KernelSU pair** and pin its digest, rather than
    adopting any generic artifact.
-5. Only after all of that, re-run the Gate C/D/G questions on DZIF. They are
+6. Only after all of that, re-run the Gate C/D/G questions on DZIF. They are
    runtime questions and no amount of file analysis answers them.
 
 ## 8. Evidence provenance
