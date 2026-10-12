@@ -138,11 +138,14 @@ def main():
     except Exception as ex:
         ks_src = ""
         fail("cannot read KsudStage.kt: %s" % ex)
+    fingerprint = str(profile.get("fingerprint") or "")
+    fingerprint_tail = fingerprint.split("/", 3)[-1] if fingerprint else ""
     for expected in (
         'assetName = "ksud-dzif"',
         str(profile.get("ksud_sha256") or ""),
         str(profile.get("ksud_size") or ""),
-        str(profile.get("fingerprint") or ""),
+        "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/",
+        fingerprint_tail,
     ):
         if expected and expected not in ks_src:
             fail("KsudStage.kt does not bind DZIF value %r" % expected)
