@@ -10,8 +10,10 @@ RECEIVER = (ROOT / "app/src/main/java/com/polygraphene/df/reroot/StageReceiver.k
 COORD = (ROOT / "app/src/main/java/com/polygraphene/df/reroot/DfrRootCoordinator.kt").read_text()
 
 failures = []
+checks = [0]
 
 def check(cond, what):
+    checks[0] += 1
     print(("ok   - " if cond else "FAIL - ") + what)
     if not cond:
         failures.append(what)
@@ -52,6 +54,6 @@ check("remote syscall preflight failed" in COORD,
       "any non-zero preflight result is a coordinator refusal")
 
 print("\n%d/%d checks passed" % (
-    18 - len(failures), 18
+    checks[0] - len(failures), checks[0]
 ))
 sys.exit(1 if failures else 0)
