@@ -255,7 +255,7 @@ def load_kallsyms(path):
 DERIVED_MARKER = "DFR-DERIVED-SYMVERS v1"
 
 
-def pinned_kernel_release():
+def pinned_kernel_release(profile_json=None):
     """The one release this repository targets, from the offline profile.
 
     Taken from the profile rather than from the module under audit: a candidate
@@ -264,14 +264,16 @@ def pinned_kernel_release():
     the candidate lets a matched non-ZZIC pair read COMPATIBLE.
     """
     try:
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "zzic_profile.json")) as f:
+        path = profile_json or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "zzic_profile.json")
+        with open(path) as f:
             return json.load(f).get("kernel_release") or ""
     except (OSError, ValueError):
         return ""
 
 
-def check_derived_provenance(symvers, provenance, module_vermagic):
+def check_derived_provenance(symvers, provenance, module_vermagic,
+                             target_profile_json=None):
     """Return (kind, provenance_summary, violations).
 
     An authoritative Module.symvers comes out of the kernel build and this tool
@@ -327,7 +329,7 @@ def check_derived_provenance(symvers, provenance, module_vermagic):
     # Both the witnesses AND the candidate are measured against the PINNED
     # release, not against each other: a ZZI4 module audited with a ZZI4-derived
     # table agrees with itself, and that is not ZZIC.
-    want = pinned_kernel_release()
+    want = pinned_kernel_release(target_profile_json)
     if not want:
         violations.append("the profile pins no kernel_release; a derived table "
                           "cannot be tied to a target")
@@ -394,7 +396,7 @@ def check_derived_provenance(symvers, provenance, module_vermagic):
 
 
 def audit(path, symvers=None, kallsyms=None, require_coverage=False,
-          provenance=None):
+          provenance=None, target_profile_json=None):
     r = {"file": path}
     with open(path, "rb") as f:
         raw = f.read()
@@ -449,7 +451,8 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False,
     # its provenance record: the CRCs must be traceable to module bytes, not
     # typed in. The generator marks its output; that marker triggers the demand.
     if symvers:
-        prov_fail = check_derived_provenance(symvers, provenance, vermagic)
+        prov_fail = check_derived_provenance(
+            symvers, provenance, vermagic, target_profile_json)
         r["symvers_kind"] = prov_fail[0]
         r["symvers_provenance"] = prov_fail[1]
         if prov_fail[2]:
@@ -617,6 +620,7 @@ def audit(path, symvers=None, kallsyms=None, require_coverage=False,
                    % (vermagic.split()[0] if vermagic else "<unknown>",
                       EXPECTED_GENERIC_VERMAGIC_PREFIX))
 
+    r["MODULE_VS_TARGET_KERNEL"] = verdict
     r["MODULE_VS_ZZIC_KERNEL"] = verdict
     # Historical key, kept so existing docs/scripts keep resolving.
     r["GENERIC_ANDROID15_6_6_MODULE"] = verdict
@@ -740,10 +744,14 @@ def main():
                     help="provenance JSON for a DERIVED symvers. Mandatory when "
                          "the symvers carries the generator's marker; found "
                          "automatically if it sits beside it.")
+    ap.add_argument("--target-profile-json",
+                    help="exact-target profile whose kernel_release binds "
+                         "candidate and witness provenance; defaults to "
+                         "tools/zzic_profile.json")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     r = audit(a.ko, a.symvers, a.kallsyms, a.require_modversion_coverage,
-              a.symvers_provenance)
+              a.symvers_provenance, a.target_profile_json)
     if a.json:
         print(json.dumps(r, indent=2))
     else:

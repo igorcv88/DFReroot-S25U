@@ -49,9 +49,31 @@ static struct ObservedTarget zzic_observed(void) {
     return o;
 }
 
+
+/* ---- canonical DZIF observed identity (matches the Stable profile exactly) ---- */
+static struct ObservedTarget dzif_observed(void) {
+    struct ObservedTarget o;
+    memset(&o, 0, sizeof(o));
+    o.manufacturer  = "samsung";
+    o.model         = "SM-S938B";
+    o.device        = "pa3q";
+    o.sdk           = 37;
+    o.android_release = 17;
+    o.display       = "CP2A.260605.016.S938BXXUCDZIF";
+    o.fingerprint   = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
+                      "S938BXXUCDZIF_OXMCDZIF:user/release-keys";
+    o.kernel_release = "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k";
+    o.kernel_version = "#1 SMP PREEMPT Sat Sep 19 07:11:26 UTC 2026";
+    o.kernel_arch   = "aarch64";
+    o.page_size     = 4096;
+    o.abi           = "arm64-v8a";
+    return o;
+}
+
 static const char *cls_name(dfr_target_class c) {
     switch (c) {
         case DFR_TARGET_S25U_ZZIC: return "S25U_ZZIC";
+        case DFR_TARGET_S25U_DZIF: return "S25U_DZIF";
         case DFR_TARGET_MISMATCH:  return "MISMATCH";
         default:                   return "UPSTREAM_GENERIC";
     }
@@ -66,7 +88,7 @@ static void test_target_detection(void) {
     dfr_target_class c = dfr_classify_target(&o, &m);
     CHECK(c == DFR_TARGET_S25U_ZZIC, "exact ZZIC -> %s (all_ok=%d)", cls_name(c), m.all_ok);
 
-    /* SM-S938B + ZZI4 firmware: right model, ZZI4 display/fingerprint/kernel */
+    /* SM-S938B + ZZI4 firmware remains a hard mismatch. */
     o = zzic_observed();
     o.display = "CP2A.260605.016.S938BXXUCZZI4";
     o.fingerprint = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
@@ -75,73 +97,44 @@ static void test_target_detection(void) {
     c = dfr_classify_target(&o, &m);
     CHECK(c == DFR_TARGET_MISMATCH, "SM-S938B + ZZI4 -> %s (must be MISMATCH)", cls_name(c));
 
-    /*
-     * SM-S938B + DZIF (One UI 9 Stable): the firmware this device actually
-     * updates to. Every pinned anchor is present - same manufacturer, model,
-     * codename, SDK, release, build ID, page size, ABI and kernel arch - and
-     * only the three firmware-identity fields differ. That is precisely the
-     * AGENTS.md 3.1 case: a device asserting the pinned model and codename
-     * while deviating in any pinned field is a hard MISMATCH and must refuse
-     * everything, NOT fall through to the generic upstream path, where it
-     * would run the chain against a kernel whose artefact hashes nobody
-     * pinned.
-     *
-     * The DZIF values are read from the firmware, not invented: the display
-     * and kernel strings come from system/build.prop and the kernel Image of
-     * S938BXXUCDZIF. The fingerprint is the one field that has NOT been read
-     * (Build.FINGERPRINT carries the CSC suffix and lives in
-     * /vendor/build.prop, which was not extracted), so the test asserts the
-     * refusal twice: once with the partition-level fingerprint that WAS
-     * observed, and once with the CSC-suffixed shape it will take. Neither
-     * may pass, and the per-field flags must name the firmware fields rather
-     * than an anchor, or the refusal would be happening for the wrong reason.
-     */
-    o = zzic_observed();
-    o.display = "CP2A.260605.016.S938BXXUCDZIF";
-    o.fingerprint = "samsung/pa3qxxx/qssi_64:17/CP2A.260605.016/"
-                    "S938BXXUCDZIF:user/release-keys";
-    o.kernel_release = "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k";
-    o.kernel_version = "#1 SMP PREEMPT Sat Sep 19 07:11:26 UTC 2026";
+    /* Exact Stable DZIF is now a first-class exact target, not a generic 6.6 fallback. */
+    o = dzif_observed();
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_S25U_DZIF && m.all_ok,
+          "exact DZIF -> %s (all_ok=%d)", cls_name(c), m.all_ok);
+    CHECK(dfr_profile_for_class(c) == &DFR_PROFILE_DZIF,
+          "DZIF class resolves to the DZIF profile");
+    CHECK(dfr_target_is_exact(c), "DZIF class is an exact target");
+
+    /* Cross-firmware mixtures must fail closed even though model/codename match. */
+    o = dzif_observed();
+    o.fingerprint = DFR_PROFILE_ZZIC.fingerprint;
     c = dfr_classify_target(&o, &m);
     CHECK(c == DFR_TARGET_MISMATCH,
-          "SM-S938B + DZIF (observed fingerprint) -> %s (must be MISMATCH)",
-          cls_name(c));
-    CHECK(!m.display_ok && !m.fingerprint_ok && !m.kernel_release_ok &&
-          !m.kernel_version_ok,
-          "DZIF refusal names the firmware fields (display=%d fingerprint=%d "
-          "kernel_release=%d kernel_version=%d)",
-          m.display_ok, m.fingerprint_ok, m.kernel_release_ok,
-          m.kernel_version_ok);
-    CHECK(m.manufacturer_ok && m.model_ok && m.device_ok && m.sdk_ok &&
-          m.android_release_ok && m.page_size_ok && m.abi_ok &&
-          m.kernel_arch_ok,
-          "DZIF still asserts every pinned anchor, which is why 3.1 makes it "
-          "a hard refusal rather than a generic fall-through (model=%d "
-          "device=%d)", m.model_ok, m.device_ok);
+          "DZIF display/kernel + ZZIC fingerprint -> %s", cls_name(c));
 
-    /* Same device on DZIF, with the CSC-suffixed fingerprint shape. */
+    o = dzif_observed();
+    o.kernel_release = DFR_PROFILE_ZZIC.kernel_release;
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_MISMATCH,
+          "DZIF identity + ZZIC kernel release -> %s", cls_name(c));
+
+    /* A future/unknown pa3q firmware stays a hard mismatch, never generic. */
+    o = dzif_observed();
+    o.display = "CP2A.260605.016.S938BXXUCFUTURE";
     o.fingerprint = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
-                    "S938BXXUCDZIF_OXMCDZIF:user/release-keys";
+                    "S938BXXUCFUTURE_OXMCFUTURE:user/release-keys";
+    o.kernel_release = "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCFUTURE-4k";
     c = dfr_classify_target(&o, &m);
     CHECK(c == DFR_TARGET_MISMATCH,
-          "SM-S938B + DZIF (CSC-suffixed fingerprint) -> %s (must be "
-          "MISMATCH)", cls_name(c));
+          "unknown future pa3q firmware -> %s (must be MISMATCH)", cls_name(c));
 
-    /*
-     * The DZIF kernel release still parses to the android15/6.6 module family,
-     * exactly as ZZIC's does. AGENTS.md section 7 calls this out: family
-     * parsing is module selection, never identity. If a future change ever
-     * let the family decide, this is the firmware it would wrongly admit.
-     */
     {
         int fam_rel = 0, fam_maj = 0, fam_min = 0;
         int fam_rc = dfr_parse_kernel_versions(
-            "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k",
-            &fam_rel, &fam_maj, &fam_min);
+            DFR_PROFILE_DZIF.kernel_release, &fam_rel, &fam_maj, &fam_min);
         CHECK(fam_rc == 0 && fam_rel == 15 && fam_maj == 6 && fam_min == 6,
-              "DZIF uname parses to android15/6.6 (rc=%d rel=%d %d.%d) - "
-              "family only, never identity",
-              fam_rc, fam_rel, fam_maj, fam_min);
+              "DZIF uname still parses to android15/6.6 family only");
     }
 
     /* SM-S938U (US variant) -> not ZZIC */

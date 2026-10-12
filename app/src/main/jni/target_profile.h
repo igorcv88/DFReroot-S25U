@@ -208,12 +208,18 @@ struct TargetProfile {
 };
 
 extern const struct TargetProfile DFR_PROFILE_ZZIC;
+extern const struct TargetProfile DFR_PROFILE_DZIF;
 
 typedef enum {
     DFR_TARGET_UPSTREAM_GENERIC = 0, /* unrelated device: run upstream path */
     DFR_TARGET_S25U_ZZIC        = 1, /* exact ZZIC target */
-    DFR_TARGET_MISMATCH         = 2  /* looks like the ZZIC target but deviates */
+    DFR_TARGET_S25U_DZIF        = 2, /* exact DZIF target */
+    DFR_TARGET_MISMATCH         = 3  /* pa3q/SM-S938B anchor hit, but no exact profile */
 } dfr_target_class;
+
+/* Exact-target helpers. NULL means generic/mismatch, never "best effort". */
+int dfr_target_is_exact(dfr_target_class cls);
+const struct TargetProfile *dfr_profile_for_class(dfr_target_class cls);
 
 /* -------- Gate G: chain-level module policy (pure, host-testable) -------- */
 
@@ -403,17 +409,19 @@ struct TargetMatch {
     int kernel_arch_ok;
     int page_size_ok;
     int abi_ok;
-    int anchor_hit;   /* set if this device asserts the ZZIC model/codename */
+    int anchor_hit;   /* set if this device asserts the pa3q model/codename */
     int all_ok;       /* set iff every field above matched */
 };
 
 /*
- * Fail-closed classification against DFR_PROFILE_ZZIC.
- *  - all identity fields match           -> DFR_TARGET_S25U_ZZIC
- *  - ZZIC model/codename present but any
- *    field deviates                      -> DFR_TARGET_MISMATCH  (refuse)
- *  - no ZZIC anchor at all               -> DFR_TARGET_UPSTREAM_GENERIC
- * `out` (may be NULL) receives the per-field breakdown for logging.
+ * Fail-closed classification against the exact pa3q profiles.
+ *  - all ZZIC fields match               -> DFR_TARGET_S25U_ZZIC
+ *  - all DZIF fields match               -> DFR_TARGET_S25U_DZIF
+ *  - SM-S938B/pa3q anchor present but no exact profile matches
+ *                                        -> DFR_TARGET_MISMATCH (refuse)
+ *  - no pa3q anchor at all               -> DFR_TARGET_UPSTREAM_GENERIC
+ * `out` (may be NULL) receives the per-field breakdown for the profile that
+ * matched, or for the closest exact profile when classification refuses.
  */
 dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
                                      struct TargetMatch *out);
