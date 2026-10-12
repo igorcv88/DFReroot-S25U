@@ -38,18 +38,24 @@ anchors still asserted:             manufacturer, model, device, sdk,
 DZIF uname parses to android15/6.6  (module family only, never identity)
 ```
 
-Both fingerprint shapes are tested because only one of them has been observed;
-see §2. The per-field assertion matters as much as the verdict: a refusal that
-happened because an *anchor* failed would mean the 3.1 case was not being
-exercised at all.
+The per-field assertion matters as much as the verdict: a refusal that happened
+because an *anchor* failed would mean the 3.1 case was not being exercised at
+all. Both fingerprint shapes stay in the test now that the real one is known:
+one is the value a DZIF device reports, the other the partition-level string
+that is easy to mistake for it, and neither may pass.
 
 ## 2. Why no satisfiable DZIF profile can be published yet
 
 `DFR_PROFILE_ZZIC` pins twelve identity fields and eight artefact/provenance
-facts. The identity side is almost complete for DZIF; the artefact side is
-almost entirely unobtainable, because every one of those values is a *runtime
-or vendor-partition* capture and the port inputs are a kernel bundle plus a
-system/product/system_ext/system_dlkm/vendor_dlkm file tree.
+facts. The identity side is now **complete** for DZIF; the artefact side is
+still largely unpinned, because those values are *runtime or vendor-partition*
+captures.
+
+The input set has grown since this record was first written, and the table
+below reflects that: beyond the original kernel bundle and the
+system/product/system_ext/system_dlkm/vendor_dlkm file tree, the owner has
+since supplied `DZIF_BL_CORE.tar.gz` and `DZIF_STOCK_MODULES.tar.gz` and read
+`Build.FINGERPRINT` off the device. What those closed is recorded in §6a.
 
 | profile field | DZIF status |
 | --- | --- |
@@ -60,7 +66,7 @@ system/product/system_ext/system_dlkm/vendor_dlkm file tree.
 | `kernel_version` = `#1 SMP PREEMPT Sat Sep 19 07:11:26 UTC 2026` | known, from the Image |
 | `kernel_image_sha256` | known: `b1b300e7e70d1aea03fcaff33dfc203b06f6322ac7ca177e6b9a39b6599713aa` |
 | `btf_sha256` | known: `e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c` (byte-identical to ZZIC, by extraction) |
-| `fingerprint` | **UNKNOWN** — `Build.FINGERPRINT` carries the CSC suffix and lives in `/vendor/build.prop`; `vendor_a.img` was not extracted |
+| `fingerprint` | **KNOWN** — `samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OXMCDZIF:user/release-keys`, read with `getprop ro.build.fingerprint` on DZIF hardware and pinned in the RMG target header. It is the shape the ZZIC entry predicted, which is exactly why it had to be read rather than written down |
 | `crashdump_sha256` | **UNKNOWN, but obtainable offline** — the path the chain hashes is `/apex/com.android.runtime/bin/crash_dump64` (`exp.c:82`, `target_profile.h:105`), *not* `/system/bin/`. The runtime APEX is not in the bundle (only the ART and Tethering ones are), but it ships inside `system_a.img`, which was extracted and hashed — so this needs an APEX extraction, not a device |
 | `vendor_target_sha256`, `vendor_target_size` | **UNKNOWN** — `/vendor/lib64/libstagefrighthw.so` needs `vendor_a.img`, which was not extracted. Offline once it is |
 | `vendor_target_context` | **UNKNOWN, device-only** — the live SELinux label |
@@ -231,18 +237,53 @@ produces its own records.
 
 Two blockers are independent of firmware and are unchanged by this document:
 
-- **Gate G (the module) is still unverified**, and `AGENTS.md` §3.6 means the
-  chain cannot be exercised end to end while it is — not even deliberately,
-  since the at-own-risk marker was removed by mechanism. DZIF adds a
-  requirement rather than removing one: its stock modules report
-  `6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k SMP preempt mod_unload
-  modversions aarch64`, so `CONFIG_MODVERSIONS=y`, and a module built for the
-  ZZIC release string is a different kernel's answer. The generic
-  `dirtyfrag-android15-6.6.ko` is not a substitute, and neither is the upstream
-  `ksud`.
+- **Gate G (the module) is still unverified at run time**, and `AGENTS.md` §3.6
+  means the chain cannot be exercised end to end while it is — not even
+  deliberately, since the at-own-risk marker was removed by mechanism. What
+  changed is that its *offline* half is no longer undecided for DZIF: see §6a.
+  A module built for the ZZIC release string remains a different kernel's
+  answer, the generic `dirtyfrag-android15-6.6.ko` is not a substitute, and
+  neither is the upstream `ksud`.
 - **`POST_SOFT_REBOOT_STABILITY` is a physical FAIL on ZZIC** in two distinct
   shapes (bootchecker rollback, and the `lmkd` stall). Neither has a DZIF
   observation, and neither becomes less likely because the firmware changed.
+
+## 6a. What the later inputs closed
+
+Recorded here because this document previously listed all three as open, and a
+dossier that reports a settled question as unsettled sends the next
+investigation to work that is already done. The work is the owner's, in
+`igorcv88/RMGLabs-Payloads` (PR #7); the authoritative record is
+`docs/SM-S938B-S938BXXUCDZIF.md` there, not this file.
+
+| was open here | now | route |
+| --- | --- | --- |
+| `Build.FINGERPRINT` unread | **read** | `getprop ro.build.fingerprint` on DZIF hardware |
+| `P0_KERNEL_PHYS_LOAD` not re-derived from DZIF bytes | **derived** | `xbl_config.elf` in `DZIF_BL_CORE.tar.gz`: FDT node `/soc/memorymap/memory@A8000000` with `reg=<0 0xa8000000 0 0x10000000>` and `mem-label="Kernel"`, against the Image header's `text_offset=0` |
+| kernel symbol-version coverage undecided | **derived and cross-checked** | `DZIF_STOCK_MODULES.tar.gz`: 446 of 449 modules at the exact DZIF release, 4,973 symbols with CRC witnesses, zero conflicting CRCs, `module_layout=0x81972209` witnessed by all 446 |
+
+Two details are worth carrying forward because both correct something stated
+earlier in this repository's own instructions:
+
+- **This platform has no `sboot.bin`.** `AGENTS.md`-adjacent guidance and an
+  earlier revision of this file both pointed at `sboot.bin.lz4`, which is the
+  Exynos path. `pa3q` is Qualcomm: the kernel load address lives in the XBL
+  FDT, and the DZIF BL archive contains no `sboot.bin` at all. Anyone closing
+  this field on a future Qualcomm Samsung target should read `xbl_config.elf`.
+- **The three rejected witnesses are the right three.** `wonder.ko`,
+  `spcom.ko` and `spss_utils.ko` carry the shortened
+  `6.6.127-p33f4ffe-abogkiS938BXXUCDZIF-4k`, not the kernel's own release, so
+  they are a different build's answer and are refused — `AGENTS.md` §3.5's
+  witness rule, applied. That count independently matches what this
+  investigation derived from `module_vermagic.txt` before any module bytes
+  existed: 97 `system_dlkm` plus 349 `vendor_dlkm` at the exact release, three
+  outside it.
+
+What this does **not** establish: that the CRCs are right because many modules
+agreed. They are right because each was read out of named module bytes whose
+digest the provenance records, and because no two witnesses disagreed —
+`AGENTS.md` §3.5 forbids a majority vote. And it remains an offline gate:
+`insmod` on the device is still unobserved.
 
 ## 7. What would actually move this forward, in order
 
@@ -251,9 +292,10 @@ Two blockers are independent of firmware and are unchanged by this document:
    from this same `Image_DZIF`, and it is deliberately absent from the support
    feed until `Build.FINGERPRINT` is read. DFReroot depends on that port
    producing a rooted DZIF device; it cannot pin its own profile first.
-2. **Read `Build.FINGERPRINT`** (`getprop ro.build.fingerprint`). It is the one
-   identity field missing here, in the RMG feed, and in the OneUILiquidGlass
-   allowlist — one read closes all three.
+2. ~~**Read `Build.FINGERPRINT`**~~ — **done**, on DZIF hardware. The value is
+   in §2's table. It is pinned in the RMG target header; the RMG feed entry and
+   the OneUILiquidGlass allowlist line are still unfilled, the first because it
+   also needs artifact digests from the isolated build.
 3. **Do the offline half of the artefact set first — it needs no device.**
    Extract `com.android.runtime` from `system_a.img` for `crash_dump64`,
    `libc.so` and `libc++.so`; extract `vendor_a.img` for

@@ -10,7 +10,11 @@ acceptance criteria for the next signed build. If this file disagrees with
 > `MISMATCH` and refuses everything, which is correct and needed no change; no
 > DZIF profile exists and **none is publishable yet** — the design is portable
 > today, what is missing is provenance/runtime values, so this is an incomplete
-> implementation and not a technical incompatibility. The Dirty
+> implementation and not a technical incompatibility. Three fields that were
+> open there are now closed by later owner-supplied inputs (`Build.FINGERPRINT`
+> read on hardware, `P0_KERNEL_PHYS_LOAD` derived from the XBL FDT, and the
+> modversions CRC table derived from 446 stock witnesses) — see §6a of that
+> record. The Dirty
 > Frag and `remove_waiter` windows are byte-identical to ZZIC with the
 > reference fix absent (re-hashed, not quoted), and CVE-2026-49881 is **fixed**
 > — which costs this fork nothing, since it reaches `network_stack` through
