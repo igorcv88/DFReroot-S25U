@@ -317,7 +317,7 @@ dfr_vendor_prov dfr_vendor_provenance_eval(dfr_target_class cls,
     memset(&m, 0, sizeof(m));
     m.verdict = DFR_VENDOR_PROV_FAIL_NO_PIN;
 
-    if (cls != DFR_TARGET_S25U_ZZIC) {
+    if (!dfr_target_is_exact(cls)) {
         m.verdict = DFR_VENDOR_PROV_NOT_APPLICABLE;
         if (out) *out = m;
         return m.verdict;
