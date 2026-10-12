@@ -70,12 +70,49 @@ since supplied `DZIF_BL_CORE.tar.gz` and `DZIF_STOCK_MODULES.tar.gz` and read
 | `crashdump_sha256` | **UNKNOWN, but obtainable offline** — the path the chain hashes is `/apex/com.android.runtime/bin/crash_dump64` (`exp.c:82`, `target_profile.h:105`), *not* `/system/bin/`. The runtime APEX is not in the bundle (only the ART and Tethering ones are), but it ships inside `system_a.img`, which was extracted and hashed — so this needs an APEX extraction, not a device |
 | `vendor_target_sha256`, `vendor_target_size` | **UNKNOWN** — `/vendor/lib64/libstagefrighthw.so` needs `vendor_a.img`, which was not extracted. Offline once it is |
 | `vendor_target_context` | **UNKNOWN, device-only** — the live SELinux label |
-| `vbmeta_digest`, `vbmeta_avb_version`, `vbmeta_hash_alg` | **UNKNOWN, but obtainable offline** — `tools/verify_zzic_avb.py` re-derives the digest from committed vbmeta blobs (`evidence/zzic/avb/vbmeta.img` plus the `dtbo-`, `optics-` and `prism-` children) rather than trusting a device observation. DZIF's blobs are in neither bundle, so they need extracting from the firmware |
-| the signed `vendor` hashtree descriptor (root digest, salt, dm-verity geometry) | **UNKNOWN, but obtainable offline** — same tool, same blobs; these live in `tools/zzic_profile.json` and are deliberately not runtime-compared |
-| `verified_boot_state`, `vbmeta_device_state`, `flash_locked`, `verity_mode`, `vendor_fstype`, `vendor_mount_ro` | **UNKNOWN, device-only** — boot-state properties and the live mount, which no firmware file can answer |
+| `vbmeta_digest` | **STILL UNKNOWN** — the DZIF top-level `vbmeta.img` arrived in `DZIF_BL_CORE.tar.gz`, but the digest is not a hash of that file: it is SHA-256 over its blob followed by the blob of each chained vbmeta. DZIF chains the same three as ZZIC (`dtbo`, `optics`, `prism`, in that order), and none of those three was supplied, so the digest cannot be reproduced. §7a says exactly which bytes close it |
+| `vbmeta_hash_alg` | **known: `sha256`** — read from the signed descriptors in the DZIF `vbmeta.img` |
+| `vbmeta_avb_version` | **STILL UNKNOWN, device-only** — and it is *not* the `required_libavb_version` in the vbmeta header, which reads `1.0` on DZIF and `1.0` on ZZIC alike while ZZIC pins `1.2`. `ro.boot.vbmeta.avb_version` is the AVB library version the *bootloader* used; the header field is the minimum version an image requires. Reading the header value into this field would pin the wrong quantity and would make ZZIC's own profile fail |
+| the signed `vendor` hashtree descriptor (root digest, salt, dm-verity geometry) | **KNOWN, read out of the DZIF `vbmeta.img`** — and it differs from ZZIC in exactly the way that matters. See §2a |
+| `verified_boot_state`, `vbmeta_device_state`, `flash_locked` | **known: `green`, `locked`, `1`** — read off the DZIF device |
+| `verity_mode`, `vendor_fstype`, `vendor_mount_ro` | **UNKNOWN, device-only** — `ro.boot.veritymode` and the live `/vendor` mount, which no firmware file can answer |
 | `libc_sha256`, `libcxx_sha256` | **UNKNOWN, but obtainable offline** — bionic ships in the runtime APEX, same extraction as `crash_dump64` |
-| `network_stack_cap_eff` | **UNKNOWN** — a runtime `CapEff` read |
+| `network_stack_cap_eff` | **known: `0x800003c00`** — read from the live `network_stack` process on DZIF, together with uid 1073 and `u:r:network_stack:s0`. It is the same bitmask ZZIC carries, which is a fact about this capability set and not a reason to copy anything else across |
 | `ksud_sha256`, `ksud_size` | **UNKNOWN** — the exact RMG DZIF daemon has not been built |
+
+## 2a. The `/vendor` hashtree: same geometry, different bytes
+
+Read with `tools/avb.py` out of each firmware's own top-level `vbmeta.img` -
+the DZIF one from `DZIF_BL_CORE.tar.gz`
+(`71755bbe966b44919ce47b948de6469a8b6f43bff07f736394e1491b8a9231e3`, which
+matches that bundle's own manifest), the ZZIC one from
+`evidence/zzic/avb/vbmeta.img` already in this repository:
+
+| signed `vendor` hashtree field | ZZIC | DZIF |
+| --- | --- | --- |
+| data blocks (4 KiB) | 860,461 | **860,461** |
+| tree blocks | 6,777 | **6,777** |
+| FEC offset / size, in blocks | 867,238 / 6,856 | **867,238 / 6,856** |
+| `dm_verity_version`, `hash_algorithm`, block sizes, `fec_num_roots` | 1, sha256, 4096/4096, 2 | **identical** |
+| salt | `336ad2aa…cada6` | `613c9e09…848c0` |
+| root digest | `794944fa…b42a3f` | `dcfb9c58…1c1e09` |
+
+Both images are `avbtool 1.4.0`, both require libavb 1.0, and both chain
+`dtbo -> optics -> prism`.
+
+The geometry being identical is unsurprising: `/vendor` inherits the same
+`15/AP3A.240905.015.A2` base on both builds, so the partition is the same size
+with the same layout. **The root digest differing is the load-bearing fact.** It
+proves the DZIF `/vendor` image is not bit-identical to ZZIC's, which means no
+`/vendor`-derived pin can be carried over - not the hashtree fields, and above
+all not `vendor_target_sha256`. Before this, that was an assumption the record
+politely called "UNKNOWN"; it is now a measurement.
+
+It cuts the other way too, and that is the useful half: `AGENTS.md` §3.3 makes
+the vendor ELF's identity rest on the AVB chain precisely because the file
+cannot be opened from the chain's own domain. The DZIF half of that chain is
+now one field short - the reproduced `vbmeta_digest` - rather than entirely
+absent.
 
 A profile written with those fields absent or copied from ZZIC would be the
 exact defect `AGENTS.md` §2 exists to prevent: a verdict with no evidence
@@ -293,9 +330,9 @@ digest the provenance records, and because no two witnesses disagreed —
    feed until `Build.FINGERPRINT` is read. DFReroot depends on that port
    producing a rooted DZIF device; it cannot pin its own profile first.
 2. ~~**Read `Build.FINGERPRINT`**~~ — **done**, on DZIF hardware. The value is
-   in §2's table. It is pinned in the RMG target header; the RMG feed entry and
-   the OneUILiquidGlass allowlist line are still unfilled, the first because it
-   also needs artifact digests from the isolated build.
+   in §2's table, and all three consumers that were waiting on it are now
+   filled: the RMG target header, the RMG support feed entry (bound to the
+   published artifact digests) and the OneUILiquidGlass allowlist line.
 3. **Do the offline half of the artefact set first — it needs no device.**
    Extract `com.android.runtime` from `system_a.img` for `crash_dump64`,
    `libc.so` and `libc++.so`; extract `vendor_a.img` for
@@ -304,17 +341,74 @@ digest the provenance records, and because no two witnesses disagreed —
    the AVB metadata and the signed `vendor` hashtree descriptor. All of that is
    firmware material that simply has not been unpacked yet, and doing it before
    the update means fewer things to get right on a device with no rollback.
-4. **Then capture what only a booted device can answer**: `Build.FINGERPRINT`,
-   the boot-state properties (`verifiedbootstate`, `device_state`,
-   `flash.locked`, `veritymode`), `/vendor`'s live filesystem type, read-only
-   flag and SELinux label, and `network_stack`'s runtime uid, SELinux context
-   and `CapEff`. Only then can a `DFR_PROFILE_DZIF` be written, and it must be
-   written from observed values — `AGENTS.md` §4: if the device disagrees with
-   the profile, the profile is wrong.
+4. **Then capture what only a booted device can answer.** Most of this list
+   has since been captured: `Build.FINGERPRINT`, `verifiedbootstate`,
+   `device_state`, `flash.locked`, and `network_stack`'s uid, context and
+   `CapEff` are all in §2's table. What is left is `veritymode`,
+   `/vendor`'s live filesystem type, read-only flag and SELinux label, and the
+   bootloader's `vbmeta.avb_version` and `vbmeta.digest`. §7a itemises them.
+   Only then can a `DFR_PROFILE_DZIF` be written, and it must be written from
+   observed values — `AGENTS.md` §4: if the device disagrees with the profile,
+   the profile is wrong.
 5. **Build the exact RMG DZIF KernelSU pair** and pin its digest, rather than
    adopting any generic artifact.
 6. Only after all of that, re-run the Gate C/D/G questions on DZIF. They are
    runtime questions and no amount of file analysis answers them.
+
+## 7a. The exact reads that are still missing, itemised
+
+Written as a shopping list on purpose. Everything below is a single file or a
+single command, and together they are the whole remaining gap between this
+record and a `DFR_PROFILE_DZIF` that can be satisfied honestly. The split
+matters because it decides where the work happens.
+
+### Needs firmware bytes, no device
+
+| what | where it comes from |
+| --- | --- |
+| `dtbo`, `optics`, `prism` vbmeta blobs | the DZIF AP tar (`dtbo.img`) and CSC tar (`optics.img`, `prism.img`). Each partition carries an AVB footer in its last 64 bytes - magic `AVBf`, then `vbmeta_offset` and `vbmeta_size` as big-endian u64s - and the blob at that range is what is needed. ZZIC's three are 2,112 / 2,176 / 2,176 bytes, so these are tiny. With them, `tools/avb.py` reproduces `vbmeta_digest` the same way it does for ZZIC, and `AGENTS.md` §3.3's chain stops being one field short |
+| `crash_dump64`, `libc.so`, `libc++.so` | `com.android.runtime` APEX out of `system_a.img`. Note the path the chain hashes is `/apex/com.android.runtime/bin/crash_dump64`, not `/system/bin/` |
+| `/vendor/lib64/libstagefrighthw.so` and its `st_size` | `vendor_a.img` out of `super.img`. §2a proves this cannot be taken from ZZIC |
+
+### Needs the booted DZIF device
+
+Four of these are one `getprop` each and can be collected in a single session:
+
+| what | command |
+| --- | --- |
+| `verity_mode` | `getprop ro.boot.veritymode` |
+| `vbmeta_avb_version` | `getprop ro.boot.vbmeta.avb_version` (the bootloader's value - see §2) |
+| `vbmeta_digest`, to corroborate the reproduced one | `getprop ro.boot.vbmeta.digest` |
+| `vendor_fstype`, `vendor_mount_ro` | the `/vendor` line of `/proc/self/mountinfo` |
+| `vendor_target_context` | the live SELinux label of the vendor ELF, which needs a domain allowed to `getattr` it; `AGENTS.md` §3.3 records `SKIP` when it is not obtainable, and absence is never agreement |
+
+### Needs a build, not a read
+
+| what | which build |
+| --- | --- |
+| `ksud_sha256`, `ksud_size` | the DZIF `ksud` under the **dfreroot** staging contract, which stages from `/data/system/dfreroot-ksud` instead of world-writable `/data/local/tmp`. The published DZIF `ksud` is the **rmg** one and is not a substitute - `AGENTS.md` §3.6 is the reason the two contracts exist separately |
+| `ko_filename`, `ko_sha256`, `ko_verified` | a DZIF `dirtyfrag-android15-6.6.ko`. The module already built for DZIF is **KernelSU's**, not DirtyFrag's; they are different modules with different imports, and the KernelSU one is no evidence about this one. What its build *can* reuse is the input that was the hard part: the exact Image export table and its provenance now exist in `RMGLabs-Payloads` under `kernelsu/evidence/pa3q-S938BXXUCDZIF/`, so a DZIF DirtyFrag module can be audited against the same CRCs |
+
+### Deliberately not on this list
+
+A `DFR_PROFILE_DZIF` skeleton with the known fields pinned and the rest NULL.
+It would compile, it would classify a DZIF device as DZIF, and it would refuse
+at the first artefact gate - which is correct behaviour, and is also exactly
+what happens today via `MISMATCH`. The only thing it would buy is a refusal
+message that names the missing evidence instead of the differing fingerprint,
+and the price is a rewrite of the classifier that protects the device, reviewed
+against a profile nobody can validate. `AGENTS.md` §8 - keep documentation
+behind the code - cuts the same way for the code itself: the profile goes in
+when its values exist, with its negative cases, not before.
+
+What that does mean is that the multi-profile work is sequenced *after* the
+reads above rather than before them. The shape is unchanged from §2's
+"not publishable yet is not not possible": `dfr_classify_target` iterating a
+profile table instead of comparing against one, `dfr_target_class` gaining a
+DZIF member, and the three gates taking the profile they were handed rather
+than assuming which one it is. That is a mechanical edit against a known
+target; it is not the blocker, and doing it early would only mean doing it
+twice.
 
 ## 8. Evidence provenance
 
@@ -324,6 +418,16 @@ Input bundles, both hashed before use:
 | --- | --- |
 | `DZIF_KERNEL_CORE.tar.gz` | `9735f7bc4e579264efa9ec9912c1ebb859a6c9bdc2cfbdb4df1fbb2872d107a5` |
 | `DZIF_FRAMEWORK_CORE_V3.tar.gz` | `27da2d22fe66f4167a50845c9854ab553cddf7155c3924dc24cb10ce15b5d05d` |
+| `DZIF_BL_CORE.tar.gz` | `4549eb06b0457a3987f35391e9082c661ce27281ebe0d76b91d6d4dec6f72972` |
+| `DZIF_STOCK_MODULES.tar.gz` | `93069b2fbd9e28a4edc717b8115c89248d7083128da1ec75521f9b82b7ebc900` |
+| `DZIF_RUNTIME_NETWORKSTACK.tar.gz` | `57890ad159e3f24d02f410835d174abe1e32614fde10289624bd204310e5b231` |
+
+Each of the seven files in `DZIF_BL_CORE.tar.gz` was checked against that
+bundle's own `SHA256SUMS.txt` before being read; the `vbmeta.img` §2a parses is
+`71755bbe966b44919ce47b948de6469a8b6f43bff07f736394e1491b8a9231e3`. The
+NetworkStack bundle holds the three Mainline APKs only, so it supplies no
+artefact digest for the chain - the `CapEff`, uid and context in §2 came from
+the device's own runtime read, not from it.
 
 Every file read out of the framework bundle was checked against that bundle's
 own `MANIFEST_SHA256.txt` first. `DZIF_FRAMEWORK_CORE_V2.tar.gz` and the

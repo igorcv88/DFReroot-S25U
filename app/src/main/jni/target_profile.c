@@ -109,7 +109,7 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
      * This closes Gate G boundary G1 (loader/import ABI) only. G2 (runtime
      * symbol discovery), G3 (selinux_state layout) and G4 (write safety) are
      * still unproven, and nothing here promotes them. */
-    .ko_zzic_verified = 1,
+    .ko_verified = 1,
     .ko_filename      = "dirtyfrag-android15-6.6-S938BXXUCZZIC.ko",
     .ko_sha256 =
         "b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017",
@@ -128,7 +128,7 @@ dfr_module_policy dfr_module_policy_eval(dfr_target_class cls,
      * "cannot evaluate" is a refusal, never a pass. */
     if (p == NULL)
         return DFR_MODULE_POLICY_REFUSE_UNVERIFIED;
-    if (!p->ko_zzic_verified)
+    if (!p->ko_verified)
         return DFR_MODULE_POLICY_REFUSE_UNVERIFIED;
     if (p->ko_sha256 == NULL || p->ko_sha256[0] == 0)
         return DFR_MODULE_POLICY_REFUSE_NO_DIGEST;

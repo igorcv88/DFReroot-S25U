@@ -673,13 +673,13 @@ Gate-G module policy, so a fail-closed module refusal happened after the first
 page-cache write. Module selection and the policy decision are pure lookups and
 now run before any write.
 
-**Section 39 — `ko_zzic_verified` is no longer a bare boolean.** Nothing bound
+**Section 39 — `ko_verified` is no longer a bare boolean.** Nothing bound
 the flag to the bytes it vouched for: flipping it to 1 would have loaded
 whatever module was bundled. The profile gained `ko_filename` + `ko_sha256`, and
 the invariant
 
 ```
-ko_zzic_verified == 1  IMPLIES  ko_sha256 pinned
+ko_verified == 1  IMPLIES  ko_sha256 pinned
                        AND      SHA-256(selected module bytes) == ko_sha256
 ```
 
@@ -774,9 +774,9 @@ Four review findings were verified and fixed:
   `patch_ko()` gate. Both now re-run the fail-closed gate at entry.
 - **P1 — refuse the unverified module on ZZIC.** `patch_ko()` no longer proceeds
   to corrupt the vendor file with the Gate-G `UNVERIFIED` generic module on the
-  ZZIC target. It refused unless `ko_zzic_verified` was set or an operator
+  ZZIC target. It refused unless `ko_verified` was set or an operator
   override marker was present; the marker was later removed outright (see
-  *Strict Gate-G policy* below), so `ko_zzic_verified` bound to the module digest
+  *Strict Gate-G policy* below), so `ko_verified` bound to the module digest
   is now the only way through.
 - **P2 — compare `kernel_version` + `kernel_arch`.** Both are now in
   `ObservedTarget` and the fail-closed identity check; a rebuilt kernel with a
@@ -1764,7 +1764,7 @@ away silently.
 the three profile fields, and they move together or not at all:
 
 ```c
-.ko_zzic_verified = 1,
+.ko_verified = 1,
 .ko_filename      = "<exact filename>",
 .ko_sha256        = "<sha256 of exactly those bundled bytes>",
 ```

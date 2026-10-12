@@ -323,25 +323,25 @@ static void test_module_policy(void) {
     /* Clearing the flag refuses again, whatever else stays pinned. The policy
      * never infers permission from a digest that happens to be there. */
     p = DFR_PROFILE_ZZIC;
-    p.ko_zzic_verified = 0;
+    p.ko_verified = 0;
     v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
     CHECK(v == DFR_MODULE_POLICY_REFUSE_UNVERIFIED && !dfr_module_policy_permits(v),
-          "ko_zzic_verified=0 with a digest pinned -> REFUSE_UNVERIFIED (%s)",
+          "ko_verified=0 with a digest pinned -> REFUSE_UNVERIFIED (%s)",
           dfr_module_policy_name(v));
 
     /* A bare flag is not evidence: no digest, no filename -> still refused. */
     p = DFR_PROFILE_ZZIC;
-    p.ko_zzic_verified = 1;
+    p.ko_verified = 1;
     p.ko_sha256 = NULL;
     p.ko_filename = NULL;
     v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
     CHECK(v == DFR_MODULE_POLICY_REFUSE_NO_DIGEST && !dfr_module_policy_permits(v),
-          "ko_zzic_verified=1 with no ko_sha256 -> REFUSE_NO_DIGEST (%s)",
+          "ko_verified=1 with no ko_sha256 -> REFUSE_NO_DIGEST (%s)",
           dfr_module_policy_name(v));
 
     /* An empty-string digest is "not pinned", not "pinned to nothing". */
     p = DFR_PROFILE_ZZIC;
-    p.ko_zzic_verified = 1;
+    p.ko_verified = 1;
     p.ko_sha256 = "";
     p.ko_filename = "dirtyfrag-zzic.ko";
     v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
@@ -350,7 +350,7 @@ static void test_module_policy(void) {
 
     /* All three fields go together: a digest without a filename is refused. */
     p = DFR_PROFILE_ZZIC;
-    p.ko_zzic_verified = 1;
+    p.ko_verified = 1;
     p.ko_sha256 = "00112233445566778899aabbccddeeff"
                   "00112233445566778899aabbccddeeff";
     p.ko_filename = NULL;
@@ -586,15 +586,15 @@ static void test_profile_invariants(void) {
      * invariant - so assert the conjunction rather than the flag, in either
      * direction. A future revert to UNVERIFIED must clear all three, and this
      * fails if it clears only some. */
-    CHECK((p->ko_zzic_verified == 1 && p->ko_filename != NULL &&
+    CHECK((p->ko_verified == 1 && p->ko_filename != NULL &&
            p->ko_sha256 != NULL) ||
-          (p->ko_zzic_verified == 0 && p->ko_filename == NULL &&
+          (p->ko_verified == 0 && p->ko_filename == NULL &&
            p->ko_sha256 == NULL),
           "the three ko_* fields move together: verified=%d filename=%s digest=%s",
-          p->ko_zzic_verified,
+          p->ko_verified,
           p->ko_filename ? p->ko_filename : "<none>",
           p->ko_sha256 ? "pinned" : "<none>");
-    CHECK(p->ko_zzic_verified == 1 &&
+    CHECK(p->ko_verified == 1 &&
           dfr_streq(p->ko_filename, "dirtyfrag-android15-6.6-S938BXXUCZZIC.ko") &&
           is_lower_hex64(p->ko_sha256),
           "the pinned module is the exact-kernel one, digest as 64 lowercase hex");

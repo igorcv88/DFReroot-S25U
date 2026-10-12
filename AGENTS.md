@@ -144,12 +144,22 @@ before it is written.
 
 ### 3.5 A boolean is not evidence — bind claims to bytes
 
-`ko_zzic_verified == 1` IMPLIES `ko_sha256` is pinned AND `ko_filename` names a
+`ko_verified == 1` IMPLIES `ko_sha256` is pinned AND `ko_filename` names a
 bundled module AND `SHA-256(the bytes actually selected) == ko_sha256`.
 
 All three fields move together or none do. Enforced at run time in `patch_ko()`
 and offline in `tools/profile_binding_audit.py`, which also rejects a stale
 digest left pinned while the flag is 0.
+
+The field was called `ko_zzic_verified`. It is `ko_verified` because the claim
+it carries is "the module bundled for *this* profile was validated against
+*this* profile's kernel", and a second profile would have made the old name
+assert ZZIC's answer about a different firmware's module. Renaming it is safe
+to do piecemeal for one specific reason: the audit looks the field up by name
+in the parsed C profile, so a site left behind reads back as absent and the
+audit refuses — `ko_zzic_verified is None; expected 0 or 1`. A half-finished
+rename fails loudly instead of quietly disabling the gate, which is the only
+reason this was not deferred to the change that needs it.
 
 `MODULE_VS_ZZIC_KERNEL = COMPATIBLE` from `tools/ko_audit.py`, against the exact
 kernel's `Module.symvers`, is the **only** result that justifies setting them.

@@ -182,13 +182,18 @@ struct TargetProfile {
 
     /*
      * Whether a kernel module positively validated for THIS firmware is bundled
-     * (Gate G COMPATIBLE against the ZZIC Module.symvers). 0 = only the generic
-     * android15-6.6 module is available and it is Gate-G UNVERIFIED, so loading
-     * it on ZZIC is fail-closed-refused unless the operator opts in explicitly.
+     * (Gate G COMPATIBLE against that firmware's own Module.symvers, or a table
+     * derived from it under §3.5's rules). 0 = only the generic android15-6.6
+     * module is available and it is Gate-G UNVERIFIED, so loading it on the
+     * exact target is fail-closed-refused.
+     *
+     * The flag is per profile, which is why its name no longer carries a
+     * firmware: ZZIC's verdict about ZZIC's module says nothing about another
+     * firmware's, and a shared name would have invited exactly that reading.
      *
      * A bare boolean is not evidence. The invariant the runtime enforces is:
      *
-     *   ko_zzic_verified == 1
+     *   ko_verified == 1
      *     IMPLIES ko_sha256 is pinned
      *     AND SHA-256(bundled module bytes actually selected) == ko_sha256
      *
@@ -197,7 +202,7 @@ struct TargetProfile {
      * refuses at run time instead of silently loading an unvalidated module.
      * tools/profile_binding_audit.py enforces the same invariant in CI.
      */
-    int         ko_zzic_verified;
+    int         ko_verified;
     const char *ko_filename;  /* validated module's filename, or NULL */
     const char *ko_sha256;    /* its lowercase hex SHA-256, or NULL */
 };
@@ -224,7 +229,7 @@ typedef enum {
 typedef enum {
     DFR_MODULE_POLICY_NOT_APPLICABLE     = 0, /* not the exact ZZIC target */
     DFR_MODULE_POLICY_ALLOW              = 1, /* all three ko_* fields present */
-    DFR_MODULE_POLICY_REFUSE_UNVERIFIED  = 2, /* ko_zzic_verified = 0 */
+    DFR_MODULE_POLICY_REFUSE_UNVERIFIED  = 2, /* ko_verified = 0 */
     DFR_MODULE_POLICY_REFUSE_NO_DIGEST   = 3, /* flag set, ko_sha256 unpinned */
     DFR_MODULE_POLICY_REFUSE_NO_FILENAME = 4  /* flag set, ko_filename unset */
 } dfr_module_policy;
@@ -239,7 +244,7 @@ typedef enum {
  * reachable outcome, so the whole chain refuses at its first stage instead of
  * refusing only at the last one.
  *
- * A bare boolean is not evidence: ko_zzic_verified=1 grants nothing unless
+ * A bare boolean is not evidence: ko_verified=1 grants nothing unless
  * ko_sha256 and ko_filename are pinned alongside it (the header invariant above,
  * dossier section 39). `p` may be NULL only when `cls` is not the ZZIC target.
  */
