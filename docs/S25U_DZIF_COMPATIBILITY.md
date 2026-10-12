@@ -384,10 +384,12 @@ Four of these are one `getprop` each and can be collected in a single session:
 
 ### Needs a build, not a read
 
+One of the two has since been built.
+
 | what | which build |
 | --- | --- |
-| `ksud_sha256`, `ksud_size` | the DZIF `ksud` under the **dfreroot** staging contract, which stages from `/data/system/dfreroot-ksud` instead of world-writable `/data/local/tmp`. The published DZIF `ksud` is the **rmg** one and is not a substitute - `AGENTS.md` §3.6 is the reason the two contracts exist separately |
-| `ko_filename`, `ko_sha256`, `ko_verified` | a DZIF `dirtyfrag-android15-6.6.ko`. The module already built for DZIF is **KernelSU's**, not DirtyFrag's; they are different modules with different imports, and the KernelSU one is no evidence about this one. What its build *can* reuse is the input that was the hard part: the exact Image export table and its provenance now exist in `RMGLabs-Payloads` under `kernelsu/evidence/pa3q-S938BXXUCDZIF/`, so a DZIF DirtyFrag module can be audited against the same CRCs |
+| ~~`ksud_sha256`, `ksud_size`~~ | **built and published.** `kernelsu/ksud-pa3q-S938BXXUCDZIF-dfreroot-v3.3.0` in `RMGLabs-Payloads`, 6,665,720 bytes, `f680f959472e994110eb1281d6aa47ed3cd934ae5775f5e9e378a2e946ae69e3`, matching its own committed `.sha256`. Checked here rather than taken on the name: it carries `/data/system/dfreroot-ksud`, `/data/system/dfreroot-post-root`, `POST_ROOT_KSU_CONTROL=PASS`, `/data/system/dfreroot-ko-loaded`, `DFR_KO_LOADED=PASS` and both halves of §3.6.1's marker (`transport_fix=`, `kdp-cred-1`), and does **not** carry `/data/local/tmp/.ksud-stage`. The separately published **rmg** `ksud` is not a substitute and carries the opposite set - `AGENTS.md` §3.6 is why the two contracts exist apart |
+| `ko_filename`, `ko_sha256`, `ko_verified` | a DZIF `dirtyfrag-android15-6.6.ko`. **Still open**, and the easiest thing on this page to think is already done: both modules built for DZIF so far are **KernelSU's** (one per staging contract). They are a different module with different imports, and neither is evidence about this one. What their build *does* hand over is the input that was the hard part - the exact Image export table and its provenance now exist in `RMGLabs-Payloads` under `kernelsu/evidence/pa3q-S938BXXUCDZIF/`, so a DZIF DirtyFrag module can be audited against the same 9,153 CRCs, and `MODULE_VS_DZIF_KERNEL = COMPATIBLE` is reachable for it rather than undecidable |
 
 ### Deliberately not on this list
 
