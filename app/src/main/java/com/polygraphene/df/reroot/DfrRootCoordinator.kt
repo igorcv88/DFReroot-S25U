@@ -302,6 +302,53 @@ object DfrRootCoordinator {
                 return refused("no CONTROLLER binder from network_stack", bootId)
             }
 
+            /*
+             * Transaction 6 is deliberately before beforeNativeRun() and before
+             * nativeStarted becomes true. It exercises only non-destructive
+             * syscall/capability probes in the actual network_stack domain.
+             * A seccomp/capability refusal therefore spends no destructive
+             * attempt and cannot leave a half-patched page cache behind.
+             */
+            host.log("[DFR][PREFLIGHT] running remote non-destructive syscall probes\n")
+            val preflightData = Parcel.obtain()
+            val preflightReply = Parcel.obtain()
+            try {
+                val preflightReporter = object : Binder() {
+                    override fun onTransact(
+                        code: Int, data: Parcel, reply: Parcel?, flags: Int
+                    ): Boolean {
+                        try {
+                            host.log(data.readString() ?: "")
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "preflight reporter recv failed", t)
+                        }
+                        return true
+                    }
+                }
+                preflightData.writeStrongBinder(preflightReporter)
+                if (!c.transact(6, preflightData, preflightReply, 0)) {
+                    return refused("remote preflight transaction 6 returned false", bootId)
+                }
+                val preflightResult = preflightReply.readInt()
+                host.log("[DFR][PREFLIGHT] remote result=$preflightResult\n")
+                if (preflightResult != 0) {
+                    return refused(
+                        "remote syscall preflight failed mask=0x" +
+                            preflightResult.toString(16),
+                        bootId
+                    )
+                }
+            } catch (t: Throwable) {
+                host.log("[DFR][PREFLIGHT] transaction 6 failed: ${t.message}\n")
+                return refused(
+                    "remote preflight transaction 6 threw ${t.javaClass.simpleName}",
+                    bootId
+                )
+            } finally {
+                preflightData.recycle()
+                preflightReply.recycle()
+            }
+
             if (!host.beforeNativeRun()) {
                 return refused("the caller withdrew before the native run", bootId)
             }

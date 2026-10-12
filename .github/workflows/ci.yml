@@ -46,8 +46,11 @@ jobs:
       - name: Release tag resolution tests (stubbed gh, no network)
         run: sh tools/tests/test_resolve_release_tag.sh
 
-      - name: Profile / module binding invariant (dossier section 39)
+      - name: Profile / module binding invariant (ZZIC)
         run: python3 tools/profile_binding_audit.py
+
+      - name: Profile / module binding invariant (DZIF)
+        run: python3 tools/dzif_profile_binding_audit.py
 
       - name: Python tool syntax
         run: python3 -m compileall -q tools
@@ -105,10 +108,33 @@ jobs:
 
       - name: Gate G - bundled kernel module ABI audit
         run: |
+          set -euo pipefail
+
+          ZZIC_KO="app/src/main/jni/dirtyfrag-android15-6.6-S938BXXUCZZIC.ko"
+          DZIF_KO="app/src/main/jni/dirtyfrag-android15-6.6-S938BXXUCDZIF.ko"
+
+          test -s "$ZZIC_KO"
+          test -s "$DZIF_KO"
+
           for ko in app/src/main/jni/dirtyfrag-android*.ko; do
+            [ "$ko" = "$ZZIC_KO" ] && continue
+            [ "$ko" = "$DZIF_KO" ] && continue
             echo "### $ko"
             python3 tools/ko_audit.py "$ko"
           done
+
+          echo "### $ZZIC_KO (strict ZZIC acceptance)"
+          python3 tools/ko_audit.py "$ZZIC_KO" \
+            --symvers evidence/zzic/gate-g/ZZIC-derived-minimal.symvers \
+            --symvers-provenance evidence/zzic/gate-g/ZZIC-modversion-provenance.json \
+            --require-modversion-coverage
+
+          echo "### $DZIF_KO (strict DZIF acceptance)"
+          python3 tools/ko_audit.py "$DZIF_KO" \
+            --symvers evidence/dzif/gate-g/DZIF-derived-minimal.symvers \
+            --symvers-provenance evidence/dzif/gate-g/DZIF-modversion-provenance.json \
+            --target-profile-json tools/dzif_profile.json \
+            --require-modversion-coverage
 
       - name: Gate H - installer round-trip on a synthetic packages.xml
         run: |

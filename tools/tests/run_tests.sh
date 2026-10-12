@@ -41,3 +41,7 @@ python3 tools/tests/test_derive_symvers.py
 # Assembly/native/UI ordering cannot run on the host, so guard the exact
 # branch/order shape that keeps finit_module errors and dfm3 fail-closed.
 python3 tools/tests/test_post_root_contract.py
+# The remote NetworkStack preflight must remain before transaction 5 and must
+# exercise only non-destructive syscall families.
+python3 tools/tests/test_dzif_preflight_static.py
+

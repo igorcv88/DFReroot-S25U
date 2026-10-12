@@ -129,8 +129,11 @@ jobs:
       - name: Release tag resolution tests (stubbed gh, no network)
         run: sh tools/tests/test_resolve_release_tag.sh
 
-      - name: Profile / module binding invariant (dossier section 39)
+      - name: Profile / module binding invariant (ZZIC)
         run: python3 tools/profile_binding_audit.py
+
+      - name: Profile / module binding invariant (DZIF)
+        run: python3 tools/dzif_profile_binding_audit.py
 
       - name: Gate F - userspace ELF audit tool (no artefacts, expect UNVERIFIED)
         run: python3 tools/elf_audit.py
@@ -186,14 +189,17 @@ jobs:
           set -euo pipefail
 
           ZZIC_KO="app/src/main/jni/dirtyfrag-android15-6.6-S938BXXUCZZIC.ko"
+          DZIF_KO="app/src/main/jni/dirtyfrag-android15-6.6-S938BXXUCDZIF.ko"
 
           test -s "$ZZIC_KO"
+          test -s "$DZIF_KO"
 
-          # Generic family modules keep their normal structural audit. The exact
-          # ZZIC image is deliberately excluded here and audited below against
-          # the provenance-bound target CRC table with mandatory full coverage.
+          # Generic family modules keep their normal structural audit. Exact
+          # firmware-bound images are deliberately excluded and audited below
+          # against their own provenance-bound CRC tables with full coverage.
           for ko in app/src/main/jni/dirtyfrag-android*.ko; do
             [ "$ko" = "$ZZIC_KO" ] && continue
+            [ "$ko" = "$DZIF_KO" ] && continue
             echo "### $ko"
             python3 tools/ko_audit.py "$ko"
           done
@@ -202,6 +208,13 @@ jobs:
           python3 tools/ko_audit.py "$ZZIC_KO" \
             --symvers evidence/zzic/gate-g/ZZIC-derived-minimal.symvers \
             --symvers-provenance evidence/zzic/gate-g/ZZIC-modversion-provenance.json \
+            --require-modversion-coverage
+
+          echo "### $DZIF_KO (strict DZIF acceptance)"
+          python3 tools/ko_audit.py "$DZIF_KO" \
+            --symvers evidence/dzif/gate-g/DZIF-derived-minimal.symvers \
+            --symvers-provenance evidence/dzif/gate-g/DZIF-modversion-provenance.json \
+            --target-profile-json tools/dzif_profile.json \
             --require-modversion-coverage
 
       - name: Decode signing keystore
@@ -284,7 +297,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           {
-            echo "## DFReroot ${VER} — Galaxy S25 Ultra SM-S938B / S938BXXUCZZIC"
+            echo "## DFReroot ${VER} — Galaxy S25 Ultra SM-S938B / ZZIC + DZIF exact profiles"
             echo
             echo "Install \`df_installer_${VER}.apk\` first; \`df_reroot_${VER}.apk\` is also"
             echo "bundled inside it, so it does not need to be sideloaded separately."

@@ -30,7 +30,14 @@ def load():
         [sys.executable, os.path.join(HERE, "profile_binding_audit.py"), "--json"],
         cwd=ROOT, stdout=subprocess.PIPE, check=False)
     audit = json.loads(out.stdout.decode())
-    return profile, audit
+
+    with open(os.path.join(HERE, "dzif_profile.json")) as f:
+        dzif_profile = json.load(f)
+    dzif_out = subprocess.run(
+        [sys.executable, os.path.join(HERE, "dzif_profile_binding_audit.py"), "--json"],
+        cwd=ROOT, stdout=subprocess.PIPE, check=False)
+    dzif_audit = json.loads(dzif_out.stdout.decode())
+    return profile, audit, dzif_profile, dzif_audit
 
 
 def short(h):
@@ -39,7 +46,7 @@ def short(h):
 
 def main():
     try:
-        profile, audit = load()
+        profile, audit, dzif_profile, dzif_audit = load()
     except Exception as e:  # noqa: BLE001
         print("cannot build release notes from the profile: %s" % e, file=sys.stderr)
         return 1
@@ -157,8 +164,53 @@ def main():
     add("")
     if not binding_ok:
         # Should be unreachable: release.yml runs the audit as a gate first.
-        add("> **The profile/module binding audit did not pass for this build.**")
+        add("> **The ZZIC profile/module binding audit did not pass for this build.**")
         add("")
+
+    add("### DZIF exact-target state")
+    add("")
+    dzif_ok = dzif_audit.get("status") == "PASS"
+    dzif_checks = dzif_audit.get("checks") or {}
+    add("This APK also carries a fail-closed exact profile for `S25U_DZIF` "
+        "(`%s`)." % dzif_profile.get("display"))
+    add("Its identity, DFR-specific ksud and exact kernel module are independent "
+        "from the ZZIC artifacts; neither exact module is reachable through the "
+        "generic android15/6.6 family table.")
+    add("")
+    add("| DZIF boundary | State | Evidence |")
+    add("| --- | --- | --- |")
+    add("| exact firmware identity | pinned | `%s` / `%s` |"
+        % (dzif_profile.get("model"), dzif_profile.get("kernel_release")))
+    add("| exact DirtyFrag module | %s | `%s`, sha256 `%s` |"
+        % ("offline PASS" if dzif_ok else "**FAIL**",
+           dzif_profile.get("ko_filename"),
+           short(dzif_profile.get("ko_sha256"))))
+    add("| CONFIG_MODVERSIONS | %s | `%s` |"
+        % ("offline PASS" if dzif_ok else "**FAIL**",
+           dzif_checks.get("MODVERSION_COVERAGE", "<unknown>")))
+    add("| DFR ksud | %s | %s bytes, sha256 `%s` |"
+        % ("offline PASS" if dzif_ok else "**FAIL**",
+           dzif_profile.get("ksud_size"),
+           short(dzif_profile.get("ksud_sha256"))))
+    add("| StageHop / NetworkStack / libexp | physical PASS on DZIF | the earlier "
+        "DZIF field run reached uid 1073 / `u:r:network_stack:s0`, "
+        "`scheduleReceiver/12`, CONTROLLER and `LIBEXP_LOADED=PASS` |")
+    add("| remote syscall preflight | **requires physical validation** | transaction 6 "
+        "runs inside NetworkStack and refuses before transaction 5 if NETLINK_XFRM, "
+        "UDP_ENCAP, mmap/pipe/vmsplice/splice or fork/wait is denied |")
+    add("| DirtyFrag page-cache write / post-root completion | **UNVERIFIED on DZIF** | "
+        "the exact module is ABI-audited offline, but the destructive chain has not "
+        "yet been accepted by a physical DZIF run |")
+    add("")
+    add("For the first DZIF field run, capture the transaction-6 preflight output. "
+        "A non-zero preflight result is a clean refusal: transaction 5 is not issued "
+        "and `nativeStarted` remains false. Do not treat the offline Gate-G PASS "
+        "as proof that CVE-2026-43284 is exploitable on this firmware.")
+    add("")
+    if not dzif_ok:
+        add("> **The DZIF exact-profile binding audit did not pass for this build.**")
+        add("")
+
     print("\n".join(L))
     return 0
 
