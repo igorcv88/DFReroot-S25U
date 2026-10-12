@@ -28,7 +28,7 @@ if [ -n "${ANDROID_HOME:-}" ]; then
 fi
 echo
 echo "## Native module payloads (compiled-in .ko + splicehelper + ksud asset)"
-for f in app/src/main/jni/dirtyfrag-android*.ko app/src/main/assets/ksud; do
+for f in app/src/main/jni/dirtyfrag-android*.ko app/src/main/assets/ksud app/src/main/assets/ksud-dzif; do
     [ -f "$f" ] && printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"
 done
 echo
@@ -52,5 +52,6 @@ if [ -f df_reroot.apk ]; then
     rm -rf "$tmp"
 fi
 echo
-echo "## Selected profile"
-echo "TARGET_PROFILE  : S25U_ZZIC (fail-closed; see app/src/main/jni/target_profile.c)"
+echo "## Exact profiles"
+echo "TARGET_PROFILE  : S25U_ZZIC (exact; see app/src/main/jni/target_profile.c)"
+echo "TARGET_PROFILE  : S25U_DZIF (exact; see app/src/main/jni/target_profile.c)"
