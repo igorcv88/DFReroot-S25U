@@ -149,11 +149,11 @@ jobs:
               echo "$TARGET_RELEASE"
 
               echo
-              echo "=== EXACT ZZIC CRC EVIDENCE ==="
+              echo "=== EXACT DZIF CRC EVIDENCE ==="
               cat "$EXACT"
 
               #
-              # Force exact ZZIC kernel release into the external module.
+              # Force exact DZIF kernel release into the external module.
               #
               mkdir -p \
                 "$KDIR/include/config" \
@@ -173,7 +173,7 @@ jobs:
                 "$KDIR/Module.symvers" || true
 
               #
-              # Patch the DDK table with the derived ZZIC CRCs using the tool this
+              # Patch the DDK table with the derived DZIF CRCs using the tool this
               # repo already has, not a second copy of the same logic inline here.
               #
               # tools/patch_symvers_crcs.py is unit-tested (row shape preserved
@@ -189,6 +189,7 @@ jobs:
                 --base "$KDIR/Module.symvers.ddk.bak" \
                 --derived "$EXACT" \
                 --provenance /work/evidence/dzif/gate-g/DZIF-modversion-provenance.json \
+                --target-profile-json /work/tools/dzif_profile.json \
                 --out "$KDIR/Module.symvers"
 
               echo

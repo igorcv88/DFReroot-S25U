@@ -47,7 +47,7 @@ sys.path.insert(0, HERE)
 import ko_audit  # noqa: E402
 
 
-def load_derived(path, provenance):
+def load_derived(path, provenance, target_profile_json=None):
     """The derived CRCs, but only if their provenance holds up.
 
     This tool is a second door into those numbers, so it demands exactly what
@@ -58,8 +58,9 @@ def load_derived(path, provenance):
     crcs, _ = ko_audit.load_symvers(path)
     if not crcs:
         raise SystemExit("%s holds no symbol rows" % path)
+    target_release = ko_audit.pinned_kernel_release(target_profile_json)
     kind, summary, violations = ko_audit.check_derived_provenance(
-        path, provenance, ko_audit.pinned_kernel_release())
+        path, provenance, target_release, target_profile_json)
     if violations:
         raise SystemExit(
             "refusing to use %s:\n  %s" % (path, "\n  ".join(violations)))
@@ -116,11 +117,15 @@ def main():
                     help="evidence/zzic/gate-g/ZZIC-derived-minimal.symvers")
     ap.add_argument("--provenance",
                     help="its provenance JSON; found beside it by default")
+    ap.add_argument("--target-profile-json",
+                    help="exact-target profile whose kernel_release binds the "
+                         "derived witnesses; defaults to tools/zzic_profile.json")
     ap.add_argument("--out", required=True,
                     help="where to write the modpost-ready table (may equal --base)")
     a = ap.parse_args()
 
-    crcs, kind, summary = load_derived(a.derived, a.provenance)
+    crcs, kind, summary = load_derived(
+        a.derived, a.provenance, a.target_profile_json)
     lines, found = patch(a.base, crcs)
 
     print("=== modpost-ready symbol table ===")

@@ -439,6 +439,22 @@ def main():
     check(kind == "DERIVED" and crcs == {n: c for n, c in TRUE_CRCS},
           "with its provenance it loads exactly the derived CRCs")
 
+    # The patcher must be able to bind the same provenance rules to a second
+    # exact target rather than silently falling back to the historical ZZIC pin.
+    other_profile = os.path.join(td, "other_profile.json")
+    with open(other_profile, "w") as f:
+        json.dump({"kernel_release": OTHER.split()[0]}, f)
+    try:
+        psv.load_derived(out_other, prov_other)
+        check(False, "non-ZZIC evidence is refused when no target profile is named")
+    except SystemExit as ex:
+        check("not the pinned" in str(ex),
+              "the patcher defaults to the historical ZZIC profile")
+    crcs, kind, _ = psv.load_derived(
+        out_other, prov_other, target_profile_json=other_profile)
+    check(kind == "DERIVED" and crcs == {n: c for n, c in TRUE_CRCS},
+          "an explicitly selected second exact profile accepts its own witnesses")
+
     # --- exit status -------------------------------------------------------
     rc = subprocess.call([sys.executable,
                           os.path.join(TOOLS, "derive_zzic_symvers.py"), w1],
