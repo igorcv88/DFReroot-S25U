@@ -1,119 +1,115 @@
 package com.polygraphene.df.reroot
 
 import android.content.Context
+import android.os.Build
 import java.io.File
 import java.security.MessageDigest
 
 object KsudStage {
     const val TAG = "SysPersist"
-
-    /**
-     * Where the daemon is staged for the privileged handoff.
-     *
-     * This is not an arbitrary choice on either side any more: the RMG ZZIC ksud
-     * is built with the `dfreroot` staging contract and calls
-     * `stage_daemon_from("/data/system/dfreroot-ksud")` — this exact path,
-     * compiled in. It is `system:system` and not world-writable, which is why
-     * this app may reference it at all: AGENTS.md §3.6 forbids naming a
-     * world-writable staging directory anywhere in code that ships here, and the
-     * audit enforces that by mechanism rather than by spelling - comments
-     * included, which is why this one describes the path instead of writing it.
-     *
-     * Both paths live on /data, so the daemon's own `rename(2)` onto
-     * /data/adb/ksud does not cross a filesystem.
-     */
     const val DEST = "/data/system/dfreroot-ksud"
 
-    /**
-     * The exact ksud these bytes must be. Mirrors `.ksud_sha256` / `.ksud_size`
-     * in target_profile.c and tools/zzic_profile.json;
-     * tools/profile_binding_audit.py fails on drift between the three copies and
-     * on a bundled asset whose digest is not this one.
-     */
-    private const val KSUD_SHA256 =
-        "d0cb516da0047b1b918f84adf8ce7a389c6285de9282cd6301514a40849af7fc"
-    private const val KSUD_SIZE = 6674552L
+    private data class KsudSpec(
+        val profileId: String,
+        val fingerprint: String,
+        val assetName: String,
+        val sha256: String,
+        val size: Long,
+    )
 
-    /**
-     * The pinned digest, for code that must bind a decision to these exact bytes
-     * without re-hashing them - the Auto Root qualification, which is void the
-     * moment the daemon changes. Exposed as a function rather than copied, so
-     * there is still exactly one literal in this app and the binding audit still
-     * has one place to compare against target_profile.c and zzic_profile.json.
-     */
-    fun pinnedKsudSha256(): String = KSUD_SHA256
+    private val ZZIC = KsudSpec(
+        profileId = "S25U_ZZIC",
+        fingerprint =
+            "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/" +
+                "S938BXXUCZZIC_OXMCZZIC:user/release-keys",
+        assetName = "ksud",
+        sha256 =
+            "d0cb516da0047b1b918f84adf8ce7a389c6285de9282cd6301514a40849af7fc",
+        size = 6674552L,
+    )
+
+    private val DZIF = KsudSpec(
+        profileId = "S25U_DZIF",
+        fingerprint =
+            "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/" +
+                "S938BXXUCDZIF_OXMCDZIF:user/release-keys",
+        assetName = "ksud-dzif",
+        sha256 =
+            "f680f959472e994110eb1281d6aa47ed3cd934ae5775f5e9e378a2e946ae69e3",
+        size = 6665720L,
+    )
+
+    private fun currentSpec(): KsudSpec? = when (Build.FINGERPRINT) {
+        ZZIC.fingerprint -> ZZIC
+        DZIF.fingerprint -> DZIF
+        else -> null
+    }
+
+    fun pinnedKsudSha256(): String = currentSpec()?.sha256 ?: ""
 
     fun stageFromAssets(context: Context): String {
+        val spec = currentSpec()
+            ?: return "[x] KSUD_PROFILE=FAIL unsupported fingerprint=${Build.FINGERPRINT}\n"
+
         val raw = try {
-            context.assets.open("ksud").use { it.readBytes() }
+            context.assets.open(spec.assetName).use { it.readBytes() }
         } catch (t: Throwable) {
-            return "[x] assets/ksud unreadable: $t (rebuild with ./build.sh?)\n"
+            return "[x] assets/${spec.assetName} unreadable: $t\n"
         }
-        return stageBytes(raw)
+        return stageBytes(raw, spec)
     }
 
     fun stageBytes(raw: ByteArray): String {
+        val spec = currentSpec()
+            ?: return "[x] KSUD_PROFILE=FAIL unsupported fingerprint=${Build.FINGERPRINT}\n"
+        return stageBytes(raw, spec)
+    }
+
+    private fun stageBytes(raw: ByteArray, spec: KsudSpec): String {
         val s = StringBuilder()
+        s.appendLine("[*] ksud profile ${spec.profileId} asset=${spec.assetName}")
         s.appendLine("[*] ksud asset ${raw.size} bytes")
 
-        /*
-         * Identity BEFORE the write, and again after. A daemon that is about to
-         * be handed uid 0 is the last thing that should be staged on trust: "we
-         * shipped a ksud" is not evidence that we shipped THIS one, and the asset
-         * is an opaque 6.6 MB binary nobody eyeballs.
-         *
-         * Size is checked separately from the digest so a truncated read is
-         * reported as truncation rather than as a mismatch that looks like the
-         * wrong binary.
-         */
-        if (raw.size.toLong() != KSUD_SIZE) {
-            s.appendLine("[x] KSUD_SIZE=FAIL asset is ${raw.size} bytes, pinned $KSUD_SIZE")
-            s.appendLine("[x] refusing to stage: a short read is not the pinned daemon")
+        if (raw.size.toLong() != spec.size) {
+            s.appendLine("[x] KSUD_SIZE=FAIL asset is ${raw.size} bytes, pinned ${spec.size}")
             return s.toString()
         }
+
         val actual = sha256(raw)
         s.appendLine("[*] ksud sha256 $actual")
-        if (actual != KSUD_SHA256) {
-            s.appendLine("[x] KSUD_IDENTITY=FAIL expected $KSUD_SHA256")
-            s.appendLine("[x] refusing to stage: these are not the verified ZZIC ksud bytes")
+        if (actual != spec.sha256) {
+            s.appendLine("[x] KSUD_IDENTITY=FAIL expected ${spec.sha256}")
             return s.toString()
         }
-        s.appendLine("[+] KSUD_IDENTITY=PASS (matches the pinned ZZIC daemon)")
+        s.appendLine("[+] KSUD_IDENTITY=PASS (matches pinned ${spec.profileId} daemon)")
 
         try {
             File(DEST).writeBytes(raw)
-            android.system.Os.chmod(DEST, 448) // 0700
+            android.system.Os.chmod(DEST, 448)
         } catch (t: Throwable) {
             s.appendLine("[!] $DEST not writable: ${t.javaClass.simpleName}: ${t.message}")
             return s.toString()
         }
 
-        /*
-         * Re-read what actually landed. A short write, a full filesystem or
-         * anything that rewrote the file between the two moments must surface
-         * here, not on the device as a daemon that fails for no visible reason.
-         */
         val back = try {
             File(DEST).readBytes()
         } catch (t: Throwable) {
             s.appendLine("[x] staged file unreadable: ${t.javaClass.simpleName}")
             return s.toString()
         }
+
         val backDigest = sha256(back)
-        if (back.size != raw.size || backDigest != KSUD_SHA256) {
+        if (back.size != raw.size || backDigest != spec.sha256) {
             s.appendLine("[x] KSUD_STAGED_VERIFY=FAIL ${back.size} bytes, sha256 $backDigest")
-            s.appendLine("[x] the staged file is not what was written; refusing to proceed")
             return s.toString()
         }
+
         s.appendLine("[+] KSUD_STAGED_VERIFY=PASS")
         s.appendLine("[+] staged $DEST (${raw.size} bytes)")
         return s.toString()
     }
 
-    private fun sha256(b: ByteArray): String {
-        val d = MessageDigest.getInstance("SHA-256").digest(b)
-        val sb = StringBuilder(64)
-        for (x in d) sb.append("%02x".format(x))
-        return sb.toString()
-    }
+    private fun sha256(b: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(b)
+            .joinToString("") { "%02x".format(it) }
 }

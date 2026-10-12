@@ -5,6 +5,7 @@
  * same object is exercised by the host unit tests.
  */
 #include "target_profile.h"
+#include "dzif_generated_profile.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -188,9 +189,9 @@ const struct TargetProfile DFR_PROFILE_DZIF = {
      * DZIF witness table. This makes recognition of DZIF safe to merge before
      * the binary artifact exists: every page-cache entry point refuses at Gate G.
      */
-    .ko_verified = 0,
-    .ko_filename = NULL,
-    .ko_sha256   = NULL,
+    .ko_verified = DFR_DZIF_KO_VERIFIED,
+    .ko_filename = DFR_DZIF_KO_FILENAME,
+    .ko_sha256   = DFR_DZIF_KO_SHA256,
 };
 
 int dfr_streq(const char *a, const char *b) {

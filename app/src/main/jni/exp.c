@@ -30,6 +30,7 @@
 #include <sys/xattr.h>
 #include "logging.h"
 #include "target_profile.h"
+#include "dzif_generated_profile.h"
 #include "sha256.h"
 
 #ifndef UDP_ENCAP
@@ -741,6 +742,17 @@ asm(
     "dirtyfrag_ko_zzic_end:\n"
 );
 
+#if DFR_DZIF_KO_VERIFIED
+asm(
+    ".section .rodata\n"
+    ".global dirtyfrag_ko_dzif_start\n"
+    ".global dirtyfrag_ko_dzif_end\n"
+    "dirtyfrag_ko_dzif_start:\n"
+    ".incbin \"dirtyfrag-android15-6.6-S938BXXUCDZIF.ko\"\n"
+    "dirtyfrag_ko_dzif_end:\n"
+);
+#endif
+
 asm(
     ".section .rodata\n"
     ".global splice_helper_start\n"
@@ -768,6 +780,10 @@ extern char dirtyfrag_ko_17_6_18_start[];
 extern char dirtyfrag_ko_17_6_18_end[];
 extern char dirtyfrag_ko_zzic_start[];
 extern char dirtyfrag_ko_zzic_end[];
+#if DFR_DZIF_KO_VERIFIED
+extern char dirtyfrag_ko_dzif_start[];
+extern char dirtyfrag_ko_dzif_end[];
+#endif
 extern char splice_helper_start[];
 extern char splice_helper_end[];
 
@@ -799,6 +815,12 @@ static const struct KoImage ko_images[] = {
 static const struct KoImage ko_image_zzic = {
     15, 6, 6, dirtyfrag_ko_zzic_start, dirtyfrag_ko_zzic_end
 };
+
+#if DFR_DZIF_KO_VERIFIED
+static const struct KoImage ko_image_dzif = {
+    15, 6, 6, dirtyfrag_ko_dzif_start, dirtyfrag_ko_dzif_end
+};
+#endif
 
 static const struct KoImage *select_ko_image(int android_release, int kver_major, int kver_minor) {
     return dfr_select_ko_image(ko_images, KO_IMAGES_N, android_release, kver_major, kver_minor);
@@ -1069,7 +1091,7 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
 
     struct TargetMatch m;
     dfr_target_class cls = dfr_classify_target(&obs, &m);
-    const struct TargetProfile *p = &DFR_PROFILE_ZZIC;
+    const struct TargetProfile *p = dfr_profile_for_class(cls);
     if (out_cls) *out_cls = cls;
 
     if (cls == DFR_TARGET_UPSTREAM_GENERIC) {
@@ -1078,7 +1100,18 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
         return 0;
     }
 
-    /* Log each individual mismatch for the ZZIC candidate. */
+    if (p == NULL && cls == DFR_TARGET_MISMATCH) {
+        if (strstr(display, "DZIF") || strstr(fingerprint, "DZIF") ||
+            strstr(u.release, "DZIF"))
+            p = &DFR_PROFILE_DZIF;
+        else
+            p = &DFR_PROFILE_ZZIC;
+    }
+    if (p == NULL) {
+        REPORTLN("[DFR][TARGET] FAIL internal profile selection returned NULL");
+        return -1;
+    }
+
     if (!m.manufacturer_ok) REPORTLN("[DFR][TARGET] MISMATCH manufacturer: got=%s want=%s", manufacturer, p->manufacturer);
     if (!m.model_ok)        REPORTLN("[DFR][TARGET] MISMATCH model: got=%s want=%s", model, p->model);
     if (!m.device_ok)       REPORTLN("[DFR][TARGET] MISMATCH device: got=%s want=%s", device, p->device);
@@ -1094,35 +1127,33 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
 
     if (cls == DFR_TARGET_MISMATCH) {
         REPORTLN("[DFR][TARGET] TARGET_PROFILE=MISMATCH");
-        REPORTLN("[DFR][TARGET] FAIL fail-closed: device asserts the ZZIC model/codename"
-                 " but does not match the pinned firmware. Refusing.");
+        REPORTLN("[DFR][TARGET] FAIL fail-closed: device asserts the SM-S938B/pa3q"
+                 " anchor but matches no pinned exact firmware. Refusing.");
         return -1;
     }
 
-    /* cls == DFR_TARGET_S25U_ZZIC: run Gate B. */
-    REPORTLN("[DFR][TARGET] TARGET_PROFILE=S25U_ZZIC");
+    REPORTLN("[DFR][TARGET] TARGET_PROFILE=%s", p->id);
     REPORTLN("[DFR][TARGET] PASS exact identity");
 
     int rc = 0;
     REPORTLN("[DFR][KERNEL] ENTER");
     if (dfr_streq(u.release, p->kernel_release))
-        REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_IDENTITY=PASS");
-    else { REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_IDENTITY=FAIL got=%s want=%s", u.release, p->kernel_release); rc = -1; }
+        REPORTLN("[DFR][KERNEL] EXACT_KERNEL_IDENTITY=PASS profile=%s", p->id);
+    else { REPORTLN("[DFR][KERNEL] EXACT_KERNEL_IDENTITY=FAIL got=%s want=%s", u.release, p->kernel_release); rc = -1; }
 
     if (dfr_streq(u.version, p->kernel_version))
-        REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_VERSION=PASS");
-    else { REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_VERSION=FAIL got=%s want=%s", u.version, p->kernel_version); rc = -1; }
+        REPORTLN("[DFR][KERNEL] EXACT_KERNEL_VERSION=PASS profile=%s", p->id);
+    else { REPORTLN("[DFR][KERNEL] EXACT_KERNEL_VERSION=FAIL got=%s want=%s", u.version, p->kernel_version); rc = -1; }
 
     if (dfr_streq(u.machine, p->kernel_arch))
-        REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_ARCH=PASS (%s)", u.machine);
-    else { REPORTLN("[DFR][KERNEL] ZZIC_KERNEL_ARCH=FAIL got=%s want=%s", u.machine, p->kernel_arch); rc = -1; }
+        REPORTLN("[DFR][KERNEL] EXACT_KERNEL_ARCH=PASS (%s)", u.machine);
+    else { REPORTLN("[DFR][KERNEL] EXACT_KERNEL_ARCH=FAIL got=%s want=%s", u.machine, p->kernel_arch); rc = -1; }
 
     if (page_size == p->page_size)
-        REPORTLN("[DFR][KERNEL] ZZIC_PAGE_SIZE=PASS (%ld)", page_size);
-    else { REPORTLN("[DFR][KERNEL] ZZIC_PAGE_SIZE=FAIL got=%ld want=%ld", page_size, p->page_size); rc = -1; }
+        REPORTLN("[DFR][KERNEL] EXACT_PAGE_SIZE=PASS (%ld)", page_size);
+    else { REPORTLN("[DFR][KERNEL] EXACT_PAGE_SIZE=FAIL got=%ld want=%ld", page_size, p->page_size); rc = -1; }
 
     REPORTLN("[DFR][USERSPACE] ENTER");
-    /* libc.so must be the runtime bionic symlink; validate the resolved target. */
     char libc_real[512];
     ssize_t ll = readlink("/system/lib64/libc.so", libc_real, sizeof(libc_real) - 1);
     if (ll > 0) {
@@ -1132,40 +1163,34 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
         REPORTLN("[DFR][USERSPACE] LIBC_SYMLINK not a symlink (errno=%d) - validating in place", errno);
     }
 
-    /*
-     * Hash only the artefact this stage is about to write, while it is still
-     * pristine (see DFR_ART_* above). The artefacts this stage does not own are
-     * reported SKIP so a log reader never mistakes an unhashed artefact for a
-     * validated one.
-     */
     if (artefacts & DFR_ART_CRASHDUMP) {
-        if (gate_hash(reporter, "ZZIC_CRASHDUMP_IDENTITY", kCrashDump, p->crashdump_sha256, 1)) rc = -1;
+        if (gate_hash(reporter, "EXACT_CRASHDUMP_IDENTITY", kCrashDump, p->crashdump_sha256, 1)) rc = -1;
     } else {
-        REPORTLN("[DFR][USERSPACE] ZZIC_CRASHDUMP_IDENTITY SKIP (not this stage's artefact)");
+        REPORTLN("[DFR][USERSPACE] EXACT_CRASHDUMP_IDENTITY SKIP (not this stage's artefact)");
     }
     if (artefacts & DFR_ART_VENDOR) {
         if (gate_vendor_provenance(reporter, cls, p)) rc = -1;
     } else {
-        REPORTLN("[DFR][USERSPACE] ZZIC_VENDOR_PROVENANCE SKIP (not this stage's artefact)");
+        REPORTLN("[DFR][USERSPACE] EXACT_VENDOR_PROVENANCE SKIP (not this stage's artefact)");
     }
     if (artefacts & DFR_ART_LIBC) {
-        if (gate_hash(reporter, "ZZIC_LIBC_IDENTITY", "/system/lib64/libc.so", p->libc_sha256, 1)) rc = -1;
+        if (gate_hash(reporter, "EXACT_LIBC_IDENTITY", "/system/lib64/libc.so", p->libc_sha256, 1)) rc = -1;
     } else {
-        REPORTLN("[DFR][USERSPACE] ZZIC_LIBC_IDENTITY SKIP (not this stage's artefact)");
+        REPORTLN("[DFR][USERSPACE] EXACT_LIBC_IDENTITY SKIP (not this stage's artefact)");
     }
     if (artefacts & DFR_ART_LIBCXX) {
-        if (gate_hash(reporter, "ZZIC_LIBCXX_IDENTITY", "/system/lib64/libc++.so", p->libcxx_sha256, 1)) rc = -1;
+        if (gate_hash(reporter, "EXACT_LIBCXX_IDENTITY", "/system/lib64/libc++.so", p->libcxx_sha256, 1)) rc = -1;
     } else {
-        REPORTLN("[DFR][USERSPACE] ZZIC_LIBCXX_IDENTITY SKIP (not this stage's artefact)");
+        REPORTLN("[DFR][USERSPACE] EXACT_LIBCXX_IDENTITY SKIP (not this stage's artefact)");
     }
 
     if (rc == 0) {
         REPORTLN("[DFR][KERNEL] PASS");
         REPORTLN("[DFR][USERSPACE] PASS");
-        REPORTLN("[DFR][TARGET] gate A/B complete: proceeding on validated ZZIC target");
+        REPORTLN("[DFR][TARGET] gate A/B complete: proceeding on validated %s target", p->id);
     } else {
-        REPORTLN("[DFR][TARGET] FAIL fail-closed: ZZIC identity but a kernel/userspace"
-                 " boundary did not validate. Refusing before any patch.");
+        REPORTLN("[DFR][TARGET] FAIL fail-closed: exact %s identity but a kernel/userspace"
+                 " boundary did not validate. Refusing before any patch.", p->id);
     }
     return rc;
 }
@@ -1176,34 +1201,32 @@ static int gate_target(struct Reporter *reporter, dfr_target_class *out_cls,
  * same logic the device runs; this wrapper only logs the boundary.
  */
 static int gate_module_policy(struct Reporter *reporter, dfr_target_class cls) {
-    dfr_module_policy v = dfr_module_policy_eval(cls, &DFR_PROFILE_ZZIC);
-    if (v == DFR_MODULE_POLICY_NOT_APPLICABLE) {
-        /* Unrelated device: upstream generic behaviour, unchanged. No Gate G. */
+    const struct TargetProfile *p = dfr_profile_for_class(cls);
+    dfr_module_policy v = dfr_module_policy_eval(cls, p);
+    if (v == DFR_MODULE_POLICY_NOT_APPLICABLE)
         return 0;
-    }
+
+    const char *id = p ? p->id : "<missing-profile>";
     REPORTLN("[DFR][MODULE] ENTER");
-    REPORTLN("[DFR][MODULE] ZZIC_MODULE_POLICY=%s", dfr_module_policy_name(v));
+    REPORTLN("[DFR][MODULE] EXACT_MODULE_POLICY=%s profile=%s",
+             dfr_module_policy_name(v), id);
     switch (v) {
         case DFR_MODULE_POLICY_ALLOW:
             return 0;
         case DFR_MODULE_POLICY_REFUSE_UNVERIFIED:
-            REPORTLN("[DFR][MODULE] GENERIC_ANDROID15_6_6_MODULE=UNVERIFIED"
-                     " (no ZZIC-validated .ko bundled)");
+            REPORTLN("[DFR][MODULE] EXACT_MODULE=UNVERIFIED profile=%s", id);
             break;
         case DFR_MODULE_POLICY_REFUSE_NO_DIGEST:
-            REPORTLN("[DFR][MODULE] ko_verified=1 but no ko_sha256 is pinned;"
-                     " the flag alone is not evidence.");
+            REPORTLN("[DFR][MODULE] ko_verified=1 but no ko_sha256 is pinned");
             break;
         case DFR_MODULE_POLICY_REFUSE_NO_FILENAME:
-            REPORTLN("[DFR][MODULE] ko_verified=1 but ko_filename is not set;"
-                     " all three ko_* fields go together.");
+            REPORTLN("[DFR][MODULE] ko_verified=1 but ko_filename is not set");
             break;
         default:
-            REPORTLN("[DFR][MODULE] unrecognised policy verdict; treating as a refusal.");
+            REPORTLN("[DFR][MODULE] unrecognised policy verdict; refusing");
             break;
     }
-    REPORTLN("[DFR][MODULE] FAIL fail-closed: refusing an unverified module on ZZIC."
-             " No page-cache write happens on this target while Gate G is unproven.");
+    REPORTLN("[DFR][MODULE] FAIL fail-closed: no page-cache write on %s while Gate G is unproven", id);
     return -1;
 }
 
@@ -1251,34 +1274,31 @@ int patch_ko(struct Reporter *reporter) {
     if (gate_module_policy(reporter, cls) != 0)
         return 1;
 
-    if (cls == DFR_TARGET_S25U_ZZIC) {
-        /*
-         * On the exact target, swap the family choice for the module built
-         * against THIS kernel. Family selection returned the generic
-         * android15-6.6 image a moment ago because (15,6,6) is all it can see;
-         * that image carries an empty __versions table, so the loader would
-         * check nothing and accept it - see AGENTS.md section 3.5 on why a hole
-         * is worse than a refusal.
-         *
-         * The swap happens BEFORE the digest binding below, so the bytes this
-         * stage writes are the bytes it hashed. Reporting both the swap and the
-         * size keeps the earlier "* ko android15-6.6" line from reading as the
-         * final answer (AGENTS.md section 3.7: no reader should have to guess
-         * which image was used).
-         */
-        ko = &ko_image_zzic;
-        REPORTLN("[DFR][MODULE] ZZIC_MODULE_SELECTED=PASS (%d bytes, exact-kernel"
-                 " image, not the generic android15-6.6 one)",
-                 (int)(ko->end - ko->start));
+    if (dfr_target_is_exact(cls)) {
+        const struct TargetProfile *p = dfr_profile_for_class(cls);
+        if (p == NULL) {
+            REPORTLN("[DFR][MODULE] FAIL exact class has no profile");
+            return 1;
+        }
 
-        /*
-         * The policy above proved the three ko_* fields are present; it
-         * deliberately did not look at the payload, because only this stage
-         * selects it. Bind the flag to the actual bytes here: a digest that does
-         * not match the selected payload is a refusal, never an assumption
-         * (dossier section 39).
-         */
-        const char *want = DFR_PROFILE_ZZIC.ko_sha256;
+        if (cls == DFR_TARGET_S25U_ZZIC) {
+            ko = &ko_image_zzic;
+        } else if (cls == DFR_TARGET_S25U_DZIF) {
+#if DFR_DZIF_KO_VERIFIED
+            ko = &ko_image_dzif;
+#else
+            REPORTLN("[DFR][MODULE] FAIL DZIF module tuple is not promoted");
+            return 1;
+#endif
+        } else {
+            REPORTLN("[DFR][MODULE] FAIL unrecognised exact target class");
+            return 1;
+        }
+
+        REPORTLN("[DFR][MODULE] EXACT_MODULE_SELECTED=PASS profile=%s (%d bytes)",
+                 p->id, (int)(ko->end - ko->start));
+
+        const char *want = p->ko_sha256;
         dfr_sha256_ctx sc;
         uint8_t digest[32];
         char hex[65];
@@ -1286,16 +1306,16 @@ int patch_ko(struct Reporter *reporter) {
         dfr_sha256_update(&sc, ko->start, (size_t)(ko->end - ko->start));
         dfr_sha256_final(&sc, digest);
         dfr_sha256_hex(digest, hex);
+
         REPORTLN("[DFR][MODULE] ko_filename=%s",
-                 DFR_PROFILE_ZZIC.ko_filename ? DFR_PROFILE_ZZIC.ko_filename : "<unnamed>");
+                 p->ko_filename ? p->ko_filename : "<unnamed>");
         REPORTLN("[DFR][MODULE] ko_sha256_actual=%s", hex);
-        if (strcmp(hex, want) != 0) {
-            REPORTLN("[DFR][MODULE] FAIL module digest does not match the profile.");
-            REPORTLN("[DFR][MODULE]   expected=%s", want);
-            REPORTLN("[DFR][MODULE] refusing: the bundled module is not the validated one.");
+        if (want == NULL || strcmp(hex, want) != 0) {
+            REPORTLN("[DFR][MODULE] FAIL module digest does not match profile=%s", p->id);
+            REPORTLN("[DFR][MODULE] expected=%s", want ? want : "<unpinned>");
             return 1;
         }
-        REPORTLN("[DFR][MODULE] ZZIC_MODULE_BINDING=PASS (bundled bytes match pinned digest)");
+        REPORTLN("[DFR][MODULE] EXACT_MODULE_BINDING=PASS profile=%s", p->id);
     }
 
     //char buf[] = {1,2,3,4};
