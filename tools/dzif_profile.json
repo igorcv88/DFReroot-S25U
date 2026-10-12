@@ -39,9 +39,9 @@
   "network_stack_uid": 1073,
   "network_stack_context": "u:r:network_stack:s0",
   "network_stack_cap_eff": "0x800003c00",
-  "ko_verified": 0,
-  "ko_filename": null,
-  "ko_sha256": null,
+  "ko_verified": 1,
+  "ko_filename": "dirtyfrag-android15-6.6-S938BXXUCDZIF.ko",
+  "ko_sha256": "512862ee484b16c256737eae05fbc1b4b51fb38639f6a655f00938cb0c3ca926",
   "targets": {
     "/apex/com.android.runtime/bin/crash_dump64": "9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f",
     "/vendor/lib64/libstagefrighthw.so": "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
