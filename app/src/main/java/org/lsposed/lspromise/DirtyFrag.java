@@ -34,6 +34,13 @@ public class DirtyFrag {
     // Step 4: create orphaned process and kill it to trigger init shell code
     public static native int createOrphanProcess();
 
+    /*
+     * Read-only syscall/capability preflight executed inside network_stack.
+     * It exercises the syscall families DirtyFrag needs but must not create an
+     * XFRM SA, patch page cache, load a module or exec a helper.
+     */
+    public native int preflight();
+
     private final IBinder reporterBinder;
 
     public DirtyFrag(IBinder b) {
