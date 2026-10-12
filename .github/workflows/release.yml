@@ -297,7 +297,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           {
-            echo "## DFReroot ${VER} — Galaxy S25 Ultra SM-S938B / S938BXXUCZZIC"
+            echo "## DFReroot ${VER} — Galaxy S25 Ultra SM-S938B / ZZIC + DZIF exact profiles"
             echo
             echo "Install \`df_installer_${VER}.apk\` first; \`df_reroot_${VER}.apk\` is also"
             echo "bundled inside it, so it does not need to be sideloaded separately."
