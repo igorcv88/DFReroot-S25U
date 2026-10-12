@@ -115,6 +115,84 @@ const struct TargetProfile DFR_PROFILE_ZZIC = {
         "b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017",
 };
 
+
+/*
+ * One UI 9 Stable / DZIF exact profile. Identity and runtime/provenance values
+ * were captured on the owner's SM-S938B after the DZIF RMG port succeeded.
+ * Gate G remains fail-closed until a DZIF-specific DirtyFrag module is built,
+ * audited against evidence/dzif/gate-g and pinned below.
+ */
+const struct TargetProfile DFR_PROFILE_DZIF = {
+    .id            = "S25U_DZIF",
+    .manufacturer  = "samsung",
+    .model         = "SM-S938B",
+    .device        = "pa3q",
+    .sdk           = 37,
+    .android_release = 17,
+    .display       = "CP2A.260605.016.S938BXXUCDZIF",
+    .fingerprint   = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
+                     "S938BXXUCDZIF_OXMCDZIF:user/release-keys",
+    .kernel_release = "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k",
+    .kernel_version = "#1 SMP PREEMPT Sat Sep 19 07:11:26 UTC 2026",
+    .page_size      = 4096,
+    .abi            = "arm64-v8a",
+    .kernel_arch    = "aarch64",
+
+    .kernel_image_sha256 =
+        "b1b300e7e70d1aea03fcaff33dfc203b06f6322ac7ca177e6b9a39b6599713aa",
+    .btf_sha256 =
+        "e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c",
+    .crashdump_sha256 =
+        "9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f",
+    .vendor_target_sha256 =
+        "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
+    .libc_sha256 =
+        "88fba68b3d1fded4bfd25197f6de24f5b8794d3253de860ee261a4272be9e861",
+    .libcxx_sha256 =
+        "cb118e98c74d3454858921123b9b51ba13df9cad7dfa141dd892c453661a4d78",
+
+    .vbmeta_digest =
+        "be1e4709a8e7befe4479147f914341cab7fd43c615fa1cfaf1fa1511bb87a0a6",
+    .vbmeta_avb_version  = "1.2",
+    .vbmeta_hash_alg     = "sha256",
+    .verified_boot_state = "green",
+    .vbmeta_device_state = "locked",
+    .flash_locked        = "1",
+    .verity_mode         = "enforcing",
+    .vendor_fstype       = "erofs",
+    .vendor_mount_ro     = 1,
+    .vendor_target_size  = 51632,
+    .vendor_target_context = "u:object_r:vendor_file:s0",
+
+    .network_stack_process = "com.android.networkstack.process",
+    .network_stack_uid     = 1073,
+    .network_stack_context = "u:r:network_stack:s0",
+    .network_stack_cap_eff = 0x800003c00L,
+
+    /*
+     * RMGLabs-Payloads publishes a distinct DFR staging daemon for DZIF. The
+     * app-side asset selector is added separately; these values are the exact
+     * bytes it must bind before any privileged handoff.
+     */
+    .ksud_sha256 =
+        "f680f959472e994110eb1281d6aa47ed3cd934ae5775f5e9e378a2e946ae69e3",
+    .ksud_size        = 6665720,
+    .post_root_record = "/data/system/dfreroot-post-root",
+    .kernelsu_version = 32601,
+    .kernelsu_uapi_version = 2,
+    .post_root_selinux = 1,
+
+    /*
+     * Deliberately OFF until the exact DZIF DirtyFrag .ko is built and the
+     * committed module itself passes strict modversion coverage against the
+     * DZIF witness table. This makes recognition of DZIF safe to merge before
+     * the binary artifact exists: every page-cache entry point refuses at Gate G.
+     */
+    .ko_verified = 0,
+    .ko_filename = NULL,
+    .ko_sha256   = NULL,
+};
+
 int dfr_streq(const char *a, const char *b) {
     if (a == NULL || b == NULL) return 0;
     return strcmp(a, b) == 0;
@@ -122,7 +200,7 @@ int dfr_streq(const char *a, const char *b) {
 
 dfr_module_policy dfr_module_policy_eval(dfr_target_class cls,
                                          const struct TargetProfile *p) {
-    if (cls != DFR_TARGET_S25U_ZZIC)
+    if (!dfr_target_is_exact(cls))
         return DFR_MODULE_POLICY_NOT_APPLICABLE;
     /* A ZZIC classification with no profile to consult cannot be evaluated, and
      * "cannot evaluate" is a refusal, never a pass. */
@@ -363,53 +441,84 @@ const struct KoImage *dfr_select_ko_image(const struct KoImage *images, size_t n
     return fallback;
 }
 
+static void match_profile(const struct ObservedTarget *obs,
+                          const struct TargetProfile *p,
+                          struct TargetMatch *m) {
+    memset(m, 0, sizeof(*m));
+    m->manufacturer_ok   = dfr_streq(obs->manufacturer, p->manufacturer);
+    m->model_ok          = dfr_streq(obs->model, p->model);
+    m->device_ok         = dfr_streq(obs->device, p->device);
+    m->sdk_ok            = (obs->sdk == p->sdk);
+    m->android_release_ok = (obs->android_release == p->android_release);
+    m->display_ok        = dfr_streq(obs->display, p->display);
+    m->fingerprint_ok    = dfr_streq(obs->fingerprint, p->fingerprint);
+    m->kernel_release_ok = dfr_streq(obs->kernel_release, p->kernel_release);
+    m->kernel_version_ok = dfr_streq(obs->kernel_version, p->kernel_version);
+    m->kernel_arch_ok    = dfr_streq(obs->kernel_arch, p->kernel_arch);
+    m->page_size_ok      = (obs->page_size == p->page_size);
+    m->abi_ok            = dfr_streq(obs->abi, p->abi);
+    m->all_ok = m->manufacturer_ok && m->model_ok && m->device_ok &&
+                m->sdk_ok && m->android_release_ok && m->display_ok &&
+                m->fingerprint_ok && m->kernel_release_ok &&
+                m->kernel_version_ok && m->kernel_arch_ok &&
+                m->page_size_ok && m->abi_ok;
+    m->anchor_hit = m->model_ok || m->device_ok;
+}
+
+static int match_score(const struct TargetMatch *m) {
+    return m->manufacturer_ok + m->model_ok + m->device_ok + m->sdk_ok +
+           m->android_release_ok + m->display_ok + m->fingerprint_ok +
+           m->kernel_release_ok + m->kernel_version_ok + m->kernel_arch_ok +
+           m->page_size_ok + m->abi_ok;
+}
+
+int dfr_target_is_exact(dfr_target_class cls) {
+    return cls == DFR_TARGET_S25U_ZZIC || cls == DFR_TARGET_S25U_DZIF;
+}
+
+const struct TargetProfile *dfr_profile_for_class(dfr_target_class cls) {
+    switch (cls) {
+        case DFR_TARGET_S25U_ZZIC: return &DFR_PROFILE_ZZIC;
+        case DFR_TARGET_S25U_DZIF: return &DFR_PROFILE_DZIF;
+        default: return NULL;
+    }
+}
+
 dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
                                      struct TargetMatch *out) {
-    const struct TargetProfile *p = &DFR_PROFILE_ZZIC;
-    struct TargetMatch m;
-    memset(&m, 0, sizeof(m));
+    struct TargetMatch zzic, dzif, chosen;
+    memset(&chosen, 0, sizeof(chosen));
 
     if (obs == NULL) {
-        if (out) *out = m;
+        if (out) *out = chosen;
         return DFR_TARGET_UPSTREAM_GENERIC;
     }
 
-    m.manufacturer_ok   = dfr_streq(obs->manufacturer, p->manufacturer);
-    m.model_ok          = dfr_streq(obs->model, p->model);
-    m.device_ok         = dfr_streq(obs->device, p->device);
-    m.sdk_ok            = (obs->sdk == p->sdk);
-    /*
-     * android_release is compared, not merely stored: an SDK number can be
-     * shared by a platform release and its beta, so leaving the pinned value
-     * unenforced would mean the profile advertises a field it never checks.
-     */
-    m.android_release_ok = (obs->android_release == p->android_release);
-    m.display_ok        = dfr_streq(obs->display, p->display);
-    m.fingerprint_ok    = dfr_streq(obs->fingerprint, p->fingerprint);
-    m.kernel_release_ok = dfr_streq(obs->kernel_release, p->kernel_release);
-    m.kernel_version_ok = dfr_streq(obs->kernel_version, p->kernel_version);
-    m.kernel_arch_ok    = dfr_streq(obs->kernel_arch, p->kernel_arch);
-    m.page_size_ok      = (obs->page_size == p->page_size);
-    m.abi_ok            = dfr_streq(obs->abi, p->abi);
+    match_profile(obs, &DFR_PROFILE_ZZIC, &zzic);
+    match_profile(obs, &DFR_PROFILE_DZIF, &dzif);
 
-    m.all_ok = m.manufacturer_ok && m.model_ok && m.device_ok && m.sdk_ok &&
-               m.android_release_ok &&
-               m.display_ok && m.fingerprint_ok && m.kernel_release_ok &&
-               m.kernel_version_ok && m.kernel_arch_ok &&
-               m.page_size_ok && m.abi_ok;
+    if (zzic.all_ok) {
+        chosen = zzic;
+        chosen.cls = DFR_TARGET_S25U_ZZIC;
+    } else if (dzif.all_ok) {
+        chosen = dzif;
+        chosen.cls = DFR_TARGET_S25U_DZIF;
+    } else if (zzic.anchor_hit || dzif.anchor_hit) {
+        /*
+         * For diagnostics choose the exact profile the observation most closely
+         * resembles, but the verdict itself is still a hard MISMATCH. This keeps
+         * a future pa3q build from falling through to the generic android15/6.6
+         * path merely because neither known profile matches completely.
+         */
+        chosen = match_score(&dzif) > match_score(&zzic) ? dzif : zzic;
+        chosen.cls = DFR_TARGET_MISMATCH;
+        chosen.anchor_hit = 1;
+    } else {
+        chosen = zzic; /* both anchors are false; field details are diagnostic only */
+        chosen.cls = DFR_TARGET_UPSTREAM_GENERIC;
+        chosen.anchor_hit = 0;
+    }
 
-    /*
-     * Identity anchors: the model and codename are unique to THIS device.
-     * If either asserts SM-S938B/pa3q the device is claiming to be the ZZIC
-     * target, so anything short of a full exact match is a hard mismatch
-     * (fail-closed) rather than a silent fall-through to the generic path.
-     */
-    m.anchor_hit = m.model_ok || m.device_ok;
-
-    if (m.all_ok)        m.cls = DFR_TARGET_S25U_ZZIC;
-    else if (m.anchor_hit) m.cls = DFR_TARGET_MISMATCH;
-    else                 m.cls = DFR_TARGET_UPSTREAM_GENERIC;
-
-    if (out) *out = m;
-    return m.cls;
+    if (out) *out = chosen;
+    return chosen.cls;
 }
