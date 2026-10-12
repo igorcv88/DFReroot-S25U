@@ -5,6 +5,26 @@ what is physically proven now, what still needs to be implemented, and the
 acceptance criteria for the next signed build. If this file disagrees with
 `docs/S25U_ZZIC_COMPATIBILITY.md` about evidence, the compatibility dossier wins.
 
+> **One UI 9 Stable (`S938BXXUCDZIF`) is covered separately, offline only, in
+> `docs/S25U_DZIF_COMPATIBILITY.md`.** Short version: a DZIF device classifies
+> `MISMATCH` and refuses everything, which is correct and needed no change; no
+> DZIF profile exists and **none is publishable yet** — the design is portable
+> today, what is missing is provenance/runtime values, so this is an incomplete
+> implementation and not a technical incompatibility. Three fields that were
+> open there are now closed by later owner-supplied inputs (`Build.FINGERPRINT`
+> read on hardware, `P0_KERNEL_PHYS_LOAD` derived from the XBL FDT, and the
+> modversions CRC table derived from 446 stock witnesses) — see §6a of that
+> record. The Dirty
+> Frag and `remove_waiter` windows are byte-identical to ZZIC with the
+> reference fix absent (re-hashed, not quoted), and CVE-2026-49881 is **fixed**
+> — which costs this fork nothing, since it reaches `network_stack` through
+> `StageHop` from inside `system_server` rather than through Telecom. Do not
+> revive that entry. Gate G and `POST_SOFT_REBOOT_STABILITY` remain the
+> blockers, and DZIF's own vermagic means the module question has to be
+> answered again for it. `S938BXXUCZZHL`, a build identifier reported in
+> delta/OTA metadata beside the DZIF material, is a named non-input and must
+> not feed any DZIF gate.
+
 > **Open, and where to start: the soft reboot works and the firmware rejects the
 > boot it produces.** The conclusive Apply Modules rerun happened, in boot
 > `85e3a031-42bb-49cc-8bbe-c276cb4b5c4e`, and it settled the old question the

@@ -1191,11 +1191,11 @@ static int gate_module_policy(struct Reporter *reporter, dfr_target_class cls) {
                      " (no ZZIC-validated .ko bundled)");
             break;
         case DFR_MODULE_POLICY_REFUSE_NO_DIGEST:
-            REPORTLN("[DFR][MODULE] ko_zzic_verified=1 but no ko_sha256 is pinned;"
+            REPORTLN("[DFR][MODULE] ko_verified=1 but no ko_sha256 is pinned;"
                      " the flag alone is not evidence.");
             break;
         case DFR_MODULE_POLICY_REFUSE_NO_FILENAME:
-            REPORTLN("[DFR][MODULE] ko_zzic_verified=1 but ko_filename is not set;"
+            REPORTLN("[DFR][MODULE] ko_verified=1 but ko_filename is not set;"
                      " all three ko_* fields go together.");
             break;
         default:

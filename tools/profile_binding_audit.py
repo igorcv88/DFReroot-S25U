@@ -2,10 +2,10 @@
 """
 Profile-to-module cryptographic binding audit (dossier section 39).
 
-`ko_zzic_verified` is a boolean, and a boolean is not evidence. This tool
+`ko_verified` is a boolean, and a boolean is not evidence. This tool
 enforces, in CI, the same invariant the runtime enforces in patch_ko():
 
-    ko_zzic_verified == 1
+    ko_verified == 1
       IMPLIES ko_sha256 is pinned
       AND     ko_filename names a module that is actually bundled
       AND     SHA-256(those bundled bytes) == ko_sha256
@@ -33,7 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 # ko_audit's COMPATIBLE verdict is the only thing that authorises setting
-# ko_zzic_verified=1, so this tool also guards the rule that verdict rests on.
+# ko_verified=1, so this tool also guards the rule that verdict rests on.
 sys.path.insert(0, HERE)
 import ko_audit  # noqa: E402
 PROFILE_C = os.path.join(ROOT, "app", "src", "main", "jni", "target_profile.c")
@@ -222,21 +222,21 @@ def audit():
         exp_src_holder = [""]
 
     # --- the section 39 invariant -------------------------------------------
-    verified = c.get("ko_zzic_verified")
+    verified = c.get("ko_verified")
     ko_sha = c.get("ko_sha256")
     ko_name = c.get("ko_filename")
-    r["checks"]["ko_zzic_verified"] = verified
+    r["checks"]["ko_verified"] = verified
     r["checks"]["ko_filename"] = ko_name
     r["checks"]["ko_sha256_pinned"] = ko_sha
 
     if verified not in (0, 1):
-        fail("ko_zzic_verified is %r; expected 0 or 1" % (verified,))
+        fail("ko_verified is %r; expected 0 or 1" % (verified,))
     elif verified == 1:
         if not ko_sha:
-            fail("ko_zzic_verified=1 but ko_sha256 is not pinned "
+            fail("ko_verified=1 but ko_sha256 is not pinned "
                  "(a boolean is not evidence)")
         if not ko_name:
-            fail("ko_zzic_verified=1 but ko_filename is not set")
+            fail("ko_verified=1 but ko_filename is not set")
         if ko_sha and ko_name:
             ko_path = os.path.join(JNI_DIR, os.path.basename(ko_name))
             if not os.path.exists(ko_path):
@@ -265,7 +265,7 @@ def audit():
                             provenance=DERIVED_PROVENANCE,
                             require_coverage=True)
                     except Exception as ex:
-                        fail("ko_zzic_verified=1 but %s cannot be audited "
+                        fail("ko_verified=1 but %s cannot be audited "
                              "against the derived ZZIC table: %s" % (ko_name, ex))
                         full = None
                     if full is not None:
@@ -274,11 +274,11 @@ def audit():
                         r["checks"]["ZZIC_MODULE_VERDICT"] = got
                         r["checks"]["ZZIC_MODULE_COVERAGE"] = cov
                         if got != "COMPATIBLE":
-                            fail("ko_zzic_verified=1 but the bundled %s audits "
+                            fail("ko_verified=1 but the bundled %s audits "
                                  "%r against the derived ZZIC table, not "
                                  "COMPATIBLE" % (ko_name, got))
                         if full.get("provenance_violations"):
-                            fail("ko_zzic_verified=1 but the derived table's "
+                            fail("ko_verified=1 but the derived table's "
                                  "provenance does not hold up: %s"
                                  % full["provenance_violations"])
                         # Name the table the verdict rests on, per AGENTS.md 3.5:
@@ -289,10 +289,10 @@ def audit():
     else:
         # flag is 0: nothing may be pinned that could later be mistaken for proof
         if ko_sha:
-            fail("ko_zzic_verified=0 but ko_sha256 is pinned (%s); "
+            fail("ko_verified=0 but ko_sha256 is pinned (%s); "
                  "a stale digest reads as evidence it is not" % ko_sha)
         if ko_name:
-            fail("ko_zzic_verified=0 but ko_filename is set (%s)" % ko_name)
+            fail("ko_verified=0 but ko_filename is set (%s)" % ko_name)
         r["checks"]["ZZIC_MODULE_BINDING"] = "UNVERIFIED (fail-closed, as expected)"
 
     # --- the modversion coverage rule behind a COMPATIBLE verdict -----------
@@ -2662,7 +2662,7 @@ def audit():
 def human(r):
     L = ["=== profile / module binding audit (dossier section 39) ==="]
     ck = r["checks"]
-    L.append("ko_zzic_verified    : %s" % ck.get("ko_zzic_verified"))
+    L.append("ko_verified    : %s" % ck.get("ko_verified"))
     L.append("ko_filename         : %s" % (ck.get("ko_filename") or "<none>"))
     L.append("ko_sha256 (pinned)  : %s" % (ck.get("ko_sha256_pinned") or "<none>"))
     if "ko_sha256_actual" in ck:

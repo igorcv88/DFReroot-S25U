@@ -75,6 +75,75 @@ static void test_target_detection(void) {
     c = dfr_classify_target(&o, &m);
     CHECK(c == DFR_TARGET_MISMATCH, "SM-S938B + ZZI4 -> %s (must be MISMATCH)", cls_name(c));
 
+    /*
+     * SM-S938B + DZIF (One UI 9 Stable): the firmware this device actually
+     * updates to. Every pinned anchor is present - same manufacturer, model,
+     * codename, SDK, release, build ID, page size, ABI and kernel arch - and
+     * only the three firmware-identity fields differ. That is precisely the
+     * AGENTS.md 3.1 case: a device asserting the pinned model and codename
+     * while deviating in any pinned field is a hard MISMATCH and must refuse
+     * everything, NOT fall through to the generic upstream path, where it
+     * would run the chain against a kernel whose artefact hashes nobody
+     * pinned.
+     *
+     * The DZIF values are read from the firmware, not invented: the display
+     * and kernel strings come from system/build.prop and the kernel Image of
+     * S938BXXUCDZIF. The fingerprint is the one field that has NOT been read
+     * (Build.FINGERPRINT carries the CSC suffix and lives in
+     * /vendor/build.prop, which was not extracted), so the test asserts the
+     * refusal twice: once with the partition-level fingerprint that WAS
+     * observed, and once with the CSC-suffixed shape it will take. Neither
+     * may pass, and the per-field flags must name the firmware fields rather
+     * than an anchor, or the refusal would be happening for the wrong reason.
+     */
+    o = zzic_observed();
+    o.display = "CP2A.260605.016.S938BXXUCDZIF";
+    o.fingerprint = "samsung/pa3qxxx/qssi_64:17/CP2A.260605.016/"
+                    "S938BXXUCDZIF:user/release-keys";
+    o.kernel_release = "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k";
+    o.kernel_version = "#1 SMP PREEMPT Sat Sep 19 07:11:26 UTC 2026";
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_MISMATCH,
+          "SM-S938B + DZIF (observed fingerprint) -> %s (must be MISMATCH)",
+          cls_name(c));
+    CHECK(!m.display_ok && !m.fingerprint_ok && !m.kernel_release_ok &&
+          !m.kernel_version_ok,
+          "DZIF refusal names the firmware fields (display=%d fingerprint=%d "
+          "kernel_release=%d kernel_version=%d)",
+          m.display_ok, m.fingerprint_ok, m.kernel_release_ok,
+          m.kernel_version_ok);
+    CHECK(m.manufacturer_ok && m.model_ok && m.device_ok && m.sdk_ok &&
+          m.android_release_ok && m.page_size_ok && m.abi_ok &&
+          m.kernel_arch_ok,
+          "DZIF still asserts every pinned anchor, which is why 3.1 makes it "
+          "a hard refusal rather than a generic fall-through (model=%d "
+          "device=%d)", m.model_ok, m.device_ok);
+
+    /* Same device on DZIF, with the CSC-suffixed fingerprint shape. */
+    o.fingerprint = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
+                    "S938BXXUCDZIF_OXMCDZIF:user/release-keys";
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_MISMATCH,
+          "SM-S938B + DZIF (CSC-suffixed fingerprint) -> %s (must be "
+          "MISMATCH)", cls_name(c));
+
+    /*
+     * The DZIF kernel release still parses to the android15/6.6 module family,
+     * exactly as ZZIC's does. AGENTS.md section 7 calls this out: family
+     * parsing is module selection, never identity. If a future change ever
+     * let the family decide, this is the firmware it would wrongly admit.
+     */
+    {
+        int fam_rel = 0, fam_maj = 0, fam_min = 0;
+        int fam_rc = dfr_parse_kernel_versions(
+            "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k",
+            &fam_rel, &fam_maj, &fam_min);
+        CHECK(fam_rc == 0 && fam_rel == 15 && fam_maj == 6 && fam_min == 6,
+              "DZIF uname parses to android15/6.6 (rc=%d rel=%d %d.%d) - "
+              "family only, never identity",
+              fam_rc, fam_rel, fam_maj, fam_min);
+    }
+
     /* SM-S938U (US variant) -> not ZZIC */
     o = zzic_observed();
     o.model = "SM-S938U";
@@ -254,25 +323,25 @@ static void test_module_policy(void) {
     /* Clearing the flag refuses again, whatever else stays pinned. The policy
      * never infers permission from a digest that happens to be there. */
     p = DFR_PROFILE_ZZIC;
-    p.ko_zzic_verified = 0;
+    p.ko_verified = 0;
     v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
     CHECK(v == DFR_MODULE_POLICY_REFUSE_UNVERIFIED && !dfr_module_policy_permits(v),
-          "ko_zzic_verified=0 with a digest pinned -> REFUSE_UNVERIFIED (%s)",
+          "ko_verified=0 with a digest pinned -> REFUSE_UNVERIFIED (%s)",
           dfr_module_policy_name(v));
 
     /* A bare flag is not evidence: no digest, no filename -> still refused. */
     p = DFR_PROFILE_ZZIC;
-    p.ko_zzic_verified = 1;
+    p.ko_verified = 1;
     p.ko_sha256 = NULL;
     p.ko_filename = NULL;
     v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
     CHECK(v == DFR_MODULE_POLICY_REFUSE_NO_DIGEST && !dfr_module_policy_permits(v),
-          "ko_zzic_verified=1 with no ko_sha256 -> REFUSE_NO_DIGEST (%s)",
+          "ko_verified=1 with no ko_sha256 -> REFUSE_NO_DIGEST (%s)",
           dfr_module_policy_name(v));
 
     /* An empty-string digest is "not pinned", not "pinned to nothing". */
     p = DFR_PROFILE_ZZIC;
-    p.ko_zzic_verified = 1;
+    p.ko_verified = 1;
     p.ko_sha256 = "";
     p.ko_filename = "dirtyfrag-zzic.ko";
     v = dfr_module_policy_eval(DFR_TARGET_S25U_ZZIC, &p);
@@ -281,7 +350,7 @@ static void test_module_policy(void) {
 
     /* All three fields go together: a digest without a filename is refused. */
     p = DFR_PROFILE_ZZIC;
-    p.ko_zzic_verified = 1;
+    p.ko_verified = 1;
     p.ko_sha256 = "00112233445566778899aabbccddeeff"
                   "00112233445566778899aabbccddeeff";
     p.ko_filename = NULL;
@@ -517,15 +586,15 @@ static void test_profile_invariants(void) {
      * invariant - so assert the conjunction rather than the flag, in either
      * direction. A future revert to UNVERIFIED must clear all three, and this
      * fails if it clears only some. */
-    CHECK((p->ko_zzic_verified == 1 && p->ko_filename != NULL &&
+    CHECK((p->ko_verified == 1 && p->ko_filename != NULL &&
            p->ko_sha256 != NULL) ||
-          (p->ko_zzic_verified == 0 && p->ko_filename == NULL &&
+          (p->ko_verified == 0 && p->ko_filename == NULL &&
            p->ko_sha256 == NULL),
           "the three ko_* fields move together: verified=%d filename=%s digest=%s",
-          p->ko_zzic_verified,
+          p->ko_verified,
           p->ko_filename ? p->ko_filename : "<none>",
           p->ko_sha256 ? "pinned" : "<none>");
-    CHECK(p->ko_zzic_verified == 1 &&
+    CHECK(p->ko_verified == 1 &&
           dfr_streq(p->ko_filename, "dirtyfrag-android15-6.6-S938BXXUCZZIC.ko") &&
           is_lower_hex64(p->ko_sha256),
           "the pinned module is the exact-kernel one, digest as 64 lowercase hex");

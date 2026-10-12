@@ -185,7 +185,7 @@ The ZZIC module has its own `.incbin` and is reachable only from the explicit
 `dfr_select_ko_image()`. The profile pins all three fields together:
 
 ```c
-.ko_zzic_verified = 1,
+.ko_verified = 1,
 .ko_filename      = "dirtyfrag-android15-6.6-S938BXXUCZZIC.ko",
 .ko_sha256        = "b941d3234ad57235083f5778ff33c52cd4691aaf620d98be43fbaedc74ae3017",
 ```
@@ -252,7 +252,7 @@ LIBEXP_LOADED=PASS                             …and dlopen succeeded there
 NATIVE_PAYLOAD_PACKAGED=PASS                   the .so is in the APK
 NATIVE_PAYLOAD_EXTRACTED=NO                    expected with extractNativeLibs=false
 NETWORK_STACK_CAP_EFF=PASS                     newly enforced; was a dead pin
-ZZIC_MODULE_POLICY=ALLOW                       only with ko_zzic_verified=1
+ZZIC_MODULE_POLICY=ALLOW                       only with ko_verified=1
 ZZIC_MODULE_BINDING=PASS                       bundled bytes == pinned digest
 ```
 

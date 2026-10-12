@@ -54,7 +54,7 @@ def main():
     except OSError:
         manifest = ""
     auto_root_present = "DfrAutoRootService" in manifest
-    ko_ok = c.get("ko_zzic_verified") == 1
+    ko_ok = c.get("ko_verified") == 1
     binding_ok = audit.get("status") == "PASS"
 
     L = []
