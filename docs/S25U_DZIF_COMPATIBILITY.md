@@ -9,7 +9,10 @@ may change form but never be skipped — are in `AGENTS.md`, not restated here.
 
 > **There is no DZIF target profile, and this document does not create one.**
 > Nothing here was observed on a DZIF device. Every statement below is about
-> firmware *files*, and §2 explains why a profile cannot be pinned from them.
+> firmware *files*. §2 states the limit precisely: **no satisfiable DZIF
+> profile can be published yet with the inputs available** — which is not the
+> same as "a DZIF profile is impossible". The distinction is load-bearing and
+> §2 explains why.
 
 ## 1. What the current code does on a DZIF device: it refuses
 
@@ -40,7 +43,7 @@ see §2. The per-field assertion matters as much as the verdict: a refusal that
 happened because an *anchor* failed would mean the 3.1 case was not being
 exercised at all.
 
-## 2. Why no DZIF profile can be pinned from the available material
+## 2. Why no satisfiable DZIF profile can be published yet
 
 `DFR_PROFILE_ZZIC` pins twelve identity fields and eight artefact/provenance
 facts. The identity side is almost complete for DZIF; the artefact side is
@@ -76,6 +79,32 @@ chain with unknown elements is not a weaker gate, it is an unsatisfiable one.
 
 **The correct state is therefore the current one: no DZIF profile, and a DZIF
 device classifying `MISMATCH`.**
+
+### "Not publishable yet" is not "not possible"
+
+Worth stating plainly, because collapsing the two would mix an incomplete
+implementation with a technical incompatibility, and they call for different
+work.
+
+Nothing about DZIF makes this profile unachievable. The kernel is the same
+`android15-6.6` family, the BTF is byte-identical, the reference fixes are
+absent in the same four compiled windows, and the Java/AMS and SELinux
+surfaces the chain needs are present (§5). The *shape* of a
+`DFR_PROFILE_DZIF` — its struct, its twelve identity fields, the gates that
+compare them, the stage-scoped artefact masks — is already written and
+already exercised by the host tests; porting it is a mechanical edit that
+could be done today.
+
+What is missing is **values**, not design: the provenance and runtime
+quantities in §2's table. A profile carrying unknown or inherited values
+would compile and would classify, and that is exactly the danger — it would
+be a gate that cannot be satisfied honestly, or worse, one satisfied by
+another firmware's evidence. So the profile is withheld at *activation*, not
+abandoned at design.
+
+Practically: do not read this document as "DZIF is incompatible". Read it as
+"DZIF has no evidence yet, and here is precisely which bytes supply each
+missing field".
 
 But "not pinned yet" is not the same as "needs a device", and the table above
 now says which is which, because conflating them sends the next investigation
@@ -259,6 +288,23 @@ own `MANIFEST_SHA256.txt` first. `DZIF_FRAMEWORK_CORE_V2.tar.gz` and the
 truncated `super.img`
 (`967c42ada6d1ba981fc7b92fdef0f25bcfea964b275778614ae4d74ccde71f88`) are
 invalid inputs and were not used.
+
+### Named non-inputs
+
+Recorded because an exclusion that is only implicit survives exactly one
+careless change.
+
+- **`S938BXXUCZZHL`** — a build identifier the owner reports appearing in
+  delta/OTA metadata alongside the DZIF firmware material (`updated_version=`),
+  which is **not** `S938BXXUCDZIF`. That metadata was never an input to this
+  work: it is absent from both bundles above, and nothing in this document or
+  in `tools/tests/test_target_profile.c` reads it. It must not feed the DZIF
+  fingerprint, the AVB chain, `crashdump_sha256`, the vendor ELF, or any other
+  gate — a delta descriptor names the build it *produces*, and attributing it
+  to DZIF would pin another firmware's identity. Until its provenance is
+  understood it stays out entirely.
+- **`DZIF_FRAMEWORK_CORE_V2.tar.gz`** and the truncated `super.img`
+  (`967c42ad…`), as above.
 
 Repository-local:
 
