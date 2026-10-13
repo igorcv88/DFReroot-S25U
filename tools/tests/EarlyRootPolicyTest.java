@@ -743,6 +743,7 @@ public class EarlyRootPolicyTest {
                         AutoRootPolicy.PHASE_STARTED, 1, true),
                 null, BOOT, BOOT, 0L);
         check(acknowledged != null && acknowledged.ksudSha256.isEmpty()
+                        && EarlyRootPolicy.incidentAcknowledged(acknowledged)
                         && !EarlyRootPolicy.incidentBlocks(acknowledged,
                                 REPAIRED_KSUD),
                 "the examined historical boot is acknowledged even though its"
@@ -819,6 +820,11 @@ public class EarlyRootPolicyTest {
         check(unattributed != null && unattributed.ksudSha256.isEmpty(),
                 "a missing arm record yields an UNATTRIBUTED incident, not no"
                         + " incident");
+        check(!EarlyRootPolicy.incidentAcknowledged(attributed)
+                        && !EarlyRootPolicy.incidentAcknowledged(unattributed)
+                        && !EarlyRootPolicy.incidentAcknowledged(null),
+                "a new boot, even with no artefact identity, cannot inherit the"
+                        + " historical acknowledgement");
 
         // Applicability. The middle case is what keeps the latch usable.
         check(EarlyRootPolicy.incidentBlocks(attributed, KSUD),

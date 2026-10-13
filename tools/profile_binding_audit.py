@@ -2496,6 +2496,23 @@ def audit():
              "not-armed answer (3.7)")):
         if required not in early_root_arm_src:
             fail("early-root arming: %s (missing %s)" % (why, required))
+    # The first arming after a historical incident must record it before
+    # applying the exact historical-boot acknowledgement. An unconditional
+    # INCIDENT_IN_JOURNAL return here makes that boot impossible to arm once;
+    # every other newly detected incident still refuses on this first call.
+    pending_at = early_root_arm_src.find("val pending = EarlyRootPolicy.detectIncident(")
+    append_at = early_root_arm_src.find("val failure = EarlyRootStore.appendIncident(pending)")
+    pending_guard_at = early_root_arm_src.find(
+        "if (!EarlyRootPolicy.incidentAcknowledged(pending)) {")
+    pending_refusal_at = early_root_arm_src.find(
+        "return \"[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_IN_JOURNAL}\"")
+    if (min(pending_at, append_at, pending_guard_at, pending_refusal_at) < 0
+            or not (pending_at < append_at < pending_guard_at < pending_refusal_at)):
+        fail("the arming must persist a newly detected incident before using "
+             "incidentAcknowledged() to exempt only the examined historical boot; "
+             "an unconditional INCIDENT_IN_JOURNAL return ignores the owner's "
+             "acknowledgement and prevents the first authorized arming")
+
     # Order: detect and record BEFORE the archive moves the journal. Reversed,
     # the detector reads a journal that is no longer there and the incident is
     # silently lost - which is the exact self-correction P0-D forbids.

@@ -350,13 +350,21 @@ object DfrEarlyRoot {
                     " refusing rather than arming over evidence that could not be" +
                     " preserved"
             }
-            return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_IN_JOURNAL}" +
-                " - boot ${pending.bootId} reached transaction 5 (native_started=1)" +
-                " and never reported a result. Recorded at" +
-                " ${EarlyRootStore.INCIDENT_PATH}. Read /proc/last_kmsg," +
-                " /proc/reset_summary and /sys/class/sec/sec_hw_param/extra_info" +
-                " for that boot before anything else; see docs/EARLY_ROOT.md" +
-                " section 12."
+            /*
+             * Persist first. Only the exact historical boot acknowledged in
+             * source may continue on this first arming. Other newly detected
+             * incidents retain the one-time refusal so the owner sees them;
+             * a later arming still consults the digest-bound latch below.
+             */
+            if (!EarlyRootPolicy.incidentAcknowledged(pending)) {
+                return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_IN_JOURNAL}" +
+                    " - boot ${pending.bootId} reached transaction 5 (native_started=1)" +
+                    " and never reported a result. Recorded at" +
+                    " ${EarlyRootStore.INCIDENT_PATH}. Read /proc/last_kmsg," +
+                    " /proc/reset_summary and /sys/class/sec/sec_hw_param/extra_info" +
+                    " for that boot before anything else; see docs/EARLY_ROOT.md" +
+                    " section 12."
+            }
         }
 
         /*
