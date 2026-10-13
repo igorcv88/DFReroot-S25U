@@ -1,6 +1,7 @@
 package com.polygraphene.df.reroot
 
 import android.os.Process
+import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
@@ -101,13 +102,21 @@ object EarlyRootStore {
 
     private fun archiveLocked(): String? {
         for (path in listOf(JOURNAL_PATH, TRACE_PATH)) {
-            val file = File(path)
-            val exists = try {
-                file.exists()
+            /*
+             * Same reason as read(): exists() would answer false for a file
+             * that is there and unreachable, and this loop would then skip
+             * archiving it - leaving the previous cycle's journal in place
+             * beside a fresh arm record, which is exactly the state the
+             * archive exists to remove. Only ENOENT is nothing to archive.
+             */
+            try {
+                Os.stat(path)
+            } catch (e: ErrnoException) {
+                if (e.errno == OsConstants.ENOENT) continue
+                return "cannot stat $path: errno=${e.errno}"
             } catch (t: Throwable) {
                 return "cannot stat $path: $t"
             }
-            if (!exists) continue
             try {
                 Os.rename(path, "$path.prev")
             } catch (t: Throwable) {
@@ -250,16 +259,35 @@ object EarlyRootStore {
      * already written in this boot.
      */
     private fun read(path: String): String? {
-        val file = File(path)
-        val exists = try {
-            file.exists()
+        /*
+         * Os.stat, never File.exists().
+         *
+         * exists() answers a boolean to a question with three answers: it
+         * returns false for ANY failed stat, EACCES and EIO included, and does
+         * not throw. So a journal that is present and unreachable would read as
+         * "this boot has done nothing" - and that journal may say STARTED, i.e.
+         * the page cache was already written in this boot. That is an absence
+         * turned into permission to proceed, which is the one defect this
+         * repository exists to prevent (AGENTS.md 2), and it is the same bug
+         * markerState() already carries the fix for: ENOENT is absence, every
+         * other errno is missing evidence.
+         *
+         * No claim is being made that this firmware denies these paths today.
+         * The defect is that the implementation could not tell if it did, while
+         * its own contract above promises it can.
+         */
+        try {
+            Os.stat(path)
+        } catch (e: ErrnoException) {
+            if (e.errno == OsConstants.ENOENT) return null
+            Log.e(TAG, "[DFR][EARLY_ROOT] cannot stat $path: errno=${e.errno}")
+            return AutoRootPolicy.RECORD_UNREADABLE
         } catch (t: Throwable) {
             Log.e(TAG, "[DFR][EARLY_ROOT] cannot stat $path", t)
             return AutoRootPolicy.RECORD_UNREADABLE
         }
-        if (!exists) return null
         return try {
-            file.readText()
+            File(path).readText()
         } catch (t: Throwable) {
             Log.e(TAG, "[DFR][EARLY_ROOT] $path exists but cannot be read", t)
             AutoRootPolicy.RECORD_UNREADABLE

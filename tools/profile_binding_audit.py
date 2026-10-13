@@ -2548,6 +2548,29 @@ def audit():
         fail("the early-root trace is unbounded; something re-entering would grow a "
              "file in /data/system without limit")
 
+    # --- absence is ENOENT and nothing else ---------------------------------
+    # File.exists() answers a boolean to a question with three answers: it is
+    # false for ANY failed stat, EACCES and EIO included, and it does not throw.
+    # A journal that is present and unreachable would therefore read as "this
+    # boot has done nothing", while it may say STARTED - an absence turned into
+    # permission to proceed (AGENTS.md 2), and the same defect markerState()
+    # already carries the Os.stat fix for. This cannot be unit-tested here
+    # (Android imports), so AGENTS.md 5's static rule applies.
+    if ".exists()" in early_root_store_src:
+        fail("EarlyRootStore is back to File.exists(); it cannot then tell an "
+             "unreadable record from an absent one, which is what its own read() "
+             "contract promises and what the journal cross-guard depends on")
+    for required in ("Os.stat(path)", "OsConstants.ENOENT"):
+        if required not in early_root_store_src:
+            fail("EarlyRootStore no longer establishes absence through %s; only "
+                 "ENOENT is absence, every other errno is missing evidence"
+                 % required)
+    if early_root_store_src.count("OsConstants.ENOENT") < 2:
+        fail("only one of EarlyRootStore's two stat sites distinguishes ENOENT; "
+             "the archive skipping an unreachable journal leaves the previous "
+             "cycle's record beside a fresh arm record, which is the ambiguity "
+             "the archive exists to remove")
+
     # One answer per boot to "has the chain already run here". The marker probe
     # cannot give it: once root is established on this firmware the /dev/df*
     # lookups answer EACCES rather than ENOENT and read as MARKER_UNKNOWN.
