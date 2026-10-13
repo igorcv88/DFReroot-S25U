@@ -22,6 +22,8 @@
     <string name="auto_root_armed">Enabled: one attempt per full boot, never after a soft reboot.</string>
     <string name="arm_early_boot_probe">Arm Early Boot Probe</string>
     <string name="early_boot_probe_not_armed">EARLY_JOB_NOT_ARMED. After arming, start one FULL reboot within 10 seconds.</string>
+    <string name="arm_early_root">Arm Early Integrated Root (one boot)</string>
+    <string name="early_root_not_armed">EARLY_ROOT_NOT_ARMED. Arms ONE early root attempt for the next full boot: the chain runs inside the boot animation, before BOOT_COMPLETED. Needs a verified manual run on this build. A hard reboot is the recovery boundary.</string>
     <string name="notif_channel_name">Root verdict</string>
     <string name="notif_channel_desc">The outcome of a DirtyFrag run, including unattended ones at boot.</string>
     <string name="notif_root_restored">Root restored</string>
