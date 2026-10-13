@@ -13,9 +13,15 @@
 # evidence:
 #
 #  - the panic/reboot records FIRST. AGENTS.md 3.6.1: on this firmware they
-#    survive at ro.debug_level=0x4f4c while pstore and `logcat -L` are empty,
-#    and the acceptance criterion requires NO _KP DropBox entry in this boot or
-#    the next one;
+#    survive at ro.debug_level=0x4f4c while pstore and `logcat -L` are empty.
+#
+#    ONE RUN OF THIS SCRIPT CANNOT CLOSE THAT CRITERION, and the workflow has to
+#    say so. Section 8 requires no _KP entry "in that boot or the one after it",
+#    and a snapshot taken at 2 minutes of boot N cannot speak for a panic at 40
+#    minutes of boot N, nor for boot N+1 at all. So a boot's packet is complete
+#    only when the NEXT boot's collection also comes back with no _KP
+#    attributable to it: three accepted boots need FOUR runs of this script.
+#    Codex caught the premature "one pass completes it" wording on PR #63;
 #  - the trace with its per-step elapsed_ms, which is what turns "root before
 #    BOOT_COMPLETED" from a claim into an ordering two numbers can be compared
 #    on;
@@ -30,7 +36,17 @@
 
 OUT=/sdcard/Download/dfr_earlyroot_pass_$(date +%Y%m%d_%H%M%S).txt
 say() { echo "$@" >> "$OUT"; }
-show() { say "--- $1 ---"; shift; "$@" >> "$OUT" 2>&1; say ""; }
+# stderr is CAPTURED, never discarded, and the exit status is recorded. A block
+# that failed and a block that was empty look identical otherwise, and most of
+# these blocks exist to establish the ABSENCE of something (AGENTS.md 2: an
+# absence is only evidence when the reader can tell it from a failed read).
+show() {
+    say "--- $1 ---"
+    shift
+    "$@" >> "$OUT" 2>&1
+    say "[exit_status=$?]"
+    say ""
+}
 
 say "=== DFReroot early-root boot evidence ==="
 say "collected_wallclock=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -44,8 +60,35 @@ say ""
 show "sec_hw_param/extra_info" cat /sys/class/sec/sec_hw_param/extra_info
 show "reset_summary" cat /proc/reset_summary
 show "reset_history" cat /proc/reset_history
+# The one block whose whole purpose is to prove an ABSENCE, so it is the one
+# block that must never report a failed read as a clean boot.
+#
+# `ls ... 2>/dev/null | grep SYSTEM_LAST_KMSG` produced an empty section for an
+# unreadable directory AND for a boot with no panic entry - the same bytes for
+# "no panic happened" and "nobody could look". Codex caught it on PR #63, and it
+# is the ENOENT-versus-other-errno discipline this repository enforces in code,
+# missing from the script that collects the evidence for it.
+#
+# So: the listing is taken once into a variable, its status is recorded, and the
+# three outcomes are named apart.
 say "--- dropbox SYSTEM_LAST_KMSG (_KP = panic, _RP = ordinary reboot) ---"
-ls -l /data/system/dropbox 2>/dev/null | grep SYSTEM_LAST_KMSG >> "$OUT" 2>&1
+DROPBOX_LS=$(ls -l /data/system/dropbox 2>&1)
+DROPBOX_STATUS=$?
+say "[ls exit_status=$DROPBOX_STATUS]"
+if [ "$DROPBOX_STATUS" -ne 0 ]; then
+    say "DROPBOX=UNREADABLE - the listing failed, so this boot's panic state is"
+    say "NOT established. This is a refusal, not a clean boot. Re-run with su."
+    say "$DROPBOX_LS"
+else
+    DROPBOX_KMSG=$(echo "$DROPBOX_LS" | grep SYSTEM_LAST_KMSG)
+    if [ -z "$DROPBOX_KMSG" ]; then
+        say "DROPBOX=LISTED_NO_KMSG_ENTRY - the directory was read and holds no"
+        say "SYSTEM_LAST_KMSG entry at all. Absence established by a successful read."
+    else
+        say "DROPBOX=LISTED_WITH_ENTRIES - read the _KP/_RP suffix on each:"
+        say "$DROPBOX_KMSG"
+    fi
+fi
 say ""
 say "ro.boot.bootreason=$(getprop ro.boot.bootreason)"
 say "sys.boot.reason=$(getprop sys.boot.reason)"

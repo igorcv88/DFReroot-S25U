@@ -25,35 +25,49 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
-> **FIRST PHYSICAL PASS, 2026-10-13 — boot 1 of 3. Everything below predates
-> it.**
+> **First run reporting COMPLETE, 2026-10-13 — and the evidence packet for it
+> does not exist yet. Everything below predates it.**
 >
-> Armed in `ebb03f9d-f478-4e2e-aba5-b7299a1feed0`, fired in
+> Armed in `ebb03f9d-f478-4e2e-aba5-b7299a1feed0`, reported in
 > `42da1cdd-ccfa-4c06-861c-ce42eac99d61`, Auto Root **off**. The **job** trigger
 > claimed at **18.3 s**; the journal reads `phase=COMPLETE` / `attempts=1` /
-> `native_started=1`, which `terminalPhase` writes only for
-> `nativeResult == 0` + same-boot `POST_ROOT_COMPLETE` + `liveSelinux == 1`; and
-> `EARLY_ROOT_BOOT_COMPLETED_OBSERVED` is the **last** of 19 append-only steps,
-> at 42.457 s. So the chain completed before `BOOT_COMPLETED` in one boot.
+> `native_started=1`, which `terminalPhase` writes only for `nativeResult == 0`
+> plus a same-boot `POST_ROOT_COMPLETE` plus the chain's own `liveSelinux == 1`.
+> The trace holds 19 steps ending at `EARLY_ROOT_BOOT_COMPLETED_OBSERVED` at
+> 42.457 s.
 >
-> **The gate stays UNVERIFIED.** §8 requires three consecutive boots, and this
-> boot's primary artefacts are not in the record yet — the trace file (for the
-> `elapsed_ms` of `POST_ROOT_COMPLETE`, i.e. the margin), the post-root record,
-> an independent SELinux read, and **no `_KP` DropBox entry in this boot or the
-> next**. `tools/earlyroot_collect_pass.sh` captures all of it in one `su` pass.
-> Collect it for this boot before arming the next one: an unrecorded PASS is a
-> PASS nobody can promote.
+> **This is not a physical PASS and must not be written up as one.** An earlier
+> revision of this block and of the dossier entry said it was; Codex caught it
+> on PR #63 and was right. Four of §8's six per-boot items are missing, and one
+> inference was unsound: `phase=COMPLETE` does **not** prove the
+> `POST_ROOT_COMPLETE` / `SELINUX_ENFORCING` trace lines exist, because
+> `DfrEarlyRootService` writes those two with the return value of `trace()`
+> ignored. The journal proves root was verified in that boot; only the trace
+> proves the ordering against `BOOT_COMPLETED`, and nobody has read it.
 >
-> **Two things this does not touch.** The modules were not initialised, which is
-> the designed behaviour (§9) and not a defect. And the job's punctuality is not
-> settled by one punctual boot — 299 s, 334.4 s and 521.7 s happened with the
-> same JobInfo, the ready-vs-not-ready fork below is untouched, and
-> `tools/earlyroot_job_probe.sh` is the read to run on the next LATE boot.
+> **What closes it, per boot:** `tools/earlyroot_collect_pass.sh`, run with
+> `su`. It takes the panic/reboot records first, the trace with its per-step
+> `elapsed_ms` and `bootanim_exit`, the journal/cycle/arm/incident records, the
+> post-root record, an independent `/sys/fs/selinux/enforce`, and the DropBox
+> listing with its read status.
 >
-> **Also collected by that script, and more valuable than it looks:**
-> `dev.bootcomplete` / `dev.platform_bootcomplete` from a boot where nothing
-> tore userspace down. AGENTS.md 3.6.2 records that nobody has read them on this
-> firmware, and they gate the whole module/soft-reboot half of the goal.
+> **And it is one run per boot, not one run per PASS.** §8 wants no `_KP` entry
+> "in that boot **or the one after it**", and a snapshot at 2 minutes of boot N
+> cannot speak for a panic at 40 minutes of boot N, nor for boot N+1 at all. So
+> boot N's packet is complete only once boot N+1's collection also comes back
+> clean: **three accepted boots need four runs.** Codex caught the premature
+> "one pass completes it" wording too.
+>
+> **Two things this run does not touch.** The modules were not initialised,
+> which is the designed behaviour (§9), not a defect. And the job's punctuality
+> is not settled by one punctual boot - 299 s, 334.4 s and 521.7 s happened with
+> the same JobInfo, the ready-vs-not-ready fork below is untouched, and
+> `tools/earlyroot_job_probe.sh` is the read for the next **late** boot.
+>
+> **Worth more than it looks:** that collector also reads `dev.bootcomplete` /
+> `dev.platform_bootcomplete` from a boot where nothing tore userspace down.
+> AGENTS.md 3.6.2 records that nobody has read them on this firmware, and they
+> gate the whole module/soft-reboot half of the goal.
 
 > **Where to start, 2026-10-13 (third run) — the batching hypothesis is
 > refuted, the broadcast trigger is dead on DZIF, and one unrun command decides
