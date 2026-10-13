@@ -225,6 +225,18 @@ class DfrBootReceiver : BroadcastReceiver() {
                 if (booted) completeSoftRebootHealth()
                 if (locked) recordLockedBoot(arrivalMs) else retryPendingFinalize()
                 /*
+                 * The early path's locked-boot timestamp, as an observation.
+                 *
+                 * Separate from the dispatch trigger on purpose: that one may
+                 * refuse, and once an arming is claimed it stands down without
+                 * writing anything. This line is what keeps the moment
+                 * LOCKED_BOOT_COMPLETED arrived - and the boot-state properties
+                 * at that moment - in the evidence file of the boot being
+                 * measured. On the first PASS boot it was the only record
+                 * placing the animation's exit within 2.5 s.
+                 */
+                if (locked) recordEarlyRootLockedBoot(arrivalMs)
+                /*
                  * The comparison point for Early Integrated Root, taken by the
                  * one component that is not part of what it measures.
                  *
@@ -378,6 +390,64 @@ class DfrBootReceiver : BroadcastReceiver() {
      * It can only ever add one line. It writes no verdict, takes no decision from
      * what it reads, and a failure costs the comparison, never the run.
      */
+    /**
+     * Append `LOCKED_BOOT_COMPLETED`'s arrival to this boot's early-root trace.
+     *
+     * The passive half of what the dispatch trigger used to record incidentally.
+     * Identical in shape to [recordEarlyRootBootCompleted] and identical in what
+     * it may do: one line, once per boot, only when this boot already has a
+     * trace, no decision taken from what it reads, and a failure costs the
+     * measurement rather than the run.
+     *
+     * Why it is worth a line at all: `bootanim_exit` and `sys.boot_completed`
+     * both move between `BEFORE_NATIVE` and the verdict steps, and this is the
+     * only sample taken inside that window. Without it the animation's exit can
+     * only be bracketed across the whole native call.
+     *
+     * It cannot arm, claim or dispatch anything, and it is deliberately NOT the
+     * trigger: a component that may refuse is not a component that can be
+     * trusted to leave a timestamp behind.
+     */
+    private fun recordEarlyRootLockedBoot(arrivalMs: Long) {
+        val trace = EarlyRootStore.readTrace() ?: return
+        if (trace == AutoRootPolicy.RECORD_UNREADABLE) {
+            Log.i(TAG, "[DFR][EARLY_ROOT] LOCKED_BOOT_OBSERVED=SKIP trace unreadable")
+            return
+        }
+        val bootId = DfrRootCoordinator.readBootId()
+        if (bootId.isEmpty()) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] LOCKED_BOOT_OBSERVED=FAIL boot_id unavailable")
+            return
+        }
+        // Last boot's trace is not this boot's record (AGENTS.md 3.8), and a
+        // boot where the early path never wrote pays nothing.
+        if (!EarlyRootPolicy.traceBelongsToBoot(trace, bootId)) return
+        /*
+         * Once per boot. LOCKED_BOOT_COMPLETED is re-delivered by a framework
+         * restart under the same boot_id - it happened twice in the first PASS
+         * boot - and the measurement is about the first arrival.
+         */
+        if (EarlyRootPolicy.traceHasStep(
+                trace, EarlyRootPolicy.STEP_LOCKED_BOOT_OBSERVED)) {
+            return
+        }
+        if (arrivalMs < 0) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] LOCKED_BOOT_OBSERVED=UNKNOWN" +
+                " reason=monotonic_clock_unavailable boot_id=$bootId")
+            return
+        }
+        val failure = EarlyRootStore.trace(
+            bootId, EarlyRootPolicy.STEP_LOCKED_BOOT_OBSERVED, arrivalMs,
+            EarlyRootEnv.bootState(null), "action=LOCKED_BOOT_COMPLETED"
+        )
+        if (failure != null) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] LOCKED_BOOT_OBSERVED=FAIL $failure")
+            return
+        }
+        Log.i(TAG, "[DFR][EARLY_ROOT] LOCKED_BOOT_OBSERVED=PASS boot_id=$bootId" +
+            " elapsed_ms=$arrivalMs")
+    }
+
     private fun recordEarlyRootBootCompleted(arrivalMs: Long) {
         val trace = EarlyRootStore.readTrace() ?: return
         if (trace == AutoRootPolicy.RECORD_UNREADABLE) {

@@ -3585,7 +3585,7 @@ This replaces the derived reading: the trace itself is now in the record.
 | item | status |
 |---|---|
 | one `boot_id` across the whole trace | **PASS** — every line reads `42da1cdd…` |
-| `POST_ROOT_COMPLETE` and `SELINUX_ENFORCING` present, both before `BOOT_COMPLETED_OBSERVED` | **PASS** — 27747 and 27759 against 42457, a **14.70 s** margin. No longer an inference |
+| `POST_ROOT_COMPLETE` and `SELINUX_ENFORCING` present, both before `BOOT_COMPLETED_OBSERVED` | **PASS** — 27747 and 27759 against 42457, a **14.70 s** margin. No longer an inference. **Against the BROADCAST only** — see the scoping section below; it does not establish root before `sys.boot_completed=1` |
 | `/data/system/dfreroot-post-root` valid for that `boot_id` | **PASS** — `boot_id=42da1cdd…`, `ksu_version=32601`, `uapi_version=2`, `runtime_mode=late-load`, `selinux=1`, `transport_fix=kdp-cred-1` |
 | `/sys/fs/selinux/enforce` read independently | **PASS** — `1` |
 | journal `phase=COMPLETE` / `attempts=1` | **PASS**, with `native_started=1` |
@@ -3601,30 +3601,64 @@ at 18.715 s and the boot ran **2 h 18 min with no `_KP`**, `kernelsu` loaded
 (`lsmod`: 180224, used by 3) and `ksud 3.3.0 (uapi: 2)` answering. That is the
 first evidence the corrected pair survives an early load. One boot.
 
-#### THE MEASUREMENT THAT MATTERS FOR THE PRODUCT GOAL: root lands after the screen
+#### What each signal is, and what the 14.70 s margin is NOT
 
-The animation exited **between 18715 and 21259 ms** — `bootanim_exit` is 0 at
-`BEFORE_NATIVE` and 1 by the locked-boot trigger. And `POST_ROOT_COMPLETE` is at
-27747.
+The owner's review on PR #64 separated three things this entry's first revision
+ran together. All three corrections hold and they all narrow the claim.
 
-**So root completed roughly 6.5–9.0 s AFTER the boot animation left the
-screen.** The chain started inside the animation and its destructive write
-happened inside it, but the verdict did not. The product goal - one visible
-initialisation with root already live - is **not** met by this run, and the gap
-is now a number instead of a question. Its decomposition:
+**1. The margin is against the broadcast, not against boot completion.**
+`BOOT_COMPLETED_OBSERVED` at 42457 is the arrival of `ACTION_BOOT_COMPLETED` at
+our receiver. But `sys.boot_completed` reads **UNKNOWN** (i.e. unset) at
+`BEFORE_NATIVE` (18715) and **1** at 21259, so the property turned 1 somewhere in
+between — **before** `POST_ROOT_COMPLETE` at 27747.
+
+So, precisely:
+
+| claim | verdict |
+|---|---|
+| root verified before `ACTION_BOOT_COMPLETED` reached us | **yes**, by 14.70 s |
+| root verified before `sys.boot_completed=1` | **no** — the property was already 1 by 21259, ~6.5-9.0 s earlier |
+| root verified before the animation left the screen | **no** — same window |
+
+`docs/EARLY_ROOT.md` §5 already states that the property and the broadcast are
+two facts and that the property moves first. The milestone in §2 is written
+against the broadcast, so it **is** satisfied as specified — and the stronger
+reading a reader might take from "before BOOT_COMPLETED" is not.
+
+**2. `POST_ROOT_COMPLETE` at 27747 is when verification SUCCEEDED, not when root
+appeared.** The coordinator polls for the same-boot post-root record; the step is
+appended when a poll finds it valid. 27747 is therefore an **upper bound** on
+when the capability existed, not the instant. Nothing in this capture dates that
+instant, and the 3108 ms `NATIVE_RETURNED → POST_ROOT_COMPLETE` segment is
+polling latency plus whatever ksud took, which this trace does not separate.
+
+**3. `service.bootanim.exit` 0→1 is the firmware's flag, not the launcher
+appearing.** It records that the animation was *asked* to leave. What the owner
+physically sees, and when, is not in any file here. So "root lands after the
+screen" is a statement about that flag's transition, and the visual claim behind
+the product goal still rests on the owner looking at the device.
+
+#### With that scoping: how far the product goal actually is
+
+The animation's exit flag moved between 18715 and 21259; `POST_ROOT_COMPLETE`
+is at 27747. **Root was verified roughly 6.5-9.0 s after the firmware asked the
+animation to leave, and after the boot had already been declared complete by the
+property.** The chain's destructive write happened inside the animation; its
+verdict did not.
+
+The gap decomposes as:
 
 | segment | cost |
 |---|---:|
 | `JOB_ENTERED` → `BEFORE_NATIVE` (gate, readiness, claim, hop, remote preflight) | 546 ms |
 | `BEFORE_NATIVE` → `NATIVE_RETURNED` (the native chain itself) | **5924 ms** |
-| `NATIVE_RETURNED` → `POST_ROOT_COMPLETE` (post-root polling) | **3108 ms** |
+| `NATIVE_RETURNED` → `POST_ROOT_COMPLETE` (polling + whatever ksud took) | **3108 ms** |
 | total `JOB_ENTERED` → `POST_ROOT_COMPLETE` | 9578 ms |
-| animation left, measured from `JOB_ENTERED` | ≤ 3090 ms |
+| animation-exit flag moved, measured from `JOB_ENTERED` | ≤ 3090 ms |
 
-To land root before the screen is handed over, the chain must finish in ≤3.1 s
-instead of 9.6 s, or start ~6.5 s earlier. The two segments worth attacking are
-named above; neither has been profiled, and nothing here says either can be
-reduced.
+To land root before that flag moves, the chain must finish in ≤3.1 s instead of
+9.6 s, or start ~6.5 s earlier. Neither of the two large segments has been
+profiled and nothing here says either can be reduced.
 
 #### The LOCKED_BOOT ordering, confirmed a third time and from inside a PASS boot
 
@@ -3697,3 +3731,11 @@ Two consequences:
   looked like "live". The trigger that fires in every boot now stands down
   silently once the cycle is claimed; the job keeps its breadcrumb, because when
   it fired is the punctuality measurement being collected.
+
+#### The gap this capture does not close
+
+**No APK build or physical validation followed the code changes made in response
+to it.** `traceHasStep`, the idempotent `BOOT_COMPLETED_OBSERVED`, the dispatch
+stand-down and the passive `LOCKED_BOOT_OBSERVED` observer are host-verified
+only; there is no NDK or Gradle in the environment they were written in. The
+next physical boot is the first time any of them runs.

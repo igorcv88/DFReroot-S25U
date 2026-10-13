@@ -41,19 +41,35 @@ acceptance criteria for the next signed build. If this file disagrees with
 >
 > **Two more accepted boots are required. The gate stays UNVERIFIED.**
 >
-> **THE NUMBER THIS WAS MISSING:** `bootanim_exit` is **0** at `BEFORE_NATIVE`
-> (18715) and **1** by 21259, so the animation left the screen between those two
-> - and `POST_ROOT_COMPLETE` is at 27747. **Root completed ~6.5-9.0 s after the
-> screen was handed over.** The chain runs inside the animation; its verdict does
-> not. The product goal is not met by this run, and the gap decomposes as: 546 ms
-> gate-to-transaction-5, **5924 ms inside the native chain**, **3108 ms of
-> post-root polling** - 9578 ms total against ≤3090 ms of animation left. To land
-> root before the screen, the chain must finish in ≤3.1 s or start ~6.5 s
-> earlier. Neither segment has been profiled; nothing says either can be reduced.
+> **THE NUMBER THIS WAS MISSING, scoped as the owner's PR #64 review requires:**
+> the animation-exit FLAG moved between `BEFORE_NATIVE` (18715,
+> `bootanim_exit=0`) and 21259 (`=1`), and `POST_ROOT_COMPLETE` is at 27747.
+> **Root was verified ~6.5-9.0 s after that flag moved, and after
+> `sys.boot_completed` was already 1.** Three scoping limits, all of which narrow
+> the claim: the 14.70 s margin is against the **broadcast**
+> (`ACTION_BOOT_COMPLETED` at 42457), not against the property, which turned 1 in
+> that same early window; `POST_ROOT_COMPLETE` is when **verification
+> succeeded**, an upper bound on when the capability appeared, not the instant;
+> and `service.bootanim.exit` is the firmware asking the animation to leave, not
+> the launcher being presented - what the owner sees is in no file here.
+>
+> The gap decomposes as 546 ms gate-to-transaction-5, **5924 ms inside the native
+> chain**, **3108 ms of polling plus whatever ksud took** - 9578 ms against
+> ≤3090 ms before the flag moved. To land root first, the chain must finish in
+> ≤3.1 s or start ~6.5 s earlier. Neither large segment has been profiled, and
+> nothing says either can be reduced.
 >
 > **First positive evidence for the repaired module in the early window:** the
 > 2026-10-12 panic was 6.2 s after `BEFORE_NATIVE`; this boot ran 2 h 18 min with
 > `kernelsu` loaded and no `_KP`. One boot.
+>
+> **The locked-boot timestamp is now a passive observation**
+> (`EARLY_ROOT_LOCKED_BOOT_OBSERVED`), written once per boot by `DfrBootReceiver`
+> and unable to arm, claim or dispatch anything. The dispatch trigger's
+> incidental `TRIGGER_ENTERED` at 21259 was the only line bracketing the
+> animation's exit to within 2.5 s, and standing that trigger down for a spent
+> arming would have taken the measurement with it - the owner's PR #64 review
+> caught that regression before it shipped.
 >
 > **A framework restart 66.3 min into that boot** re-delivered both boot
 > broadcasts under the same `boot_id`. Cause not in the capture. It means

@@ -1484,6 +1484,22 @@ public class EarlyRootPolicyTest {
                         && !EarlyRootPolicy.traceHasStep(oneStep, null),
                 "null inputs report absent rather than throwing");
 
+        // --- the passive locked-boot observation ----------------------------
+        String lockedObserved = EarlyRootPolicy.formatTraceStep(
+                EarlyRootPolicy.STEP_LOCKED_BOOT_OBSERVED, BOOT, 21_259L,
+                "sys_boot_completed=1 bootanim_exit=1 user_unlocked=0",
+                "action=LOCKED_BOOT_COMPLETED");
+        check(EarlyRootPolicy.parseTraceLine(lockedObserved) != null,
+                "EARLY_ROOT_LOCKED_BOOT_OBSERVED is in the closed step vocabulary,"
+                        + " so the observer's append is not refused at the writer");
+        check(EarlyRootPolicy.traceHasStep(lockedObserved,
+                        EarlyRootPolicy.STEP_LOCKED_BOOT_OBSERVED)
+                        && !EarlyRootPolicy.traceHasStep(lockedObserved,
+                                EarlyRootPolicy.STEP_BOOT_COMPLETED_OBSERVED),
+                "the observer's dedup check distinguishes its own step from the"
+                        + " BOOT_COMPLETED one: a framework restart re-delivers both"
+                        + " and each is measured from its first arrival");
+
         check(EarlyRootPolicy.MAX_ATTEMPTS_PER_BOOT == 1,
                 "the early path is one attempt per boot: there is no retry loop to"
                         + " bound, and a self-rescheduling root attempt must not exist");

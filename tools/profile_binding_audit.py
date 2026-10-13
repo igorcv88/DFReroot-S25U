@@ -3016,6 +3016,48 @@ def audit():
     if "traceHasStep" not in early_root_policy_src:
         fail("EarlyRootPolicy lost traceHasStep, so the writer's idempotence check "
              "rests on nothing")
+    # The locked-boot timestamp survives that stand-down as a PASSIVE observation.
+    # On the first PASS boot the dispatch trigger's incidental TRIGGER_ENTERED at
+    # 21259 ms was the only line bracketing the animation's exit to within 2.5 s;
+    # standing the trigger down for a spent arming would have taken the
+    # measurement with it, and the margin is what the remaining work has to
+    # measure. The owner's review on PR #64 caught that.
+    locked_fn = receiver_code.find("private fun recordEarlyRootLockedBoot(")
+    locked_body = receiver_code[locked_fn:] if locked_fn >= 0 else ""
+    locked_body = locked_body[:locked_body.find("\n    private fun ", 1)] if \
+        locked_body.find("\n    private fun ", 1) > 0 else locked_body
+    if locked_fn < 0:
+        fail("the locked-boot arrival is no longer observed anywhere; the only "
+             "sample inside the window where bootanim_exit and sys.boot_completed "
+             "move would be gone, and with it the visual margin")
+    else:
+        for required, why in (
+                ("EarlyRootPolicy.STEP_LOCKED_BOOT_OBSERVED",
+                 "it writes no step of its own"),
+                ("EarlyRootPolicy.traceBelongsToBoot(",
+                 "it would append to last boot's record (3.8), and every boot of "
+                 "every install would pay for it"),
+                ("EarlyRootPolicy.traceHasStep(",
+                 "a framework restart re-delivers the broadcast under the same "
+                 "boot_id, and the measurement is about the first arrival")):
+            if required not in locked_body:
+                fail("the passive locked-boot observation is unsound: %s (%r "
+                     "missing)" % (why, required))
+        # Passive means passive: it may not arm, claim, dispatch or gate.
+        for forbidden in ("claimCycle", "bindCycle", "startService",
+                          "gateAndDispatch", "evaluateArmBinding",
+                          "journalPhase"):
+            if forbidden in locked_body:
+                fail("the locked-boot observation reaches a decision path (%r); a "
+                     "component that may refuse is not one that can be trusted to "
+                     "leave a timestamp behind" % forbidden)
+    if "STEP_LOCKED_BOOT_OBSERVED" not in early_root_policy_src:
+        fail("EARLY_ROOT_LOCKED_BOOT_OBSERVED left the closed step vocabulary; "
+             "writing it would refuse and the sample would go unrecorded")
+    if "EarlyRootPolicy.STEP_LOCKED_BOOT_OBSERVED" in early_root_dispatch_src:
+        fail("the dispatch writes the passive locked-boot observation; the "
+             "observer must be the component that is not part of what it measures")
+
     # And the trigger that fires in EVERY boot stands down silently once the
     # arming it would serve is claimed: an arm record outlives its cycle, so
     # without this the evidence file of the boot being measured collects two
