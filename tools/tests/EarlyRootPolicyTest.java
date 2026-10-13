@@ -893,6 +893,136 @@ public class EarlyRootPolicyTest {
                 "the incident record refuses on its own, after the journal that"
                         + " produced it has been archived");
 
+        // ------------------------------------------------------------------
+        // The incident LOG, and the second-incident regression Codex found on
+        // PR #55.
+        //
+        // The defect: with one record, incident A on the panicking artefact
+        // occupied the only slot, and the arming's "A does not block B, return"
+        // branch never looked at the journal. So corrected artefact B could die
+        // after transaction 5, have its STARTED journal archived, and run again
+        // with nothing remembering it.
+        // ------------------------------------------------------------------
+        final String DEAD_BOOT_B = "11111111-2222-3333-4444-555555555555";
+
+        EarlyRootPolicy.Incident incidentA = attributed;          // names KSUD
+        EarlyRootPolicy.Incident incidentB = EarlyRootPolicy.detectIncident(
+                EarlyRootPolicy.formatJournal(DEAD_BOOT_B,
+                        AutoRootPolicy.PHASE_STARTED, 1, true),
+                EarlyRootPolicy.formatArm(ARMED_BOOT,
+                        EarlyRootPolicy.EXPECTED_JOB_ID, NS, 15_000L, 1, CODE,
+                        NAME, OTHER_KSUD, FP, 300_000L, 1759000000000L, GEN),
+                BOOT, BOOT, 1759000001000L);
+        check(incidentB != null && OTHER_KSUD.equals(incidentB.ksudSha256),
+                "a second incident is attributed to the corrected artefact");
+
+        String logA = EarlyRootPolicy.appendIncident(null, incidentA);
+        String logAB = EarlyRootPolicy.appendIncident(logA, incidentB);
+
+        java.util.List<EarlyRootPolicy.Incident> parsedA =
+                EarlyRootPolicy.parseIncidents(logA);
+        java.util.List<EarlyRootPolicy.Incident> parsedAB =
+                EarlyRootPolicy.parseIncidents(logAB);
+        check(parsedA != null && parsedA.size() == 1
+                        && parsedAB != null && parsedAB.size() == 2
+                        && DEAD_BOOT.equals(parsedAB.get(0).bootId)
+                        && DEAD_BOOT_B.equals(parsedAB.get(1).bootId)
+                        && KSUD.equals(parsedAB.get(0).ksudSha256)
+                        && OTHER_KSUD.equals(parsedAB.get(1).ksudSha256),
+                "the log holds both incidents, oldest first, each keeping its own"
+                        + " attribution");
+        check(EarlyRootPolicy.parseIncidents(null) != null
+                        && EarlyRootPolicy.parseIncidents(null).isEmpty()
+                        && EarlyRootPolicy.parseIncidents("").isEmpty(),
+                "an absent log is an empty log, not a malformed one");
+        check(EarlyRootPolicy.parseIncidents(
+                        AutoRootPolicy.RECORD_UNREADABLE) == null,
+                "an unreadable log does not parse");
+        // One bad entry refuses the whole log: the entry this build cannot read
+        // may be the one that would have blocked.
+        check(EarlyRootPolicy.parseIncidents(
+                        logA + "\n\nincident_boot_id=x\n") == null,
+                "one unaccountable entry refuses the whole log rather than being"
+                        + " skipped");
+
+        // This is the regression itself: B's incident must refuse B.
+        check(EarlyRootPolicy.blockingIncident(parsedA, OTHER_KSUD) == null,
+                "with only A recorded, the corrected artefact B is not refused -"
+                        + " which is what made the hole reachable");
+        EarlyRootPolicy.Incident blocksB =
+                EarlyRootPolicy.blockingIncident(parsedAB, OTHER_KSUD);
+        check(blocksB != null && DEAD_BOOT_B.equals(blocksB.bootId),
+                "once B's own incident is in the log it refuses B, and names B's"
+                        + " boot rather than A's");
+        EarlyRootPolicy.Incident blocksOriginal =
+                EarlyRootPolicy.blockingIncident(parsedAB, KSUD);
+        check(blocksOriginal != null && DEAD_BOOT.equals(blocksOriginal.bootId),
+                "A still refuses the original artefact with B's entry beside it");
+        check(EarlyRootPolicy.blockingIncident(parsedAB, "c".repeat(64)) == null,
+                "a third, untried artefact is refused by neither");
+        check(EarlyRootPolicy.blockingIncident(null, KSUD) == null,
+                "a log that did not parse yields no blocking incident; the caller"
+                        + " refuses on the parse instead");
+
+        // Duplicate suppression, or every arming after a detection walks the
+        // log to its bound.
+        check(EarlyRootPolicy.incidentRecorded(parsedAB, incidentA)
+                        && EarlyRootPolicy.incidentRecorded(parsedAB, incidentB),
+                "an incident already in the log is recognised, by the boot it"
+                        + " happened in");
+        check(!EarlyRootPolicy.incidentRecorded(parsedA, incidentB),
+                "an incident not yet in the log is not recognised");
+        check(EarlyRootPolicy.incidentRecorded(parsedAB, unattributed),
+                "an unattributed incident from the same boot as a recorded one is"
+                        + " the same incident: the boot is what identifies it");
+
+        // The bound, and that a full log refuses the append rather than growing.
+        String fullLog = null;
+        for (int i = 0; i < EarlyRootPolicy.MAX_INCIDENTS; i++) {
+            EarlyRootPolicy.Incident one = EarlyRootPolicy.detectIncident(
+                    EarlyRootPolicy.formatJournal("boot-" + i,
+                            AutoRootPolicy.PHASE_STARTED, 1, true),
+                    arm(), BOOT, BOOT, 0L);
+            fullLog = EarlyRootPolicy.appendIncident(fullLog, one);
+        }
+        check(EarlyRootPolicy.parseIncidents(fullLog) != null
+                        && EarlyRootPolicy.parseIncidents(fullLog).size()
+                                == EarlyRootPolicy.MAX_INCIDENTS,
+                "the log parses at exactly MAX_INCIDENTS entries");
+        check(EarlyRootPolicy.incidentLogHasRoom(logAB)
+                        && !EarlyRootPolicy.incidentLogHasRoom(fullLog),
+                "a full log has no room; the append is refused rather than the"
+                        + " bound exceeded");
+        check(!EarlyRootPolicy.incidentLogHasRoom(
+                        AutoRootPolicy.RECORD_UNREADABLE),
+                "an unreadable log has no room either: it is not replaced");
+        check(EarlyRootPolicy.incidentLogHasRoom(null),
+                "an absent log has room");
+        check(EarlyRootPolicy.parseIncidents(
+                        EarlyRootPolicy.appendIncident(fullLog, incidentB)) == null,
+                "a log one past the bound does not parse, so nothing downstream"
+                        + " reads it as a shorter one");
+
+        // And at the gate, with the log form.
+        in = ready();
+        in.incidentRecord = logAB;
+        in.ksudSha256 = OTHER_KSUD;
+        in.armRecord = EarlyRootPolicy.formatArm(ARMED_BOOT,
+                EarlyRootPolicy.EXPECTED_JOB_ID, NS, 15_000L, 1, CODE, NAME,
+                OTHER_KSUD, FP, 300_000L, 1759000000000L, GEN);
+        in.qualificationRecord = AutoRootPolicy.formatQualification(CODE, NAME,
+                OTHER_KSUD, FP, QUAL_BOOT, 1759000000000L, false, QUAL_BOOT);
+        refused(in, EarlyRootPolicy.INCIDENT_UNRESOLVED,
+                "the gate refuses the corrected artefact once its OWN unexplained"
+                        + " death is in the log");
+        in.incidentRecord = logA;
+        allowed(in, "with only the previous artefact's incident recorded, the"
+                + " corrected one is not refused by the latch");
+        in = ready();
+        in.incidentRecord = logA + "\n\nincident_boot_id=x\n";
+        refused(in, EarlyRootPolicy.INCIDENT_MALFORMED,
+                "one unaccountable entry refuses at the gate too");
+
         check(EarlyRootPolicy.MAX_ATTEMPTS_PER_BOOT == 1,
                 "the early path is one attempt per boot: there is no retry loop to"
                         + " bound, and a self-rescheduling root attempt must not exist");

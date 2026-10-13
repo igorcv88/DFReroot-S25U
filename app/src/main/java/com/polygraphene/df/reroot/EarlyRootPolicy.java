@@ -1,7 +1,9 @@
 package com.polygraphene.df.reroot;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -667,6 +669,95 @@ public final class EarlyRootPolicy {
         return incident.ksudSha256.trim().equals(ksudSha256.trim());
     }
 
+    /**
+     * Upper bound on the incident log.
+     *
+     * Same rule as {@link #MAX_TRACE_STEPS} and the same reason: an append-only
+     * file in /data/system that grows without bound is a defect of its own, and
+     * sixteen unexplained early deaths is far past the point where anything
+     * automated should still be arming. Exceeding it refuses the append, which
+     * the caller treats as a refusal of the arming.
+     */
+    public static final int MAX_INCIDENTS = 16;
+
+    /** Separator between records in the log. A record never contains one. */
+    private static final String INCIDENT_SEPARATOR = "\n\n";
+
+    /**
+     * Every incident the log holds, oldest first. {@code null} if ANY of them is
+     * malformed, or if there are more than {@link #MAX_INCIDENTS}.
+     *
+     * One record was not enough, and the way it failed is worth keeping: the
+     * log exists so that a SECOND unexplained death, on a corrected artefact,
+     * cannot be lost because the first one's record occupies the slot. With a
+     * single record the recovery flow this feature is designed for - fix the
+     * module, authorise the new pair, arm, and have that run die too - erased
+     * the new incident and let the new artefact run again. Codex review on
+     * PR #55 caught it.
+     *
+     * Fail-closed in the usual direction: one unaccountable entry refuses the
+     * whole log rather than being skipped, because an entry this build cannot
+     * read may be the one that would have blocked.
+     */
+    public static List<Incident> parseIncidents(String record) {
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(record)) return null;
+        if (blank(record)) return List.of();
+        List<Incident> out = new ArrayList<>();
+        for (String chunk : record.split(INCIDENT_SEPARATOR, -1)) {
+            if (chunk.trim().isEmpty()) continue;
+            Incident one = parseIncident(chunk);
+            if (one == null) return null;
+            out.add(one);
+        }
+        if (out.isEmpty() || out.size() > MAX_INCIDENTS) return null;
+        return out;
+    }
+
+    /** Whether another record can be appended without exceeding the bound. */
+    public static boolean incidentLogHasRoom(String record) {
+        if (blank(record)) return true;
+        List<Incident> recorded = parseIncidents(record);
+        return recorded != null && recorded.size() < MAX_INCIDENTS;
+    }
+
+    /**
+     * The first recorded incident that refuses {@code ksudSha256}, or null.
+     *
+     * Every entry is consulted, not just the newest. An incident attributed to
+     * an artefact that is no longer in play stops refusing, and one that still
+     * names this daemon digest - or that could not be attributed at all - keeps
+     * refusing however many later entries sit beside it.
+     */
+    public static Incident blockingIncident(List<Incident> recorded, String ksudSha256) {
+        if (recorded == null) return null;
+        for (Incident one : recorded) {
+            if (incidentBlocks(one, ksudSha256)) return one;
+        }
+        return null;
+    }
+
+    /**
+     * Is this incident already in the log?
+     *
+     * Keyed on the boot it happened in, which identifies it: one boot can hold
+     * at most one early attempt. Without this, every arming after a detected
+     * incident would append the same entry again and walk the log to its bound.
+     */
+    public static boolean incidentRecorded(List<Incident> recorded, Incident candidate) {
+        if (recorded == null || candidate == null || blank(candidate.bootId)) return false;
+        for (Incident one : recorded) {
+            if (candidate.bootId.equals(one.bootId)) return true;
+        }
+        return false;
+    }
+
+    /** Append one record to the log, producing the log's new contents. */
+    public static String appendIncident(String existing, Incident incident) {
+        String record = formatIncident(incident);
+        if (blank(existing)) return record;
+        return existing + INCIDENT_SEPARATOR.substring(1) + record;
+    }
+
     public static String formatIncident(Incident incident) {
         return "incident_boot_id=" + nonNull(incident.bootId) + "\n"
                 + "phase=" + nonNull(incident.phase) + "\n"
@@ -1225,17 +1316,19 @@ public final class EarlyRootPolicy {
                     + " incident, so this boot refuses");
         }
         if (!blank(in.incidentRecord)) {
-            Incident recorded = parseIncident(in.incidentRecord);
+            List<Incident> recorded = parseIncidents(in.incidentRecord);
             if (recorded == null) {
-                return refuse(INCIDENT_MALFORMED, "the early-root incident record is"
-                        + " not a record this build can account for; refusing rather"
-                        + " than reading it as absent");
+                return refuse(INCIDENT_MALFORMED, "the early-root incident log holds"
+                        + " an entry this build cannot account for; refusing rather"
+                        + " than skipping it, because the entry it cannot read may"
+                        + " be the one that would have blocked");
             }
-            if (incidentBlocks(recorded, in.ksudSha256)) {
+            Incident blocking = blockingIncident(recorded, in.ksudSha256);
+            if (blocking != null) {
                 return refuse(INCIDENT_UNRESOLVED, "an earlier boot ("
-                        + recorded.bootId + ") reached transaction 5 and never"
+                        + blocking.bootId + ") reached transaction 5 and never"
                         + " reported a result"
-                        + (blank(recorded.ksudSha256)
+                        + (blank(blocking.ksudSha256)
                             ? "; the incident could not be attributed to an artefact,"
                               + " so every early dispatch refuses until the owner"
                               + " accounts for it"

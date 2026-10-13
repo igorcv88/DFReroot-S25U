@@ -2483,7 +2483,7 @@ def audit():
              "and it is the only place that can, because archivePreviousCycle() "
              "is about to move the journal aside and the arm record the "
              "attribution comes from is about to be overwritten"),
-            ("EarlyRootStore.writeIncident(",
+            ("EarlyRootStore.appendIncident(",
              "the arming no longer persists the incident it detected, so the "
              "evidence dies with the cycle that produced it"),
             ("EarlyRootPolicy.INCIDENT_IN_JOURNAL",
@@ -2506,6 +2506,30 @@ def audit():
         fail("EarlyRootStore no longer has a durable incident record; a field in "
              "the per-cycle journal cannot do this job, because "
              "archivePreviousCycle() moves that journal aside on the next arming")
+    # The journal is examined on EVERY arming, not only when the log is empty or
+    # when a recorded incident blocks. The branch that returned as soon as a
+    # recorded incident did not block the current digest is the one the recovery
+    # flow takes, and on it a SECOND unexplained death was archived unrecorded
+    # and the artefact ran again. Codex review on PR #55.
+    detect_at = early_root_arm_src.find("EarlyRootPolicy.detectIncident(")
+    block_at = early_root_arm_src.find("EarlyRootPolicy.blockingIncident(")
+    if detect_at < 0 or block_at < 0 or detect_at > block_at:
+        fail("the early-root arming decides what a recorded incident blocks "
+             "before it looks at the journal in front of it. On the branch where "
+             "the recorded incident does not block the artefact being armed - "
+             "which is exactly the corrected-artefact recovery flow - the new "
+             "incident is never recorded, archivePreviousCycle() moves its "
+             "journal aside, and the artefact runs again with its own "
+             "unexplained death erased")
+    if "parseIncidents(" not in early_root_arm_src:
+        fail("the early-root arming reads the incident log as a single record. "
+             "One record means the first incident occupies the only slot and a "
+             "second one, on a corrected artefact, is lost")
+    if "MAX_INCIDENTS" not in code_only(early_root_policy_src) \
+            or "incidentLogHasRoom" not in early_root_store_src:
+        fail("the incident log has no bound, or the store does not check it; an "
+             "append-only file in /data/system that grows without limit is a "
+             "defect of its own (the rule MAX_TRACE_STEPS states)")
     archive_body = early_root_store_src[
         early_root_store_src.find("private fun archiveLocked("):]
     archive_body = archive_body[:archive_body.find("fun journalPhase(")]

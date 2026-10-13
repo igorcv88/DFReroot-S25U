@@ -248,51 +248,94 @@ object DfrEarlyRoot {
     /**
      * Detect, persist and refuse an unresolved fatal incident. null means clear.
      *
-     * Three readings, each a separate refusal, because they are separate facts
-     * and the owner's next move differs for each (AGENTS.md 3.7): a record that
-     * cannot be read, a record this build cannot account for, and a record that
-     * is open against the artefact about to be armed.
+     * Each reading is a separate refusal, because they are separate facts and
+     * the owner's next move differs for each (AGENTS.md 3.7): a log that cannot
+     * be read, a log holding an entry this build cannot account for, a journal
+     * in front of us that nothing has recorded yet, and a recorded incident
+     * still open against the artefact about to be armed.
+     *
+     * ## The order is the fix, and it was wrong once
+     *
+     * The journal in front of us is examined **unconditionally**, before any
+     * decision about whether a recorded incident blocks this artefact.
+     *
+     * An earlier shape returned early as soon as the recorded incident did not
+     * block the current digest - "attributed to a different artefact, it stays
+     * on disk as history" - and never looked at the journal on that branch.
+     * That is precisely the branch the recovery flow takes. Incident A is on
+     * disk for the artefact that panicked; the owner builds corrected artefact
+     * B, authorises it, arms, and B's early run reaches transaction 5 and dies
+     * without reporting. The next arming finds A, sees it does not block B,
+     * returns, and then [EarlyRootStore.archivePreviousCycle] moves B's
+     * `STARTED` journal to `.prev` and the arm record is overwritten. The gate's
+     * own journal reading finds nothing, A does not block B, and B runs again
+     * with its own unexplained death erased.
+     *
+     * Which is the whole guarantee inverted: an unexplained death has to outlive
+     * the cycle it happened in. Codex review on PR #55 caught it.
+     *
+     * So: look at the journal first, append what is there, and only then decide
+     * what blocks. The append is also why the record is a log rather than one
+     * entry - A occupying the only slot was the second half of the same defect.
      */
     private fun recordPendingIncident(bootId: String): String? {
         val existing = EarlyRootStore.readIncident()
         if (existing == AutoRootPolicy.RECORD_UNREADABLE) {
             return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_UNREADABLE}" +
-                " - an early-root incident record exists and cannot be read." +
+                " - the early-root incident log exists and cannot be read." +
                 " Refusing rather than arming over it."
         }
-        if (existing != null) {
-            val recorded = EarlyRootPolicy.parseIncident(existing)
+        val recorded = if (existing == null) {
+            emptyList()
+        } else {
+            EarlyRootPolicy.parseIncidents(existing)
                 ?: return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_MALFORMED}" +
-                    " - the early-root incident record is not a record this build" +
-                    " can account for (${EarlyRootStore.INCIDENT_PATH})."
-            if (EarlyRootPolicy.incidentBlocks(recorded, KsudStage.pinnedKsudSha256())) {
-                return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_UNRESOLVED}" +
-                    " - boot ${recorded.bootId} reached transaction 5 and never" +
-                    " reported a result. A corrected module is a new ksud digest;" +
-                    " see docs/EARLY_ROOT.md section 12."
-            }
-            // Attributed to a different artefact. It stays on disk as history.
-            return null
+                    " - the early-root incident log holds an entry this build cannot" +
+                    " account for (${EarlyRootStore.INCIDENT_PATH})."
         }
 
+        /*
+         * The journal in front of us, whatever the log already says. This is
+         * the only moment it can be read: archivePreviousCycle() is about to
+         * move it aside and the arm record its attribution comes from is about
+         * to be overwritten.
+         */
         val pending = EarlyRootPolicy.detectIncident(
             EarlyRootStore.readJournal(), EarlyRootStore.readArm(), bootId,
             bootId, wallclockNow()
-        ) ?: return null
-
-        val failure = EarlyRootStore.writeIncident(
-            EarlyRootPolicy.formatIncident(pending))
-        if (failure != null) {
-            return "[x] EARLY_ROOT_NOT_ARMED: cannot record the unresolved early-root" +
-                " incident from boot ${pending.bootId} ($failure); refusing rather" +
-                " than arming over evidence that could not be preserved"
+        )
+        if (pending != null && !EarlyRootPolicy.incidentRecorded(recorded, pending)) {
+            val failure = EarlyRootStore.appendIncident(pending)
+            if (failure != null) {
+                return "[x] EARLY_ROOT_NOT_ARMED: cannot record the unresolved" +
+                    " early-root incident from boot ${pending.bootId} ($failure);" +
+                    " refusing rather than arming over evidence that could not be" +
+                    " preserved"
+            }
+            return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_IN_JOURNAL}" +
+                " - boot ${pending.bootId} reached transaction 5 (native_started=1)" +
+                " and never reported a result. Recorded at" +
+                " ${EarlyRootStore.INCIDENT_PATH}. Read /proc/last_kmsg," +
+                " /proc/reset_summary and /sys/class/sec/sec_hw_param/extra_info" +
+                " for that boot before anything else; see docs/EARLY_ROOT.md" +
+                " section 12."
         }
-        return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_IN_JOURNAL}" +
-            " - boot ${pending.bootId} reached transaction 5 (native_started=1) and" +
-            " never reported a result. Recorded at ${EarlyRootStore.INCIDENT_PATH}." +
-            " Read /proc/last_kmsg, /proc/reset_summary and" +
-            " /sys/class/sec/sec_hw_param/extra_info for that boot before anything" +
-            " else; see docs/EARLY_ROOT.md section 12."
+
+        /*
+         * Only now: does anything in the log refuse the artefact about to be
+         * armed? An entry attributed to an artefact no longer in play stops
+         * refusing; one naming this digest, or one that could not be attributed
+         * at all, keeps refusing however many entries sit beside it.
+         */
+        val blocking = EarlyRootPolicy.blockingIncident(
+            recorded, KsudStage.pinnedKsudSha256())
+        if (blocking != null) {
+            return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_UNRESOLVED}" +
+                " - boot ${blocking.bootId} reached transaction 5 and never" +
+                " reported a result. A corrected module is a new ksud digest;" +
+                " see docs/EARLY_ROOT.md section 12."
+        }
+        return null
     }
 
     fun armState(): String {

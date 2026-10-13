@@ -75,6 +75,14 @@ object EarlyRootStore {
      * cycle's row is unambiguous; an unexplained death has to outlive the cycle
      * it happened in, or re-arming would erase the only thing that remembers it.
      *
+     * **Append-only, and it holds many.** One record was not enough and the way
+     * it failed is the reason this is a log: the feature exists so a SECOND
+     * unexplained death, on a corrected artefact, cannot be lost because the
+     * first one's record occupies the slot. With a single record the recovery
+     * flow this is designed for - fix the module, authorise the new pair, arm,
+     * and have that run die too - erased the new incident and let the new
+     * artefact run again.
+     *
      * Written before the arming that detected it completes, and read by both
      * entry points. Nothing clears it from code: the way out is a corrected
      * artefact, which is a different ksud digest and therefore a different
@@ -102,28 +110,37 @@ object EarlyRootStore {
     fun readIncident(): String? = synchronized(lock) { read(INCIDENT_PATH) }
 
     /**
-     * Record an unexplained death, durably, and say why when it cannot be done.
+     * Append an unexplained death to the log, durably, and say why when it
+     * cannot be done.
      *
      * A failure is RETURNED, not logged, for the reason [trace] documents: the
      * caller's correct response is to refuse what it was about to do. An arming
      * that proceeds after failing to record the incident it just detected is
-     * the absence-as-permission this record exists to prevent.
+     * the absence-as-permission this log exists to prevent.
      *
-     * Never overwrites an existing record. The first incident is the one with a
-     * live arm record beside it and therefore the one that could be attributed;
-     * a later observation of the same unexplained journal would rewrite it with
-     * whatever arm record happens to be on disk then, which is a different
-     * cycle's artefact. An existing unreadable record is a hard failure rather
-     * than something to replace - see AGENTS.md 3.9 on backups that restore
-     * nothing.
+     * Appends rather than replaces, and never rewrites an entry already there.
+     * An earlier incident was recorded with the arm record of ITS cycle beside
+     * it, which is the only moment it could be attributed; rewriting it later
+     * would attribute it to whatever arm record happens to be on disk then -
+     * a different cycle's artefact. So history accumulates and nothing in it
+     * moves.
+     *
+     * An existing unreadable log is a hard failure rather than something to
+     * replace: AGENTS.md 3.9 on backups that restore nothing applies verbatim,
+     * and a log that was overwritten because it could not be read is worse than
+     * none because it looks complete.
      */
-    fun writeIncident(record: String): String? = synchronized(lock) {
-        when (read(INCIDENT_PATH)) {
-            AutoRootPolicy.RECORD_UNREADABLE ->
-                "an incident record exists and cannot be read; refusing to replace it"
-            null -> atomicWrite(INCIDENT_PATH, record)
-            else -> null // already recorded; the first attribution stands
+    fun appendIncident(incident: EarlyRootPolicy.Incident): String? = synchronized(lock) {
+        val existing = read(INCIDENT_PATH)
+        if (existing == AutoRootPolicy.RECORD_UNREADABLE) {
+            return "the incident log exists and cannot be read; refusing to replace it"
         }
+        if (!EarlyRootPolicy.incidentLogHasRoom(existing)) {
+            return "the incident log already holds ${EarlyRootPolicy.MAX_INCIDENTS}" +
+                " unexplained early deaths, or an entry this build cannot read;" +
+                " nothing automated should still be arming"
+        }
+        atomicWrite(INCIDENT_PATH, EarlyRootPolicy.appendIncident(existing, incident))
     }
 
     fun writeArm(record: String): String? = synchronized(lock) { atomicWrite(ARM_PATH, record) }

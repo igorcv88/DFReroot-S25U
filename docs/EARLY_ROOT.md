@@ -490,11 +490,37 @@ it is a separate record rather than a field in the journal: the journal and trac
 are per-cycle evidence and get moved to `<path>.prev` on the next arming, and an
 unexplained death has to outlive the cycle it happened in.
 
+**It is an append-only log, and holding one record was a real defect.** The
+first version held exactly one, and the arming returned as soon as that record
+did not block the digest being armed — "attributed to a different artefact, it
+stays on disk as history". That branch is precisely the one the recovery flow
+takes, and on it the journal was never examined:
+
+1. incident A is on disk for the artefact that panicked;
+2. the owner builds corrected artefact B, authorises it, arms, reboots;
+3. B's early run reaches transaction 5 and dies without reporting;
+4. the next arming finds A, sees A does not block B, and returns — so B's
+   incident is never recorded;
+5. `archivePreviousCycle()` moves B's `STARTED` journal to `.prev` and the arm
+   record is overwritten;
+6. the gate's own journal reading finds nothing, A does not block B, and **B
+   runs again** with its own unexplained death erased.
+
+That is the guarantee inverted. Codex review on PR #55 traced it. Two halves had
+to change together: the journal is now examined on **every** arming before any
+decision about what blocks, and the record is a log so A cannot occupy the only
+slot. `MAX_INCIDENTS = 16` bounds it for the reason `MAX_TRACE_STEPS` states, and
+a full or unreadable log refuses the append rather than being replaced.
+`parseIncidents()` refuses the **whole** log if any entry is unaccountable — the
+entry this build cannot read may be the one that would have blocked.
+`tools/profile_binding_audit.py` fails if the ordering is reversed again.
+
 | state | verdict |
 |---|---|
 | incident open, same ksud digest | `EARLY_ROOT_INCIDENT_UNRESOLVED` |
 | incident open, no artefact identity | `EARLY_ROOT_INCIDENT_UNRESOLVED` — refuses **every** dispatch |
-| incident open, a different ksud digest | not this dispatch's objection; the record stays as history |
+| incident open, a different ksud digest | not this dispatch's objection; the entry stays as history |
+| several entries open | every one is consulted; the first that blocks refuses, and names its own boot |
 | incident record unreadable | `EARLY_ROOT_INCIDENT_UNREADABLE` |
 | incident record unaccountable | `EARLY_ROOT_INCIDENT_MALFORMED` |
 | stale `STARTED`/`native_started=1` journal, no incident record | `EARLY_ROOT_INCIDENT_IN_JOURNAL` |
