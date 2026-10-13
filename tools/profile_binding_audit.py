@@ -191,7 +191,7 @@ def parse_c_profile(path):
         if raw == "NULL":
             out[field] = None
             continue
-        lits = re.findall(r'"((?:[^"\\]|\\.)*)"', raw)
+        lits = re.findall(r'"((?:[^"\\]|\.)*)"', raw)
         if lits:
             out[field] = "".join(lits)
             continue
@@ -2465,12 +2465,16 @@ def audit():
     # policy's own negative cases cover the decision
     # (EarlyRootPolicyTest); what cannot be unit-tested is the Kotlin that has
     # to supply the record, write it, and refuse without it.
-    if "ACKNOWLEDGED_INCIDENT_BOOTS = Set.of()" not in early_root_policy_src:
-        fail("the acknowledged-incident list is no longer empty, or no longer a "
-             "fixed in-source exact-match set. An entry names one boot the owner "
-             "examined and closed; a wildcard, a parsed file or a runtime clear "
-             "action would be the execution override 3.6 forbids, since an "
-             "acknowledged incident stops being a reason to refuse")
+    acknowledged = re.search(
+        r"ACKNOWLEDGED_INCIDENT_BOOTS\s*=\s*Set\.of\(([^;]*)\);",
+        early_root_policy_src, flags=re.S)
+    acknowledged_boot = "5a7c2537-9693-44f9-8b2e-e26a1b3a10f2"
+    if (not acknowledged or
+            re.findall(r'"([^"]+)"', acknowledged.group(1)) != [acknowledged_boot] or
+            re.sub(r'"[^"]+"|[\s,]', "", acknowledged.group(1))):
+        fail("the acknowledged-incident list must contain only the examined "
+             "2026-10-12 DZIF boot id as a fixed in-source exact match; a wildcard, "
+             "parsed file or runtime clear would bypass the incident latch")
     for name, src in (("DfrEarlyRootJobService", early_root_job_src),
                       ("DfrEarlyRootService", early_root_service_src)):
         if "in0.incidentRecord = EarlyRootStore.readIncident()" not in src:
@@ -2792,14 +2796,14 @@ def audit():
         fail("the Auto Root service does not supply the early-root journal, so the "
              "policy's check is fed nothing and refuses nothing")
 
-    # --- the early window is suspended until a pair is physically cleared ----
+    # --- the early window requires an exact owner-authorized pair ----------
     #
     # The first physical early load took the kernel down: `list_del corruption /
     # LIST_POISON1` inside kernelsu.ko's own manager discovery
     # (my_actor <- search_manager <- track_throne <- kernelsu_init), DZIF boot
     # 5a7c2537, 2026-10-12. AGENTS.md 3.6.1 governs what follows: an operation
-    # whose worst outcome is not a refusal needs an operation's evidence, and
-    # that evidence came back negative.
+    # whose worst outcome is not a refusal needs an operation's evidence. The
+    # owner authorized one repaired pair after the source fix and manual PASS.
     #
     # The guard is an ALLOWLIST of (fingerprint, ksud digest) pairs with a
     # authorized early load, and it must stay one. A denylist of the artefact

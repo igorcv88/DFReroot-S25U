@@ -601,13 +601,14 @@ What must stay separate:
   ALLOWLIST, not a denylist.** The first physical early load panicked the kernel
   inside `kernelsu.ko`'s manager discovery, so
   `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` holds the (fingerprint, ksud
-  digest) pairs whose EARLY load the owner has authorized, and it is empty.
+  digest) pairs whose EARLY load the owner has authorized. On 2026-10-13 the
+  owner authorized the repaired DZIF pair for its first early attempt.
   A denylist of the pair that panicked would let the next untested pair through
   by default, which is §2's absence-as-permission in a new costume. The ksud
   digest names the module because the exact-port workflow embeds `kernelsu.ko`
   into ksud, so a corrected module is a new digest that the list will not match
   either. The list is immutable at run time, the gate is the last check of
-  `evaluate()` so that every other gate stays falsifiable while it is empty, and
+  `evaluate()` so that every other gate stays falsifiable, and
   `docs/EARLY_ROOT.md` §11 says what an entry costs. **A manual late-load PASS
   is not that evidence** — the manual path works on the pair that panicked,
   which is exactly what makes it the control rather than the proof.
@@ -618,8 +619,8 @@ What must stay separate:
   has proven, as every other gate here is split. And it is **not** an
   at-own-risk marker: 3.6 forbids a second, more permissive "trial" tier beside
   it, however an automated review phrases the suggestion. One list, every entry
-  a deliberate owner decision naming one exact pair, and the only change an
-  agent may make to it on its own is none.
+  a deliberate owner decision naming one exact pair; an agent may not add
+  another pair without that decision.
 - **The trace precedes the step it announces, and a trace that cannot be written
   refuses the step.** Same rule, same reason, as `traceSoftReboot` in 3.6.1.
   Reasoning from an absence works once.

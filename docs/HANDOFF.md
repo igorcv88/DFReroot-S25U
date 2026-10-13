@@ -15,6 +15,16 @@ acceptance criteria for the next signed build. If this file disagrees with
 > `docs/S25U_DZIF_COMPATIBILITY.md`; the up-to-date repaired artifact
 > identity and the remaining APK asset import are specified immediately below.
 
+> **Authorization update (2026-10-13):** PR #58 bundled the repaired daemon,
+> and the owner observed manual full-boot DirtyFrag `POST_ROOT_COMPLETE` with
+> the corrected pair in boot `0a6a0849-b320-4642-9376-2cb386d1056e`.
+> The owner authorized the exact DZIF fingerprint + daemon digest
+> `3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee`
+> for its first Early Integrated Root attempt. The historical panic boot
+> `5a7c2537-9693-44f9-8b2e-e26a1b3a10f2` is acknowledged by exact boot id;
+> its incident record stays on disk. The earlier binary-import and empty-list
+> status below is historical. Early physical PASS remains unproven.
+
 > **Open, and where to start — the early path is suspended after a kernel panic.**
 >
 > **(0) Early Integrated Root: physical FAIL, 2026-10-12, DZIF.** Boot
