@@ -67,6 +67,32 @@ object EarlyRootStore {
     const val TRACE_PATH = "/data/system/dfreroot-early-root-trace"
 
     /**
+     * An early run that reached transaction 5 and never reported a result.
+     *
+     * Deliberately NOT archived by [archivePreviousCycle], which is the whole
+     * reason it is a fourth record instead of a field in the journal. The
+     * journal and trace are per-cycle evidence and get moved aside so the next
+     * cycle's row is unambiguous; an unexplained death has to outlive the cycle
+     * it happened in, or re-arming would erase the only thing that remembers it.
+     *
+     * **Append-only, and it holds many.** One record was not enough and the way
+     * it failed is the reason this is a log: the feature exists so a SECOND
+     * unexplained death, on a corrected artefact, cannot be lost because the
+     * first one's record occupies the slot. With a single record the recovery
+     * flow this is designed for - fix the module, authorise the new pair, arm,
+     * and have that run die too - erased the new incident and let the new
+     * artefact run again.
+     *
+     * Written before the arming that detected it completes, and read by both
+     * entry points. Nothing clears it from code: the way out is a corrected
+     * artefact, which is a different ksud digest and therefore a different
+     * incident question, or an explicit in-source acknowledgement of that exact
+     * boot id in [EarlyRootPolicy]. A "clear incidents" action is the override
+     * AGENTS.md 3.6 forbids, wearing a maintenance hat.
+     */
+    const val INCIDENT_PATH = "/data/system/dfreroot-early-root-incident"
+
+    /**
      * Both the job callback's worker and the service's thread live in process
      * "system" and write these records, so their read-modify-write sequences
      * genuinely interleave. Every public entry point holds this for the whole
@@ -80,6 +106,42 @@ object EarlyRootStore {
     fun readJournal(): String? = synchronized(lock) { read(JOURNAL_PATH) }
 
     fun readTrace(): String? = synchronized(lock) { read(TRACE_PATH) }
+
+    fun readIncident(): String? = synchronized(lock) { read(INCIDENT_PATH) }
+
+    /**
+     * Append an unexplained death to the log, durably, and say why when it
+     * cannot be done.
+     *
+     * A failure is RETURNED, not logged, for the reason [trace] documents: the
+     * caller's correct response is to refuse what it was about to do. An arming
+     * that proceeds after failing to record the incident it just detected is
+     * the absence-as-permission this log exists to prevent.
+     *
+     * Appends rather than replaces, and never rewrites an entry already there.
+     * An earlier incident was recorded with the arm record of ITS cycle beside
+     * it, which is the only moment it could be attributed; rewriting it later
+     * would attribute it to whatever arm record happens to be on disk then -
+     * a different cycle's artefact. So history accumulates and nothing in it
+     * moves.
+     *
+     * An existing unreadable log is a hard failure rather than something to
+     * replace: AGENTS.md 3.9 on backups that restore nothing applies verbatim,
+     * and a log that was overwritten because it could not be read is worse than
+     * none because it looks complete.
+     */
+    fun appendIncident(incident: EarlyRootPolicy.Incident): String? = synchronized(lock) {
+        val existing = read(INCIDENT_PATH)
+        if (existing == AutoRootPolicy.RECORD_UNREADABLE) {
+            return "the incident log exists and cannot be read; refusing to replace it"
+        }
+        if (!EarlyRootPolicy.incidentLogHasRoom(existing)) {
+            return "the incident log already holds ${EarlyRootPolicy.MAX_INCIDENTS}" +
+                " unexplained early deaths, or an entry this build cannot read;" +
+                " nothing automated should still be arming"
+        }
+        atomicWrite(INCIDENT_PATH, EarlyRootPolicy.appendIncident(existing, incident))
+    }
 
     fun writeArm(record: String): String? = synchronized(lock) { atomicWrite(ARM_PATH, record) }
 

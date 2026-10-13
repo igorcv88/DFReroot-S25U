@@ -400,6 +400,10 @@ class DfrEarlyRootService : Service() {
          * marker probe answers a clean ENOENT and nothing else would refuse.
          */
         in0.autoRootJournalRecord = AutoRootStore.journal()
+        // An earlier boot that reached transaction 5 and never reported.
+        // Read here as well as at the arming, because a job already
+        // pending never goes through the arming again.
+        in0.incidentRecord = EarlyRootStore.readIncident()
         in0.qualificationRecord = AutoRootStore.qualification()
         in0.currentBootId = bootId
         /*

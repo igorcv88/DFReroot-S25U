@@ -2459,6 +2459,141 @@ def audit():
         fail("the arm record no longer carries a generation; an interrupted re-arm "
              "would leave a new job authorised by an old record")
 
+    # --- the unresolved-incident latch is enforced at BOTH entry points -----
+    # A journal left at STARTED with native_started=1 and no completion, in a
+    # boot that is not this one, is a run that died after transaction 5. The
+    # policy's own negative cases cover the decision
+    # (EarlyRootPolicyTest); what cannot be unit-tested is the Kotlin that has
+    # to supply the record, write it, and refuse without it.
+    if "ACKNOWLEDGED_INCIDENT_BOOTS = Set.of()" not in early_root_policy_src:
+        fail("the acknowledged-incident list is no longer empty, or no longer a "
+             "fixed in-source exact-match set. An entry names one boot the owner "
+             "examined and closed; a wildcard, a parsed file or a runtime clear "
+             "action would be the execution override 3.6 forbids, since an "
+             "acknowledged incident stops being a reason to refuse")
+    for name, src in (("DfrEarlyRootJobService", early_root_job_src),
+                      ("DfrEarlyRootService", early_root_service_src)):
+        if "in0.incidentRecord = EarlyRootStore.readIncident()" not in src:
+            fail("%s does not supply the early-root incident record, so the latch "
+                 "evaluates it as absent and a previous boot's unexplained death "
+                 "stops refusing at this entry point (3.2)" % name)
+    for required, why in (
+            ("EarlyRootPolicy.detectIncident(",
+             "the arming no longer looks for an unaccounted-for previous boot - "
+             "and it is the only place that can, because archivePreviousCycle() "
+             "is about to move the journal aside and the arm record the "
+             "attribution comes from is about to be overwritten"),
+            ("EarlyRootStore.appendIncident(",
+             "the arming no longer persists the incident it detected, so the "
+             "evidence dies with the cycle that produced it"),
+            ("EarlyRootPolicy.INCIDENT_IN_JOURNAL",
+             "the arming no longer reports a detected incident as its own "
+             "refusal, so the owner cannot tell it apart from an ordinary "
+             "not-armed answer (3.7)")):
+        if required not in early_root_arm_src:
+            fail("early-root arming: %s (missing %s)" % (why, required))
+    # Order: detect and record BEFORE the archive moves the journal. Reversed,
+    # the detector reads a journal that is no longer there and the incident is
+    # silently lost - which is the exact self-correction P0-D forbids.
+    latch_order = order(early_root_arm_src,
+                        "recordPendingIncident(",
+                        "EarlyRootStore.archivePreviousCycle()")
+    if latch_order is None or latch_order != sorted(latch_order):
+        fail("the early-root arming archives the previous cycle before looking "
+             "for an unresolved incident in it; the journal that carries the "
+             "evidence is gone by then")
+    if "INCIDENT_PATH" not in early_root_store_src:
+        fail("EarlyRootStore no longer has a durable incident record; a field in "
+             "the per-cycle journal cannot do this job, because "
+             "archivePreviousCycle() moves that journal aside on the next arming")
+    # The journal is examined on EVERY arming, not only when the log is empty or
+    # when a recorded incident blocks. The branch that returned as soon as a
+    # recorded incident did not block the current digest is the one the recovery
+    # flow takes, and on it a SECOND unexplained death was archived unrecorded
+    # and the artefact ran again. Codex review on PR #55.
+    detect_at = early_root_arm_src.find("EarlyRootPolicy.detectIncident(")
+    block_at = early_root_arm_src.find("EarlyRootPolicy.blockingIncident(")
+    if detect_at < 0 or block_at < 0 or detect_at > block_at:
+        fail("the early-root arming decides what a recorded incident blocks "
+             "before it looks at the journal in front of it. On the branch where "
+             "the recorded incident does not block the artefact being armed - "
+             "which is exactly the corrected-artefact recovery flow - the new "
+             "incident is never recorded, archivePreviousCycle() moves its "
+             "journal aside, and the artefact runs again with its own "
+             "unexplained death erased")
+    # An unreadable or malformed journal is a refusal in the ARMING, not only in
+    # the gate. detectIncident() answers null for both, and null means "nothing
+    # pending" downstream, so without its own refusal the arming archived a
+    # journal it could not account for - one that may say STARTED with
+    # native_started=1 - and the gate's own two verdicts became unreachable for
+    # anything older than the current cycle. Reported on PR #55.
+    #
+    # Scoped to recordPendingIncident()'s own body throughout. A whole-file
+    # ordering would compare this function's DEFINITION site against arm()'s
+    # CALL site, which says nothing about call order; what the archive ordering
+    # needs is already covered by the recordPendingIncident -> archive check
+    # above.
+    detect_fn = early_root_arm_src.find("private fun recordPendingIncident(")
+    detect_body = ""
+    if detect_fn < 0:
+        fail("the early-root arming no longer has recordPendingIncident(), so "
+             "nothing examines the previous cycle before it is archived")
+    else:
+        detect_body = early_root_arm_src[detect_fn:]
+        next_fn = detect_body.find("\n    fun ", 1)
+        if next_fn > 0:
+            detect_body = detect_body[:next_fn]
+
+        for required, why in (
+                ("EarlyRootPolicy.JOURNAL_UNREADABLE",
+                 "the arming does not refuse an unreadable previous journal, so "
+                 "archivePreviousCycle() destroys the only evidence that a run "
+                 "reached transaction 5"),
+                ("EarlyRootPolicy.JOURNAL_MALFORMED",
+                 "the arming does not refuse a previous journal this build "
+                 "cannot account for, so a record written by a run that died "
+                 "mid-write is archived unexamined")):
+            if required not in detect_body:
+                fail("early-root arming: %s (missing %s)" % (why, required))
+
+        # Both refusals come before the detection they guard: detectIncident()
+        # answers null for an unaccountable journal, and null means "nothing
+        # pending" to everything after it.
+        unaccountable_order = order(detect_body,
+                                    "EarlyRootPolicy.JOURNAL_UNREADABLE",
+                                    "EarlyRootPolicy.JOURNAL_MALFORMED",
+                                    "EarlyRootPolicy.detectIncident(")
+        if unaccountable_order is None \
+                or unaccountable_order != sorted(unaccountable_order):
+            fail("recordPendingIncident() runs detectIncident() before deciding "
+                 "whether the journal could be read or parsed at all; it answers "
+                 "null for both, so the refusals have to come first")
+
+        # One read, into a local. Two reads of a mutable file are two answers,
+        # and the second is the one that would decide. armState() legitimately
+        # reads the journal again to render the UI row, hence the scoping.
+        reads = detect_body.count("EarlyRootStore.readJournal()")
+        if reads != 1:
+            fail("recordPendingIncident() reads the journal %d times, not once; "
+                 "the unreadable check, the malformed check and the detection "
+                 "must all judge the same bytes" % reads)
+    if "parseIncidents(" not in early_root_arm_src:
+        fail("the early-root arming reads the incident log as a single record. "
+             "One record means the first incident occupies the only slot and a "
+             "second one, on a corrected artefact, is lost")
+    if "MAX_INCIDENTS" not in code_only(early_root_policy_src) \
+            or "incidentLogHasRoom" not in early_root_store_src:
+        fail("the incident log has no bound, or the store does not check it; an "
+             "append-only file in /data/system that grows without limit is a "
+             "defect of its own (the rule MAX_TRACE_STEPS states)")
+    archive_body = early_root_store_src[
+        early_root_store_src.find("private fun archiveLocked("):]
+    archive_body = archive_body[:archive_body.find("fun journalPhase(")]
+    if "INCIDENT_PATH" in archive_body:
+        fail("archivePreviousCycle() archives the incident record. An "
+             "unexplained death has to outlive the cycle it happened in, or "
+             "re-arming erases the only thing that remembers it")
+
     # --- inside the window is not the same as before boot completion --------
     # The window bounds the clock, not the boot: a persisted callback restored
     # at 43 s in a boot that completed at 30 s satisfies the 120 s bound. The

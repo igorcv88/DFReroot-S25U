@@ -42,13 +42,35 @@ acceptance criteria for the next signed build. If this file disagrees with
 > (fingerprint, ksud digest) pairs, enforced in the complete gate and at the
 > arming. The probe, the manual run and Auto Root are unaffected.
 >
-> **Next step is offline and needs no device:** decide whether the list
-> `my_actor` manipulates is reachable from both discovery passes. If each
-> `search_manager` owns its list on its own stack, overlap cannot explain the
-> corruption and the fault is in shared throne/manager state — a different
-> patch. `docs/EARLY_ROOT.md` §11 is what authorizing a pair requires; the
-> dossier's *Early Integrated Root — first physical run, kernel panic* is the
-> evidence.
+> **That offline question is now answered, and the answer is "shared".**
+> `kernel/manager/throne_tracker.c:59` at KernelSU's pinned v3.3.0 tag declares
+> `apk_path_hash_list` as a file-scope global and the file takes no lock around
+> it; `kernel/manager/pkg_observer.c` runs the whole recursive `/data/app` scan
+> inline in the fsnotify handler. The faulting instruction was resolved from the
+> module's own bytes — `my_actor` at `0x688c`, `.rela.text 0x6be8
+> R_AARCH64_CALL26 __list_del_entry_valid_or_report`, DWARF line
+> `throne_tracker.c:141` — and the race was reproduced offline with the real
+> scanner. See RMGLabs-Payloads
+> `docs/incidents/2026-10-12-dzif-early-load-throne-tracker-panic.md`.
+>
+> **Next step, and it is not DFReroot's:** the fix is in RMGLabs-Payloads and
+> gated offline there, but **no corrected module has been built**. That needs one
+> `workflow_dispatch` of `.github/workflows/build-dzif-exact-port.yml`, which
+> spends runner minutes and publishes a new pair — an owner decision. A corrected
+> build is a new ksud digest, so `EARLY_LOAD_AUTHORIZED_ARTEFACTS` will not match
+> it either; `docs/EARLY_ROOT.md` §11 is what authorizing a pair requires, and
+> §12 is the incident latch below.
+>
+> **And that run now latches.** Its journal — `phase=STARTED`,
+> `native_started=1`, no completion — used to mean nothing on the next boot,
+> discarded as "last boot's record". It is now a fatal incident pending
+> investigation: `EarlyRootPolicy` detects the shape, the arming persists it to
+> `/data/system/dfreroot-early-root-incident` before archiving the journal that
+> carries it, and both entry points refuse while it is open
+> (`EARLY_ROOT_INCIDENT_*`). The record on this device carries no artefact
+> identity, so it refuses **every** early dispatch until the owner acknowledges
+> that exact boot id in source. `docs/EARLY_ROOT.md` §12 has the table and what
+> to read first. The probe, the manual run and Auto Root are unaffected.
 >
 > **The two threads below predate that run.**
 >

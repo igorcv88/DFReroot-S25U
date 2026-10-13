@@ -3069,15 +3069,70 @@ Two manager searches were in flight:
 from `init_module`, with two discovery passes overlapping and a `packages.list`
 change event landing mid-initialisation.
 
-**NOT established, and must not be asserted:** which write produced the
-`LIST_POISON1`. Double unlink, use-after-free, a shared global without a lock
-and a list-manipulation error local to the second pass are all still live, and
-`LIST_POISON1` in `next` is the *consequence* in every one of them. The decisive
-first question is answerable offline, from the binary alone: whether the list
-`my_actor` manipulates is reachable from both passes at all. If each
-`search_manager` owns its list on its own stack, overlap cannot explain the
-corruption and the fault must be in shared throne/manager state — a different
-patch. That fork should be closed before any locking is designed.
+#### The fork is now closed: shared global, no lock, double unlink
+
+The earlier text here said which write produced the `LIST_POISON1` was **not
+established** and named the decisive offline question. That question has been
+answered, from the binary and the pinned source, and the entry is updated rather
+than appended to because leaving the open form beside the answer is how a reader
+ends up believing the wrong one.
+
+**Resolved, from the module's own bytes.** In
+`android15-6.6_kernelsu-pa3q-S938BXXUCDZIF-kdp-v3.3.0.ko`, `my_actor` begins at
+`0x688c`, and `.rela.text` carries
+
+```text
+0x6be8  R_AARCH64_CALL26  __list_del_entry_valid_or_report + 0
+```
+
+so the reported `my_actor+0x360` (`0x6bec`) is the instruction after that call,
+and its DWARF line is `/work/KernelSU/kernel/manager/throne_tracker.c:141` —
+the `list_del(&pos->list)` in the *"Manager found, clear APK cache list"* loop.
+
+**Resolved, from the pinned source.** `throne_tracker.c:59` declares
+
+```c
+static struct list_head apk_path_hash_list = LIST_HEAD_INIT(apk_path_hash_list);
+```
+
+a file-scope global, mutated by `my_actor()` and `search_manager()` alike, with
+**no mutex, spinlock or RCU anywhere in the file**. `tiann/KernelSU@0c0fdb96`
+— the commit the engineering report compared against — has
+`DEFINE_MUTEX(throne_tracker_mutex)`; the tag this module is built from does
+not. And `pkg_observer.c:34` calls `track_throne(false)` **inline in the
+fsnotify handler**, so the thread that writes `packages.list` performs the
+second scan itself.
+
+So the answer is the first branch of the fork: the list is shared, overlap
+explains the corruption, and the mechanism is a double unlink — one thread
+unlinks a node and poisons `next`, the other calls `list_del` on the node its
+own `list_for_each_entry_safe` cursor still holds.
+
+**Reproduced offline, with the real scanner.**
+RMGLabs-Payloads `kernelsu/tools/throne_tracker_harness/` compiles the actual
+`throne_tracker.c` against shims whose `list_del()` poisons and checks for
+poison exactly as `lib/list_debug.c` does, and drives it with two threads.
+The pristine source reports `list_del corruption … LIST_POISON1` on 12 runs of
+12; the patched source reports nothing and never has two scans inside the
+scanner at once. The pristine failure is a required gate — a harness that came
+back clean on the source that killed the kernel would certify any patch for
+free.
+
+**Still not established, and still must not be asserted:** that the module which
+ran is the module these offsets were read from. Its build-id was
+`0bf2f3900df98f1739a66d09e89295a09cd7493d`; the committed `.ko` is
+`a52ee100d839a16840d8a9514afd3807cf1d1d4b`, the `rmg` profile's build, and the
+`dfreroot` pair published no module record at all. `my_actor`'s size matches the
+panic exactly (`0x3ec`); the other three frames are 4 bytes larger there, which
+is consistent with the kernel deriving a module symbol's size from the next
+symbol's address and **not** with the two builds being byte-identical. The
+resolution is therefore against *a different compilation of the same pinned
+source*. RMGLabs-Payloads now publishes a module-provenance sidecar carrying
+size, SHA-256 and GNU build-id for every profile, and refuses a module without a
+build-id, so the next incident can name its artefact.
+
+Full chain:
+RMGLabs-Payloads `docs/incidents/2026-10-12-dzif-early-load-throne-tracker-panic.md`.
 
 #### Why the early window, specifically
 
@@ -3124,7 +3179,45 @@ The probe stays observational and unaffected. The manual run and Auto Root
 after a full boot are unaffected: their physical evidence is unchanged and the
 suspension is scoped to the early window.
 
+**And the run itself now latches across boots.** Its journal — `phase=STARTED`,
+`attempts=1`, `native_started=1`, no completion — described a run that died
+between issuing transaction 5 and reporting anything about it, and on the next
+boot the gate discarded it as "last boot's record". Correct for a boot that
+completed, refused, or failed and locked; wrong for the one shape that never
+reported. `EarlyRootPolicy.detectIncident()` now recognises it,
+`DfrEarlyRoot.arm()` persists it to
+`/data/system/dfreroot-early-root-incident` **before**
+`archivePreviousCycle()` moves the journal that carries the evidence, and both
+entry points refuse while it is open (`EARLY_ROOT_INCIDENT_UNRESOLVED`,
+`INCIDENT_UNREADABLE`, `INCIDENT_MALFORMED`, `INCIDENT_IN_JOURNAL` — four codes
+because they send the next run to different places).
+
+The record on this device carries no artefact identity, because the journal
+format never had one, so it refuses **every** early dispatch until the owner
+acknowledges that exact boot id in
+`EarlyRootPolicy.ACKNOWLEDGED_INCIDENT_BOOTS` — in-source, immutable,
+exact-match, empty as shipped, one entry naming one boot that already happened.
+A corrected artefact is the ordinary exit: a new ksud digest is a different
+incident question. `docs/EARLY_ROOT.md` §12 has the table and the evidence to
+read first; `tools/tests/EarlyRootPolicyTest.java` carries one negative case per
+element and `tools/profile_binding_audit.py` guards the Kotlin that cannot be
+unit-tested.
+
 #### What is still owed
+
+**No corrected module exists.** The fix is in RMGLabs-Payloads and gated offline
+there; building it needs one `workflow_dispatch` of the DZIF exact-port
+workflow, which is an owner decision. A corrected build is a new ksud digest, so
+`EARLY_LOAD_AUTHORIZED_ARTEFACTS` will not match it either.
+
+**The ZZIC pair carries the same upstream defect.**
+`tools/assert_observer_defers.py` in RMGLabs-Payloads rejects the committed ZZIC
+module for the same reason it rejects DZIF's: `ksu_handle_inode_event` relocates
+against `track_throne`. That pair is pinned by `support/targets-v3.json`, so
+rebuilding it changes digests the feed and the app verify against — a release
+decision, not a repair to apply unasked. Nothing in DFReroot's gates depends on
+it, and the manual late-load path is unaffected, but the latent race is the same
+one.
 
 `JOBSCHEDULER`/probe timing on DZIF is **one** boot, not three
 (`callback 16994 ms`, `LOCKED_BOOT_COMPLETED 19821`, `BOOT_COMPLETED 42967`).
