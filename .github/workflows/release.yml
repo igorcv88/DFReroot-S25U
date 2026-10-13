@@ -91,11 +91,37 @@ jobs:
             echo "DFR_VERSION_CODE=$VERSION_CODE"
           } >> "$GITHUB_ENV"
 
+      # `cache: gradle` caches ~/.gradle/caches and ~/.gradle/wrapper, which is
+      # where the two things this build re-downloads every run live: the Gradle
+      # DISTRIBUTION the wrapper fetches, and every dependency AGP and the Kotlin
+      # plugin resolve.
+      #
+      # Why here and why only this: runs 34 and 36 were measured step by step
+      # (2m48s vs 5m40s of job time), and the delta is three roughly equal
+      # chunks - +50 s in `Set up Android SDK`, +50 s in `Build signed APKs`, and
+      # +67 s between the last step finishing and the job being marked complete.
+      # The first of those installs the same four pinned packages on every
+      # commit, so its inputs are identical across the two runs and its slowdown
+      # is environmental by construction; the last is GitHub's own teardown. The
+      # repository had no caching of any kind, so both download-bound steps run
+      # at whatever the network gives that day - which is also why the floor
+      # across runs 23-36 is 2m46s and the ceiling 5m44s.
+      #
+      # This is therefore not a fix for a regression - there was none in the
+      # workflow - it removes one of the two variable downloads from the critical
+      # path. A cache miss behaves exactly as today.
+      #
+      # The SDK/NDK is deliberately NOT cached here. The NDK is the single
+      # largest download, but restoring ~1 GB from the Actions cache is not
+      # obviously faster than fetching it, it would occupy a tenth of the
+      # repository's 10 GB cache budget, and it is the toolchain that produces
+      # signed artefacts. Measure that one before trading it.
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
+          cache: gradle
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
