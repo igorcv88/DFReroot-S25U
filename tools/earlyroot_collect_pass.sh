@@ -58,8 +58,14 @@ say ""
 
 # 1. Panic and reboot records, before anything else.
 show "sec_hw_param/extra_info" cat /sys/class/sec/sec_hw_param/extra_info
-show "reset_summary" cat /proc/reset_summary
-show "reset_history" cat /proc/reset_history
+# AGENTS.md 3.6.1 names this one as the carrier of the surrounding kernel log,
+# and the collector was not reading it.
+show "sec_hw_param/extrc_info" cat /sys/class/sec/sec_hw_param/extrc_info
+# These two come and go: present on 2026-10-12 after the panic, ENOENT in a
+# clean boot. show() records the exit status, so "absent" and "unreadable" stay
+# distinguishable - and neither is proof of a clean boot on its own.
+show "reset_summary (may be absent)" cat /proc/reset_summary
+show "reset_history (may be absent)" cat /proc/reset_history
 # The one block whose whole purpose is to prove an ABSENCE, so it is the one
 # block that must never report a failed read as a clean boot.
 #

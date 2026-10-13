@@ -3664,10 +3664,20 @@ Two consequences:
 
 #### Corrections to the collection procedure
 
-- **`/proc/reset_summary` and `/proc/reset_history` do not exist on this
-  firmware** — both answered `No such file or directory`. §8's command list and
-  AGENTS.md 3.6.1 name them as sources; on DZIF the DropBox `SYSTEM_LAST_KMSG_*`
-  entries and `/sys/class/sec/sec_hw_param/extra_info` are the ones that exist.
+- **the `/proc` reset pair comes and goes, and this entry first said it wrong.**
+  Both `/proc/reset_summary` and `/proc/reset_history` answered
+  `No such file or directory` here, as uid 0 — and the first revision of this
+  section concluded they "do not exist on this firmware". That is refuted by
+  this dossier's own 2026-10-12 record, where `/proc/reset_summary` answered
+  `UPLOAD CAUSE = 0xc8000000 = KERNEL PANIC` on the same device. Two samples:
+  present after a panic, ENOENT in a clean boot. Consistent with the nodes
+  existing only when the firmware has a reset record to report — **not
+  confirmed**, so an absent node is not proof of a clean boot either.
+  What has been read in both states, and is what a procedure may rely on: the
+  DropBox `SYSTEM_LAST_KMSG_*` listing and `extra_info`. AGENTS.md 3.6.1 and
+  `docs/EARLY_ROOT.md` §8 now say so; leaving the standing directive claiming
+  the `/proc` pair carries the log while this page said it was absent would have
+  handed the next investigation two mutually exclusive instructions.
 - `extra_info` read successfully and was **empty**, which is consistent with no
   panic record in this boot rather than with an unreadable node.
 - `/data/system/dfreroot-early-boot-probe` was absent: the probe's own cycle had
