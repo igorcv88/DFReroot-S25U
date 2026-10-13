@@ -299,10 +299,48 @@ object DfrEarlyRoot {
          * the only moment it can be read: archivePreviousCycle() is about to
          * move it aside and the arm record its attribution comes from is about
          * to be overwritten.
+         *
+         * Read ONCE, into a local. Two reads of a mutable file are two
+         * different answers, and the second one is the one that would decide.
          */
+        val journal = EarlyRootStore.readJournal()
+
+        /*
+         * Unreadable and malformed are refusals HERE, not just in the gate.
+         *
+         * detectIncident() answers null for both of them, and null means "no
+         * pending incident" to everything downstream - so without this the
+         * arming walked straight past a journal it could not account for,
+         * archivePreviousCycle() moved it to .prev, and the callback then found
+         * no journal to refuse. The gate has JOURNAL_UNREADABLE and
+         * JOURNAL_MALFORMED precisely because such a journal may say STARTED
+         * with native_started=1, i.e. the page cache was already written; the
+         * arming archiving it made those two verdicts unreachable for anything
+         * older than the current cycle.
+         *
+         * detectIncident() is deliberately left answering null for them rather
+         * than being taught to report them: it answers one question, "is there
+         * an unexplained death here", and a record it cannot parse is not an
+         * answer to that question in either direction. The caller that is about
+         * to destroy the evidence is the one that has to refuse.
+         */
+        if (journal == AutoRootPolicy.RECORD_UNREADABLE) {
+            return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.JOURNAL_UNREADABLE}" +
+                " - the previous early-root journal exists and cannot be read." +
+                " It may say STARTED with native_started=1, so archiving it would" +
+                " destroy the only evidence that a run reached transaction 5." +
+                " Refusing rather than arming over it."
+        }
+        if (!journal.isNullOrEmpty() && EarlyRootPolicy.parseJournal(journal) == null) {
+            return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.JOURNAL_MALFORMED}" +
+                " - the previous early-root journal is not a record this build can" +
+                " account for (${EarlyRootStore.JOURNAL_PATH}); it may have been" +
+                " written by a run that died mid-write. Refusing rather than" +
+                " archiving it."
+        }
+
         val pending = EarlyRootPolicy.detectIncident(
-            EarlyRootStore.readJournal(), EarlyRootStore.readArm(), bootId,
-            bootId, wallclockNow()
+            journal, EarlyRootStore.readArm(), bootId, bootId, wallclockNow()
         )
         if (pending != null && !EarlyRootPolicy.incidentRecorded(recorded, pending)) {
             val failure = EarlyRootStore.appendIncident(pending)

@@ -1023,6 +1023,71 @@ public class EarlyRootPolicyTest {
         refused(in, EarlyRootPolicy.INCIDENT_MALFORMED,
                 "one unaccountable entry refuses at the gate too");
 
+        // ------------------------------------------------------------------
+        // A journal the arming cannot account for must refuse BEFORE the
+        // archive, under both log conditions.
+        //
+        // detectIncident() answers null for an unreadable and for a malformed
+        // journal, and null means "no pending incident" downstream. So without
+        // a refusal of its own the arming walked past a journal that may say
+        // STARTED with native_started=1, archivePreviousCycle() moved it to
+        // .prev, and the gate's JOURNAL_UNREADABLE / JOURNAL_MALFORMED
+        // verdicts became unreachable for anything older than the current
+        // cycle. Reported on PR #55.
+        //
+        // The policy half is asserted here; that the ARMING refuses on it is a
+        // Kotlin path, guarded statically in tools/profile_binding_audit.py.
+        // ------------------------------------------------------------------
+        final String MALFORMED_JOURNAL = "boot_id=" + DEAD_BOOT + "\nphase=who\n";
+        check(EarlyRootPolicy.parseJournal(MALFORMED_JOURNAL) == null,
+                "the fixture really is a journal this build cannot account for");
+        check(EarlyRootPolicy.detectIncident(
+                        AutoRootPolicy.RECORD_UNREADABLE, arm(), BOOT, BOOT, 0L) == null
+                        && EarlyRootPolicy.detectIncident(
+                                MALFORMED_JOURNAL, arm(), BOOT, BOOT, 0L) == null,
+                "detectIncident answers null for an unreadable and a malformed"
+                        + " journal alike - which is why the caller about to destroy"
+                        + " the evidence has to refuse on them itself");
+
+        // (a) empty incident log
+        in = ready();
+        in.incidentRecord = null;
+        in.journalRecord = AutoRootPolicy.RECORD_UNREADABLE;
+        refused(in, EarlyRootPolicy.JOURNAL_UNREADABLE,
+                "an unreadable journal refuses with an empty incident log");
+        in = ready();
+        in.incidentRecord = null;
+        in.journalRecord = MALFORMED_JOURNAL;
+        refused(in, EarlyRootPolicy.JOURNAL_MALFORMED,
+                "a malformed journal refuses with an empty incident log");
+
+        // (b) a nonblocking prior incident A beside a new digest B - the branch
+        // that used to return early and skip the journal entirely.
+        EarlyRootPolicy.Inputs correctedB = ready();
+        correctedB.ksudSha256 = OTHER_KSUD;
+        correctedB.armRecord = EarlyRootPolicy.formatArm(ARMED_BOOT,
+                EarlyRootPolicy.EXPECTED_JOB_ID, NS, 15_000L, 1, CODE, NAME,
+                OTHER_KSUD, FP, 300_000L, 1759000000000L, GEN);
+        correctedB.qualificationRecord = AutoRootPolicy.formatQualification(CODE,
+                NAME, OTHER_KSUD, FP, QUAL_BOOT, 1759000000000L, false, QUAL_BOOT);
+        correctedB.incidentRecord = logA;
+
+        in = correctedB;
+        in.journalRecord = AutoRootPolicy.RECORD_UNREADABLE;
+        refused(in, EarlyRootPolicy.JOURNAL_UNREADABLE,
+                "an unreadable journal refuses even when the recorded incident is"
+                        + " attributed to another artefact");
+        in.journalRecord = MALFORMED_JOURNAL;
+        refused(in, EarlyRootPolicy.JOURNAL_MALFORMED,
+                "a malformed journal refuses even when the recorded incident is"
+                        + " attributed to another artefact");
+        // And the control: the same inputs with a readable, accountable journal
+        // from a boot that completed are not refused by any of this.
+        in.journalRecord = EarlyRootPolicy.formatJournal(DEAD_BOOT,
+                AutoRootPolicy.PHASE_COMPLETE, 1, true);
+        allowed(in, "a readable journal from a boot that reported is not refused by"
+                + " the unaccountable-journal checks");
+
         check(EarlyRootPolicy.MAX_ATTEMPTS_PER_BOOT == 1,
                 "the early path is one attempt per boot: there is no retry loop to"
                         + " bound, and a self-rescheduling root attempt must not exist");

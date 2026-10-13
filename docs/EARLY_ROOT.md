@@ -515,6 +515,24 @@ a full or unreadable log refuses the append rather than being replaced.
 entry this build cannot read may be the one that would have blocked.
 `tools/profile_binding_audit.py` fails if the ordering is reversed again.
 
+**And a journal the arming cannot account for is a refusal there too.**
+`detectIncident()` answers `null` for an unreadable journal and for one that does
+not parse, and `null` means "nothing pending" to everything downstream — so the
+arming walked past a journal that may have said `STARTED` with
+`native_started=1`, `archivePreviousCycle()` moved it to `.prev`, and the gate's
+own `EARLY_ROOT_JOURNAL_UNREADABLE` / `EARLY_ROOT_JOURNAL_MALFORMED` verdicts
+became unreachable for anything older than the current cycle. Also reported on
+PR #55.
+
+`detectIncident()` is deliberately left answering `null` for both rather than
+being taught to report them: it answers one question — *is there an unexplained
+death here* — and a record it cannot parse is not an answer to that question in
+either direction. The caller that is about to destroy the evidence is the one
+that has to refuse. So `recordPendingIncident()` reads the journal **once**, into
+a local, refuses on both states before `detectIncident()` sees it, and the audit
+fails if either refusal disappears, if they move after the detection, or if the
+journal is read twice.
+
 | state | verdict |
 |---|---|
 | incident open, same ksud digest | `EARLY_ROOT_INCIDENT_UNRESOLVED` |
