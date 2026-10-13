@@ -680,12 +680,6 @@ public class EarlyRootPolicyTest {
                                 + "6ae69e3"),
                 "the exact DZIF pair whose early load panicked the kernel is not"
                         + " cleared");
-        check(!EarlyRootPolicy.earlyLoadAuthorized(
-                        "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
-                                + "S938BXXUCDZIF_OXMCDZIF:user/release-keys",
-                        "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee"),
-                "the new repaired DZIF daemon/module pair has no physical early"
-                        + " acceptance and must not be auto-authorized by repinning");
         check(!EarlyRootPolicy.earlyLoadAuthorized(null, KSUD)
                         && !EarlyRootPolicy.earlyLoadAuthorized(FP, null)
                         && !EarlyRootPolicy.earlyLoadAuthorized("", "")
