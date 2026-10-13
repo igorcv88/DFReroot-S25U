@@ -1294,9 +1294,10 @@ inferred from a nearby firmware.
 | POST_SOFT_REBOOT_KERNEL_PANIC — was the 2026-10-01 reboot a panic? | **NO EVIDENCE (and the evidence that exists says no)** | the DropBox entry for the event is `SYSTEM_LAST_KMSG_0_20261001_140539_RP`, a reboot record; this device writes `_KP` for a panic and has two from 2026-09-29. `/sys/fs/pstore` was empty and no tombstone names `bootchecker` |
 | DFR_PERSISTED_JOB_EARLY_CALLBACK — an armed DFR JobService is called back in a new boot before `LOCKED_BOOT_COMPLETED` | **physical PASS** | `2.0.15-zzic`, three consecutive full boots (`48bf5c32…`, `9af4b55f…`, `ab10e200…`): `EARLY_JOB_FIRED_NEW_BOOT` / `EARLY_JOB_PRE_LOCKED_BOOT` / `same_boot=0` / `namespace_binding=PASS` in 3/3, callback at 14.6-16.9 s with `bootanim_exit=0` and `user_unlocked=0`, and logcat ordering corroborating the marker file independently. See *Early-job probe acceptance* below |
 | DFR_JOB_STAGEHOP_READY — the hop's prerequisites are resolvable at that callback | **physical PASS** | same three boots: `networkstack_proc` / `ams_process_record` / `application_thread` / `schedule_receiver_12` all `PASS`, rolling up to `NETWORKSTACK_READY`, 2.69-2.90 s before the DFR locked-boot marker. Resolving `scheduleReceiver/12` is **not** invoking it (AGENTS.md 3.7): this says the lookup succeeds, not that the hop lands |
-| EARLY_ROOT_DISPATCH — the chain actually runs from that callback | **UNVERIFIED** (source + 73 host checks, no physical run) | `EarlyRootPolicy` plus a second persisted job and a non-exported service, both re-deriving the full gate; `/data/system/dfreroot-early-root-trace` records each step before it is taken. Nothing has run on hardware. See *Early Integrated Root source implementation checkpoint* below and `docs/EARLY_ROOT.md` for the acceptance procedure |
-| EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED — the first milestone | **UNVERIFIED** | needs one boot's trace holding `EARLY_ROOT_POST_ROOT_COMPLETE` and `EARLY_ROOT_SELINUX_ENFORCING` at a smaller `elapsed_ms` than `EARLY_ROOT_BOOT_COMPLETED_OBSERVED`, all under one `boot_id` |
-| EARLY_ROOT_BOOT_HEALTH — the page-cache writes are survivable that early | **UNVERIFIED, and the open risk** | the early path does not restart the framework, so it does not enter the `bootchecker_timeout` mode the two `POST_SOFT_REBOOT_STABILITY` failures did — but it writes to the page cache while Samsung's boot watchdog is still deciding whether this boot completed, and nobody has observed what that costs. This is why arming is one-shot and owner-driven (AGENTS.md 3.6.1) |
+| EARLY_ROOT_DISPATCH — the chain actually runs from that callback | **physical PASS up to `BEFORE_NATIVE`** | DZIF, `2.0.18-dzif`, boot `5a7c2537-9693-44f9-8b2e-e26a1b3a10f2`, 2026-10-12: the job fired in the correct boot at 15.960 s, readiness `NETWORKSTACK_READY`, service entered (`pid=2861`), hop sent and returned, controller received, remote preflight (transaction 6) accepted, `EARLY_ROOT_BEFORE_NATIVE` recorded durably at 16.555 s with journal `STARTED` / `attempts=1` / `native_started=1`. Twelve trace steps, all in one `boot_id`. **Every DFReroot boundary held; what came after it did not** — see the row below |
+| EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED — the first milestone | **physical FAIL** | same boot: `EARLY_ROOT_NATIVE_RETURNED`, `_POST_ROOT_COMPLETE`, `_SELINUX_ENFORCING` and `_BOOT_COMPLETED_OBSERVED` are all absent, and the journal is still `STARTED`. 6.2 s after `BEFORE_NATIVE` the kernel BUGged and the device rebooted. The one-attempt guarantee held: the journal was never rewritten to `COMPLETE` and no second attempt ran |
+| EARLY_ROOT_BOOT_HEALTH — the page-cache writes are survivable that early | **physical FAIL — kernel panic** | at kernel uptime 22.723473, `list_del corruption, …->next is LIST_POISON1`, `kernel BUG at lib/list_debug.c:58`, `pc : __list_del_entry_valid_or_report+0xb8/0xf0`, stack `my_actor+0x360/0x3ec [kernelsu]` ← f2fs_readdir/iterate_dir ← `search_manager+0x1b8/0x35c` ← `track_throne+0x360/0x3ac` ← `kernelsu_init+0x150/0x174` ← `do_init_module`. DropBox `SYSTEM_LAST_KMSG_566_20261012_223012_KP`; `/proc/reset_summary` `UPLOAD CAUSE = 0xc8000000 = KERNEL PANIC`. **Not** the `bootchecker_timeout` mode and **not** the 2026-09-29 `allowed_for_su` panic — a third, distinct failure. The early window is now suspended in code for every artefact; see the row below |
+| EARLY_ROOT_ARTEFACT_CLEARED — may any pair be loaded early at all? | **suspended: the allowlist is empty** | `EarlyRootPolicy.EARLY_LOAD_CLEARED_ARTEFACTS` holds no (fingerprint, ksud digest) pair, so the gate and the arming both refuse with `EARLY_ROOT_ARTEFACT_NOT_CLEARED`. An allowlist rather than a denylist of the panicking pair, because an untested pair must not read as permission. Clearing one needs the three-boot criterion in `docs/EARLY_ROOT.md` §8 — a manual late-load PASS is explicitly **not** that evidence |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
 remaining blocker to calling the automated flow complete is the post-root
@@ -2925,6 +2926,15 @@ evidence of any kind**. Nothing below is a gate promotion.
 EARLY_ROOT_DISPATCH=UNVERIFIED            (no physical run)
 EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED=UNVERIFIED
 EARLY_ROOT_BOOT_HEALTH=UNVERIFIED         (the open question below)
+```
+
+> **Superseded on 2026-10-12.** All three have physical results now, and the
+> third is a kernel panic. The gate matrix above is the authoritative copy; the
+> record is *Early Integrated Root — first physical run, kernel panic* at the end
+> of this file. The paragraph below describes the state before any early
+> dispatch had run.
+
+```text
 EARLY_ROOT_MODULE_LIFECYCLE=NOT_IMPLEMENTED
 ```
 
@@ -2975,3 +2985,149 @@ it does write to the page cache *while the same boot watchdog is still running*,
 and nobody has observed what that costs. That is why arming is one-shot and
 owner-driven rather than a persistent switch: AGENTS.md 3.6.1's rule is that an
 operation whose worst outcome is not a refusal needs an operation's evidence.
+
+### Early Integrated Root — first physical run, kernel panic
+
+DZIF (`samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OXMCDZIF:user/release-keys`),
+kernel `6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k`, DFReroot
+`2.0.18-dzif` / `versionCode 20018`, 2026-10-12. Owner capture; the full
+engineering report is the primary record and this is its evidence summary.
+
+Four boots are involved and must not be merged (AGENTS.md 3.8):
+
+| Role | `boot_id` |
+|---|---|
+| probe arming | `47b45a28-dd7a-4c13-9921-e052d8d0dd5e` |
+| probe fired; later the early-root **arming** boot | `0ce28740-c51a-445c-8afe-35770ba2846e` |
+| **the early dispatch that panicked** | `5a7c2537-9693-44f9-8b2e-e26a1b3a10f2` |
+| manual recovery afterwards | `46cfa993-415d-4e7c-9de8-72eb229865b4` |
+
+#### What held
+
+Every DFReroot boundary, in one boot, with its durable pre-record:
+
+```text
+EARLY_ROOT_JOB_ENTERED            15960 ms
+EARLY_ROOT_READINESS_PASS         16111    proc/pr/thread/schedule_receiver_12 = PASS
+EARLY_ROOT_DISPATCHED             16112
+EARLY_ROOT_SERVICE_ENTERED        16117    pid=2861
+EARLY_ROOT_PREFLIGHT_PASS         16259    NETWORKSTACK_READY, selinux 1, marker ABSENT
+EARLY_ROOT_COORDINATOR_ENTERED    16267
+EARLY_ROOT_KSUD_STAGING           16268
+EARLY_ROOT_STAGEHOP_SENDING       16388
+EARLY_ROOT_STAGEHOP_SENT          16416
+EARLY_ROOT_CONTROLLER_RECEIVED    16502
+EARLY_ROOT_REMOTE_PREFLIGHT_PASS  16548    transaction 6 accepted
+EARLY_ROOT_BEFORE_NATIVE          16555    journal STARTED written first
+```
+
+The generation token (`generation=706869d22341f2040cbe1d3365314be0`) bound the
+callback to its arming. `sys_boot_completed=UNKNOWN bootanim_exit=0
+user_unlocked=0` on every line is telemetry, not the gate: the gate reads
+`bootCompletedState()`, which separates "read it, not 1" from "could not read
+it", and only the second refuses.
+
+**The one-attempt guarantee held.** The journal is still `phase=STARTED` /
+`attempts=1` / `native_started=1`. Nothing rewrote it to `COMPLETE`, nothing
+retried, and the later manual success in another boot did not touch it.
+
+#### What failed
+
+6.169 s after `BEFORE_NATIVE`, during `kernelsu.ko`'s own initialisation:
+
+```text
+[22.723473] list_del corruption, ffffff89b56d9948->next is LIST_POISON1 (dead000000000100)
+[22.723486] kernel BUG at lib/list_debug.c:58!
+[22.724185] pc : __list_del_entry_valid_or_report+0xb8/0xf0
+[22.724482] Kernel panic - not syncing: Oops - BUG: Fatal exception
+
+  __list_del_entry_valid_or_report+0xb8/0xf0
+  my_actor+0x360/0x3ec                [kernelsu]
+  f2fs_fill_dentries / f2fs_read_inline_dir / f2fs_readdir / iterate_dir
+  search_manager+0x1b8/0x35c          [kernelsu]
+  track_throne+0x360/0x3ac            [kernelsu]
+  kernelsu_init+0x150/0x174           [kernelsu]
+  do_one_initcall / do_init_module / load_module / __arm64_sys_init_module
+```
+
+`CPU:2 PID:8305 Comm: logcat`; module build id `0bf2f3900df98f1739a66d09e89295a09cd7493d`.
+`/proc/reset_summary`: `UPLOAD CAUSE = 0xc8000000 = KERNEL PANIC`,
+`panic_msg = Oops - BUG: Fatal exception`. DropBox
+`SYSTEM_LAST_KMSG_566_20261012_223012_KP`.
+
+Two manager searches were in flight:
+
+| kernel uptime | thread | event |
+|---|---|---|
+| 22.549709 | `logcat:8305` | `Searching manager...` — from `kernelsu_init` |
+| 22.628842 | `binder:2861_11:5257` | `packages.list detected: 128` |
+| 22.655299 | `binder:2861_11:5257` | `Searching manager...` — second search |
+| 22.723465 / 22.723471 | both | `Crowning manager: me.weishu.kernelsu(uid=10496)`, 6 µs apart |
+| 22.723473 | logcat | `list_del corruption` |
+
+**CONFIRMED:** the panic is inside `kernelsu.ko`'s manager discovery, reached
+from `init_module`, with two discovery passes overlapping and a `packages.list`
+change event landing mid-initialisation.
+
+**NOT established, and must not be asserted:** which write produced the
+`LIST_POISON1`. Double unlink, use-after-free, a shared global without a lock
+and a list-manipulation error local to the second pass are all still live, and
+`LIST_POISON1` in `next` is the *consequence* in every one of them. The decisive
+first question is answerable offline, from the binary alone: whether the list
+`my_actor` manipulates is reachable from both passes at all. If each
+`search_manager` owns its list on its own stack, overlap cannot explain the
+corruption and the fault must be in shared throne/manager state — a different
+patch. That fork should be closed before any locking is designed.
+
+#### Why the early window, specifically
+
+The manual chain on this **exact** pair works: it is how the device was
+recovered in `46cfa993…`, reaching `POST_ROOT_COMPLETE`, `ksu_version=32601`,
+`uapi_version=2`, `runtime_mode=late-load`, `selinux=1`,
+`transport_fix=kdp-cred-1`. So this is not module/kernel incompatibility; it is
+load-time sensitivity.
+
+The sharpest available statement of the trigger, and it is testable: at ~16 s
+of boot PackageManagerService is **still writing** `/data/system/packages.list`,
+while in a settled session that file is quiescent. The early window is therefore
+not merely a window where a change event *can* arrive during `kernelsu_init` —
+it is the window where one is *likely* to. That is consistent with the capture
+(`packages.list detected` at 22.628842, between the two searches) and with the
+manual path never reproducing it.
+
+One further datum worth keeping: the loader's `Comm` is `logcat`. That is
+expected for this exploit family rather than anomalous — DirtyFrag patches
+`libc` in the page cache and the payload runs in whatever process next execs —
+but it means the process that loads the module, and hence the kernel context of
+`init_module`, is **not chosen by this chain**. Early in boot, the set of
+processes that exec is entirely different from a settled session's. Any future
+early attempt inherits that nondeterminism.
+
+#### Consequence in code
+
+The early window is suspended for every artefact, not only the one that
+panicked. `EarlyRootPolicy.EARLY_LOAD_CLEARED_ARTEFACTS` is an **empty
+allowlist** of (fingerprint, ksud digest) pairs; the complete gate and
+`DfrEarlyRoot.arm()` both refuse with `EARLY_ROOT_ARTEFACT_NOT_CLEARED`.
+
+The pair is the right key, and the ksud digest is enough to name the module:
+the RMGLabs exact-port workflow builds `kernelsu.ko` and **embeds it into
+ksud** before publishing (see `docs/HANDOFF.md`, *Build-time requirements for
+the next DFR-specific ksud*). One ksud digest is therefore one module, and a
+corrected module arrives as a new digest — which this list will not match
+either, so re-clearing stays an explicit decision taken in the open.
+
+The probe stays observational and unaffected. The manual run and Auto Root
+after a full boot are unaffected: their physical evidence is unchanged and the
+suspension is scoped to the early window.
+
+#### What is still owed
+
+`JOBSCHEDULER`/probe timing on DZIF is **one** boot, not three
+(`callback 16994 ms`, `LOCKED_BOOT_COMPLETED 19821`, `BOOT_COMPLETED 42967`).
+The ZZIC 3/3 does not carry over to another firmware.
+
+Separately observed and deliberately **not** attributed to this panic: `SIGSYS`
+/ `SYS_SECCOMP` from `libksud.so` on syscall 142 after the reboot, and an
+earlier, distinct `_KP` DropBox entry at 16:46:51 with no recovered stack.
+Neither is evidence about the 22.724 s panic.

@@ -4,8 +4,31 @@
 for what is *proven*; this file is the design and the acceptance procedure. Where
 the two disagree about evidence, the dossier wins.
 
-> **State: implemented in source, zero physical evidence.** Nothing in this file
-> is a gate promotion. The first physical run has not happened.
+> **State: SUSPENDED. The first physical run ended in a kernel panic.**
+>
+> DZIF, 2026-10-12, boot `5a7c2537-9693-44f9-8b2e-e26a1b3a10f2`,
+> `2.0.18-dzif`. Every boundary in this document held — the job fired in the
+> right boot at 15.960 s, readiness was `NETWORKSTACK_READY`, the service
+> entered, the hop landed, the controller answered, the remote preflight was
+> accepted, and `EARLY_ROOT_BEFORE_NATIVE` was recorded durably at 16.555 s.
+> 6.2 s later `kernelsu.ko` BUGged inside its own manager discovery
+> (`list_del corruption / LIST_POISON1` at
+> `__list_del_entry_valid_or_report`, via
+> `my_actor ← search_manager ← track_throne ← kernelsu_init`) and the device
+> rebooted. Two discovery passes were overlapping, one from `kernelsu_init` and
+> one raised by a `packages.list` change event.
+>
+> **The early window is now refused for every artefact.**
+> `EarlyRootPolicy.EARLY_LOAD_CLEARED_ARTEFACTS` is an empty allowlist of
+> (fingerprint, ksud digest) pairs; the gate and `DfrEarlyRoot.arm()` both
+> refuse with `EARLY_ROOT_ARTEFACT_NOT_CLEARED`. §11 below says what clearing a
+> pair requires. The probe, the manual run and Auto Root after a full boot are
+> unaffected.
+>
+> The authoritative evidence record is
+> `docs/S25U_ZZIC_COMPATIBILITY.md`, *Early Integrated Root — first physical
+> run, kernel panic*. Section 8's procedure below remains correct for the day a
+> corrected module exists; it is not runnable today.
 
 ---
 
@@ -341,3 +364,41 @@ The next measurement that would actually advance it is the one in §8's property
 list: `dev.bootcomplete` / `dev.platform_bootcomplete` in a boot where nothing
 restarted userspace, and the same two after one that did. Until that exists,
 every coordination design for the handshake is a guess.
+
+## 11. Clearing an artefact after the panic
+
+The allowlist is a statement about bytes, so clearing a pair is a statement
+about bytes too. `EarlyRootPolicy.EARLY_LOAD_CLEARED_ARTEFACTS` takes
+`artefactKey(fingerprint, ksudSha256)` and nothing else; `tools/profile_binding_audit.py`
+refuses a raw entry, refuses the digest that panicked, and refuses a mutable
+list.
+
+What a new entry needs, in this order:
+
+1. **A corrected `kernelsu.ko`, as a new ksud digest.** The module is embedded
+   into ksud by the RMGLabs exact-port workflow, so there is no way to change
+   one without changing the other. A pair that keeps digest
+   `f680f959…` is the pair that panicked, whatever else was done to it.
+2. **The root cause closed, not just the symptom.** The decisive question is
+   answerable from the binary with no device: is the list `my_actor` manipulates
+   reachable from both discovery passes? If each `search_manager` owns its list
+   on its own stack, overlap cannot explain the corruption and the fault lies in
+   shared throne/manager state instead — a different patch. Close that fork
+   first; a lock added to the wrong object replaces a panic with a deadlock, and
+   a scan put under a spinlock is worse than either.
+3. **Never by disabling the check that caught it.** `CONFIG_DEBUG_LIST` is why
+   this was a panic at 22.7 s instead of silent corruption discovered later.
+4. **Concurrency proven off this device.** A harness that forces a
+   `packages.list` change during `INITIALIZING` and repeated notifications
+   during enumeration, under `CONFIG_DEBUG_LIST` and KASAN where available, over
+   many interleavings. Not on the owner's phone.
+5. **The three-boot criterion of §8**, unchanged. A manual late-load PASS does
+   **not** clear a pair: the manual path already works on the pair that
+   panicked — it is how the device was recovered — so manual success is the
+   control that isolates the defect, never evidence for the early window.
+6. **The entry carries its evidence.** Boot ids, dates and the trace steps that
+   closed each of the three boots go in the dossier beside the digest, the way
+   every other promotion in this repository does.
+
+Nothing above may be traded for a schedule. The only thing an agent may do to
+this allowlist without the owner deciding in the open is leave it empty.

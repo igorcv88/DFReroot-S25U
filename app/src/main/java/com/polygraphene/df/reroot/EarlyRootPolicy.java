@@ -178,6 +178,14 @@ public final class EarlyRootPolicy {
     public static final String MARKER_UNKNOWN = "EARLY_ROOT_MARKER_UNKNOWN";
     public static final String SELINUX_NOT_ENFORCING = "EARLY_ROOT_SELINUX_NOT_ENFORCING";
     public static final String READINESS_REFUSED = "EARLY_ROOT_NETWORKSTACK_NOT_READY";
+    /**
+     * The (firmware, daemon) pair has no physically validated early load.
+     *
+     * Its own code because it is not a property of the cycle, the arming or the
+     * boot - it is a property of the ARTEFACT, and it refuses before any of the
+     * rest is even read.
+     */
+    public static final String ARTEFACT_NOT_CLEARED = "EARLY_ROOT_ARTEFACT_NOT_CLEARED";
 
     /*
      * The durable trace steps, in the order one boot can pass through them.
@@ -292,7 +300,87 @@ public final class EarlyRootPolicy {
     private static final Set<String> JOURNAL_KEYS = Set.of(
             "boot_id", "phase", "attempts", "native_started");
 
+    /*
+     * The (device fingerprint, ksud SHA-256) pairs whose EARLY load has been
+     * physically validated.
+     *
+     * It is deliberately EMPTY, and an allowlist rather than a denylist, which
+     * is the whole point. A denylist of the artefact that panicked would let the
+     * next unvalidated pair through by default, and "we have not tested this one
+     * yet" is exactly the absence section 2 forbids treating as permission.
+     *
+     * ## Why it is empty: the first physical early load killed the kernel
+     *
+     * DZIF, 2026-10-12, boot `5a7c2537-9693-44f9-8b2e-e26a1b3a10f2`,
+     * `2.0.18-dzif`. Every DFR boundary passed - the job fired in the right boot
+     * at 15.960 s, readiness was `NETWORKSTACK_READY`, the service entered, the
+     * hop landed, the controller answered, the remote preflight (transaction 6)
+     * was accepted, and `EARLY_ROOT_BEFORE_NATIVE` was recorded durably at
+     * 16.555 s. 6.2 seconds later, at kernel uptime 22.723473, `kernelsu.ko`
+     * died inside its own manager discovery:
+     *
+     * <pre>
+     *   list_del corruption, ...->next is LIST_POISON1 (dead000000000100)
+     *   kernel BUG at lib/list_debug.c:58
+     *   pc : __list_del_entry_valid_or_report+0xb8/0xf0
+     *        my_actor+0x360/0x3ec        [kernelsu]
+     *        ... f2fs_readdir -> iterate_dir ...
+     *        search_manager+0x1b8/0x35c  [kernelsu]
+     *        track_throne+0x360/0x3ac    [kernelsu]
+     *        kernelsu_init+0x150/0x174   [kernelsu]
+     *        do_one_initcall -> do_init_module -> __arm64_sys_init_module
+     * </pre>
+     *
+     * Two manager searches were in flight: the one `kernelsu_init` starts at
+     * 22.549709, and a second at 22.655299 raised by a `packages.list` change
+     * event at 22.628842. They crowned the manager 6 us apart and the kernel
+     * BUGged 2 us later. The mechanism of the first bad write is NOT established
+     * and must not be asserted - see docs/EARLY_ROOT.md.
+     *
+     * ## Why the pair, and why ksud's digest is enough to name the module
+     *
+     * The panic is in `kernelsu.ko`, which this repository does not build. It
+     * does not need to: the RMGLabs exact-port workflow builds that module and
+     * **embeds it into ksud** before publishing the pair (docs/HANDOFF.md,
+     * "Build-time requirements for the next DFR-specific ksud"). So one ksud
+     * digest means one `kernelsu.ko`, and the digest already pinned in
+     * {@link KsudStage} is a complete identity for both. A corrected module
+     * therefore arrives as a new ksud digest, which this list will not match
+     * either - re-clearing it is an explicit decision, taken in the open, with
+     * the physical evidence named beside the entry.
+     *
+     * The fingerprint is in the key because the same daemon on another firmware
+     * is another experiment: the early window's contents are the platform's.
+     *
+     * Adding an entry requires what docs/EARLY_ROOT.md section 8 requires -
+     * three consecutive full boots reaching `EARLY_ROOT_POST_ROOT_COMPLETE` and
+     * `EARLY_ROOT_SELINUX_ENFORCING` before `BOOT_COMPLETED`, with no `_KP`
+     * DropBox entry in that boot or the next. A manual late-load PASS is not
+     * that evidence: the manual path works on this exact pair - it is how the
+     * device was recovered on 2026-10-12 - and it is precisely the comparison
+     * that shows the defect is specific to loading this early.
+     */
+    private static final Set<String> EARLY_LOAD_CLEARED_ARTEFACTS = Set.of();
+
     private EarlyRootPolicy() {}
+
+    /** The allowlist key. Both halves, so neither can speak for the other. */
+    private static String artefactKey(String deviceFingerprint, String ksudSha256) {
+        return deviceFingerprint + "\u0000" + ksudSha256;
+    }
+
+    /**
+     * Whether this (firmware, daemon+module) pair may be loaded EARLY at all.
+     *
+     * Public so the arming UI can refuse before the owner spends a reboot, and
+     * so a reader can see that the arming check and the gate consult one list.
+     * The gate is the authority; the arming check is ergonomics on top of it.
+     */
+    public static boolean earlyLoadCleared(String deviceFingerprint, String ksudSha256) {
+        if (blank(deviceFingerprint) || blank(ksudSha256)) return false;
+        return EARLY_LOAD_CLEARED_ARTEFACTS.contains(
+                artefactKey(deviceFingerprint.trim(), ksudSha256.trim()));
+    }
 
     private static boolean blank(String s) {
         return s == null || s.trim().isEmpty();
@@ -955,6 +1043,37 @@ public final class EarlyRootPolicy {
                     + in.readinessState + ", not "
                     + EarlyBootProbePolicy.NETWORKSTACK_READY
                     + "; an early window the hop cannot use is not an early window");
+        }
+        /*
+         * The artefact itself, and it is the very LAST check of the complete
+         * gate rather than the first. Three reasons, in order of weight.
+         *
+         * 1. Every other gate stays falsifiable. Refusing here first would make
+         *    the marker probe, the SELinux read and the readiness roll-up
+         *    unreachable for as long as the allowlist is empty - which is now -
+         *    and a gate that cannot fail is not a gate (AGENTS.md 5). Their
+         *    negative cases in EarlyRootPolicyTest would have gone green while
+         *    testing nothing.
+         * 2. It is the message the next physical run needs. A real arming has a
+         *    valid cycle and a clean device, so this is the gate it lands on; a
+         *    broken cycle deserves to report what broke instead.
+         * 3. The suspension is a statement about bytes, not about a boot, so it
+         *    cannot be invalidated by anything the checks above observe.
+         *
+         * Nothing is weakened by the position: this is inside the one function
+         * both entry points call, so an uncleared pair can never reach `allow`.
+         *
+         * Blank inputs refuse rather than being skipped. An unreadable
+         * fingerprint or a daemon with no pinned digest is not a cleared
+         * artefact; it is no evidence about one.
+         */
+        if (!earlyLoadCleared(in.deviceFingerprint, in.ksudSha256)) {
+            return refuse(ARTEFACT_NOT_CLEARED, "no physically validated early load"
+                    + " exists for this firmware and daemon/module pair"
+                    + " (fingerprint=" + in.deviceFingerprint + " ksud="
+                    + in.ksudSha256 + "); the early window is suspended for it."
+                    + " The manual run and Auto Root after a full boot are"
+                    + " unaffected");
         }
         return new Decision(true, ALLOW, "EARLY_ROOT_PREFLIGHT=PASS");
     }
