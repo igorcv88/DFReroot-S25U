@@ -3673,7 +3673,28 @@ The trace carries a second `TRIGGER_ENTERED` + `REFUSED` at **3 976 999 ms** and
 a second `BOOT_COMPLETED_OBSERVED` at **3 982 637 ms**, under the same
 `boot_id`. Both boot broadcasts were re-delivered 66.3 minutes into the boot,
 which is the signature of a userspace/framework restart (the same property the
-soft-reboot path relies on). **What caused it is not in this capture.**
+soft-reboot path relies on). **What caused it is not in this capture, and the
+owner has no record of it either** — asked directly, the answer was that nothing
+on hand distinguishes a soft reboot he triggered from a spontaneous framework
+restart. So this instance stays **permanently unattributed**, and no later
+reasoning may assume either.
+
+What would attribute the next one, and what the collector was not reading:
+DFReroot's own soft-reboot path writes `phase=CLAIMED` to
+`/data/system/dfreroot-softreboot-lock` **before** the daemon is ever invoked
+(AGENTS.md 3.6.1), traces each privileged step to `-softreboot-trace`, and
+records the firmware's verdict in `-softreboot-health`. Records present and
+naming the boot means this app asked for the restart; absent or naming an
+earlier boot means it did not. `tools/earlyroot_collect_pass.sh` now reads all
+three — which also makes it a standing check that the early trigger never
+reaches that path, since the audit forbids it in code and this would show it in
+evidence.
+
+The same revision fixed a path error of its own: the collector read
+`/data/system/dfreroot-early-boot-probe`, which does not exist —
+`EarlyBootProbeStore` uses the `-early-job-` prefix — so this packet reported an
+absence that was a wrong path rather than a missing record. The probe's four
+real records are now in the list.
 
 Two consequences:
 
