@@ -53,13 +53,35 @@ acceptance criteria for the next signed build. If this file disagrees with
 > scanner. See RMGLabs-Payloads
 > `docs/incidents/2026-10-12-dzif-early-load-throne-tracker-panic.md`.
 >
-> **Next step, and it is not DFReroot's:** the fix is in RMGLabs-Payloads and
-> gated offline there, but **no corrected module has been built**. That needs one
-> `workflow_dispatch` of `.github/workflows/build-dzif-exact-port.yml`, which
-> spends runner minutes and publishes a new pair — an owner decision. A corrected
-> build is a new ksud digest, so `EARLY_LOAD_AUTHORIZED_ARTEFACTS` will not match
-> it either; `docs/EARLY_ROOT.md` §11 is what authorizing a pair requires, and
-> §12 is the incident latch below.
+> **DZIF KernelSU source repair compiled; DFR repin in progress (2026-10-13).**
+> RMGLabs-Payloads merged the throne-tracker serialization fix and published a
+> new DFR-specific daemon/module pair in commit `bbd765b048cf26d91c05788d8bf08b85f1ccaff1`.
+> The new `ksud` has SHA-256
+> `3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee`
+> (6,670,840 bytes). Its embedded `kernelsu.ko` has SHA-256
+> `dd193d36d13caea129572e9ffdeedfeebdadb860fcb7d8d7a72b1e3e58301220`,
+> GNU build ID `cc25bef1fe27d0567035cf578e2325ac065cf0e5`. Source
+> `kernelsu/<ksud>.module-provenance.txt` records the exact kernel, patch set,
+> KernelSU commit and source commit. The build is NOT hardware proof.
+>
+> **The final app step is to replace the APK asset** `app/src/main/assets/ksud-dzif`
+> with these exact bytes. This branch updates `KsudStage.kt`,
+> `target_profile.c` and `tools/dzif_profile.json` to the new digest and size,
+> but the app must NOT ship until the binary is imported. The private source
+> repository's bytes cannot be transferred via the text-only GitHub connection.
+> In a checkout authenticated to both repositories, run
+> `python3 tools/import_repaired_dzif_ksud.py` to fetch the immutable source
+> commit with `gh api`, verify both provenance and digest, and atomically
+> replace the asset. Then run the normal host/CI/Gradle checks: specifically,
+> `python3 tools/dzif_profile_binding_audit.py` must pass. This required FAIL
+> while the old asset remains is intentional — do not bypass it.
+>
+> The corrected module is still **not physically validated** in manual full-boot
+> mode or early boot. `EARLY_LOAD_AUTHORIZED_ARTEFACTS` and
+> `ACKNOWLEDGED_INCIDENT_BOOTS` remain empty. Requalify Auto Root after any
+> daemon digest and app build change. The observational probe and manual
+> DirtyFrag path remain separate from the early-root suspension; no part of this
+> repin grants authorization for the dangerous early-load window.
 >
 > **And that run now latches.** Its journal — `phase=STARTED`,
 > `native_started=1`, no completion — used to mean nothing on the next boot,
