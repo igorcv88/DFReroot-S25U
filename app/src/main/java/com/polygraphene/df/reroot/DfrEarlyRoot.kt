@@ -58,6 +58,25 @@ object DfrEarlyRoot {
             return "[x] EARLY_ROOT_NOT_ARMED: this build has no verified manual run" +
                 " yet; run DirtyFrag once and reach POST_ROOT_COMPLETE first"
         }
+        /*
+         * And refused when this firmware/daemon pair has no validated early load.
+         *
+         * Same relationship to the gate as the check above: EarlyRootPolicy is
+         * the authority and refuses in both entry points, so this cannot be the
+         * only place it is enforced - a UI-only suspension is not a suspension.
+         * What it buys is that the owner is told now instead of spending a full
+         * reboot on a dispatch that will refuse, or worse, on the artefact that
+         * panicked the kernel on 2026-10-12.
+         */
+        if (!EarlyRootPolicy.earlyLoadAuthorized(
+                AutoRootStore.deviceFingerprint(), KsudStage.pinnedKsudSha256())) {
+            return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.ARTEFACT_NOT_AUTHORIZED}" +
+                " - the early window is not authorized for this firmware" +
+                " and daemon/module pair. The first physical early load of it" +
+                " ended in a kernel panic inside kernelsu.ko (list_del" +
+                " corruption in its manager discovery); see docs/EARLY_ROOT.md." +
+                " The manual run and Auto Root after a full boot are unaffected."
+        }
         val base = try {
             context.getSystemService(JobScheduler::class.java)
         } catch (t: Throwable) {

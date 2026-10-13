@@ -25,7 +25,32 @@ acceptance criteria for the next signed build. If this file disagrees with
 > delta/OTA metadata beside the DZIF material, is a named non-input and must
 > not feed any DZIF gate.
 
-> **Open, and where to start — two independent threads now.**
+> **Open, and where to start — the early path is suspended after a kernel panic.**
+>
+> **(0) Early Integrated Root: physical FAIL, 2026-10-12, DZIF.** Boot
+> `5a7c2537-9693-44f9-8b2e-e26a1b3a10f2`, `2.0.18-dzif`. Every DFReroot
+> boundary held to `EARLY_ROOT_BEFORE_NATIVE` at 16.555 s; 6.2 s later
+> `kernelsu.ko` BUGged in its own manager discovery
+> (`list_del corruption / LIST_POISON1`, `my_actor ← search_manager ←
+> track_throne ← kernelsu_init`) with two discovery passes overlapping after a
+> `packages.list` event, and the device rebooted. The one-attempt guarantee
+> held: journal still `STARTED`, nothing retried. The manual chain on the same
+> pair works and recovered the device in `46cfa993…`.
+>
+> The early window is now **refused for every artefact** —
+> `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` is an empty allowlist of
+> (fingerprint, ksud digest) pairs, enforced in the complete gate and at the
+> arming. The probe, the manual run and Auto Root are unaffected.
+>
+> **Next step is offline and needs no device:** decide whether the list
+> `my_actor` manipulates is reachable from both discovery passes. If each
+> `search_manager` owns its list on its own stack, overlap cannot explain the
+> corruption and the fault is in shared throne/manager state — a different
+> patch. `docs/EARLY_ROOT.md` §11 is what authorizing a pair requires; the
+> dossier's *Early Integrated Root — first physical run, kernel panic* is the
+> evidence.
+>
+> **The two threads below predate that run.**
 >
 > **(1) Early Integrated Root is implemented and has no physical evidence.** The
 > probe question is closed: over three consecutive full boots

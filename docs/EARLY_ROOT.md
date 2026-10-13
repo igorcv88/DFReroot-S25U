@@ -4,8 +4,31 @@
 for what is *proven*; this file is the design and the acceptance procedure. Where
 the two disagree about evidence, the dossier wins.
 
-> **State: implemented in source, zero physical evidence.** Nothing in this file
-> is a gate promotion. The first physical run has not happened.
+> **State: SUSPENDED. The first physical run ended in a kernel panic.**
+>
+> DZIF, 2026-10-12, boot `5a7c2537-9693-44f9-8b2e-e26a1b3a10f2`,
+> `2.0.18-dzif`. Every boundary in this document held — the job fired in the
+> right boot at 15.960 s, readiness was `NETWORKSTACK_READY`, the service
+> entered, the hop landed, the controller answered, the remote preflight was
+> accepted, and `EARLY_ROOT_BEFORE_NATIVE` was recorded durably at 16.555 s.
+> 6.2 s later `kernelsu.ko` BUGged inside its own manager discovery
+> (`list_del corruption / LIST_POISON1` at
+> `__list_del_entry_valid_or_report`, via
+> `my_actor ← search_manager ← track_throne ← kernelsu_init`) and the device
+> rebooted. Two discovery passes were overlapping, one from `kernelsu_init` and
+> one raised by a `packages.list` change event.
+>
+> **The early window is now refused for every artefact.**
+> `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` is an empty allowlist of
+> (fingerprint, ksud digest) pairs; the gate and `DfrEarlyRoot.arm()` both
+> refuse with `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED`. §11 below says what clearing a
+> pair requires. The probe, the manual run and Auto Root after a full boot are
+> unaffected.
+>
+> The authoritative evidence record is
+> `docs/S25U_ZZIC_COMPATIBILITY.md`, *Early Integrated Root — first physical
+> run, kernel panic*. Section 8's procedure below remains correct for the day a
+> corrected module exists; it is not runnable today.
 
 ---
 
@@ -341,3 +364,64 @@ The next measurement that would actually advance it is the one in §8's property
 list: `dev.bootcomplete` / `dev.platform_bootcomplete` in a boot where nothing
 restarted userspace, and the same two after one that did. Until that exists,
 every coordination design for the handshake is a guess.
+
+## 11. Authorizing an artefact after the panic
+
+> An earlier version of this section required three successful early boots
+> before a pair could be listed — which was circular, since the dispatch
+> refuses until the pair is listed. Codex review on PR #54 caught it. The
+> contract below is the corrected one.
+
+The list gates **permission to make the attempt**, not proven safety. It is
+named `EARLY_LOAD_AUTHORIZED_ARTEFACTS` for that reason, it takes
+`artefactKey(fingerprint, ksudSha256)` and nothing else, and
+`tools/profile_binding_audit.py` refuses a raw entry, refuses the digest that
+panicked, and refuses a mutable list.
+
+**It is not an at-own-risk marker and must not grow one.** AGENTS.md 3.6
+forbids a second, more permissive "trial" tier beside it: one list, every entry
+a deliberate owner decision naming one exact pair, and the only change an agent
+may make to it is none.
+
+### What an entry costs — all of it before the first attempt
+
+1. **A corrected `kernelsu.ko`, arriving as a new ksud digest.** The module is
+   embedded into ksud by the RMGLabs exact-port workflow, so neither can change
+   without the other. A pair still carrying digest `f680f959…` is the pair that
+   panicked, whatever else was done to it, and the static guard refuses it
+   permanently.
+2. **The root cause closed, not the symptom.** The decisive question needs no
+   device: is the list `my_actor` manipulates reachable from both discovery
+   passes? If each `search_manager` owns its list on its own stack, overlap
+   cannot explain the corruption and the fault is in shared throne/manager
+   state instead — a different patch. Close that fork first; a lock on the wrong
+   object trades the panic for a deadlock, and a `/data/app` scan under a
+   spinlock is worse than either.
+3. **Never by disabling the check that caught it.** `CONFIG_DEBUG_LIST` is why
+   this was a panic at 22.7 s rather than silent corruption found later.
+4. **Concurrency proven off this device.** A harness forcing a `packages.list`
+   change during `INITIALIZING` and repeated notifications during enumeration,
+   under `CONFIG_DEBUG_LIST` and KASAN where available, over many interleavings.
+   Not on the owner's phone.
+
+Only then does the owner add the pair, in a PR, with items 1–4 named beside the
+digest in the dossier.
+
+### What three boots are for
+
+They are not what authorizes the attempt; they are what **promotes the
+evidence**. The first authorized early run on a corrected pair is still a
+kernel-risk experiment, to be treated as §8 describes and never repeated
+automatically. `EARLY_ROOT_DISPATCH`, `EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED`
+and `EARLY_ROOT_BOOT_HEALTH` move to physical PASS in
+`docs/S25U_ZZIC_COMPATIBILITY.md` only on the §8 criterion — three consecutive
+full boots, one `boot_id` each, with no `_KP` DropBox entry in that boot or the
+next.
+
+So the code gates identity and the dossier records what that identity has
+proven. Every other gate in this repository is split the same way.
+
+**A manual late-load PASS authorizes nothing.** The manual path works on the
+exact pair that panicked — it is how the device was recovered on 2026-10-12 —
+which is what makes it the control that isolates the defect to load time, and
+never evidence for the early window.
