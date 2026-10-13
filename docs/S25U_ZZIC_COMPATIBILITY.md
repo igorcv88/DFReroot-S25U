@@ -3464,3 +3464,79 @@ against anything but `0`, so the new values break no contract.
 `tools/tests/test_post_root_contract.py` guards the separation, the ordering that
 decides undeterminable first, and the reason the two positive readings can be
 told apart; both new guards were mutation-checked.
+
+### Early Integrated Root — FIRST PHYSICAL PASS, boot 1 of 3
+
+DZIF, 2026-10-13, `main` at `6031fa1`. Armed in boot
+`ebb03f9d-f478-4e2e-aba5-b7299a1feed0`, fired in boot
+`42da1cdd-ccfa-4c06-861c-ce42eac99d61`. **Auto Root was switched off**, so
+nothing else in this app could have established root in that boot.
+
+Reported by the app's own row, which derives it from the cycle record, the
+journal and the trace:
+
+```text
+EARLY_ROOT_SPENT job_id=1145459282 namespace=dfr-early-root
+armed_boot_id=ebb03f9d-f478-4e2e-aba5-b7299a1feed0
+claimed_by=job claim_boot_id=42da1cdd-ccfa-4c06-861c-ce42eac99d61
+claim_elapsed_ms=18300
+phase=COMPLETE attempts=1 native_started=1
+journal_boot_id=42da1cdd-ccfa-4c06-861c-ce42eac99d61
+last_step=EARLY_ROOT_BOOT_COMPLETED_OBSERVED elapsed_ms=42457
+bootanim_exit=1 steps=19 detail=action=BOOT_COMPLETED
+```
+
+#### What this establishes
+
+| fact | evidence |
+|---|---|
+| the **job** trigger fired, and punctually | `claimed_by=job`, `claim_elapsed_ms=18300` — 18.3 s, inside the window and inside the animation |
+| the chain ran to a verified verdict | `phase=COMPLETE`, which `EarlyRootPolicy.terminalPhase` writes only for `success` — i.e. `nativeResult == 0` **and** same-boot `POST_ROOT_COMPLETE` **and** `liveSelinux == 1` |
+| transaction 5 was issued | `native_started=1` |
+| one boot, not two | `claim_boot_id == journal_boot_id`, and the trace is boot-scoped |
+| one attempt | `attempts=1` |
+| **the milestone ordering** | `EARLY_ROOT_BOOT_COMPLETED_OBSERVED` is the **last** of 19 steps at 42.457 s, and the trace is append-only — so `POST_ROOT_COMPLETE` and `SELINUX_ENFORCING` were written before it, in the same boot |
+
+`EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED` is therefore satisfied **for one
+boot**. The criterion is three consecutive full boots (§8), so the gate stays
+**UNVERIFIED** until two more and the per-boot artefacts below are in the
+record.
+
+#### What is still owed for this boot, and why each item
+
+The row is derived evidence. These are the primary records, and
+`tools/earlyroot_collect_pass.sh` captures all of them in one pass:
+
+- the **trace file itself**, for the `elapsed_ms` of `POST_ROOT_COMPLETE` and
+  `SELINUX_ENFORCING`. The ordering above is sound from the append-only
+  property, but the margin — how much of the animation was left — is a number
+  nobody has yet, and it is the number the second half of the goal has to fit
+  inside;
+- `/data/system/dfreroot-post-root` for that `boot_id`, and
+  `/sys/fs/selinux/enforce` read independently;
+- **no `_KP` DropBox entry** in that boot or the one after it. The 2026-10-12
+  panic was at 22.7 s, i.e. *after* the equivalent point of this run, so a clean
+  boot here is the first evidence that the repaired module survives an early
+  load — and it is not evidence until the DropBox listing says so;
+- `dev.bootcomplete` / `dev.platform_bootcomplete`. Not for this milestone:
+  this is the AGENTS.md 3.6.2 baseline from a boot where **nothing** tore
+  userspace down, which nobody has ever read on this firmware, and it gates the
+  module/soft-reboot half of the product goal.
+
+#### What it does NOT establish
+
+- **Nothing about the modules.** `DfrEarlyRootService` ends at
+  `POST_ROOT_COMPLETE` and never touches the module lifecycle or the soft-reboot
+  transport; the audit fails if it does. The owner observing that modules were
+  not initialised is the designed behaviour, not a defect (`docs/EARLY_ROOT.md`
+  §9).
+- **Nothing about the job's punctuality in general.** This boot's callback was
+  at 18.3 s; three recent boots were at 299 s, 334.4 s and 521.7 s with the same
+  JobInfo. One punctual boot does not make the distribution tight, and the
+  open fork in the previous entry — ready-and-deferred vs not-ready — is
+  untouched by it. `tools/earlyroot_job_probe.sh` is still the read that settles
+  it, and the next LATE boot is when to run it.
+- **Nothing about what the owner saw.** The verdict notification is posted when
+  the run finishes and its *display* time is recorded nowhere, so "the
+  notification appeared well after the phone started" is not a measurement of
+  when root existed. The trace is, and it places the whole chain before 42.457 s.

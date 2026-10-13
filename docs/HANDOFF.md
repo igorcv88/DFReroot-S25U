@@ -25,6 +25,36 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
+> **FIRST PHYSICAL PASS, 2026-10-13 — boot 1 of 3. Everything below predates
+> it.**
+>
+> Armed in `ebb03f9d-f478-4e2e-aba5-b7299a1feed0`, fired in
+> `42da1cdd-ccfa-4c06-861c-ce42eac99d61`, Auto Root **off**. The **job** trigger
+> claimed at **18.3 s**; the journal reads `phase=COMPLETE` / `attempts=1` /
+> `native_started=1`, which `terminalPhase` writes only for
+> `nativeResult == 0` + same-boot `POST_ROOT_COMPLETE` + `liveSelinux == 1`; and
+> `EARLY_ROOT_BOOT_COMPLETED_OBSERVED` is the **last** of 19 append-only steps,
+> at 42.457 s. So the chain completed before `BOOT_COMPLETED` in one boot.
+>
+> **The gate stays UNVERIFIED.** §8 requires three consecutive boots, and this
+> boot's primary artefacts are not in the record yet — the trace file (for the
+> `elapsed_ms` of `POST_ROOT_COMPLETE`, i.e. the margin), the post-root record,
+> an independent SELinux read, and **no `_KP` DropBox entry in this boot or the
+> next**. `tools/earlyroot_collect_pass.sh` captures all of it in one `su` pass.
+> Collect it for this boot before arming the next one: an unrecorded PASS is a
+> PASS nobody can promote.
+>
+> **Two things this does not touch.** The modules were not initialised, which is
+> the designed behaviour (§9) and not a defect. And the job's punctuality is not
+> settled by one punctual boot — 299 s, 334.4 s and 521.7 s happened with the
+> same JobInfo, the ready-vs-not-ready fork below is untouched, and
+> `tools/earlyroot_job_probe.sh` is the read to run on the next LATE boot.
+>
+> **Also collected by that script, and more valuable than it looks:**
+> `dev.bootcomplete` / `dev.platform_bootcomplete` from a boot where nothing
+> tore userspace down. AGENTS.md 3.6.2 records that nobody has read them on this
+> firmware, and they gate the whole module/soft-reboot half of the goal.
+
 > **Where to start, 2026-10-13 (third run) — the batching hypothesis is
 > refuted, the broadcast trigger is dead on DZIF, and one unrun command decides
 > the rest. Everything below this block predates run 3.**
