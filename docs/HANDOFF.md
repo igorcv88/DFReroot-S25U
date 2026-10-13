@@ -25,6 +25,66 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
+> **Where to start, 2026-10-13 (later the same day) — the trigger was the blocker, and it is
+> rebuilt. Everything below this block predates run 2 and is historical.**
+>
+> **What failed on 2026-10-13:** the persisted job's callback arrived at
+> **521.707 s** of uptime. The policy refused with
+> `EARLY_ROOT_PAST_EARLY_WINDOW` (bound: 120 s), with `sys.boot_completed=1`,
+> `bootanim_exit=1`, `user_unlocked=1`. **No native transaction was issued by
+> the early path**, so that boot says nothing about the repaired module - the
+> absence of a panic there is the absence of an attempt. A manual
+> **Run DirtyFrag** later in the same boot reached `POST_ROOT_COMPLETE=PASS`,
+> `ksu_version=32601`, `selinux=1`, `transport_fix=kdp-cred-1`, which is a
+> late-load PASS for the repaired pair and authorizes nothing about the early
+> window (`docs/EARLY_ROOT.md` §11).
+>
+> **Why, exactly:** `setMinimumLatency(15 s)` is an EARLIEST bound. The job had
+> no other constraint and the scheduler ran it when it chose. Four captured
+> boots had it at 14.6, 14.6, 16.9 and 17.0 s, and one at 521.7 s. Why
+> JobSchedulerService deferred it is a question about *its* state and was not
+> instrumented; the fix does not depend on the answer, because it stops making a
+> scheduler callback the only trigger. Note that the 521 s elapsed **before**
+> `onStartJob`'s first statement, so no telemetry in this app can explain it.
+>
+> **What changed in response** (`docs/EARLY_ROOT.md` §4a, §4b, §5):
+>
+> - a second, **deterministic** trigger on `ACTION_LOCKED_BOOT_COMPLETED`
+>   (observed 17.6-19.8 s on this device, 2.69-2.90 s after the job callback),
+>   dispatched off system_server's looper from `DfrBootReceiver`. The job stays
+>   as the opportunistic earlier path and now also carries a 45 s override
+>   deadline. **One** gate-and-dispatch sequence serves both
+>   (`DfrEarlyRootDispatch`);
+> - `service.bootanim.exit` becomes an element of the gate, re-read at the point
+>   of no return. The 120 s window was a proxy for "the animation is still on the
+>   screen", which is the only definition of early the product goal has;
+> - **one arming, one boot, one claimed run** moves into
+>   `/data/system/dfreroot-early-root-cycle`. The scheduler used to provide that
+>   by consuming the job; a broadcast arrives in every boot, so without it a
+>   one-shot arming would have silently become the standing switch
+>   `docs/EARLY_ROOT.md` §6 says is an owner decision;
+> - the app's early-root row now reads the cycle record and the scheduler, so a
+>   spent arming no longer reads `ARMED` and a clean terminal refusal no longer
+>   reads `CALLBACK_INCOMPLETE`.
+>
+> **What is still open, in order:**
+>
+> 1. **Early Integrated Root has never physically passed.** The authorized pair
+>    (DZIF + `3861dbd4…`) has one owner-authorized first attempt. Follow
+>    `docs/EARLY_ROOT.md` §8 exactly, read the panic records first, and do not
+>    re-arm before reading the trace. `EARLY_ROOT_DISPATCH`,
+>    `EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED` and `EARLY_ROOT_BOOT_HEALTH`
+>    stay UNVERIFIED until three consecutive boots meet §8's criterion;
+> 2. **the second half of the product goal is not implemented and is gated on a
+>    measurement, not on code.** Module activation / userspace restart inside the
+>    animation needs `dev.bootcomplete` and `dev.platform_bootcomplete` read in a
+>    boot where nothing tore userspace down and in one where something did
+>    (AGENTS.md 3.6.2 - nobody has read either on this firmware), plus the margin
+>    this path actually has: `claim_elapsed_ms` → `POST_ROOT_COMPLETE` →
+>    animation exit. `docs/EARLY_ROOT.md` §9 states what that costs and why
+>    stacking a teardown on an unproven early root makes the next failure
+>    unattributable.
+
 > **Open, and where to start — the early path is suspended after a kernel panic.**
 >
 > **(0) Early Integrated Root: physical FAIL, 2026-10-12, DZIF.** Boot

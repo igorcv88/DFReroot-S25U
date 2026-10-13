@@ -3161,8 +3161,11 @@ early attempt inherits that nondeterminism.
 #### Consequence in code
 
 The early window is suspended for every artefact, not only the one that
-panicked. `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` is an **empty
-allowlist** of (fingerprint, ksud digest) pairs; the complete gate and
+panicked. `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` is an allowlist of
+(fingerprint, ksud digest) pairs — **empty as this entry was written**, and
+since 2026-10-13 carrying exactly one pair, the repaired DZIF daemon
+`3861dbd4…`, authorized by the owner for its first early attempt (see
+*Early Integrated Root — second physical run* below); the complete gate and
 `DfrEarlyRoot.arm()` both refuse with `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED`.
 It gates permission to make the attempt, not proven safety - the three-boot
 criterion is what promotes the evidence afterwards, and requiring it to add an
@@ -3196,7 +3199,9 @@ The record on this device carries no artefact identity, because the journal
 format never had one, so it refuses **every** early dispatch until the owner
 acknowledges that exact boot id in
 `EarlyRootPolicy.ACKNOWLEDGED_INCIDENT_BOOTS` — in-source, immutable,
-exact-match, empty as shipped, one entry naming one boot that already happened.
+exact-match, empty as this entry was written and since 2026-10-13 carrying the
+one boot id `5a7c2537…` the owner examined; one entry naming one boot that
+already happened.
 A corrected artefact is the ordinary exit: a new ksud digest is a different
 incident question. `docs/EARLY_ROOT.md` §12 has the table and the evidence to
 read first; `tools/tests/EarlyRootPolicyTest.java` carries one negative case per
@@ -3227,3 +3232,105 @@ Separately observed and deliberately **not** attributed to this panic: `SIGSYS`
 / `SYS_SECCOMP` from `libksud.so` on syscall 142 after the reboot, and an
 earlier, distinct `_KP` DropBox entry at 16:46:51 with no recovered stack.
 Neither is evidence about the 22.724 s panic.
+
+### Early Integrated Root — second physical run, the trigger fired 521 s late
+
+DZIF, 2026-10-13, DFReroot `2.0.22-dzif` / `versionCode 20022`, repaired daemon
+`3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee`. Owner
+capture. **No native transaction was issued by the early path in this boot**, so
+nothing here is evidence about the repaired module's early load, in either
+direction.
+
+Two boots, not merged (AGENTS.md 3.8):
+
+| Role | `boot_id` |
+|---|---|
+| arming | `41768702-5990-4c76-933c-df1a3c1ddc0e` |
+| the boot the callback fired in | `7715dd17-42fd-47e3-8027-6bc9e76c070f` |
+
+#### What was observed
+
+```text
+EARLY_ROOT_JOB_ENTERED  7715dd17…  521707  sys_boot_completed=1 bootanim_exit=1
+                                            user_unlocked=1
+EARLY_ROOT_REFUSED      7715dd17…  521707  EARLY_ROOT_PAST_EARLY_WINDOW
+```
+
+The arm record was intact and correct (`generation=73dd106266739fa586f985e3785c51d7`,
+`minimum_latency_ms=15000`, `schedule_result=1`, `armed_elapsed_ms=533560`,
+`armed_wallclock_ms=1791902364368`). The job was no longer pending afterwards,
+consistent with the one-shot having been consumed. Logcat at 11:48:32.678 names
+the same verdict code.
+
+**CONFIRMED:** the gate refused, on its own evidence, 401.707 s outside the
+120 s bound. That is the tool working.
+
+**CONFIRMED, and the reason for this change:** `setMinimumLatency` is an
+EARLIEST bound. The job had no other constraint, the deadline the JobStore
+restores is derived from wallclock and had long passed, and the scheduler ran
+the callback 521.707 s into the boot anyway. Three earlier boots had been called
+back at 14.6 s, 14.6 s and 16.9 s, and one DZIF boot at 16.994 s. So the
+distribution is not tight and nothing in the platform's contract says it should
+be.
+
+**NOT established by this boot:**
+
+- anything about the repaired module. The chain never reached transaction 5;
+  `native_started` was never set and no page-cache write happened. The absence
+  of a panic here is the absence of an attempt, and reading it as evidence of a
+  fix would be the absence-as-permission AGENTS.md 2 forbids;
+- *why* the scheduler deferred the job for 521 s. That is a question about
+  JobSchedulerService's own state, not about this chain, and it was not
+  instrumented. The change made in response does not depend on the answer: it
+  stops making a scheduler callback the only trigger;
+- that the 521 s delay had anything to do with this app's telemetry. The
+  timestamp was sampled as the first statement of `onStartJob`, so everything
+  this app does runs **after** the measured delay.
+
+Separately, in that same boot, the owner ran **Run DirtyFrag** manually and
+reached `POST_ROOT_COMPLETE=PASS`, `ksu_version=32601`, `uapi_version=2`,
+`runtime_mode=late-load`, `selinux=1`, `transport_fix=kdp-cred-1`,
+`ROOT_RESULT=SUCCESS`, with the post-root record naming that same boot. That is
+a late-load PASS for the repaired pair and, per `docs/EARLY_ROOT.md` §11,
+authorizes nothing about the early window.
+
+#### Consequence in code
+
+`EARLY_ROOT_DISPATCH` stays **UNVERIFIED**. What changed is the trigger
+architecture, and it is a design change rather than a tuning:
+
+- `ACTION_LOCKED_BOOT_COMPLETED` becomes a second, **deterministic** early
+  trigger (`DfrEarlyRootDispatch`, reached from `DfrBootReceiver`). AMS
+  dispatches it at a fixed point of user 0's unlock-for-locked-boot; on this
+  device it has been observed 2.69–2.90 s after the job callback, i.e. later
+  than the job at its best and bounded, which the job is not. The persisted job
+  stays as the opportunistic earlier path and now also carries
+  `setOverrideDeadline(45 s)`;
+- **the boot animation becomes an element of the gate**
+  (`EARLY_ROOT_BOOTANIM_ALREADY_EXITED`, `…_BOOTANIM_STATE_UNKNOWN`), read
+  before the dispatch and again at the point of no return. The 120 s window was
+  a proxy for it; in this boot both the window and the animation had passed, and
+  they are separate facts;
+- **one arming, one boot, one claimed run** moves into a durable record,
+  `/data/system/dfreroot-early-root-cycle`. The scheduler used to provide that
+  by consuming the job; a broadcast arrives in every boot, so without the record
+  a one-shot arming would have become a standing switch — the persistent form
+  `docs/EARLY_ROOT.md` §6 says is an owner decision made in the open. The
+  trigger that claims it runs; the other refuses with
+  `EARLY_ROOT_ARM_ALREADY_CLAIMED`, a later boot with `EARLY_ROOT_ARM_EXPIRED`,
+  and the service now requires a claim of its own
+  (`EARLY_ROOT_CLAIM_MISSING`, `…_CLAIM_NOT_THIS_BOOT`). The gate is split for
+  this - `evaluateArmBinding()` is what refuses identically in every boot, the
+  bind follows it, and only then are the clock, the window, the animation and
+  the journals weighed. Binding after those, as the first revision of this
+  change did, leaves the arming live in a boot that refused and lets the next
+  boot inherit it; Codex caught it on PR #61;
+- the row in the app reads the cycle record and the scheduler, so
+  "already claimed and run" and "a callback that refused and went home" stop
+  reading as `ARMED` and `CALLBACK_INCOMPLETE` — both observed in this boot,
+  both of which would have sent the owner into a reboot that could not do
+  anything.
+
+`tools/tests/EarlyRootPolicyTest.java` carries one negative case per new element
+and `tools/profile_binding_audit.py` guards the Kotlin that cannot be
+unit-tested, including that both triggers route through one gate.

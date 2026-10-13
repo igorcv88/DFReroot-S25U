@@ -42,6 +42,36 @@ class DfrBootReceiver : BroadcastReceiver() {
         Log.i(TAG, "[DFR][AUTOROOT][TIMELINE] receiver_arrival" +
             " action=$action elapsed_ms=$arrivalMs")
         /*
+         * Early Integrated Root's deterministic trigger, FIRST and off this
+         * looper.
+         *
+         * First, because everything after it on this thread - the opt-in read,
+         * Auto Root's startService - is time taken out of the only budget this
+         * path has: the boot animation is still on the screen and the chain
+         * needs every millisecond of it. Off the looper, because this is
+         * system_server's main looper (the app declares
+         * `android:process="system"`), and the dispatch does an AMS reflection
+         * sweep plus several fsync'd appends - inline, that would delay the boot
+         * it is trying to get ahead of.
+         *
+         * Why this broadcast is a trigger at all: the persisted job is a floor,
+         * not a deadline. On 2026-10-13 the scheduler called it back at
+         * 521.707 s, 401 s past the early window, in a boot that had already
+         * completed and whose animation had already exited. AMS dispatches
+         * LOCKED_BOOT_COMPLETED at a fixed point of user 0's
+         * unlock-for-locked-boot - 2.69-2.90 s after the job callback on the
+         * boots where the job did fire - so it is later at best and bounded,
+         * which the job is not.
+         *
+         * It authorises nothing. EarlyRootPolicy refuses unless an arming is on
+         * disk, bound to this boot and unclaimed, the build is qualified, the
+         * animation is still up and the boot has not completed - and this
+         * broadcast is not evidence for any of that.
+         */
+        if (action == Intent.ACTION_LOCKED_BOOT_COMPLETED) {
+            dispatchEarlyRoot(context, arrivalMs)
+        }
+        /*
          * LOCKED_BOOT_COMPLETED arrives before the user unlocks; BOOT_COMPLETED
          * after. Both are accepted because the state this needs lives in
          * device-protected storage, and the policy's own one-attempt-per-boot
@@ -104,6 +134,59 @@ class DfrBootReceiver : BroadcastReceiver() {
         SystemClock.elapsedRealtime()
     } catch (_: Throwable) {
         -1L
+    }
+
+    /**
+     * Hand LOCKED_BOOT_COMPLETED to the one early-root dispatch sequence, on a
+     * thread of its own.
+     *
+     * Its own thread, not the marker worker: that executor is a single thread
+     * that also carries the probe's read-modify-write and two fsyncs, and
+     * serialising the one trigger that is racing the boot animation behind
+     * unrelated telemetry would spend the margin this trigger exists to add.
+     *
+     * No `goAsync()`. A pending result keeps a receiver's PROCESS alive, and
+     * this receiver is hosted in system_server, which does not get killed for
+     * being idle - so the only thing it would buy here is a timeout to run out
+     * of while the chain is mid-flight. The thread outlives onReceive by
+     * construction.
+     *
+     * A thread that cannot be started is a refusal, recorded in logcat and
+     * nowhere else - the dispatch's own durable trace begins inside it, and
+     * writing a trace step from this looper is what the thread exists to avoid.
+     * The job trigger, if the scheduler calls back in this boot, still covers it.
+     */
+    private fun dispatchEarlyRoot(context: Context, arrivalMs: Long) {
+        val appContext = context.applicationContext ?: context
+        val task = Runnable {
+            try {
+                DfrEarlyRootDispatch.gateAndDispatch(
+                    appContext,
+                    EarlyRootPolicy.TRIGGER_LOCKED_BOOT,
+                    EarlyRootPolicy.STEP_TRIGGER_ENTERED,
+                    arrivalMs,
+                    /*
+                     * Asserted, not observed: there is no live callback here, so
+                     * these are the identity this runtime would have armed in and
+                     * the policy compares them against the arm record. The
+                     * generation is resolved the same way inside the dispatch,
+                     * and the comment there says plainly why that is
+                     * self-consistency rather than scheduler evidence.
+                     */
+                    DfrEarlyRoot.JOB_ID,
+                    DfrEarlyRoot.namespaceForRuntime(),
+                    "",
+                ) { false }
+            } catch (t: Throwable) {
+                Log.e(TAG, "[DFR][EARLY_ROOT] locked-boot trigger failed", t)
+            }
+        }
+        try {
+            Thread(task, "dfr-early-root-trigger").apply { isDaemon = true }.start()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] TRIGGER=UNAVAILABLE reason=thread_start" +
+                " ($t); refusing to run the dispatch on system_server's looper")
+        }
     }
 
     /**

@@ -2259,6 +2259,8 @@ def audit():
     early_root_service_src = code_only(dfr_source("DfrEarlyRootService.kt"))
     early_root_arm_src = code_only(dfr_source("DfrEarlyRoot.kt"))
     early_root_store_src = code_only(dfr_source("EarlyRootStore.kt"))
+    early_root_dispatch_src = code_only(dfr_source("DfrEarlyRootDispatch.kt"))
+    early_root_env_src = code_only(dfr_source("EarlyRootEnv.kt"))
 
     # The two jobs stay two jobs. The probe exists to time itself against
     # LOCKED_BOOT_COMPLETED, so a root chain on that looper would move the
@@ -2266,7 +2268,7 @@ def audit():
     # be reachable by arming a probe. One shared job id or one service with a
     # mode is how both properties are lost in a single edit.
     for forbidden in ("EarlyRootPolicy", "EarlyRootStore", "DfrEarlyRootService",
-                      "DfrEarlyRoot."):
+                      "DfrEarlyRootDispatch", "DfrEarlyRoot."):
         if forbidden in early_job_code:
             fail("the observation-only probe references the dispatching early-root "
                  "path (%r); the measurement that found this window would stop "
@@ -2315,38 +2317,178 @@ def audit():
         if forbidden in early_root_job_src:
             fail("the early-root callback reaches the chain directly (%r) instead of "
                  "dispatching the service that re-derives the gate" % forbidden)
-    gate_order = order(early_root_job_src,
-                       "EarlyRootPolicy.STEP_JOB_ENTERED",
+    # --- two triggers, ONE gate-and-dispatch sequence ----------------------
+    # There are now two triggers: the persisted job, which fires earlier when it
+    # fires at all, and ACTION_LOCKED_BOOT_COMPLETED, which is bounded. A second
+    # copy of the sequence would be a second place to forget a gate, which is
+    # AGENTS.md 3.2 at the scale of the feature - so the order, the refusals and
+    # the cancellation boundaries are asserted on the shared object, and the
+    # entry points are asserted to route through it and to assemble no inputs of
+    # their own.
+    for forbidden in ("transact(5", "hopToNetworkStack", "DirtyFrag", "RootTransport",
+                      "DfrRootCoordinator.run("):
+        if forbidden in early_root_dispatch_src:
+            fail("the early-root dispatch reaches the chain directly (%r) instead of "
+                 "starting the service that re-derives the gate" % forbidden)
+    gate_order = order(early_root_dispatch_src,
+                       "EarlyRootStore.trace(",
+                       "EarlyRootPolicy.evaluateArmBinding(",
+                       "EarlyRootStore.bindCycle(",
                        "EarlyRootPolicy.evaluateBeforeReadiness(",
                        "StageHop.probeReadiness(",
                        "EarlyRootPolicy.evaluate(",
+                       "EarlyRootPolicy.STEP_READINESS_PASS",
+                       "EarlyRootStore.claimCycle(",
+                       "EarlyRootPolicy.STEP_CLAIMED",
                        "EarlyRootPolicy.STEP_DISPATCHED",
                        "context.startService(")
     if gate_order is None or gate_order != sorted(gate_order):
-        fail("the early-root callback's order drifted: it must record the entry "
-             "breadcrumb, refuse on the durable evidence before paying for the AMS "
-             "sweep, re-evaluate the full gate with that sweep's result, record the "
-             "dispatch, and only then start the service")
-    # A trace that cannot be written is the pre-operation record missing before
-    # the operation - the exact condition AGENTS.md 3.6.1 exists to end. The
-    # breadcrumb failure must refuse, not log and continue.
-    breadcrumb = early_root_job_src.find("val breadcrumb = EarlyRootStore.trace(")
+        fail("the early-root dispatch order drifted: it must record the entry "
+             "breadcrumb, refuse on the IMMUTABLE half of the gate, bind the "
+             "arming to this boot, only then weigh the transient half, pay for "
+             "the AMS sweep, re-evaluate the full gate with its result, claim the "
+             "arming exclusively, and only then start the service")
+    # The bind sits between the durable half of the gate and the readiness sweep,
+    # and both sides of that are load-bearing. Before identity, a device that was
+    # never armed would write a cycle record on every boot - the broadcast arrives
+    # in every boot now. After readiness, a boot in which the framework was too
+    # slow would leave the arming live for the NEXT boot, which is the standing
+    # switch docs/EARLY_ROOT.md section 6 says is an owner decision.
+    # The bind sits between the two halves of the durable gate, and the split is
+    # the invariant. Codex caught this on PR #61: with the bind after the
+    # transient checks, a boot that arrived a second too late left the arm record
+    # live, and the next boot's LOCKED_BOOT_COMPLETED - which arrives in every
+    # boot - ran unarmed. EarlyRootPolicyTest holds the contract that keeps the
+    # halves apart; what this asserts is that the dispatcher respects it.
+    bind_at = early_root_dispatch_src.find("EarlyRootStore.bindCycle(")
+    binding_at = early_root_dispatch_src.find("EarlyRootPolicy.evaluateArmBinding(")
+    durable_at = early_root_dispatch_src.find("EarlyRootPolicy.evaluateBeforeReadiness(")
+    sweep_at = early_root_dispatch_src.find("StageHop.probeReadiness(")
+    if not (0 < binding_at < bind_at < durable_at < sweep_at):
+        fail("the early-root dispatch does not bind the arming between the "
+             "immutable and the transient halves of the gate; either a refusal "
+             "that costs nothing consumes the owner's arming, or a boot that "
+             "refused on the clock, the window, the animation or a journal leaves "
+             "it live for the boots after this one")
+    # ...and the halves stay apart in the policy, not only in the dispatcher.
+    binding_fn = early_root_policy_src.find("public static Decision evaluateArmBinding(")
+    binding_end = early_root_policy_src.find(
+        "public static Decision evaluateBeforeReadiness(")
+    if not (0 < binding_fn < binding_end):
+        fail("EarlyRootPolicy no longer separates the immutable half of the gate "
+             "from the transient one; the bind has nothing to sit between")
+    immutable_body = early_root_policy_src[binding_fn:binding_end]
+    for transient in ("PAST_WINDOW,", "BOOT_ALREADY_COMPLETED,",
+                      "BOOTANIM_ALREADY_EXITED,", "BOOT_SPENT,",
+                      "AUTO_BOOT_SPENT,", "CLOCK_UNAVAILABLE,"):
+        if transient in immutable_body:
+            fail("the transient refusal %s moved into evaluateArmBinding; it can "
+                 "refuse in one boot and allow in the next, so refusing there "
+                 "leaves the arming live for a boot the owner never armed"
+                 % transient)
+    bind_guard = re.search(r"if \(bind != null\) \{(?:[^}]|\}(?!\n        \}))*return false",
+                           early_root_dispatch_src, flags=re.S)
+    if not bind_guard:
+        fail("the early-root dispatch continues after failing to bind the arming to "
+             "this boot; an arming that runs without being bound is unbounded")
+    claim_guard = re.search(r"if \(claim != null\) \{(?:[^}]|\}(?!\n        \}))*return false",
+                            early_root_dispatch_src, flags=re.S)
+    if not claim_guard:
+        fail("the early-root dispatch continues after failing to claim the arming; "
+             "both triggers can pass the gate in one boot and exactly one may run, "
+             "so the one that cannot claim is the one that must stop")
+    breadcrumb = early_root_dispatch_src.find("val breadcrumb = EarlyRootStore.trace(")
     if breadcrumb < 0 or not re.search(
-            r"if \(breadcrumb != null\) \{[^}]*return", early_root_job_src[breadcrumb:],
-            flags=re.S):
-        fail("the early-root callback continues after a failed entry trace; a "
+            r"if \(breadcrumb != null\) \{[^}]*return false",
+            early_root_dispatch_src[breadcrumb:], flags=re.S):
+        fail("the early-root dispatch continues after a failed entry trace; a "
              "privileged step nobody could have diagnosed is what 3.6.1 forbids")
-    if "EarlyRootPolicy.STEP_REFUSED" not in early_root_job_src:
-        fail("the early-root callback records no durable refusal; a refusal nobody "
-             "can read afterwards is indistinguishable from a callback that never "
-             "happened, and the owner just spent a full reboot on it")
+    if "EarlyRootPolicy.STEP_REFUSED" not in early_root_dispatch_src:
+        fail("the early-root dispatch records no durable refusal; a refusal nobody "
+             "can read afterwards is indistinguishable from a trigger that never "
+             "happened, and on the job trigger the owner just spent a full reboot "
+             "on it")
+    # An unarmed device must not pay for this path on every boot. The broadcast
+    # arrives in every boot of every install, so a breadcrumb written before the
+    # arm record is read would mean two fsyncs in /data/system on every boot
+    # forever for a cycle nobody armed - instrumentation changing the system it
+    # instruments, which is the defect the probe's marker was restructured for.
+    read_arm_at = early_root_dispatch_src.find("val armRecord = EarlyRootStore.readArm()")
+    crumb_at = early_root_dispatch_src.find("val breadcrumb = EarlyRootStore.trace(")
+    if not (0 < read_arm_at < crumb_at):
+        fail("the early-root dispatch writes its entry breadcrumb before it has "
+             "read the arm record; LOCKED_BOOT_COMPLETED arrives in every boot of "
+             "every install, armed or not")
+    if "armRecord == null && EarlyRootPolicy.TRIGGER_JOB != trigger" not in \
+            early_root_dispatch_src:
+        fail("the early-root dispatch no longer leaves an unarmed device alone on "
+             "the trigger that fires every boot; an unreadable record must still "
+             "trace, an absent one must not")
+    if early_root_dispatch_src.count('abandoned("') < 4:
+        fail("the early-root dispatch does not check for cancellation at its "
+             "boundaries; a run the scheduler took back would still walk into a "
+             "dispatch")
+    # Exactly one place assembles the policy's inputs. Three copies - two
+    # triggers and the service - is three places a field can be left unset, and
+    # an unset field is a gate fed nothing, which refuses nothing.
+    if "fun inputs(" not in early_root_dispatch_src:
+        fail("DfrEarlyRootDispatch no longer owns the input assembly; every caller "
+             "building its own is how one of them starts refusing nothing")
+    for name, src in (("DfrEarlyRootJobService", early_root_job_src),
+                      ("DfrEarlyRootService", early_root_service_src),
+                      ("DfrBootReceiver", receiver_code)):
+        if "EarlyRootPolicy.Inputs()" in src:
+            fail("%s assembles the early-root policy inputs itself instead of using "
+                 "the one builder; a field left unset there is a gate fed nothing"
+                 % name)
+    for name, src in (("DfrEarlyRootJobService", early_root_job_src),
+                      ("DfrBootReceiver", receiver_code)):
+        if "DfrEarlyRootDispatch.gateAndDispatch(" not in src:
+            fail("%s does not route through the shared early-root dispatch; a "
+                 "second copy of the sequence is a second place to forget a gate"
+                 % name)
+    # Each trigger names itself, and the two names are different. One shared
+    # entry step would hide which trigger got there - which is the measurement
+    # this whole change exists to collect.
+    if "EarlyRootPolicy.TRIGGER_JOB" not in early_root_job_src \
+            or "EarlyRootPolicy.STEP_JOB_ENTERED" not in early_root_job_src:
+        fail("the early-root job callback does not identify itself as the job "
+             "trigger, so the trace cannot say which trigger reached the chain")
+    if "EarlyRootPolicy.TRIGGER_LOCKED_BOOT" not in receiver_code \
+            or "EarlyRootPolicy.STEP_TRIGGER_ENTERED" not in receiver_code:
+        fail("DfrBootReceiver does not identify itself as the LOCKED_BOOT_COMPLETED "
+             "trigger, so the trace cannot say which trigger reached the chain")
+    # ...and the deterministic trigger runs off system_server's main looper,
+    # before the Auto Root dispatch it shares the broadcast with. Inline, the AMS
+    # reflection sweep and the fsync'd appends would delay the boot this trigger
+    # exists to get ahead of.
+    dispatch_call = receiver_code.find("dispatchEarlyRoot(context, arrivalMs)")
+    optin_call = receiver_code.find("AutoRootStore.optInVerdict()")
+    if dispatch_call < 0:
+        fail("DfrBootReceiver no longer dispatches the deterministic early-root "
+             "trigger; the persisted job is a floor, not a deadline, and on "
+             "2026-10-13 the scheduler called it back 401 s past the window")
+    elif not (dispatch_call < optin_call):
+        fail("DfrBootReceiver dispatches Auto Root's opt-in read before the "
+             "early-root trigger; that read is filesystem time taken out of the "
+             "only budget the early path has")
+    trigger_fn = receiver_code.find("private fun dispatchEarlyRoot(")
+    if trigger_fn < 0 or 'Thread(task, "dfr-early-root-trigger")' not in \
+            receiver_code[trigger_fn:]:
+        fail("the deterministic early-root trigger does not run on a thread of its "
+             'own; the receiver is hosted in process "system" and the dispatch '
+             "would run on system_server's main looper")
+    if re.search(r"dispatchEarlyRoot\([^)]*\)\s*\n\s*(EarlyRootStore|StageHop)",
+                 receiver_code):
+        fail("DfrBootReceiver does early-root I/O on the broadcast looper")
+
     # Same main-looper discipline as the probe, and for a stronger reason: this
     # callback is trying to get AHEAD of the boot's own broadcasts.
     root_start = early_root_job_src.find("override fun onStartJob")
     root_start_body = early_root_job_src[
         root_start:early_root_job_src.find("override fun onStopJob")]
     for banned in ("StageHop.", "EarlyRootStore.", "readBootId()",
-                   "EarlyRootPolicy.evaluate"):
+                   "EarlyRootPolicy.evaluate", "DfrEarlyRootDispatch."):
         if banned in root_start_body.split("val task = Runnable {")[0]:
             fail("early-root onStartJob does blocking work (%r) before handing off "
                  "to the worker; it would delay the very broadcasts it is trying to "
@@ -2362,13 +2504,10 @@ def audit():
     if "JobInfo" in early_root_job_src:
         fail("the early-root callback builds a JobInfo; a self-rescheduling root "
              "attempt is exactly the shape that must not exist")
-    if early_root_job_src.count("if (abandonIfStopped(") < 3:
-        fail("the early-root callback does not check for cancellation at its "
-             "boundaries; a run the scheduler took back would still walk into a "
-             "dispatch")
+    if "token.stopped.get()" not in early_root_job_src:
+        fail("the early-root callback no longer answers the dispatch's cancellation "
+             "question, so a run the scheduler took back would walk into a dispatch")
 
-    # The service re-derives everything. A gate enforced at one of two entry
-    # points is the defect AGENTS.md 3.2 describes for the native stages.
     service_order = order(early_root_service_src,
                           "EarlyRootPolicy.STEP_SERVICE_ENTERED",
                           "StageHop.probeReadiness(",
@@ -2451,10 +2590,19 @@ def audit():
         fail("the early-root callback does not read the arming generation out of the "
              "live JobParameters; comparing our own file against itself proves the "
              "record self-consistent, not that it scheduled this job")
-    if "in0.callbackGeneration" not in early_root_job_src \
-            or "in0.callbackGeneration" not in early_root_service_src:
-        fail("one of the two early-root entry points does not supply the arming "
-             "generation, so its gate compares nothing (3.2)")
+    if "in0.callbackGeneration" not in early_root_dispatch_src:
+        fail("the early-root input builder does not supply the arming generation, "
+             "so every gate that reads it compares nothing (3.2)")
+    # The two triggers do NOT have the same evidence here, and the difference is
+    # asserted rather than left to a comment: only the job callback may present a
+    # token it did not read out of the arm record it is compared against.
+    if "EarlyRootPolicy.TRIGGER_JOB == trigger" not in early_root_dispatch_src \
+            or "EarlyRootPolicy.parseArm(armRecord)?.generation" not in \
+            early_root_dispatch_src:
+        fail("the early-root dispatch no longer distinguishes the scheduler's "
+             "generation from the one read back out of the arm record; the "
+             "broadcast trigger has no scheduler half, and pretending otherwise "
+             "makes a self-comparison look like binding")
     if "generation" not in code_only(early_root_policy_src):
         fail("the arm record no longer carries a generation; an interrupted re-arm "
              "would leave a new job authorised by an old record")
@@ -2475,12 +2623,11 @@ def audit():
         fail("the acknowledged-incident list must contain only the examined "
              "2026-10-12 DZIF boot id as a fixed in-source exact match; a wildcard, "
              "parsed file or runtime clear would bypass the incident latch")
-    for name, src in (("DfrEarlyRootJobService", early_root_job_src),
-                      ("DfrEarlyRootService", early_root_service_src)):
-        if "in0.incidentRecord = EarlyRootStore.readIncident()" not in src:
-            fail("%s does not supply the early-root incident record, so the latch "
-                 "evaluates it as absent and a previous boot's unexplained death "
-                 "stops refusing at this entry point (3.2)" % name)
+    if "in0.incidentRecord = EarlyRootStore.readIncident()" not in \
+            early_root_dispatch_src:
+        fail("the early-root input builder does not supply the incident record, so "
+             "the latch evaluates it as absent and a previous boot's unexplained "
+             "death stops refusing at every entry point (3.2)")
     for required, why in (
             ("EarlyRootPolicy.detectIncident(",
              "the arming no longer looks for an unaccounted-for previous boot - "
@@ -2623,8 +2770,7 @@ def audit():
     # reading, and that it is re-taken at the point of no return - everything
     # between the gate and transaction 5 takes real time, and the property can
     # move inside it.
-    for name, src in (("DfrEarlyRootJobService", early_root_job_src),
-                      ("DfrEarlyRootService", early_root_service_src)):
+    for name, src in (("DfrEarlyRootDispatch", early_root_dispatch_src),):
         if "EarlyRootEnv.bootCompletedState()" not in src:
             fail("%s does not supply the boot-completion reading, so the gate "
                  "evaluates it as absent and the early path would refuse every "
@@ -2689,11 +2835,10 @@ def audit():
                  "missing); a failed Auto Root attempt that wrote no marker would "
                  "let the early callback issue a second native transaction in the "
                  "same boot" % required)
-    for name, src in (("DfrEarlyRootService", early_root_service_src),
-                      ("DfrEarlyRootJobService", early_root_job_src)):
-        if "in0.autoRootJournalRecord = AutoRootStore.journal()" not in src:
-            fail("%s does not supply Auto Root's journal, so the policy's check is "
-                 "fed nothing and refuses nothing" % name)
+    if "in0.autoRootJournalRecord = AutoRootStore.journal()" not in \
+            early_root_dispatch_src:
+        fail("the early-root input builder does not supply Auto Root's journal, so "
+             "the policy's check is fed nothing and refuses nothing")
     before_native = early_root_service_src.find("override fun beforeNativeRun()")
     if before_native < 0:
         fail("the early-root service does not implement beforeNativeRun; the "
@@ -2717,7 +2862,7 @@ def audit():
     # boot-health record.
     for forbidden in ("RootTransport", "DfrSoftRebootReceiver", "SoftRebootPolicy",
                       "__NR_reboot", "APPLY_MODULES"):
-        if forbidden in early_root_service_src:
+        if forbidden in early_root_service_src or forbidden in early_root_dispatch_src:
             fail("the early-root service reaches the soft-reboot/module-lifecycle "
                  "path (%r); that is a separate operation with its own gate and its "
                  "own unanswered boot-health question" % forbidden)
@@ -2753,6 +2898,114 @@ def audit():
     if "ARM_SAME_BOOT" not in early_root_policy_src:
         fail("the early-root policy no longer refuses a callback in its own arming "
              "boot; a framework restart keeps boot_id and is not a full reboot")
+    # An upper bound beside the floor. Not the fix - the second trigger is - but
+    # a persisted job with only a minimum latency is what produced a callback
+    # 401 s past the window on 2026-10-13.
+    if "setOverrideDeadline(OVERRIDE_DEADLINE_MS)" not in early_root_arm_src:
+        fail("the early-root arming schedules a job with a floor and no deadline; "
+             "setMinimumLatency is an EARLIEST bound and the scheduler is free to "
+             "run the job whenever it likes afterwards")
+
+    # --- one arming, one boot, one claimed run -----------------------------
+    # Until the deterministic trigger existed, JobScheduler enforced this by
+    # consuming the job. LOCKED_BOOT_COMPLETED arrives in EVERY boot, armed or
+    # not, so without a durable record the same arm record would authorise a run
+    # in every boot after the arming - the standing switch docs/EARLY_ROOT.md
+    # section 6 says is an owner decision made in the open.
+    for required, why in (
+            ("CYCLE_PATH", "there is no durable cycle record, so nothing bounds an "
+                           "arming to one boot or to one run"),
+            ("fun bindCycle(", "nothing binds an arming to a boot"),
+            ("fun claimCycle(", "nothing claims an arming exclusively, so both "
+                                "triggers of one boot could dispatch")):
+        if required not in early_root_store_src:
+            fail("EarlyRootStore: %s (missing %s)" % (why, required))
+    for fn in ("fun bindCycle(", "fun claimCycle("):
+        body = early_root_store_src[early_root_store_src.find(fn):]
+        body = body[:body.find("\n    fun ", 1) if body.find("\n    fun ", 1) > 0
+                    else len(body)]
+        if "synchronized(lock)" not in body:
+            fail("EarlyRootStore.%s does not serialise its read-modify-write; the "
+                 "two triggers race each other into it and both live in process "
+                 '"system"' % fn)
+    if 'listOf(JOURNAL_PATH, TRACE_PATH, CYCLE_PATH)' not in early_root_store_src:
+        fail("archivePreviousCycle no longer moves the cycle record aside with the "
+             "journal and the trace; a new arm record beside the previous cycle is "
+             "the state in which 'has this fired?' has no answer")
+    archive_list = re.search(r"listOf\(JOURNAL_PATH[^)]*\)", early_root_store_src)
+    if archive_list and "INCIDENT_PATH" in archive_list.group(0):
+        fail("archivePreviousCycle moves the incident log aside; an unexplained "
+             "death has to outlive the cycle it happened in, which is the whole "
+             "reason it is a separate record")
+    for required in ("CYCLE_BOUND", "CYCLE_CLAIMED", "ARM_EXPIRED",
+                     "ARM_ALREADY_CLAIMED", "CLAIM_MISSING", "CLAIM_NOT_THIS_BOOT",
+                     "CYCLE_FOREIGN"):
+        if required not in early_root_policy_src:
+            fail("EarlyRootPolicy lost the cycle verdict %s; one arming would stop "
+                 "meaning one run" % required)
+    # The service's authorisation is a claim of its own, not merely a gate that
+    # passes: anything sharing uid 1000 can call startService on a non-exported
+    # component of its own package's process.
+    if "EarlyRootPolicy.ROLE_CLAIMED_RUN" not in early_root_service_src:
+        fail("the early-root service does not present itself as the claimed run, so "
+             "it is not gated on a claim and anything in our shared uid could start "
+             "it and be let through by the readiness-and-marker gate alone")
+    if "EarlyRootPolicy.ROLE_DISPATCH" not in early_root_dispatch_src:
+        fail("the early-root dispatch does not present itself as a trigger, so the "
+             "cycle record would be read from the wrong side")
+    trigger_fn = early_root_service_src.find("private fun trigger(")
+    if trigger_fn < 0 or "parseCycle(cycleRecord)?.trigger" not in \
+            early_root_service_src[trigger_fn:]:
+        fail("the early-root service takes the claiming trigger from the intent "
+             "rather than from the claim record; an intent extra can be set by "
+             "anything sharing our uid")
+
+    # --- the animation is an element, not a comment ------------------------
+    # The fact the product requirement is actually stated in. On 2026-10-13 the
+    # callback arrived with bootanim_exit=1 as well as sys.boot_completed=1, and
+    # a run inside the window, before boot completion, after the animation left
+    # the screen would still be a second visible initialisation.
+    for required in ("BOOTANIM_RUNNING", "BOOTANIM_EXITED", "BOOTANIM_ALREADY_EXITED",
+                     "BOOTANIM_STATE_UNKNOWN", "in.bootanimState"):
+        if required not in early_root_policy_src:
+            fail("EarlyRootPolicy no longer weighs the boot-animation state (%r "
+                 "missing); 'early' would be back to meaning 'soon after the kernel "
+                 "started'" % required)
+    if "in0.bootanimState = EarlyRootEnv.bootanimState()" not in early_root_dispatch_src:
+        fail("the early-root input builder does not supply the boot-animation "
+             "reading, so the gate evaluates it as absent and refuses every run - "
+             "or, if that refusal is removed, runs after the screen was handed to "
+             "the launcher")
+    anim_fn = early_root_env_src.find("fun bootanimState()")
+    anim_body = early_root_env_src[anim_fn:] if anim_fn >= 0 else ""
+    anim_body = anim_body[:anim_body.find("\n    fun ", 1)] if \
+        anim_body.find("\n    fun ", 1) > 0 else anim_body
+    if anim_fn < 0 or 'raw == "1"' not in anim_body \
+            or "EarlyRootPolicy.BOOTANIM_RUNNING" not in anim_body \
+            or "EarlyBootProbePolicy.UNKNOWN" not in anim_body:
+        fail("EarlyRootEnv.bootanimState does not map an unset property to RUNNING "
+             "and a throwing lookup to UNKNOWN; one of those mistakes refuses every "
+             "genuine early run and the other reads an absence as permission")
+    recheck = early_root_service_src.find("override fun beforeNativeRun()")
+    recheck_body = early_root_service_src[recheck:] if recheck >= 0 else ""
+    recheck_body = recheck_body[:recheck_body.find("DfrRootCoordinator.run(")] if \
+        recheck_body.find("DfrRootCoordinator.run(") > 0 else recheck_body
+    if "EarlyRootEnv.bootanimState()" not in recheck_body:
+        fail("the point of no return does not re-read the boot-animation state; "
+             "everything between the gate and transaction 5 takes real time and the "
+             "two properties move at different moments on this firmware")
+
+    # The row the owner reads before spending a reboot must read the cycle, not
+    # only the arm record. Reading only the arm record is how it reported ARMED
+    # over an arming that had already been claimed and run.
+    arm_state = early_root_arm_src.find("fun armState(")
+    arm_state_body = early_root_arm_src[arm_state:] if arm_state >= 0 else ""
+    for required in ("EarlyRootStore.readCycle()", "cycle.claimed()",
+                     "jobState(context)"):
+        if required not in arm_state_body:
+            fail("the early-root row no longer derives its answer from the cycle "
+                 "record and the scheduler (%r missing); the arm record outlives "
+                 "its cycle, so on its own it answers nothing" % required)
 
     # The trace store: serialised, boot-scoped, and honest about a failed clock.
     if "synchronized(lock)" not in early_root_store_src:
