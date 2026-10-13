@@ -25,6 +25,62 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
+> **Where to start, 2026-10-13 (third run) — the batching hypothesis is
+> refuted, the broadcast trigger is dead on DZIF, and one unrun command decides
+> the rest. Everything below this block predates run 3.**
+>
+> **Run 3:** `2.0.23-dzif`, `main` at `0c612b3`. The callback arrived at
+> **334.417 s** (run 2: 521.707 s). The job wakelock appeared **298.6 s after
+> the JobStore reported reading 201 persisted jobs**. No native transaction by
+> the early path. A later manual DirtyFrag in another boot then failed in a new
+> way — see the fourth item.
+>
+> **(1) REFUTED, from AOSP source: force-batching is not the cause.** The
+> device's constants invited it (`min_ready_non_active_jobs_count=2`,
+> `max_non_active_job_batch_delay_ms=1860000`), but
+> `JobSchedulerService.java`'s predicate carries
+> `&& job.getEffectiveStandbyBucket() != EXEMPTED_INDEX` in **both** branches,
+> and `dumpsys` puts this job in **EXEMPTED**. No value of those constants can
+> hold it. Closed by reading the code that would have had to do it.
+>
+> **(2) The remaining fork, and the one read that decides it.** Either the job
+> is *ready and deferred* (cause is scheduler-side) or *not ready* because the
+> restored earliest-run time is in the future — AOSP converts persisted timing
+> from wallclock at restore and arms the delay with a **non-wakeup, inexact**
+> `ELAPSED_REALTIME` + `WINDOW_HEURISTIC` alarm. **These have opposite fixes and
+> nothing captured so far distinguishes them.** The distinguishing read must
+> happen while the wait is in progress: the job's satisfied/unsatisfied
+> constraints and its earliest/latest run times.
+> **`tools/earlyroot_job_probe.sh` is that read** — Termux or `rish`, no root, no
+> ADB, output in `/sdcard/Download/`. Run it before changing the scheduling;
+> dropping the minimum latency is only correct under the second hypothesis, and
+> it is the obvious wrong move under the first.
+>
+> **(3) The broadcast trigger cannot work on this firmware.** `sf_stop_bootanim`
+> 15:26:40.469, `LOCKED_BOOT_COMPLETED` 15:26:40.760 — the animation stops
+> **291 ms before** the earliest manifest broadcast, and the earlier attempt had
+> `service.bootanim.exit` already 1 at 24.915 s. So PR #61's deterministic
+> trigger lands outside its own gate here, permanently, and
+> **the persisted job is the only trigger that can meet the goal on DZIF.**
+> `docs/EARLY_ROOT.md` §4a carries the correction and the two things it does not
+> establish (whether the ordering is structural, and the margin a punctual job
+> would have had).
+>
+> **(4) A separate failure: the manual bootstrap died in the stage-1/stage-2
+> handoff.** `df=1 helper=0 ns=0 bind=0 exec_fail=0` after eight rounds. From
+> `stage1.S`: stage 1 runs only as uid 0 on tid 1 and its first action is
+> `openat("/dev/df", O_CREAT|O_EXCL)`, so the mutex existing **proves stage 1
+> ran** and the three absent `dfm*` markers **prove stage 2 did not** — they are
+> all created by stage 2, `dfm4` included, so its absence is not evidence the
+> exec succeeded. The handoff died at the `clone`, the
+> `/proc/self/attr/exec` write to `u:r:vendor_modprobe:s0`, or the
+> `execve("/vendor/bin/modprobe")`; which one is **not established**. The seven
+> rounds after the first could not have changed anything, because O_EXCL fails
+> for every later stage-1 invocation once the mutex exists — a hard reboot is the
+> boundary. `runAll` now reports these as three verdicts with three return codes
+> (2 / 4 / 5) instead of one sentence. Do not merge this investigation with the
+> scheduling delay.
+
 > **Where to start, 2026-10-13 (later the same day) — the trigger was the blocker, and it is
 > rebuilt. Everything below this block predates run 2 and is historical.**
 >
