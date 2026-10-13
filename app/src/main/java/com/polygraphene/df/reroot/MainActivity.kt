@@ -147,16 +147,17 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Painted from the stored records, never from memory.
+     * Painted from the stored records and from the scheduler, never from memory.
      *
-     * The row has to be able to say "this cycle is spent" as well as "a cycle is
-     * waiting", because the one-shot job leaves its arm record behind after
-     * firing and an owner who reads ARMED over a consumed cycle spends a full
-     * reboot on a run that cannot happen. [DfrEarlyRoot.armState] derives that
-     * from the journal and the trace, not from boot ids.
+     * The row has to answer "if I reboot now, will an early run happen?", and
+     * the arm record alone cannot: it outlives its cycle, so reading only that
+     * reported ARMED over an arming that had already been claimed and run. The
+     * cycle record is what makes the answer definite, and the Context is passed
+     * because the one state no file can see - whether the persisted job is still
+     * pending - belongs in the row too. See [DfrEarlyRoot.armState].
      */
     private fun refreshEarlyRoot() {
-        earlyRootState.text = DfrEarlyRoot.armState()
+        earlyRootState.text = DfrEarlyRoot.armState(applicationContext)
     }
 
     private fun runDfAll() {

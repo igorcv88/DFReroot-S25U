@@ -93,6 +93,33 @@ object EarlyRootEnv {
     }
 
     /**
+     * Is the boot animation still on the screen? Three answers, never two.
+     *
+     * Read exactly like [bootCompletedState] and refused exactly like it: an
+     * UNSET `service.bootanim.exit` is the normal state of the early window and
+     * answers [EarlyRootPolicy.BOOTANIM_RUNNING]; only a lookup that THREW
+     * answers UNKNOWN, which the gate refuses. Mapping unset to UNKNOWN would
+     * refuse every genuine early run (AGENTS.md 3.6.1), and mapping a failed
+     * lookup to RUNNING would be an absence read as permission.
+     *
+     * Separate from [systemProperty], which maps an empty value to UNKNOWN
+     * because nobody should read "" as a measurement in a trace line. The two
+     * readings of one property answer different questions and must not be
+     * shared - that distinction is the whole reason [bootCompletedState] exists
+     * beside [systemProperty] too.
+     */
+    fun bootanimState(): String = try {
+        val cls = Class.forName("android.os.SystemProperties")
+        val get = cls.getMethod("get", String::class.java)
+        val raw = (get.invoke(null, "service.bootanim.exit") as String?)?.trim() ?: ""
+        if (raw == "1") EarlyRootPolicy.BOOTANIM_EXITED
+        else EarlyRootPolicy.BOOTANIM_RUNNING
+    } catch (t: Throwable) {
+        Log.e(TAG, "[DFR][EARLY_ROOT] service.bootanim.exit unreadable: $t")
+        EarlyBootProbePolicy.UNKNOWN
+    }
+
+    /**
      * The three facts that place a step inside or outside the boot animation.
      *
      * This composite string is recorded as evidence and never gated on: it is

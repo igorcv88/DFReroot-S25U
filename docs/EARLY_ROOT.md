@@ -4,31 +4,44 @@
 for what is *proven*; this file is the design and the acceptance procedure. Where
 the two disagree about evidence, the dossier wins.
 
-> **State: SUSPENDED. The first physical run ended in a kernel panic.**
+> **State, 2026-10-13: authorized for one attempt, and the trigger has been
+> rebuilt. Early Integrated Root has never physically passed.**
 >
-> DZIF, 2026-10-12, boot `5a7c2537-9693-44f9-8b2e-e26a1b3a10f2`,
-> `2.0.18-dzif`. Every boundary in this document held — the job fired in the
-> right boot at 15.960 s, readiness was `NETWORKSTACK_READY`, the service
-> entered, the hop landed, the controller answered, the remote preflight was
-> accepted, and `EARLY_ROOT_BEFORE_NATIVE` was recorded durably at 16.555 s.
-> 6.2 s later `kernelsu.ko` BUGged inside its own manager discovery
-> (`list_del corruption / LIST_POISON1` at
-> `__list_del_entry_valid_or_report`, via
-> `my_actor ← search_manager ← track_throne ← kernelsu_init`) and the device
-> rebooted. Two discovery passes were overlapping, one from `kernelsu_init` and
-> one raised by a `packages.list` change event.
+> Two physical runs exist and they failed differently. Read both before
+> changing anything here; the authoritative evidence record is
+> `docs/S25U_ZZIC_COMPATIBILITY.md`.
 >
-> **The early window is now refused for every artefact.**
-> `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` is an empty allowlist of
-> (fingerprint, ksud digest) pairs; the gate and `DfrEarlyRoot.arm()` both
-> refuse with `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED`. §11 below says what clearing a
-> pair requires. The probe, the manual run and Auto Root after a full boot are
-> unaffected.
+> **Run 1, 2026-10-12, `2.0.18-dzif`, boot `5a7c2537…` — kernel panic.** Every
+> boundary in this document held: the job fired in the right boot at 15.960 s,
+> readiness was `NETWORKSTACK_READY`, the hop landed, the controller answered,
+> the remote preflight was accepted, and `EARLY_ROOT_BEFORE_NATIVE` was recorded
+> durably at 16.555 s. 6.2 s later `kernelsu.ko` BUGged inside its own manager
+> discovery (`list_del corruption / LIST_POISON1`, two discovery passes
+> overlapping) and the device rebooted. Root cause closed upstream; §11 and §12
+> say what that cost and what it bought.
 >
-> The authoritative evidence record is
-> `docs/S25U_ZZIC_COMPATIBILITY.md`, *Early Integrated Root — first physical
-> run, kernel panic*. Section 8's procedure below remains correct for the day a
-> corrected module exists; it is not runnable today.
+> **Run 2, 2026-10-13, `2.0.22-dzif`, boot `7715dd17…` — the trigger fired
+> 521.707 s into the boot.** The gate refused with
+> `EARLY_ROOT_PAST_EARLY_WINDOW`, 401 s outside the bound, with
+> `sys.boot_completed=1` and `bootanim_exit=1`. **No native transaction was
+> issued**, so this run says nothing about the repaired module in either
+> direction - the absence of a panic is the absence of an attempt. What it did
+> establish is that `setMinimumLatency` is an EARLIEST bound and the platform may
+> run a persisted job whenever it likes afterwards, so §4's single trigger was
+> never going to be enough.
+>
+> **The allowlist is no longer empty.**
+> `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` carries exactly one
+> (fingerprint, ksud digest) pair: DZIF plus the repaired daemon
+> `3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee`, which the
+> owner authorized for its **first** early attempt after it passed manual
+> full-boot DirtyFrag. §11 is what an entry costs; a manual late-load PASS is
+> explicitly not part of it. Any other pair still refuses with
+> `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED`, and the historical incident record stays
+> on disk.
+>
+> **And the trigger is now two triggers with one gate.** §4 and §4a. The probe,
+> the manual run and Auto Root after a full boot are unaffected by any of this.
 
 ---
 
@@ -115,6 +128,99 @@ Load-bearing in both directions:
 path, if the two job ids collide, or if either service loses its manifest
 boundary.
 
+## 4a. Two triggers, one gate — and why the job could not be the only one
+
+`setMinimumLatency(15 s)` is an **earliest** bound. That is the whole lesson of
+run 2: the job was restored, had no unmet constraint, and the scheduler called it
+back at 521.707 s. Four captured boots had it at 14.6, 14.6, 16.9 and 17.0 s, so
+the distribution is not tight and nothing in the platform's contract says it
+should be. A trigger whose timing the platform may choose freely cannot be the
+only trigger of a path whose entire requirement is "before the animation ends".
+
+So there are two, and they are deliberately different *kinds* of thing:
+
+| | when | what it proves | what it is for |
+|---|---|---|---|
+| `TRIGGER_JOB` | 14.6-16.9 s when it fires at all; 521.7 s once | a live job id, namespace and the arming generation out of the JobInfo the **scheduler** stored | the opportunistic earlier path: when it fires it fires first, and margin inside the animation is the product requirement |
+| `TRIGGER_LOCKED_BOOT` | 17.6-19.8 s, dispatched by AMS inside user 0's unlock-for-locked-boot | nothing about the scheduler. Its job id, namespace and generation are read out of the arm record it is compared against | the deterministic floor: later than the job at its best, and bounded |
+
+Three properties keep this from being two paths:
+
+- **one sequence.** `DfrEarlyRootDispatch.gateAndDispatch()` is the whole
+  gate-record-claim-dispatch sequence and both triggers call it. A second copy
+  would be a second place to forget a gate, which is AGENTS.md 3.2 at the scale
+  of the feature. The triggers own only what is genuinely theirs: the job owns
+  its stop token and `jobFinished`, the receiver owns running off
+  system_server's looper. `tools/profile_binding_audit.py` fails if either
+  builds its own `EarlyRootPolicy.Inputs`;
+- **one input builder.** Three copies of that assembly - two triggers and the
+  service - is three places a field can be left unset, and an unset field is a
+  gate fed nothing, which refuses nothing;
+- **the policy is told which trigger is asking**, because they do not carry the
+  same evidence and the difference must not be papered over. The generation
+  token is scheduler evidence on the job trigger and self-consistency on the
+  broadcast one; what makes an arming one-shot on *both* is §4b.
+
+The broadcast trigger runs on a thread of its own, started before Auto Root's
+opt-in read. Both reasons are measured quantities: this receiver runs on
+system_server's main looper (the app declares `android:process="system"`), and
+everything on that looper is time taken out of the only budget this path has.
+
+`LOCKED_BOOT_COMPLETED` is **not** the definition of success and must not become
+one. It is before the first unlock; that is not the same as "the animation is
+still on the screen", which is why §5 now reads the animation directly instead
+of inferring it from a broadcast's position in the boot.
+
+## 4b. One arming, one boot, one claimed run
+
+Until the broadcast trigger existed, this was the **scheduler's** doing:
+`JobScheduler` consumed the persisted job when it fired, so a second early run
+needed a second arming by construction, and nothing in this app had to enforce
+it.
+
+`LOCKED_BOOT_COMPLETED` arrives in every boot, armed or not. A trigger on it
+that read only the arm record would have turned a one-shot arming into a
+standing switch - the arm record outlives its cycle, so the next boot, and every
+boot after it, would find the same authorisation and run again. That is exactly
+the persistent form §6 says is an owner decision made in the open, arrived at by
+accident.
+
+So the property moves into a fourth record,
+`/data/system/dfreroot-early-root-cycle`:
+
+```ini
+state=EARLY_ROOT_CYCLE_BOUND | EARLY_ROOT_CYCLE_CLAIMED
+generation=<the arming's 128-bit token>
+run_boot_id=<the boot this arming belongs to>
+trigger=NONE | job | locked-boot
+bound_elapsed_ms=<ms since kernel boot>
+claim_elapsed_ms=<ms, or -1 while BOUND>
+```
+
+- **BOUND** is written by the first trigger of the first boot that finds a live
+  arming, before the readiness sweep and after the identity half of the gate.
+  Before identity, every boot of every install would write one; after readiness,
+  a boot where the framework was slow would leave the arming live for the *next*
+  boot. A failed write refuses the dispatch: an arming that runs without being
+  bound is unbounded;
+- **CLAIMED** is written by the trigger that is about to start the service. It is
+  the mutual exclusion between the two triggers - both can pass the gate in one
+  boot and exactly one may run - and the loser is the one whose claim fails, so
+  it stops with nothing started;
+- a trigger in a later boot gets `EARLY_ROOT_ARM_EXPIRED`; a trigger after a
+  claim gets `EARLY_ROOT_ARM_ALREADY_CLAIMED`; a cycle naming another arming's
+  generation gets `EARLY_ROOT_CYCLE_FOREIGN` rather than being treated as
+  absent, because the arming archives the previous cycle or refuses, so that
+  state is one nothing in this app can produce;
+- the **service** reads the same record from the other side and requires a claim
+  of its own, in this boot (`EARLY_ROOT_CLAIM_MISSING`,
+  `EARLY_ROOT_CLAIM_NOT_THIS_BOOT`). Before this, anything sharing uid 1000
+  could `startService` and the readiness-and-marker gate would let it through.
+
+The journal is unchanged and still answers a different question: the cycle is
+per **arming**, the journal is per **boot**. Both are archived by the arming; the
+incident log is the one record that must outlive its cycle, and it is not.
+
 ## 5. The gate
 
 `EarlyRootPolicy.evaluate()` runs in **both** entry points - the callback and
@@ -142,6 +248,9 @@ refused:
 | `EARLY_ROOT_NETWORKSTACK_NOT_READY` | see §3 |
 | `EARLY_ROOT_INCIDENT_UNRESOLVED` / `INCIDENT_UNREADABLE` / `INCIDENT_MALFORMED` / `INCIDENT_IN_JOURNAL` | a previous boot reached transaction 5 and never reported a result. Four codes because "recorded and open", "cannot be read", "cannot be accounted for" and "never recorded at all" send the next run to different places — see §12 |
 | `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED` | the owner has not authorized an EARLY load of this (firmware, daemon+module) pair. A property of the artefact, so it refuses before the cycle, the arming or the boot is read — see §11 |
+| `EARLY_ROOT_TRIGGER_UNRECOGNISED` / `ROLE_UNRECOGNISED` | a dispatch that does not say which trigger it is, or which side of the dispatch it is, is a dispatch whose evidence this policy cannot weigh. Both are unset by default, so the default refuses |
+| `EARLY_ROOT_BOOTANIM_ALREADY_EXITED` / `BOOTANIM_STATE_UNKNOWN` | the fact the product requirement is actually stated in. See below |
+| `EARLY_ROOT_CYCLE_UNREADABLE` / `CYCLE_MALFORMED` / `CYCLE_FOREIGN_GENERATION` / `ARM_EXPIRED` / `ARM_ALREADY_CLAIMED` / `CLAIM_MISSING` / `CLAIM_NOT_THIS_BOOT` | §4b. Seven codes because an unreadable record, a record this build cannot account for, a record belonging to an arming that is gone, an arming whose boot has passed, an arming already claimed, a service with no claim and a claim from another boot send the owner to seven different places |
 
 Auto Root's `opt_in` flag is deliberately **not** consulted. That flag is Auto
 Root's separate owner decision; Early Root's opt-in is the arming itself.
@@ -176,11 +285,44 @@ It is not `ACTION_BOOT_COMPLETED`. The broadcast is what
 part of what it measures; the property is what the gate reads, and it moves
 first.
 
+### And neither of those is "the animation is still on the screen"
+
+Which is the only definition of "early" the product goal has. The owner's
+requirement is **one visible initialisation**: the UI appears once, already
+rooted. A run inside the 120 s window, before `sys.boot_completed`, that happens
+after the animation left the screen is still a second visible initialisation.
+
+Run 2 had both already past - `bootanim_exit=1` *and* `sys.boot_completed=1` at
+521.707 s - which is what makes them two facts rather than one with two
+spellings: on this firmware they move at different moments, in that order.
+
+So `service.bootanim.exit` is an element of its own, read exactly the way
+`sys.boot_completed` is read and refused the same way: UNSET is the normal state
+of the early window and reads `BOOTANIM_RUNNING`; only a property lookup that
+**threw** reads UNKNOWN, which refuses. Mapping unset to UNKNOWN would refuse
+every genuine early run (AGENTS.md 3.6.1) and mapping a failed lookup to RUNNING
+would be an absence read as permission (AGENTS.md 2).
+
+It is re-read at the point of no return, beside the boot-completion reading and
+for the same reason: everything between the gate and transaction 5 takes real
+time, and a run that loses the screen mid-flight has not written anything yet, so
+the cheap thing to do is refuse.
+
+**What it is still not:** proof that the owner saw one initialisation. It is the
+firmware's own flag for "the animation has been asked to leave", which is the
+closest observable this path has to the requirement, and the requirement itself
+is answered by the owner looking at the device (§8).
+
 ## 6. Arming is one-shot, and that is the point
 
 The owner taps **Arm Early Integrated Root (one boot)**, then starts a full
-reboot within ~10 s. The scheduler consumes the job; the next boot needs a new
-arming.
+reboot within ~10 s. The next boot needs a new arming.
+
+**What enforces that is now §4b, not the scheduler.** It used to be a property
+of `JobScheduler` consuming the job, and the broadcast trigger would have
+quietly removed it - a broadcast arrives in every boot. The cycle record binds
+one arming to one boot and allows one claim, so the guarantee is the same one
+and it is now written down.
 
 There is no persistent switch, and AGENTS.md 3.6.1 is why: an operation whose
 worst outcome is not a refusal needs an operation's evidence, not a
@@ -233,8 +375,9 @@ was a record that survived.
 The expected sequence of a successful run:
 
 ```text
-EARLY_ROOT_JOB_ENTERED
+EARLY_ROOT_JOB_ENTERED        (or EARLY_ROOT_TRIGGER_ENTERED, see below)
 EARLY_ROOT_READINESS_PASS
+EARLY_ROOT_CLAIMED
 EARLY_ROOT_DISPATCHED
 EARLY_ROOT_SERVICE_ENTERED
 EARLY_ROOT_PREFLIGHT_PASS
@@ -253,6 +396,18 @@ EARLY_ROOT_BOOT_COMPLETED_OBSERVED
 
 `EARLY_ROOT_REFUSED` can appear instead at any point, carrying the verdict code.
 `EARLY_ROOT_FAILED` carries the coordinator's reason.
+
+**Which trigger got there is in the first line, and that is the measurement.**
+`EARLY_ROOT_JOB_ENTERED` is the persisted callback, `EARLY_ROOT_TRIGGER_ENTERED`
+is `LOCKED_BOOT_COMPLETED`; both carry `trigger=` in the detail field, and both
+can appear in one boot - the second one refusing with
+`EARLY_ROOT_ARM_ALREADY_CLAIMED`, which is the normal, correct shape of a boot
+where the job fired on time. One shared step name would have hidden exactly the
+failure of run 2: that the scheduler never called back inside the window at all.
+
+`EARLY_ROOT_CLAIMED` sits between readiness and the dispatch because "the gate
+passed", "this trigger owns the arming" and "the service was asked to start" are
+three facts with three different next steps for whoever reads the trace.
 
 `EARLY_ROOT_BOOT_COMPLETED_OBSERVED` is appended by `DfrBootReceiver` - the one
 component that is not part of what it measures - and it is the comparison point
@@ -290,6 +445,7 @@ cat /proc/sys/kernel/random/boot_id
 cat /data/system/dfreroot-early-root-trace
 cat /data/system/dfreroot-early-root-journal
 cat /data/system/dfreroot-early-root-arm
+cat /data/system/dfreroot-early-root-cycle    # which trigger claimed it, and when
 
 # the chain's own verdict, same boot
 cat /data/system/dfreroot-post-root
@@ -308,7 +464,9 @@ that investigation does not have.
 
 | Trace ends at | Reading |
 |---|---|
-| nothing at all | the scheduler never called back in this boot. The arm record and the JobStore are the next thing to read, not the chain |
+| nothing at all | **neither** trigger ran. That is now a much stronger statement than it was: the broadcast arrives in every boot, so an empty trace in a boot with a live arming means `DfrBootReceiver` did not run, or the thread it starts did not. The arm record, the cycle record and `dumpsys package` for the receiver are the next things to read, not the chain |
+| `EARLY_ROOT_TRIGGER_ENTERED` only, and the job never appears | the deterministic trigger did the work and the scheduler never called back inside the window. This is the run-2 failure, now survivable. Record the elapsed_ms: it is the margin this path has |
+| `EARLY_ROOT_JOB_ENTERED` then `EARLY_ROOT_TRIGGER_ENTERED` + `ARM_ALREADY_CLAIMED` | the normal shape when the job fires on time. The second trigger refusing is the exclusion working, not a fault |
 | `EARLY_ROOT_JOB_ENTERED` then `EARLY_ROOT_REFUSED` | the gate refused; the detail field names the code. This is the tool working |
 | `EARLY_ROOT_DISPATCHED`, no `EARLY_ROOT_SERVICE_ENTERED` | the platform did not honour a `startService` that early, in direct boot. This is the first genuinely unknown property of this path and it is a refusal, not a hazard |
 | `EARLY_ROOT_KSUD_STAGING` and nothing after | staging itself threw or failed its digest check. The step says STAGING, not STAGED, because the coordinator reports that phase *before* it stages — a step claiming STAGED would be false in exactly this run |
@@ -339,6 +497,14 @@ requires, in **each** of three consecutive full boots:
 - `/data/system/dfreroot-post-root` valid for that same `boot_id`;
 - `/sys/fs/selinux/enforce` reading `1` afterwards, read independently;
 - journal `phase=COMPLETE` / `attempts=1`;
+- cycle record `state=EARLY_ROOT_CYCLE_CLAIMED` naming that boot and **one**
+  trigger, with `claim_elapsed_ms` recorded. Which trigger it was is data, not a
+  pass condition: either is acceptable, and the three boots are what say whether
+  the job is reliable enough to be relied on;
+- every step at `bootanim_exit=0`, and the owner's own observation that the
+  device presented its UI **once**. The property is the firmware's flag for "the
+  animation was asked to leave"; the requirement is what the owner saw, and no
+  log substitutes for it;
 - no `_KP` DropBox entry and no `bootchecker`/`rollback` reboot reason in that
   boot or the one after it.
 
@@ -346,26 +512,51 @@ A refusal in any boot is reported as a refusal with its code. Do not re-arm
 "to see if it works this time" before reading the trace — that is how a
 reproducible failure becomes an anecdote.
 
-## 9. What comes after, and what is not yet answerable
+## 9. What comes after: the half of the goal this path does not do
 
-The second half of the product goal needs the KernelSU module lifecycle,
-ReZygisk and LSPosed to exist before the final UI. The honest state of that
-question:
+The owner's requirement is one visible initialisation with root and modules
+already live. This path delivers the first half - the root chain inside the
+animation - and **does not** restart userspace, apply modules, or make
+Zygisk-dependent components live. `DfrEarlyRootService` ends at
+`POST_ROOT_COMPLETE` and its verdict notification carries no Apply Modules
+action; `tools/profile_binding_audit.py` fails if either changes.
+
+That is a deliberate boundary, not an oversight, and the reason is attribution:
+
+- `POST_SOFT_REBOOT_STABILITY` is a physical **FAIL** twice - a
+  `bootchecker_timeout` rollback, and an `lmkd` stall 66 minutes later - and
+  AGENTS.md 3.6.2 records that the cause of the first is still an open question
+  nobody has measured. Samsung's own `bootchecker.rc` zeroes
+  `dev.platform_bootcomplete` when `init.svc.zygote=restarting`, and whether
+  anything sets `dev.bootcomplete=1` again after a soft reboot **has never been
+  read on this firmware**;
+- stacking a userspace teardown on top of an early root that has never passed
+  once would make the next failure impossible to attribute to either half. Run 1
+  and run 2 failed for unrelated reasons; a third failure with two unproven
+  operations in it would be unreadable;
+- and a restart inside the animation is not obviously invisible anyway. It tears
+  down SurfaceFlinger's clients, so "the animation covers it" is a hypothesis
+  about this firmware, not a consequence of starting early.
+
+So the honest state of the second half:
 
 - which stages `ksud` can run on demand after a late load (`post-fs-data`,
   `service`, `boot-completed`, module mounts, sepolicy) has not been enumerated
   against this daemon build;
 - whether ReZygisk/LSPosed can be made live without re-creating zygote is
   **unknown**, and the only mechanism this repository has for re-creating it is
-  the soft reboot, which is a physical FAIL twice with an unmeasured cause;
-- so "move the restart inside the boot animation" is a design idea, not a plan.
-  It depends on a teardown whose postcondition AGENTS.md 3.6.2 says nobody has
-  read on this firmware.
+  the soft reboot, which is the FAIL above;
+- so "move the restart inside the boot animation" remains a design idea, not a
+  plan.
 
-The next measurement that would actually advance it is the one in §8's property
-list: `dev.bootcomplete` / `dev.platform_bootcomplete` in a boot where nothing
-restarted userspace, and the same two after one that did. Until that exists,
-every coordination design for the handshake is a guess.
+The next measurement that would actually advance it is unchanged and cheap:
+`dev.bootcomplete` / `dev.platform_bootcomplete` in a boot where nothing
+restarted userspace - which §8 now collects on every early run - and the same
+two after one that did. Until that pair exists, every coordination design for
+the handshake is a guess. The second measurement, which this change makes
+possible, is the margin: `claim_elapsed_ms` to `EARLY_ROOT_POST_ROOT_COMPLETE`
+to the animation's exit, over three boots. A teardown has to fit inside what is
+left of it, and nobody knows that number yet.
 
 ## 11. Authorizing an artefact after the panic
 

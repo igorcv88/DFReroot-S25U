@@ -212,6 +212,110 @@ public final class EarlyRootPolicy {
      */
     public static final String INCIDENT_IN_JOURNAL = "EARLY_ROOT_INCIDENT_IN_JOURNAL";
 
+    /**
+     * Which trigger is asking, and what that changes about the evidence.
+     *
+     * Two triggers reach this policy and they do NOT carry the same evidence,
+     * so the policy is told which one it is answering rather than inferring it
+     * (3.7: separate facts, separate values).
+     *
+     * {@link #TRIGGER_JOB} is the persisted JobScheduler callback. It is the
+     * earlier of the two when it fires - 14.6-16.9 s on this device over four
+     * captured boots - and it carries scheduler evidence nothing else can: a
+     * live job id, a live namespace and the arming generation out of the
+     * JobInfo the scheduler itself stored.
+     *
+     * {@link #TRIGGER_LOCKED_BOOT} is {@code ACTION_LOCKED_BOOT_COMPLETED},
+     * dispatched by AMS at a fixed point of user 0's unlock-for-locked-boot.
+     * It carries NO scheduler evidence at all: there is no live callback, so
+     * the job id, the namespace and the generation it presents are read out of
+     * the arm record and compared against that same record. That comparison is
+     * self-consistency, not binding, and it is deliberately not dressed up as
+     * more: what makes an arming one-shot on this trigger is the durable cycle
+     * record below, not a token the trigger could only have copied.
+     *
+     * Why it exists at all: {@code setMinimumLatency} is a floor, not a
+     * deadline. On 2026-10-13 the scheduler restored the persisted job and
+     * called it back at 521.707 s - 401 s past the early window - in a boot
+     * where {@code sys.boot_completed} was already 1 and the boot animation had
+     * already exited. The policy refused correctly and the chain never ran. A
+     * trigger whose timing the platform may choose freely cannot be the only
+     * trigger of a path whose whole requirement is "before the animation ends".
+     */
+    public static final String TRIGGER_JOB = "job";
+    public static final String TRIGGER_LOCKED_BOOT = "locked-boot";
+
+    /**
+     * Which side of the dispatch is asking.
+     *
+     * {@link #ROLE_DISPATCH} is a trigger deciding whether to claim this
+     * arming and start the service. {@link #ROLE_CLAIMED_RUN} is the service
+     * itself, re-deriving the whole gate on its own observations.
+     *
+     * The two roles read the cycle record in OPPOSITE directions, which is the
+     * reason the role is an input instead of a comment: for a trigger, a claim
+     * naming this arming is a refusal - somebody got here first, or an earlier
+     * boot already spent it. For the claimed run, that same claim is the thing
+     * that must exist, in this boot, for the run to be authorised at all. A
+     * service started by anything else in our shared uid now finds no claim of
+     * its own and refuses, which the readiness-and-marker gate alone never did.
+     */
+    public static final String ROLE_DISPATCH = "dispatch";
+    public static final String ROLE_CLAIMED_RUN = "claimed-run";
+
+    public static final String TRIGGER_UNRECOGNISED = "EARLY_ROOT_TRIGGER_UNRECOGNISED";
+    public static final String ROLE_UNRECOGNISED = "EARLY_ROOT_ROLE_UNRECOGNISED";
+
+    /**
+     * Is the boot animation still on the screen?
+     *
+     * The fact the product requirement is actually stated in, and the one the
+     * 120 s window was standing in for. "Early" does not mean "soon after the
+     * kernel started"; it means the owner has not been shown the final UI yet,
+     * because the whole point is one visible initialisation. A persisted job
+     * restored at 43 s in a boot whose animation ended at 30 s satisfies the
+     * clock bound and is not early by the only definition that matters.
+     *
+     * {@code service.bootanim.exit} is what the firmware sets when the
+     * animation is asked to leave the screen, so it is read the same way
+     * {@link #BOOT_NOT_COMPLETED} is read and for the same reason: UNSET is the
+     * normal state of the early window and must read RUNNING, and only a
+     * property lookup that THREW reads UNKNOWN, which refuses. Mapping unset to
+     * UNKNOWN would refuse every genuine early run (3.6.1).
+     *
+     * It is not a substitute for {@link #BOOT_NOT_COMPLETED}: the two
+     * properties move at different moments, in that order, and a run that
+     * crosses either line mid-flight is not the early path any more.
+     */
+    public static final String BOOTANIM_RUNNING = "BOOTANIM_RUNNING";
+    public static final String BOOTANIM_EXITED = "BOOTANIM_EXITED";
+    public static final String BOOTANIM_ALREADY_EXITED =
+            "EARLY_ROOT_BOOTANIM_ALREADY_EXITED";
+    public static final String BOOTANIM_STATE_UNKNOWN =
+            "EARLY_ROOT_BOOTANIM_STATE_UNKNOWN";
+
+    /*
+     * The cycle record's verdicts.
+     *
+     * Five codes rather than one because they are five different facts and the
+     * owner's next move differs for each: a record that cannot be read, a
+     * record this build cannot account for, a record belonging to an arming
+     * that is no longer on disk, an arming whose one boot has already passed,
+     * and an arming that has already been claimed and run.
+     */
+    public static final String CYCLE_UNREADABLE = "EARLY_ROOT_CYCLE_UNREADABLE";
+    public static final String CYCLE_MALFORMED = "EARLY_ROOT_CYCLE_MALFORMED";
+    public static final String CYCLE_FOREIGN = "EARLY_ROOT_CYCLE_FOREIGN_GENERATION";
+    public static final String ARM_EXPIRED = "EARLY_ROOT_ARM_EXPIRED";
+    public static final String ARM_ALREADY_CLAIMED = "EARLY_ROOT_ARM_ALREADY_CLAIMED";
+    /*
+     * ...and the claimed run's own three, which are the same record read from
+     * the other side. A service that cannot show a claim of its own in this
+     * boot is not a run this path authorised.
+     */
+    public static final String CLAIM_MISSING = "EARLY_ROOT_CLAIM_MISSING";
+    public static final String CLAIM_NOT_THIS_BOOT = "EARLY_ROOT_CLAIM_NOT_THIS_BOOT";
+
     /*
      * The durable trace steps, in the order one boot can pass through them.
      *
@@ -222,6 +326,26 @@ public final class EarlyRootPolicy {
      * step name is a line nobody can account for, so writing one refuses.
      */
     public static final String STEP_JOB_ENTERED = "EARLY_ROOT_JOB_ENTERED";
+    /**
+     * The deterministic trigger's entry step.
+     *
+     * Its own step, never reusing {@link #STEP_JOB_ENTERED}: a reader of the
+     * trace has to be able to say WHICH trigger got there, because that is the
+     * measurement this path is now collecting. One line saying JOB_ENTERED at
+     * 18 s would hide the fact that the scheduler never called back at all -
+     * which is exactly the failure of 2026-10-13, and the one a shared step
+     * name would have made invisible.
+     */
+    public static final String STEP_TRIGGER_ENTERED = "EARLY_ROOT_TRIGGER_ENTERED";
+    /**
+     * The arming was durably claimed by this trigger, in this boot.
+     *
+     * Between {@link #STEP_READINESS_PASS} and {@link #STEP_DISPATCHED}, and
+     * separate from both: "the gate passed", "this trigger owns the arming" and
+     * "the service was asked to start" are three facts with three different
+     * next steps for whoever reads the trace afterwards.
+     */
+    public static final String STEP_CLAIMED = "EARLY_ROOT_CLAIMED";
     public static final String STEP_READINESS_PASS = "EARLY_ROOT_READINESS_PASS";
     public static final String STEP_DISPATCHED = "EARLY_ROOT_DISPATCHED";
     public static final String STEP_SERVICE_ENTERED = "EARLY_ROOT_SERVICE_ENTERED";
@@ -297,7 +421,8 @@ public final class EarlyRootPolicy {
             "EARLY_ROOT_BOOT_COMPLETED_OBSERVED";
 
     private static final Set<String> STEPS = Set.of(
-            STEP_JOB_ENTERED, STEP_READINESS_PASS, STEP_DISPATCHED,
+            STEP_JOB_ENTERED, STEP_TRIGGER_ENTERED, STEP_CLAIMED,
+            STEP_READINESS_PASS, STEP_DISPATCHED,
             STEP_SERVICE_ENTERED, STEP_PREFLIGHT_PASS, STEP_COORDINATOR_ENTERED,
             STEP_KSUD_STAGING, STEP_STAGEHOP_SENDING, STEP_STAGEHOP_SENT,
             STEP_CONTROLLER_RECEIVED, STEP_REMOTE_PREFLIGHT_PASS,
@@ -337,6 +462,35 @@ public final class EarlyRootPolicy {
      * copied here from the ARM record instead, which already carries it and
      * which belongs to the same cycle as the journal being accounted for.
      */
+    /*
+     * The cycle record: which boot this arming belongs to, and whether it has
+     * been spent.
+     *
+     * A record of its own rather than fields in the journal or the arm record,
+     * for two reasons that pull in opposite directions and both matter.
+     *
+     * The journal is per-BOOT ("what has the early path already done in the
+     * boot it names") and its key set is read by a strict parser, so adding a
+     * key would refuse every journal written by a build that predates it -
+     * the mistake 3.6.1 records about making an optional record key required.
+     *
+     * The arm record is the owner's authorisation and is written once, by the
+     * arming. The cycle is written by the TRIGGERS, twice, in a boot the arming
+     * could not name: an authorisation that rewrites itself as it is consumed
+     * stops being readable as what the owner asked for.
+     *
+     * So: three records, three questions. The arm says what was authorised, the
+     * cycle says whether that authorisation is still live, the journal says
+     * what this boot already did.
+     */
+    private static final Set<String> CYCLE_KEYS = Set.of(
+            "state", "generation", "run_boot_id", "trigger", "bound_elapsed_ms",
+            "claim_elapsed_ms");
+
+    /** The cycle's two states. BOUND is live; CLAIMED is spent. */
+    public static final String CYCLE_BOUND = "EARLY_ROOT_CYCLE_BOUND";
+    public static final String CYCLE_CLAIMED = "EARLY_ROOT_CYCLE_CLAIMED";
+
     private static final Set<String> INCIDENT_KEYS = Set.of(
             "incident_boot_id", "phase", "native_started", "version_code",
             "version_name", "ksud_sha256", "device_fingerprint",
@@ -831,6 +985,122 @@ public final class EarlyRootPolicy {
     }
 
     /** What the policy was asked about. Assembled by the caller, never trusted. */
+    /**
+     * The cycle record: one arming, one boot, one claimed run.
+     *
+     * ## What this replaces, and why it had to exist
+     *
+     * Until the deterministic trigger was added, the one-shot property of an
+     * arming was enforced by the SCHEDULER: {@code JobScheduler} consumed the
+     * persisted job when it fired, so a second early run needed a second
+     * arming by construction. Nothing in this app enforced it, and nothing had
+     * to.
+     *
+     * {@code ACTION_LOCKED_BOOT_COMPLETED} arrives in every boot whether or not
+     * anything was armed. A trigger on it that read only the arm record would
+     * turn a one-shot arming into a standing switch - the arm record outlives
+     * its cycle, so the next boot, and every boot after it, would find the same
+     * authorisation and run again. That is precisely the persistent form
+     * docs/EARLY_ROOT.md section 6 says is an owner decision made in the open,
+     * and AGENTS.md 3.6.1 is the rule behind it: an operation whose worst
+     * outcome is not a refusal needs an operation's evidence.
+     *
+     * So the property moves into a record:
+     *
+     *  - **BOUND** is written by the first trigger of the first boot that finds
+     *    a live arming. It names that boot. From then on, a trigger in any
+     *    OTHER boot refuses with {@link #ARM_EXPIRED} - one arming, one boot;
+     *  - **CLAIMED** is written by the trigger that is about to start the
+     *    service, before it starts it. From then on every trigger refuses with
+     *    {@link #ARM_ALREADY_CLAIMED} - one arming, one run - and the service
+     *    requires this record to be its own.
+     *
+     * Both halves carry the arming's generation, so a cycle left behind by an
+     * arming that is no longer on disk cannot speak for the one that is.
+     */
+    public static final class Cycle {
+        public final String state;
+        public final String generation;
+        public final String runBootId;
+        /** The trigger that claimed it, or {@code NONE} while BOUND. */
+        public final String trigger;
+        public final long boundElapsedMs;
+        /** -1 while BOUND. */
+        public final long claimElapsedMs;
+
+        Cycle(String state, String generation, String runBootId, String trigger,
+              long boundElapsedMs, long claimElapsedMs) {
+            this.state = state;
+            this.generation = generation;
+            this.runBootId = runBootId;
+            this.trigger = trigger;
+            this.boundElapsedMs = boundElapsedMs;
+            this.claimElapsedMs = claimElapsedMs;
+        }
+
+        public boolean claimed() {
+            return CYCLE_CLAIMED.equals(state);
+        }
+    }
+
+    /** The trigger field of a cycle that has not been claimed yet. */
+    public static final String TRIGGER_NONE = "NONE";
+
+    public static String formatCycle(String state, String generation,
+                                     String runBootId, String trigger,
+                                     long boundElapsedMs, long claimElapsedMs) {
+        return "state=" + state + "\n"
+                + "generation=" + generation + "\n"
+                + "run_boot_id=" + runBootId + "\n"
+                + "trigger=" + trigger + "\n"
+                + "bound_elapsed_ms=" + boundElapsedMs + "\n"
+                + "claim_elapsed_ms=" + claimElapsedMs + "\n";
+    }
+
+    /** null means absent, unreadable, malformed or not a cycle this build wrote. */
+    public static Cycle parseCycle(String record) {
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(record)) return null;
+        Map<String, String> values = parse(record, CYCLE_KEYS);
+        if (values == null) return null;
+        String state = values.get("state");
+        if (!CYCLE_BOUND.equals(state) && !CYCLE_CLAIMED.equals(state)) return null;
+        String generation = values.get("generation");
+        String runBootId = values.get("run_boot_id");
+        String trigger = values.get("trigger");
+        if (blank(generation) || blank(runBootId) || blank(trigger)) return null;
+        /*
+         * A CLAIMED record must name the trigger that claimed it, and a BOUND
+         * record must not name one. The trigger is the only field that says
+         * which path reached transaction 5 in a boot that did not come back,
+         * so a claim carrying NONE would be a record that cannot answer the
+         * question it exists for.
+         */
+        boolean claimed = CYCLE_CLAIMED.equals(state);
+        /*
+         * One comparison, both directions: a CLAIMED record must name the
+         * trigger that claimed it and a BOUND record must not. Written as an
+         * equality rather than two ifs because the second if would be a branch
+         * no input can reach, and a dead guard reads as a check (AGENTS.md 5).
+         */
+        if (claimed == TRIGGER_NONE.equals(trigger)) return null;
+        if (claimed && !TRIGGER_JOB.equals(trigger)
+                && !TRIGGER_LOCKED_BOOT.equals(trigger)) {
+            return null;
+        }
+        try {
+            long bound = Long.parseLong(values.get("bound_elapsed_ms"));
+            long claim = Long.parseLong(values.get("claim_elapsed_ms"));
+            if (bound < 0) return null;
+            // -1 is the only honest "not claimed yet"; a claimed record with a
+            // negative timestamp orders nothing and is refused at the parser.
+            if (claimed ? claim < 0 : claim != -1) return null;
+            return new Cycle(state, generation.trim(), runBootId.trim(),
+                    trigger.trim(), bound, claim);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
     public static final class Inputs {
         public String armRecord;
         public String journalRecord;
@@ -862,6 +1132,16 @@ public final class EarlyRootPolicy {
          * point an already-pending job does not go through at all.
          */
         public String incidentRecord;
+        /**
+         * The cycle record, if any. See {@link Cycle}.
+         *
+         * Read at BOTH entry points of BOTH triggers, because a one-shot
+         * guarantee enforced at one of them is not a guarantee (3.2) - and
+         * since the deterministic trigger fires in every boot regardless of
+         * arming, this record is now the only thing standing between a
+         * one-shot arming and a standing switch.
+         */
+        public String cycleRecord;
         public String qualificationRecord;
         public String currentBootId;
         /** The job id the scheduler actually called back with. */
@@ -890,6 +1170,17 @@ public final class EarlyRootPolicy {
         public String callbackGeneration;
         /** The namespace THIS runtime would have armed in. */
         public String expectedNamespace;
+        /**
+         * {@link #TRIGGER_JOB} or {@link #TRIGGER_LOCKED_BOOT}. Anything else
+         * refuses: a dispatch this policy cannot attribute to a trigger is a
+         * dispatch whose evidence it cannot weigh.
+         */
+        public String trigger;
+        /**
+         * {@link #ROLE_DISPATCH} or {@link #ROLE_CLAIMED_RUN}. Anything else
+         * refuses, and the default is therefore neither.
+         */
+        public String role;
         /** One of the three {@code EarlyBootProbePolicy.NETWORKSTACK_*} states. */
         public String readinessState;
         /** Locally sampled ms since kernel boot. Negative refuses. */
@@ -899,6 +1190,11 @@ public final class EarlyRootPolicy {
          * {@code EarlyBootProbePolicy.UNKNOWN}. Anything else refuses.
          */
         public String bootCompletedState;
+        /**
+         * One of {@link #BOOTANIM_RUNNING}, {@link #BOOTANIM_EXITED} or
+         * {@code EarlyBootProbePolicy.UNKNOWN}. Anything else refuses.
+         */
+        public String bootanimState;
         /** One of {@code AutoRootPolicy.MARKER_*}. */
         public int markerState = AutoRootPolicy.MARKER_UNKNOWN;
         /** 1, 0, or -1 when /sys/fs/selinux/enforce could not be read. */
@@ -1153,6 +1449,24 @@ public final class EarlyRootPolicy {
      */
     public static Decision evaluateBeforeReadiness(Inputs in) {
         if (in == null) return refuse(NO_BOOT_ID, "no inputs");
+        /*
+         * Which trigger, and which side of the dispatch, before anything else.
+         *
+         * Both are unset by default and an unrecognised value refuses, like
+         * every other enum here. They are not decoration: the cycle record is
+         * read in opposite directions by the two roles, and the trigger decides
+         * which of the binding comparisons below is scheduler evidence and
+         * which is self-consistency. A caller that does not say refuses rather
+         * than getting whichever reading happens to be more permissive.
+         */
+        if (!TRIGGER_JOB.equals(in.trigger) && !TRIGGER_LOCKED_BOOT.equals(in.trigger)) {
+            return refuse(TRIGGER_UNRECOGNISED, "the dispatch did not name a trigger"
+                    + " this policy can weigh evidence for (" + in.trigger + ")");
+        }
+        if (!ROLE_DISPATCH.equals(in.role) && !ROLE_CLAIMED_RUN.equals(in.role)) {
+            return refuse(ROLE_UNRECOGNISED, "the caller did not name which side of"
+                    + " the dispatch it is (" + in.role + ")");
+        }
         if (blank(in.currentBootId)) {
             return refuse(NO_BOOT_ID, "current boot_id is unavailable; same-boot"
                     + " evidence could not be established");
@@ -1216,6 +1530,17 @@ public final class EarlyRootPolicy {
                     + arm.generation + "; a job outlived the authorisation it was"
                     + " scheduled with");
         }
+        /*
+         * Is this arming still live, and is it live HERE?
+         *
+         * The one-shot property, which the scheduler used to provide by
+         * consuming the job and which nothing provides for a broadcast that
+         * arrives in every boot. See {@link Cycle} for the whole argument; what
+         * is enforced here is: one arming, one boot, one claimed run - with the
+         * two roles reading the same record in opposite directions.
+         */
+        Decision cycle = evaluateCycle(in, arm);
+        if (cycle != null) return cycle;
         /*
          * Three namespaces must agree, and they are three different facts.
          * `callbackNamespace` is what the scheduler called us back in;
@@ -1302,6 +1627,34 @@ public final class EarlyRootPolicy {
                     + " not be determined (" + in.bootCompletedState + "); a run that"
                     + " cannot be placed before or after BOOT_COMPLETED proves"
                     + " nothing the milestone asks for");
+        }
+        /*
+         * And the fact the requirement is actually stated in: is the animation
+         * still covering the screen?
+         *
+         * A third element, not a second spelling of the two above.
+         * `sys.boot_completed` is the framework's own completion flag and the
+         * 120 s window is a bound on the clock; neither of them is "the owner
+         * has not been shown the final UI yet", which is the whole product
+         * goal. On this firmware the two properties move at different moments -
+         * the 2026-10-13 callback found both already past - and a run that is
+         * inside the window, before boot completion, and after the animation
+         * left the screen would still be a second visible initialisation.
+         *
+         * UNSET reads RUNNING (see BOOTANIM_RUNNING); only a lookup that threw
+         * reads UNKNOWN, and that refuses.
+         */
+        if (BOOTANIM_EXITED.equals(in.bootanimState)) {
+            return refuse(BOOTANIM_ALREADY_EXITED, "service.bootanim.exit is already"
+                    + " 1 at " + (in.callbackElapsedMs / 1000) + "s; the boot"
+                    + " animation has left the screen, so a run here cannot be the"
+                    + " single visible initialisation this path exists for");
+        }
+        if (!BOOTANIM_RUNNING.equals(in.bootanimState)) {
+            return refuse(BOOTANIM_STATE_UNKNOWN, "whether the boot animation is"
+                    + " still on screen could not be determined ("
+                    + in.bootanimState + "); a run that cannot be placed inside"
+                    + " the animation proves nothing the milestone asks for");
         }
         /*
          * The unresolved-incident latch, before the journal is read for the
@@ -1428,6 +1781,90 @@ public final class EarlyRootPolicy {
             }
         }
         return new Decision(true, ALLOW, "EARLY_ROOT_PREFLIGHT=PASS (pre-readiness)");
+    }
+
+    /**
+     * The cycle record, read from whichever side is asking. null means pass.
+     *
+     * Absence is the ONLY state in which a trigger may bind a fresh cycle, and
+     * absence is established by the store the same way every other record here
+     * establishes it: ENOENT is absence, every other errno is
+     * {@code RECORD_UNREADABLE} and refuses. A cycle naming another arming's
+     * generation also refuses rather than being treated as absent - the arming
+     * archives the previous cycle before it writes the new arm record and
+     * refuses if that archive fails, so a foreign cycle beside a fresh arming
+     * is a state nothing in this app can produce, and guessing which of the two
+     * is stale is exactly the inference AGENTS.md 2 forbids.
+     */
+    private static Decision evaluateCycle(Inputs in, Arm arm) {
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(in.cycleRecord)) {
+            return refuse(CYCLE_UNREADABLE, "the early-root cycle record exists but"
+                    + " could not be read; it may say this arming was already"
+                    + " claimed, so refusing rather than claiming it again");
+        }
+        boolean absent = blank(in.cycleRecord);
+        Cycle cycle = absent ? null : parseCycle(in.cycleRecord);
+        if (!absent && cycle == null) {
+            return refuse(CYCLE_MALFORMED, "the early-root cycle record is not a"
+                    + " record this build can account for; it may have been written"
+                    + " by a run that died mid-write");
+        }
+        if (cycle != null && !cycle.generation.equals(arm.generation)) {
+            return refuse(CYCLE_FOREIGN, "the cycle record names arming "
+                    + cycle.generation + ", not the arm record's " + arm.generation
+                    + "; the arming that should have archived it did not, and which"
+                    + " of the two is stale cannot be established from here");
+        }
+        if (ROLE_CLAIMED_RUN.equals(in.role)) {
+            /*
+             * The service. Its authorisation is a claim of its own, written by
+             * the trigger that started it, in this boot - not merely a gate that
+             * passes. Before this record existed, anything sharing our uid could
+             * start the service and the readiness-and-marker gate would let it
+             * through.
+             */
+            if (cycle == null || !cycle.claimed()) {
+                return refuse(CLAIM_MISSING, "the early-root service was started"
+                        + " without a durable claim on this arming; a run nothing"
+                        + " claimed is a run no trigger authorised");
+            }
+            if (!in.currentBootId.equals(cycle.runBootId)) {
+                return refuse(CLAIM_NOT_THIS_BOOT, "the claim on this arming names"
+                        + " boot " + cycle.runBootId + ", not this one; a service"
+                        + " restarted into a later boot must not resume it");
+            }
+            /*
+             * The relayed generation is NOT compared to the claim here, and the
+             * absence is deliberate rather than an omission: it is already
+             * compared, transitively and earlier. GENERATION_MISMATCH above
+             * refuses unless the relayed token equals the arm record's, and
+             * CYCLE_FOREIGN refuses unless the cycle's equals the arm record's,
+             * so by this line the two are equal. A third comparison here would
+             * be a branch no input can reach - and a gate that cannot fail is
+             * not a gate (AGENTS.md 5), it is a line that makes the next reader
+             * believe something is being checked twice.
+             */
+            return null;
+        }
+        /*
+         * A trigger. The same record, read the other way: anything already
+         * claimed is spent, and a cycle bound to another boot means this
+         * arming's one boot has passed.
+         */
+        if (cycle == null) return null;
+        if (cycle.claimed()) {
+            return refuse(ARM_ALREADY_CLAIMED, "this arming was already claimed by"
+                    + " the " + cycle.trigger + " trigger in boot " + cycle.runBootId
+                    + " at " + cycle.claimElapsedMs + " ms; one arming authorises"
+                    + " one run, and a hard reboot plus a new arming is the"
+                    + " boundary");
+        }
+        if (!in.currentBootId.equals(cycle.runBootId)) {
+            return refuse(ARM_EXPIRED, "this arming was bound to boot "
+                    + cycle.runBootId + " and that boot has passed; an arming is"
+                    + " for the next full boot, not for every boot after it");
+        }
+        return null;
     }
 
     /**

@@ -67,6 +67,21 @@ object EarlyRootStore {
     const val TRACE_PATH = "/data/system/dfreroot-early-root-trace"
 
     /**
+     * Which boot this arming belongs to, and whether it has been spent.
+     *
+     * The record that makes an arming one-shot now that a broadcast - which
+     * arrives in every boot, armed or not - can dispatch the chain. See
+     * [EarlyRootPolicy.Cycle] for the whole argument; what lives here is that
+     * it is archived with the journal and the trace by [archivePreviousCycle],
+     * because it is per-cycle evidence and a cycle left beside a fresh arming
+     * is the ambiguity that archive exists to remove.
+     *
+     * Deliberately NOT the incident record below, which is the one thing that
+     * must outlive its cycle.
+     */
+    const val CYCLE_PATH = "/data/system/dfreroot-early-root-cycle"
+
+    /**
      * An early run that reached transaction 5 and never reported a result.
      *
      * Deliberately NOT archived by [archivePreviousCycle], which is the whole
@@ -108,6 +123,99 @@ object EarlyRootStore {
     fun readTrace(): String? = synchronized(lock) { read(TRACE_PATH) }
 
     fun readIncident(): String? = synchronized(lock) { read(INCIDENT_PATH) }
+
+    fun readCycle(): String? = synchronized(lock) { read(CYCLE_PATH) }
+
+    /**
+     * Bind this arming to this boot, if nothing has bound it yet. null on
+     * success, or the reason it could not be done.
+     *
+     * Idempotent for the same (arming, boot): the second trigger of one boot
+     * finds the record already naming this boot and this generation and does
+     * nothing. Every other shape is a refusal rather than an overwrite - a bind
+     * that replaced a CLAIMED record would hand a second run to a boot that had
+     * already had one, which is the whole guarantee inverted.
+     *
+     * The read-modify-write is serialised by [lock], and that is sufficient
+     * rather than lucky: every writer of this record - both triggers, the
+     * service and the arming - runs in process "system", because the app
+     * declares `android:process="system"`.
+     */
+    fun bindCycle(generation: String, bootId: String, elapsedMs: Long): String? =
+        synchronized(lock) {
+            if (generation.isEmpty()) return "no arming generation to bind"
+            if (bootId.isEmpty()) return "boot_id unavailable"
+            if (elapsedMs < 0) return "monotonic_clock_unavailable"
+            val existing = read(CYCLE_PATH)
+            if (existing == AutoRootPolicy.RECORD_UNREADABLE) {
+                return "the cycle record exists and cannot be read; refusing to" +
+                    " replace it"
+            }
+            if (existing != null) {
+                val cycle = EarlyRootPolicy.parseCycle(existing)
+                    ?: return "the cycle record is not one this build can account for"
+                if (cycle.generation != generation) {
+                    return "the cycle record belongs to arming ${cycle.generation}"
+                }
+                if (cycle.runBootId != bootId) {
+                    return "the cycle record is bound to boot ${cycle.runBootId}"
+                }
+                // Already bound to this arming and this boot, claimed or not.
+                // Nothing to do, and nothing may be overwritten.
+                return null
+            }
+            atomicWrite(
+                CYCLE_PATH,
+                EarlyRootPolicy.formatCycle(
+                    EarlyRootPolicy.CYCLE_BOUND, generation, bootId,
+                    EarlyRootPolicy.TRIGGER_NONE, elapsedMs, -1L
+                )
+            )
+        }
+
+    /**
+     * Claim this arming for one run, exclusively. null means the claim is ours.
+     *
+     * The mutual exclusion between the two triggers, and the durable half of
+     * "one arming, one run". A failure is RETURNED so the caller refuses to
+     * dispatch: a trigger that starts the chain after failing to record its
+     * claim is the absence-as-permission this record exists to prevent, and the
+     * loser of the race must be the one that stops.
+     */
+    fun claimCycle(generation: String, bootId: String, trigger: String,
+                   elapsedMs: Long): String? = synchronized(lock) {
+        if (generation.isEmpty()) return "no arming generation to claim"
+        if (bootId.isEmpty()) return "boot_id unavailable"
+        if (elapsedMs < 0) return "monotonic_clock_unavailable"
+        val existing = read(CYCLE_PATH)
+        if (existing == AutoRootPolicy.RECORD_UNREADABLE) {
+            return "the cycle record exists and cannot be read"
+        }
+        val cycle = existing?.let { EarlyRootPolicy.parseCycle(it) }
+        if (existing != null && cycle == null) {
+            return "the cycle record is not one this build can account for"
+        }
+        if (cycle != null) {
+            if (cycle.generation != generation) {
+                return "the cycle record belongs to arming ${cycle.generation}"
+            }
+            if (cycle.runBootId != bootId) {
+                return "the cycle record is bound to boot ${cycle.runBootId}"
+            }
+            if (cycle.claimed()) {
+                return "this arming was already claimed by the ${cycle.trigger}" +
+                    " trigger at ${cycle.claimElapsedMs} ms"
+            }
+        }
+        val bound = cycle?.boundElapsedMs ?: elapsedMs
+        atomicWrite(
+            CYCLE_PATH,
+            EarlyRootPolicy.formatCycle(
+                EarlyRootPolicy.CYCLE_CLAIMED, generation, bootId, trigger,
+                bound, elapsedMs
+            )
+        )
+    }
 
     /**
      * Append an unexplained death to the log, durably, and say why when it
@@ -163,7 +271,7 @@ object EarlyRootStore {
     fun archivePreviousCycle(): String? = synchronized(lock) { archiveLocked() }
 
     private fun archiveLocked(): String? {
-        for (path in listOf(JOURNAL_PATH, TRACE_PATH)) {
+        for (path in listOf(JOURNAL_PATH, TRACE_PATH, CYCLE_PATH)) {
             /*
              * Same reason as read(): exists() would answer false for a file
              * that is there and unreachable, and this loop would then skip

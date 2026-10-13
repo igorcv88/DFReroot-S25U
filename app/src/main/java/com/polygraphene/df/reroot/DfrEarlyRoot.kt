@@ -42,6 +42,29 @@ object DfrEarlyRoot {
     const val MINIMUM_LATENCY_MS = 15_000L
     const val REBOOT_WITHIN_MS = 10_000L
 
+    /**
+     * An upper bound to go with the floor - and the reason it is not the fix.
+     *
+     * `setMinimumLatency` is an EARLIEST bound and nothing else, which is how
+     * 2026-10-13 happened: the job was restored, had no unmet constraint, and
+     * the scheduler ran it at 521.707 s. A deadline is the only thing the
+     * JobInfo API offers in the other direction - AOSP's JobStore persists it
+     * as an RTC bound and restores it as `nowElapsed + max(storedRtc -
+     * nowWallclock, 0)`, so a deadline whose wallclock has already passed makes
+     * the job deadline-expired the moment the JobStore reads it, which is the
+     * earliest the platform could possibly run it.
+     *
+     * That is worth having and is NOT a guarantee: a deadline is still the
+     * platform's to honour, and nothing in the framework promises a millisecond.
+     * The determinism this path needs comes from the second trigger
+     * (`DfrEarlyRootDispatch`), not from this number. 45 s rather than something
+     * tight because a deadline that expires inside the window would spend the
+     * job's one callback on a boot moment the gate then refuses - and the gate's
+     * refusal is cheap only until it costs the claim, which it does not, but it
+     * does cost the earlier of the two triggers.
+     */
+    const val OVERRIDE_DEADLINE_MS = 45_000L
+
     @Synchronized
     fun arm(context: Context): String {
         val bootId = DfrRootCoordinator.readBootId()
@@ -149,6 +172,7 @@ object DfrEarlyRoot {
             JobInfo.Builder(JOB_ID, component)
                 .setPersisted(true)
                 .setMinimumLatency(MINIMUM_LATENCY_MS)
+                .setOverrideDeadline(OVERRIDE_DEADLINE_MS)
                 .setExtras(PersistableBundle().apply {
                     putString(EarlyRootPolicy.EXTRA_GENERATION, generation)
                 })
@@ -231,20 +255,6 @@ object DfrEarlyRoot {
             "run inside the boot animation; a hard reboot is the recovery boundary."
     }
 
-    /**
-     * What the row says: the arm record AND this cycle's journal and trace.
-     *
-     * The arm record outlives the callback - the job is one-shot, so it never
-     * fires again, but nothing erases the file that says it was scheduled.
-     * Reporting only that record leaves the row reading ARMED after the cycle has
-     * already been spent, and an owner who trusts it spends a full reboot on a
-     * run that cannot happen.
-     *
-     * Which cycle a record belongs to is established by [arm], which archives the
-     * previous cycle before writing the new arm record - never inferred here from
-     * boot ids, which cannot tell a stale record from a fresh one when the owner
-     * re-arms in the boot the previous callback fired in.
-     */
     /**
      * Detect, persist and refuse an unresolved fatal incident. null means clear.
      *
@@ -384,7 +394,34 @@ object DfrEarlyRoot {
         return null
     }
 
-    fun armState(): String {
+    /**
+     * What the row says, derived from the records and from the scheduler.
+     *
+     * The row has to answer one question: if the owner reboots now, will an
+     * early run happen? Four facts decide it and the row used to read only one
+     * of them, which is how it reported ARMED over a cycle that was already
+     * spent and `CALLBACK_INCOMPLETE` over a callback that had refused cleanly
+     * and gone home - both observed on 2026-10-13, both sending the owner into
+     * a reboot that could not do anything.
+     *
+     * The four, in the order they are read:
+     *
+     *  1. the **arm record** - what was authorised, and for which build. It
+     *     outlives its cycle, so on its own it answers nothing;
+     *  2. the **cycle record** - whether that authorisation is still live, and
+     *     which boot it was bound to. This is the fact the row was missing;
+     *  3. the **journal and trace** - what the boot that consumed it actually
+     *     did, including a terminal refusal and its code;
+     *  4. the **scheduler**, for the one state the files cannot see: an arming
+     *     whose persisted job is no longer pending. That is not fatal any more
+     *     (the broadcast trigger covers it) and it is still worth saying,
+     *     because it names which trigger the next boot will be relying on.
+     *
+     * Nothing here is inferred from boot ids. Which cycle a record belongs to is
+     * established by [arm], which archives the previous cycle - journal, trace
+     * and cycle record together - before writing the new arm record.
+     */
+    fun armState(context: Context?): String {
         val record = EarlyRootStore.readArm()
             ?: return "EARLY_ROOT_NOT_ARMED"
         if (record == AutoRootPolicy.RECORD_UNREADABLE) return "EARLY_ROOT_ARM_UNKNOWN"
@@ -392,38 +429,110 @@ object DfrEarlyRoot {
             ?: return "EARLY_ROOT_ARM_MALFORMED"
         val armed = "job_id=${arm.jobId} namespace=${arm.namespace} " +
             "armed_boot_id=${arm.armedBootId}"
-        val journalRecord = EarlyRootStore.readJournal()
-        if (journalRecord == null) {
-            val trace = EarlyRootStore.readTrace()
-                ?: return "EARLY_ROOT_ARMED $armed"
-            if (trace == AutoRootPolicy.RECORD_UNREADABLE) {
-                return "EARLY_ROOT_TRACE_UNKNOWN $armed (trace unreadable)"
-            }
+        val bootId = DfrRootCoordinator.readBootId()
+        val cycleRecord = EarlyRootStore.readCycle()
+        if (cycleRecord == AutoRootPolicy.RECORD_UNREADABLE) {
+            return "EARLY_ROOT_CYCLE_UNKNOWN $armed (cycle record unreadable;" +
+                " every trigger refuses)"
+        }
+        val cycle = if (cycleRecord == null) null else {
+            EarlyRootPolicy.parseCycle(cycleRecord)
+                ?: return "EARLY_ROOT_CYCLE_MALFORMED $armed (every trigger refuses)"
+        }
+        if (cycle != null && cycle.generation != arm.generation) {
+            return "EARLY_ROOT_CYCLE_FOREIGN $armed\n" +
+                "A cycle record for arming ${cycle.generation} sits beside this" +
+                " arm record; every trigger refuses. Re-arm to archive it."
+        }
+        if (cycle != null && cycle.claimed()) {
+            return "EARLY_ROOT_SPENT $armed\n" +
+                "claimed_by=${cycle.trigger} claim_boot_id=${cycle.runBootId}" +
+                " claim_elapsed_ms=${cycle.claimElapsedMs}\n" +
+                outcome() + "\nCycle consumed. Re-arm before the next full reboot."
+        }
+        if (cycle != null && cycle.runBootId != bootId) {
             /*
-             * A trace without a journal is the shape that matters most to read
-             * correctly: the callback got far enough to record a step and never
-             * reached the service's claim. Saying ARMED there would invite a
-             * second reboot into an identical refusal.
+             * Bound to a boot that has passed without being claimed. The
+             * arming is spent in the only sense that matters - no trigger will
+             * accept it again - and the trace from that boot is the reason why.
              */
-            return "EARLY_ROOT_CALLBACK_INCOMPLETE $armed\n" +
-                "The callback ran and the dispatch did not reach its journal." +
-                " ${traceSummary(trace)}"
+            return "EARLY_ROOT_ARM_EXPIRED $armed\n" +
+                "bound_boot_id=${cycle.runBootId} bound_elapsed_ms=" +
+                "${cycle.boundElapsedMs}\n" + outcome() +
+                "\nThat boot ended without a claimed run. Re-arm before the next" +
+                " full reboot."
         }
-        if (journalRecord == AutoRootPolicy.RECORD_UNREADABLE) {
-            return "EARLY_ROOT_JOURNAL_UNKNOWN $armed (journal unreadable)"
+        if (cycle != null) {
+            // Bound to THIS boot and not claimed: the triggers of this boot
+            // either refused or have not arrived yet, and the trace says which.
+            return "EARLY_ROOT_UNCLAIMED_THIS_BOOT $armed\n" +
+                "bound_elapsed_ms=${cycle.boundElapsedMs}\n" + outcome()
         }
-        val journal = EarlyRootPolicy.parseJournal(journalRecord)
-            ?: return "EARLY_ROOT_JOURNAL_MALFORMED $armed"
-        val trace = EarlyRootStore.readTrace()
-        val summary = if (trace == null || trace == AutoRootPolicy.RECORD_UNREADABLE) {
-            "no readable trace"
+        /*
+         * No cycle record: nothing has bound this arming yet. Either the owner
+         * armed in this boot and has not rebooted (the normal state), or a boot
+         * happened in which no early trigger ran at all.
+         */
+        val waiting = if (arm.armedBootId == bootId) {
+            "EARLY_ROOT_ARMED"
         } else {
-            traceSummary(trace)
+            "EARLY_ROOT_ARMED_NO_TRIGGER_RAN"
         }
-        return "EARLY_ROOT_${journal.phase} $armed\n" +
-            "attempts=${journal.attempts} native_started=" +
-            "${if (journal.nativeStarted) 1 else 0} journal_boot_id=${journal.bootId}\n" +
-            "$summary\nCycle consumed. Re-arm before the next full reboot."
+        return "$waiting $armed\njob=${jobState(context)}" +
+            " deadline_ms=$OVERRIDE_DEADLINE_MS\n" +
+            "Triggers for the next full boot: the persisted job if the scheduler" +
+            " calls back, and LOCKED_BOOT_COMPLETED either way."
+    }
+
+    /**
+     * Is the persisted job still pending, as the scheduler sees it?
+     *
+     * Three answers, and UNKNOWN is one of them: no Context, no JobScheduler or
+     * a throwing lookup is missing evidence, not an absent job. ABSENT is not a
+     * failure state any more - the broadcast trigger does not need the job - so
+     * this is reported rather than acted on.
+     */
+    private fun jobState(context: Context?): String {
+        if (context == null) return "UNKNOWN"
+        return try {
+            val base = context.getSystemService(JobScheduler::class.java)
+                ?: return "UNKNOWN"
+            val scheduler =
+                if (Build.VERSION.SDK_INT >= 34) base.forNamespace(NAMESPACE) else base
+            val pending = scheduler.getPendingJob(JOB_ID)
+            when {
+                pending == null -> "ABSENT"
+                pending.service != ComponentName(context,
+                    DfrEarlyRootJobService::class.java) -> "FOREIGN"
+                else -> "PENDING"
+            }
+        } catch (t: Throwable) {
+            "UNKNOWN"
+        }
+    }
+
+    /** What the consumed or bound boot did, from the journal and the trace. */
+    private fun outcome(): String {
+        val journalRecord = EarlyRootStore.readJournal()
+        val trace = EarlyRootStore.readTrace()
+        val summary = when {
+            trace == null -> "no trace"
+            trace == AutoRootPolicy.RECORD_UNREADABLE -> "trace unreadable"
+            else -> traceSummary(trace)
+        }
+        val phase = when {
+            journalRecord == null -> "no journal (the dispatch never claimed a" +
+                " boot attempt)"
+            journalRecord == AutoRootPolicy.RECORD_UNREADABLE -> "journal unreadable"
+            else -> {
+                val journal = EarlyRootPolicy.parseJournal(journalRecord)
+                if (journal == null) "journal malformed"
+                else "phase=${journal.phase} attempts=${journal.attempts}" +
+                    " native_started=${if (journal.nativeStarted) 1 else 0}" +
+                    " journal_boot_id=${journal.bootId}"
+            }
+        }
+        return "$phase\n$summary"
     }
 
     /** The last accountable step of the stored trace, with its timestamp. */

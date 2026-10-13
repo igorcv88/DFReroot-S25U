@@ -78,6 +78,37 @@ public class EarlyRootPolicyTest {
         in.versionName = NAME;
         in.ksudSha256 = KSUD;
         in.deviceFingerprint = FP;
+        /*
+         * The two new elements every dispatch has to name, and the two new
+         * records it is weighed against. A fixture that left them unset would
+         * refuse on TRIGGER_UNRECOGNISED and nothing below would test anything -
+         * which is the failure mode of defaults, so they are set explicitly here
+         * and spoiled one at a time in the cases that own them.
+         */
+        in.trigger = EarlyRootPolicy.TRIGGER_JOB;
+        in.role = EarlyRootPolicy.ROLE_DISPATCH;
+        in.bootanimState = EarlyRootPolicy.BOOTANIM_RUNNING;
+        in.cycleRecord = null;      // nothing has bound this arming yet
+        return in;
+    }
+
+    /** A cycle record bound to this boot, for this arming, unclaimed. */
+    private static String boundCycle() {
+        return EarlyRootPolicy.formatCycle(EarlyRootPolicy.CYCLE_BOUND, GEN, BOOT,
+                EarlyRootPolicy.TRIGGER_NONE, 15_100L, -1L);
+    }
+
+    /** A cycle record claimed by one trigger, in this boot, for this arming. */
+    private static String claimedCycle(String trigger, String bootId) {
+        return EarlyRootPolicy.formatCycle(EarlyRootPolicy.CYCLE_CLAIMED, GEN,
+                bootId, trigger, 15_100L, 15_400L);
+    }
+
+    /** The service's side: a claimed run re-deriving the whole gate. */
+    private static EarlyRootPolicy.Inputs claimedRun() {
+        EarlyRootPolicy.Inputs in = ready();
+        in.role = EarlyRootPolicy.ROLE_CLAIMED_RUN;
+        in.cycleRecord = claimedCycle(EarlyRootPolicy.TRIGGER_JOB, BOOT);
         return in;
     }
 
@@ -1143,6 +1174,172 @@ public class EarlyRootPolicyTest {
                 AutoRootPolicy.PHASE_COMPLETE, 1, true);
         allowed(in, "a readable journal from a boot that reported is not refused by"
                 + " the unaccountable-journal checks");
+
+        // --- the trigger and the role are named, never defaulted -----------
+        // Two triggers reach this policy and they do not carry the same
+        // evidence; the two roles read the cycle record in opposite directions.
+        // A caller that does not say gets the refusing answer.
+        EarlyRootPolicy.Inputs in2 = ready();
+        in2.trigger = null;
+        refused(in2, EarlyRootPolicy.TRIGGER_UNRECOGNISED,
+                "a dispatch that names no trigger refuses");
+        in2.trigger = "expedited-job";
+        refused(in2, EarlyRootPolicy.TRIGGER_UNRECOGNISED,
+                "a trigger this policy has no evidence model for refuses");
+        in2 = ready();
+        in2.role = null;
+        refused(in2, EarlyRootPolicy.ROLE_UNRECOGNISED,
+                "a caller that does not say which side of the dispatch it is"
+                        + " refuses");
+        in2.role = "whatever";
+        refused(in2, EarlyRootPolicy.ROLE_UNRECOGNISED,
+                "an unrecognised role refuses rather than taking the permissive"
+                        + " reading");
+        in2 = ready();
+        in2.trigger = EarlyRootPolicy.TRIGGER_LOCKED_BOOT;
+        allowed(in2, "the deterministic LOCKED_BOOT_COMPLETED trigger is weighed by"
+                + " the same gate as the job callback");
+
+        // --- the boot animation is its own element -------------------------
+        // The fact the product requirement is stated in, and the one the 120 s
+        // window was standing in for. On 2026-10-13 the callback arrived with
+        // bootanim_exit=1 AND sys.boot_completed=1; these are separate facts and
+        // either one alone must refuse.
+        in2 = ready();
+        in2.bootanimState = EarlyRootPolicy.BOOTANIM_EXITED;
+        refused(in2, EarlyRootPolicy.BOOTANIM_ALREADY_EXITED,
+                "a run after the boot animation left the screen refuses even while"
+                        + " sys.boot_completed is still unset");
+        in2.bootanimState = EarlyBootProbePolicy.UNKNOWN;
+        refused(in2, EarlyRootPolicy.BOOTANIM_STATE_UNKNOWN,
+                "an unreadable service.bootanim.exit refuses; a reading nobody took"
+                        + " is not an animation still on screen");
+        in2.bootanimState = null;
+        refused(in2, EarlyRootPolicy.BOOTANIM_STATE_UNKNOWN,
+                "an absent boot-animation reading refuses");
+        in2.bootanimState = "0";
+        refused(in2, EarlyRootPolicy.BOOTANIM_STATE_UNKNOWN,
+                "the raw property value is not one of the three states and refuses;"
+                        + " the mapping belongs in EarlyRootEnv");
+        in2 = ready();
+        in2.bootCompletedState = EarlyRootPolicy.BOOT_NOT_COMPLETED;
+        in2.bootanimState = EarlyRootPolicy.BOOTANIM_RUNNING;
+        allowed(in2, "inside the animation and before boot completion is the early"
+                + " window");
+
+        // --- the cycle record: one arming, one boot, one claimed run --------
+        // What the scheduler used to provide by consuming the job, and what
+        // nothing provides for a broadcast that arrives in every boot.
+        String cycleBound = boundCycle();
+        EarlyRootPolicy.Cycle cycle = EarlyRootPolicy.parseCycle(cycleBound);
+        check(cycle != null && EarlyRootPolicy.CYCLE_BOUND.equals(cycle.state)
+                        && cycle.generation.equals(GEN) && cycle.runBootId.equals(BOOT)
+                        && !cycle.claimed() && cycle.claimElapsedMs == -1L,
+                "a bound cycle record parses and reports itself unclaimed");
+        EarlyRootPolicy.Cycle claimedParsed = EarlyRootPolicy.parseCycle(
+                claimedCycle(EarlyRootPolicy.TRIGGER_LOCKED_BOOT, BOOT));
+        check(claimedParsed != null && claimedParsed.claimed()
+                        && EarlyRootPolicy.TRIGGER_LOCKED_BOOT.equals(
+                                claimedParsed.trigger),
+                "a claimed cycle record names the trigger that claimed it");
+        check(EarlyRootPolicy.parseCycle(cycleBound + "unknown=1\n") == null,
+                "an unknown cycle key refuses");
+        check(EarlyRootPolicy.parseCycle(
+                        cycleBound.replace("run_boot_id=" + BOOT + "\n", "")) == null,
+                "a missing cycle key refuses");
+        check(EarlyRootPolicy.parseCycle(cycleBound.replace(
+                        "state=" + EarlyRootPolicy.CYCLE_BOUND, "state=WHATEVER"))
+                        == null,
+                "an unrecognised cycle state refuses");
+        check(EarlyRootPolicy.parseCycle(cycleBound.replace(
+                        "trigger=" + EarlyRootPolicy.TRIGGER_NONE,
+                        "trigger=" + EarlyRootPolicy.TRIGGER_JOB)) == null,
+                "a BOUND cycle that names a claiming trigger refuses: nothing has"
+                        + " claimed it, so the field would be a claim nobody made");
+        check(EarlyRootPolicy.parseCycle(claimedCycle(
+                        EarlyRootPolicy.TRIGGER_NONE, BOOT)) == null,
+                "a CLAIMED cycle that names no trigger refuses: the trigger is the"
+                        + " only field that says which path reached the chain");
+        check(EarlyRootPolicy.parseCycle(claimedCycle(
+                        EarlyRootPolicy.TRIGGER_JOB, BOOT)
+                        .replace("claim_elapsed_ms=15400", "claim_elapsed_ms=-1"))
+                        == null,
+                "a CLAIMED cycle with no claim timestamp refuses; it orders nothing");
+        check(EarlyRootPolicy.parseCycle(
+                        cycleBound.replace("claim_elapsed_ms=-1",
+                                "claim_elapsed_ms=15400")) == null,
+                "a BOUND cycle carrying a claim timestamp refuses");
+        check(EarlyRootPolicy.parseCycle(AutoRootPolicy.RECORD_UNREADABLE) == null,
+                "an unreadable cycle record does not parse as a cycle");
+
+        in2 = ready();
+        in2.cycleRecord = AutoRootPolicy.RECORD_UNREADABLE;
+        refused(in2, EarlyRootPolicy.CYCLE_UNREADABLE,
+                "an unreadable cycle record refuses: it may say this arming was"
+                        + " already claimed");
+        in2.cycleRecord = "state=nonsense\n";
+        refused(in2, EarlyRootPolicy.CYCLE_MALFORMED,
+                "a cycle record this build cannot account for refuses");
+        in2.cycleRecord = EarlyRootPolicy.formatCycle(EarlyRootPolicy.CYCLE_BOUND,
+                STALE_GEN, BOOT, EarlyRootPolicy.TRIGGER_NONE, 15_100L, -1L);
+        refused(in2, EarlyRootPolicy.CYCLE_FOREIGN,
+                "a cycle belonging to another arming refuses rather than being"
+                        + " treated as absent; the arming archives it or refuses");
+        in2.cycleRecord = claimedCycle(EarlyRootPolicy.TRIGGER_JOB, BOOT);
+        refused(in2, EarlyRootPolicy.ARM_ALREADY_CLAIMED,
+                "a trigger finding this arming already claimed in this boot refuses:"
+                        + " one arming, one run, whichever trigger got there first");
+        in2.cycleRecord = claimedCycle(EarlyRootPolicy.TRIGGER_LOCKED_BOOT, DEAD_BOOT);
+        refused(in2, EarlyRootPolicy.ARM_ALREADY_CLAIMED,
+                "an arming claimed in an EARLIER boot stays claimed; the arm record"
+                        + " outliving its cycle is exactly what this record fixes");
+        in2.cycleRecord = EarlyRootPolicy.formatCycle(EarlyRootPolicy.CYCLE_BOUND,
+                GEN, DEAD_BOOT, EarlyRootPolicy.TRIGGER_NONE, 15_100L, -1L);
+        refused(in2, EarlyRootPolicy.ARM_EXPIRED,
+                "an arming bound to a boot that has passed refuses: a broadcast"
+                        + " arrives in every boot, and one arming is for one boot");
+        in2.cycleRecord = cycleBound;
+        allowed(in2, "an arming bound to THIS boot and not yet claimed is still"
+                + " live for the second trigger of the same boot");
+
+        // --- the claimed run's side of the same record ----------------------
+        // The service's authorisation is a claim of its own, not merely a gate
+        // that passes. Anything sharing our uid can call startService.
+        EarlyRootPolicy.Inputs run = claimedRun();
+        allowed(run, "a service whose claim names this arming and this boot is"
+                + " authorised");
+        run = claimedRun();
+        run.cycleRecord = null;
+        refused(run, EarlyRootPolicy.CLAIM_MISSING,
+                "a service started with no claim on disk refuses: a run nothing"
+                        + " claimed is a run no trigger authorised");
+        run = claimedRun();
+        run.cycleRecord = boundCycle();
+        refused(run, EarlyRootPolicy.CLAIM_MISSING,
+                "a BOUND cycle is not a claim; the service still refuses");
+        run = claimedRun();
+        run.cycleRecord = claimedCycle(EarlyRootPolicy.TRIGGER_JOB, DEAD_BOOT);
+        refused(run, EarlyRootPolicy.CLAIM_NOT_THIS_BOOT,
+                "a claim from an earlier boot cannot authorise a service restarted"
+                        + " into this one");
+        run = claimedRun();
+        run.callbackGeneration = STALE_GEN;
+        /*
+         * Transitively, and earlier: the relayed token is compared to the arm
+         * record (GENERATION_MISMATCH) and the cycle is compared to the arm
+         * record (CYCLE_FOREIGN), so a relayed token that is not the claimed
+         * arming's cannot reach the claim check. This case exists to prove the
+         * composition holds, so that nobody adds a third comparison that no
+         * input can reach.
+         */
+        refused(run, EarlyRootPolicy.GENERATION_MISMATCH,
+                "a relayed generation that is not the claimed arming's refuses"
+                        + " before the claim is read at all");
+        run = claimedRun();
+        run.cycleRecord = EarlyRootPolicy.formatCycle(EarlyRootPolicy.CYCLE_CLAIMED,
+                STALE_GEN, BOOT, EarlyRootPolicy.TRIGGER_JOB, 15_100L, 15_400L);
+        refused(run, EarlyRootPolicy.CYCLE_FOREIGN,
+                "a claim naming another arming refuses for the claimed run too");
 
         check(EarlyRootPolicy.MAX_ATTEMPTS_PER_BOOT == 1,
                 "the early path is one attempt per boot: there is no retry loop to"

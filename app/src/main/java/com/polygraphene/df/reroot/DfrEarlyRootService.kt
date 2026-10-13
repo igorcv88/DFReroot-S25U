@@ -72,6 +72,10 @@ class DfrEarlyRootService : Service() {
         // GENERATION_MISSING rather than skipping the comparison.
         val callbackGeneration = intent?.getStringExtra(
             EarlyRootPolicy.EXTRA_GENERATION) ?: ""
+        // Telemetry, and a better refusal when no claim can be read. See
+        // trigger(): the claim record is what this role is gated on.
+        val intentTrigger = intent?.getStringExtra(
+            DfrEarlyRootDispatch.EXTRA_TRIGGER) ?: ""
         Log.i(TAG, "[DFR][EARLY_ROOT][TIMELINE] service_start" +
             " service_elapsed_ms=$serviceStartMs" +
             " callback_elapsed_ms=$callbackElapsedMs")
@@ -97,7 +101,7 @@ class DfrEarlyRootService : Service() {
                     Log.e(TAG, "[DFR][EARLY_ROOT] no wakelock: $t")
                     null
                 }
-                drive(serviceStartMs, callbackGeneration)
+                drive(serviceStartMs, callbackGeneration, intentTrigger)
             } catch (t: Throwable) {
                 Log.e(TAG, "[DFR][EARLY_ROOT] FAIL unexpected: $t", t)
             } finally {
@@ -112,7 +116,8 @@ class DfrEarlyRootService : Service() {
     }
 
     /** One pass: re-derive the gate, claim the boot's single attempt, run once. */
-    private fun drive(serviceStartMs: Long, callbackGeneration: String) {
+    private fun drive(serviceStartMs: Long, callbackGeneration: String,
+                      intentTrigger: String) {
         val context = applicationContext
         val bootId = DfrRootCoordinator.readBootId()
         if (bootId.isEmpty()) {
@@ -138,7 +143,7 @@ class DfrEarlyRootService : Service() {
          */
         val readiness = StageHop.probeReadiness(context)
         val decision = EarlyRootPolicy.evaluate(
-            inputs(bootId, readiness.state, callbackGeneration))
+            inputs(bootId, readiness.state, callbackGeneration, intentTrigger))
         if (!decision.allow) {
             Log.i(TAG, "[DFR][EARLY_ROOT] REFUSED ${decision.code}: ${decision.reason}")
             trace(bootId, EarlyRootPolicy.STEP_REFUSED,
@@ -293,6 +298,25 @@ class DfrEarlyRootService : Service() {
                             " boot_state=$bootNow at the point of no return")
                     return false
                 }
+                /*
+                 * And the animation, for the same reason and with the same
+                 * timing risk. It is a separate reading because it is a separate
+                 * fact (3.7) and because it is the one the product requirement
+                 * is stated in: the two properties move at different moments on
+                 * this firmware, so a run that is still before boot completion
+                 * can already have lost the screen. Nothing has been written
+                 * yet, so the cheap thing to do is refuse.
+                 */
+                val animNow = EarlyRootEnv.bootanimState()
+                if (animNow != EarlyRootPolicy.BOOTANIM_RUNNING) {
+                    Log.e(TAG, "[DFR][EARLY_ROOT] REFUSED boot animation state at" +
+                        " the point of no return is $animNow, not " +
+                        EarlyRootPolicy.BOOTANIM_RUNNING)
+                    trace(bootId, EarlyRootPolicy.STEP_REFUSED,
+                        "code=${EarlyRootPolicy.BOOTANIM_ALREADY_EXITED}" +
+                            " bootanim_state=$animNow at the point of no return")
+                    return false
+                }
                 val journalled = EarlyRootStore.journalPhase(
                     bootId, AutoRootPolicy.PHASE_STARTED, ATTEMPT_NO, true)
                 if (journalled != null) {
@@ -387,46 +411,52 @@ class DfrEarlyRootService : Service() {
         return failure
     }
 
+    /**
+     * Every input the policy weighs, through the one builder both triggers use.
+     *
+     * Three copies of this assembly - two triggers and this service - would be
+     * three places a field can be left unset, and an unset field is a gate fed
+     * nothing, which refuses nothing. What is passed here rather than read is
+     * what is genuinely this caller's: it was not called back by the scheduler,
+     * so it asserts the identity it is supposed to be running under and the
+     * policy compares that against the arm record, exactly as before.
+     */
     private fun inputs(bootId: String, readinessState: String,
-                       callbackGeneration: String): EarlyRootPolicy.Inputs {
-        val in0 = EarlyRootPolicy.Inputs()
-        in0.armRecord = EarlyRootStore.readArm()
-        in0.journalRecord = EarlyRootStore.readJournal()
-        /*
-         * And Auto Root's journal for this boot. Auto Root is triggered by
-         * LOCKED_BOOT_COMPLETED, which arrives at 17.6-19.7 s on this device,
-         * so it can reach transaction 5 before a late-restored early callback -
-         * and if its native side failed before stage1 created /dev/df, the
-         * marker probe answers a clean ENOENT and nothing else would refuse.
-         */
-        in0.autoRootJournalRecord = AutoRootStore.journal()
-        // An earlier boot that reached transaction 5 and never reported.
-        // Read here as well as at the arming, because a job already
-        // pending never goes through the arming again.
-        in0.incidentRecord = EarlyRootStore.readIncident()
-        in0.qualificationRecord = AutoRootStore.qualification()
-        in0.currentBootId = bootId
-        /*
-         * The service was not called back by the scheduler, so it cannot observe
-         * the binding directly. It asserts the identity it is supposed to be
-         * running under, which the policy then compares against the arm record -
-         * so an arm record naming a different job id or namespace still refuses
-         * here, exactly as it does in the callback.
-         */
-        in0.callbackJobId = DfrEarlyRoot.JOB_ID
-        in0.callbackNamespace = DfrEarlyRoot.namespaceForRuntime()
-        in0.expectedNamespace = DfrEarlyRoot.namespaceForRuntime()
-        in0.readinessState = readinessState
-        in0.callbackElapsedMs = EarlyRootEnv.monotonicNow()
-        in0.callbackGeneration = callbackGeneration
-        in0.bootCompletedState = EarlyRootEnv.bootCompletedState()
-        in0.markerState = DfrRootCoordinator.markerState()
-        in0.liveSelinux = DfrRootCoordinator.readLiveSelinux()
-        in0.versionCode = AutoRootStore.versionCode()
-        in0.versionName = AutoRootStore.versionName()
-        in0.ksudSha256 = KsudStage.pinnedKsudSha256()
-        in0.deviceFingerprint = AutoRootStore.deviceFingerprint()
-        return in0
+                       callbackGeneration: String,
+                       intentTrigger: String): EarlyRootPolicy.Inputs {
+        val cycleRecord = EarlyRootStore.readCycle()
+        return DfrEarlyRootDispatch.inputs(
+            applicationContext, bootId, trigger(cycleRecord, intentTrigger),
+            EarlyRootPolicy.ROLE_CLAIMED_RUN,
+            EarlyRootStore.readArm(), cycleRecord, readinessState,
+            DfrEarlyRoot.JOB_ID, DfrEarlyRoot.namespaceForRuntime(),
+            callbackGeneration, EarlyRootEnv.monotonicNow()
+        )
+    }
+
+    /**
+     * Which trigger claimed this run - out of the CLAIM, not out of the intent.
+     *
+     * The cycle record is written by the dispatcher through a root-owned path
+     * and names the trigger that claimed the arming, so it is the authority
+     * here. The intent extra is used for one thing only: when there is no
+     * readable claim at all, it lets the refusal be the accurate
+     * `EARLY_ROOT_CLAIM_MISSING` instead of the misleading
+     * `EARLY_ROOT_TRIGGER_UNRECOGNISED`. It can never authorise anything -
+     * anything sharing our uid can set an intent extra, and the claim is what
+     * this role is gated on.
+     */
+    private fun trigger(cycleRecord: String?, intentTrigger: String): String {
+        val claimed = EarlyRootPolicy.parseCycle(cycleRecord)?.trigger
+        if (claimed == EarlyRootPolicy.TRIGGER_JOB
+            || claimed == EarlyRootPolicy.TRIGGER_LOCKED_BOOT) {
+            return claimed
+        }
+        if (intentTrigger == EarlyRootPolicy.TRIGGER_JOB
+            || intentTrigger == EarlyRootPolicy.TRIGGER_LOCKED_BOOT) {
+            return intentTrigger
+        }
+        return ""
     }
 
     companion object {
