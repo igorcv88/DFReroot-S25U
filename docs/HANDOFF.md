@@ -38,7 +38,7 @@ acceptance criteria for the next signed build. If this file disagrees with
 > pair works and recovered the device in `46cfa993…`.
 >
 > The early window is now **refused for every artefact** —
-> `EarlyRootPolicy.EARLY_LOAD_CLEARED_ARTEFACTS` is an empty allowlist of
+> `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` is an empty allowlist of
 > (fingerprint, ksud digest) pairs, enforced in the complete gate and at the
 > arming. The probe, the manual run and Auto Root are unaffected.
 >
@@ -46,7 +46,7 @@ acceptance criteria for the next signed build. If this file disagrees with
 > `my_actor` manipulates is reachable from both discovery passes. If each
 > `search_manager` owns its list on its own stack, overlap cannot explain the
 > corruption and the fault is in shared throne/manager state — a different
-> patch. `docs/EARLY_ROOT.md` §11 is what clearing a pair requires; the
+> patch. `docs/EARLY_ROOT.md` §11 is what authorizing a pair requires; the
 > dossier's *Early Integrated Root — first physical run, kernel panic* is the
 > evidence.
 >

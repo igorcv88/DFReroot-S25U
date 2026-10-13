@@ -179,13 +179,13 @@ public final class EarlyRootPolicy {
     public static final String SELINUX_NOT_ENFORCING = "EARLY_ROOT_SELINUX_NOT_ENFORCING";
     public static final String READINESS_REFUSED = "EARLY_ROOT_NETWORKSTACK_NOT_READY";
     /**
-     * The (firmware, daemon) pair has no physically validated early load.
+     * The owner has not authorized an early load of this (firmware, daemon) pair.
      *
      * Its own code because it is not a property of the cycle, the arming or the
      * boot - it is a property of the ARTEFACT, and it refuses before any of the
      * rest is even read.
      */
-    public static final String ARTEFACT_NOT_CLEARED = "EARLY_ROOT_ARTEFACT_NOT_CLEARED";
+    public static final String ARTEFACT_NOT_AUTHORIZED = "EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED";
 
     /*
      * The durable trace steps, in the order one boot can pass through them.
@@ -301,8 +301,27 @@ public final class EarlyRootPolicy {
             "boot_id", "phase", "attempts", "native_started");
 
     /*
-     * The (device fingerprint, ksud SHA-256) pairs whose EARLY load has been
-     * physically validated.
+     * The (device fingerprint, ksud SHA-256) pairs whose EARLY load the owner
+     * has authorized.
+     *
+     * AUTHORIZED, not "validated", and the distinction is the whole contract.
+     * An earlier version of this comment said an entry required three
+     * successful early boots on the pair - which was circular, because the
+     * dispatch refuses until the pair is listed, so those boots could never be
+     * collected. Codex review on PR #54 caught it.
+     *
+     * What this list gates is therefore permission to make the ATTEMPT, taken
+     * by the owner in the open, for a pair whose module defect has been closed
+     * offline first (docs/EARLY_ROOT.md section 11). What three boots buy is the
+     * dossier promotion of EARLY_ROOT_* to physical PASS - evidence, recorded
+     * where evidence lives. The code gates identity; the dossier records what
+     * that identity has proven. Every other gate in this repository is split
+     * the same way.
+     *
+     * It is NOT an at-own-risk marker, and must not become one. Section 3.6
+     * forbids an agent adding a second, more permissive "trial" tier beside
+     * this one: there is one list, every entry is a deliberate owner decision
+     * naming one exact pair, and an agent may only ever leave it empty.
      *
      * It is deliberately EMPTY, and an allowlist rather than a denylist, which
      * is the whole point. A denylist of the artefact that panicked would let the
@@ -352,15 +371,13 @@ public final class EarlyRootPolicy {
      * The fingerprint is in the key because the same daemon on another firmware
      * is another experiment: the early window's contents are the platform's.
      *
-     * Adding an entry requires what docs/EARLY_ROOT.md section 8 requires -
-     * three consecutive full boots reaching `EARLY_ROOT_POST_ROOT_COMPLETE` and
-     * `EARLY_ROOT_SELINUX_ENFORCING` before `BOOT_COMPLETED`, with no `_KP`
-     * DropBox entry in that boot or the next. A manual late-load PASS is not
-     * that evidence: the manual path works on this exact pair - it is how the
-     * device was recovered on 2026-10-12 - and it is precisely the comparison
-     * that shows the defect is specific to loading this early.
+     * docs/EARLY_ROOT.md section 11 is what an entry costs. A manual late-load
+     * PASS is explicitly not part of it: the manual path works on the exact
+     * pair that panicked - it is how the device was recovered on 2026-10-12 -
+     * which is what makes it the control that isolates the defect to load time,
+     * never evidence for the early window.
      */
-    private static final Set<String> EARLY_LOAD_CLEARED_ARTEFACTS = Set.of();
+    private static final Set<String> EARLY_LOAD_AUTHORIZED_ARTEFACTS = Set.of();
 
     private EarlyRootPolicy() {}
 
@@ -376,9 +393,9 @@ public final class EarlyRootPolicy {
      * so a reader can see that the arming check and the gate consult one list.
      * The gate is the authority; the arming check is ergonomics on top of it.
      */
-    public static boolean earlyLoadCleared(String deviceFingerprint, String ksudSha256) {
+    public static boolean earlyLoadAuthorized(String deviceFingerprint, String ksudSha256) {
         if (blank(deviceFingerprint) || blank(ksudSha256)) return false;
-        return EARLY_LOAD_CLEARED_ARTEFACTS.contains(
+        return EARLY_LOAD_AUTHORIZED_ARTEFACTS.contains(
                 artefactKey(deviceFingerprint.trim(), ksudSha256.trim()));
     }
 
@@ -1061,19 +1078,18 @@ public final class EarlyRootPolicy {
          *    cannot be invalidated by anything the checks above observe.
          *
          * Nothing is weakened by the position: this is inside the one function
-         * both entry points call, so an uncleared pair can never reach `allow`.
+         * both entry points call, so an unauthorized pair can never reach `allow`.
          *
          * Blank inputs refuse rather than being skipped. An unreadable
-         * fingerprint or a daemon with no pinned digest is not a cleared
+         * fingerprint or a daemon with no pinned digest is not an authorized
          * artefact; it is no evidence about one.
          */
-        if (!earlyLoadCleared(in.deviceFingerprint, in.ksudSha256)) {
-            return refuse(ARTEFACT_NOT_CLEARED, "no physically validated early load"
-                    + " exists for this firmware and daemon/module pair"
+        if (!earlyLoadAuthorized(in.deviceFingerprint, in.ksudSha256)) {
+            return refuse(ARTEFACT_NOT_AUTHORIZED, "the early window is not"
+                    + " authorized for this firmware and daemon/module pair"
                     + " (fingerprint=" + in.deviceFingerprint + " ksud="
-                    + in.ksudSha256 + "); the early window is suspended for it."
-                    + " The manual run and Auto Root after a full boot are"
-                    + " unaffected");
+                    + in.ksudSha256 + "). The manual run and Auto Root after a"
+                    + " full boot are unaffected");
         }
         return new Decision(true, ALLOW, "EARLY_ROOT_PREFLIGHT=PASS");
     }

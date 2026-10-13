@@ -19,9 +19,9 @@ the two disagree about evidence, the dossier wins.
 > one raised by a `packages.list` change event.
 >
 > **The early window is now refused for every artefact.**
-> `EarlyRootPolicy.EARLY_LOAD_CLEARED_ARTEFACTS` is an empty allowlist of
+> `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` is an empty allowlist of
 > (fingerprint, ksud digest) pairs; the gate and `DfrEarlyRoot.arm()` both
-> refuse with `EARLY_ROOT_ARTEFACT_NOT_CLEARED`. §11 below says what clearing a
+> refuse with `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED`. §11 below says what clearing a
 > pair requires. The probe, the manual run and Auto Root after a full boot are
 > unaffected.
 >
@@ -365,40 +365,63 @@ list: `dev.bootcomplete` / `dev.platform_bootcomplete` in a boot where nothing
 restarted userspace, and the same two after one that did. Until that exists,
 every coordination design for the handshake is a guess.
 
-## 11. Clearing an artefact after the panic
+## 11. Authorizing an artefact after the panic
 
-The allowlist is a statement about bytes, so clearing a pair is a statement
-about bytes too. `EarlyRootPolicy.EARLY_LOAD_CLEARED_ARTEFACTS` takes
-`artefactKey(fingerprint, ksudSha256)` and nothing else; `tools/profile_binding_audit.py`
-refuses a raw entry, refuses the digest that panicked, and refuses a mutable
-list.
+> An earlier version of this section required three successful early boots
+> before a pair could be listed — which was circular, since the dispatch
+> refuses until the pair is listed. Codex review on PR #54 caught it. The
+> contract below is the corrected one.
 
-What a new entry needs, in this order:
+The list gates **permission to make the attempt**, not proven safety. It is
+named `EARLY_LOAD_AUTHORIZED_ARTEFACTS` for that reason, it takes
+`artefactKey(fingerprint, ksudSha256)` and nothing else, and
+`tools/profile_binding_audit.py` refuses a raw entry, refuses the digest that
+panicked, and refuses a mutable list.
 
-1. **A corrected `kernelsu.ko`, as a new ksud digest.** The module is embedded
-   into ksud by the RMGLabs exact-port workflow, so there is no way to change
-   one without changing the other. A pair that keeps digest
-   `f680f959…` is the pair that panicked, whatever else was done to it.
-2. **The root cause closed, not just the symptom.** The decisive question is
-   answerable from the binary with no device: is the list `my_actor` manipulates
-   reachable from both discovery passes? If each `search_manager` owns its list
-   on its own stack, overlap cannot explain the corruption and the fault lies in
-   shared throne/manager state instead — a different patch. Close that fork
-   first; a lock added to the wrong object replaces a panic with a deadlock, and
-   a scan put under a spinlock is worse than either.
+**It is not an at-own-risk marker and must not grow one.** AGENTS.md 3.6
+forbids a second, more permissive "trial" tier beside it: one list, every entry
+a deliberate owner decision naming one exact pair, and the only change an agent
+may make to it is none.
+
+### What an entry costs — all of it before the first attempt
+
+1. **A corrected `kernelsu.ko`, arriving as a new ksud digest.** The module is
+   embedded into ksud by the RMGLabs exact-port workflow, so neither can change
+   without the other. A pair still carrying digest `f680f959…` is the pair that
+   panicked, whatever else was done to it, and the static guard refuses it
+   permanently.
+2. **The root cause closed, not the symptom.** The decisive question needs no
+   device: is the list `my_actor` manipulates reachable from both discovery
+   passes? If each `search_manager` owns its list on its own stack, overlap
+   cannot explain the corruption and the fault is in shared throne/manager
+   state instead — a different patch. Close that fork first; a lock on the wrong
+   object trades the panic for a deadlock, and a `/data/app` scan under a
+   spinlock is worse than either.
 3. **Never by disabling the check that caught it.** `CONFIG_DEBUG_LIST` is why
-   this was a panic at 22.7 s instead of silent corruption discovered later.
-4. **Concurrency proven off this device.** A harness that forces a
-   `packages.list` change during `INITIALIZING` and repeated notifications
-   during enumeration, under `CONFIG_DEBUG_LIST` and KASAN where available, over
-   many interleavings. Not on the owner's phone.
-5. **The three-boot criterion of §8**, unchanged. A manual late-load PASS does
-   **not** clear a pair: the manual path already works on the pair that
-   panicked — it is how the device was recovered — so manual success is the
-   control that isolates the defect, never evidence for the early window.
-6. **The entry carries its evidence.** Boot ids, dates and the trace steps that
-   closed each of the three boots go in the dossier beside the digest, the way
-   every other promotion in this repository does.
+   this was a panic at 22.7 s rather than silent corruption found later.
+4. **Concurrency proven off this device.** A harness forcing a `packages.list`
+   change during `INITIALIZING` and repeated notifications during enumeration,
+   under `CONFIG_DEBUG_LIST` and KASAN where available, over many interleavings.
+   Not on the owner's phone.
 
-Nothing above may be traded for a schedule. The only thing an agent may do to
-this allowlist without the owner deciding in the open is leave it empty.
+Only then does the owner add the pair, in a PR, with items 1–4 named beside the
+digest in the dossier.
+
+### What three boots are for
+
+They are not what authorizes the attempt; they are what **promotes the
+evidence**. The first authorized early run on a corrected pair is still a
+kernel-risk experiment, to be treated as §8 describes and never repeated
+automatically. `EARLY_ROOT_DISPATCH`, `EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED`
+and `EARLY_ROOT_BOOT_HEALTH` move to physical PASS in
+`docs/S25U_ZZIC_COMPATIBILITY.md` only on the §8 criterion — three consecutive
+full boots, one `boot_id` each, with no `_KP` DropBox entry in that boot or the
+next.
+
+So the code gates identity and the dossier records what that identity has
+proven. Every other gate in this repository is split the same way.
+
+**A manual late-load PASS authorizes nothing.** The manual path works on the
+exact pair that panicked — it is how the device was recovered on 2026-10-12 —
+which is what makes it the control that isolates the defect to load time, and
+never evidence for the early window.

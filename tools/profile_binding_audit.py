@@ -2667,11 +2667,11 @@ def audit():
     # that evidence came back negative.
     #
     # The guard is an ALLOWLIST of (fingerprint, ksud digest) pairs with a
-    # validated early load, and it must stay one. A denylist of the artefact
+    # authorized early load, and it must stay one. A denylist of the artefact
     # that panicked would let the next untested pair through by default, which
     # is the absence-as-permission shape section 2 forbids.
     allow_match = re.search(
-        r"EARLY_LOAD_CLEARED_ARTEFACTS\s*=\s*Set\.of\(([^;]*)\);",
+        r"EARLY_LOAD_AUTHORIZED_ARTEFACTS\s*=\s*Set\.of\(([^;]*)\);",
         early_root_policy_src, flags=re.S)
     if not allow_match:
         fail("the early-load allowlist is gone; the early window would be open "
@@ -2694,13 +2694,30 @@ def audit():
             fail("the early-load allowlist holds raw entries that did not go "
                  "through artefactKey(); half a key would let a daemon cleared "
                  "on one firmware run on another")
-    for required in ("private static final Set<String> EARLY_LOAD_CLEARED_ARTEFACTS",
-                     "public static boolean earlyLoadCleared(",
-                     "ARTEFACT_NOT_CLEARED"):
+    for required in ("private static final Set<String> EARLY_LOAD_AUTHORIZED_ARTEFACTS",
+                     "public static boolean earlyLoadAuthorized(",
+                     "ARTEFACT_NOT_AUTHORIZED"):
         if required not in early_root_policy_src:
             fail("the early-load suspension lost %r" % required)
+    # --- no second, more permissive tier beside it --------------------------
+    # AGENTS.md 3.6: "Restoring an at-own-risk opt-in is a policy decision for
+    # the repository owner, made in the open. It is not a patch an agent applies
+    # because a run is inconvenient." A "trial"/"experimental"/"at own risk"
+    # list that permits an early dispatch on a pair nobody authorized is that
+    # opt-in with a new name, and an automated review suggested exactly it on
+    # PR #54. The circularity that suggestion was answering is real and was
+    # fixed by naming what the one list gates - permission to attempt, with the
+    # three-boot criterion promoting the dossier afterwards - not by adding a
+    # tier.
+    for banned in ("TRIAL_ARTEFACTS", "EXPERIMENTAL_ARTEFACTS",
+                   "AT_OWN_RISK", "earlyLoadTrial", "ACCEPT_KERNEL_RISK"):
+        if banned in early_root_policy_src:
+            fail("a second, more permissive early-load tier (%r) is back beside "
+                 "the authorized list; that is the at-own-risk opt-in 3.6 "
+                 "removed, and only the repository owner may restore one" % banned)
+
     # Immutable. A list something can add to at run time is not a gate.
-    if re.search(r"EARLY_LOAD_CLEARED_ARTEFACTS\s*\.\s*(add|remove|clear)\(",
+    if re.search(r"EARLY_LOAD_AUTHORIZED_ARTEFACTS\s*\.\s*(add|remove|clear)\(",
                  early_root_policy_src):
         fail("the early-load allowlist is mutated at run time; it may only be a "
              "compile-time statement about bytes that were physically validated")
@@ -2708,7 +2725,7 @@ def audit():
     # other gate stays falsifiable while the allowlist is empty.
     suspension_order = order(early_root_policy_src,
                              "READINESS_REFUSED, \"StageHop readiness is \"",
-                             "if (!earlyLoadCleared(in.deviceFingerprint, in.ksudSha256))",
+                             "if (!earlyLoadAuthorized(in.deviceFingerprint, in.ksudSha256))",
                              'return new Decision(true, ALLOW, "EARLY_ROOT_PREFLIGHT=PASS")')
     if suspension_order is None or suspension_order != sorted(suspension_order):
         fail("the early-load suspension is not the last check of the complete "
@@ -2718,13 +2735,13 @@ def audit():
     # And refused at the arming too, so the owner is not told by a reboot.
     # The exact branch shape, not just the call: `if (false && !cleared(...))`
     # keeps the call text and defeats a guard that only looks for the name.
-    if "if (!EarlyRootPolicy.earlyLoadCleared(" not in early_root_arm_src:
+    if "if (!EarlyRootPolicy.earlyLoadAuthorized(" not in early_root_arm_src:
         fail("arming does not refuse on the early-load allowlist (the "
-             "`if (!EarlyRootPolicy.earlyLoadCleared(` branch is gone or was "
+             "`if (!EarlyRootPolicy.earlyLoadAuthorized(` branch is gone or was "
              "short-circuited); the owner would spend a full reboot to be "
              "refused, on the artefact that panicked")
     arm_suspension = order(early_root_arm_src,
-                           "EarlyRootPolicy.earlyLoadCleared(",
+                           "EarlyRootPolicy.earlyLoadAuthorized(",
                            "scheduler.schedule(job)")
     if arm_suspension is None or arm_suspension != sorted(arm_suspension):
         fail("arming schedules the job before checking the early-load "

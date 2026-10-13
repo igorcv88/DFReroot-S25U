@@ -93,7 +93,7 @@ public class EarlyRootPolicyTest {
      * It used to assert `d.allow`, and that stopped being the right assertion
      * when the early window was suspended for every artefact: the allowlist in
      * EarlyRootPolicy is empty, so a cycle with nothing wrong with it now ends
-     * on ARTEFACT_NOT_CLEARED. Weakening these to "refuses with something" would
+     * on ARTEFACT_NOT_AUTHORIZED. Weakening these to "refuses with something" would
      * have thrown away what they test, and asserting `allow` would have required
      * un-suspending the window from a test.
      *
@@ -105,7 +105,7 @@ public class EarlyRootPolicyTest {
      */
     private static void allowed(EarlyRootPolicy.Inputs in, String what) {
         EarlyRootPolicy.Decision d = EarlyRootPolicy.evaluate(in);
-        check(d.allow || EarlyRootPolicy.ARTEFACT_NOT_CLEARED.equals(d.code),
+        check(d.allow || EarlyRootPolicy.ARTEFACT_NOT_AUTHORIZED.equals(d.code),
                 what + " (code=" + d.code + " reason=" + d.reason + ")");
     }
 
@@ -668,29 +668,29 @@ public class EarlyRootPolicyTest {
         // allowlist rather than a denylist because "we have not tested this pair
         // yet" must not read as permission.
         in = ready();
-        refused(in, EarlyRootPolicy.ARTEFACT_NOT_CLEARED,
+        refused(in, EarlyRootPolicy.ARTEFACT_NOT_AUTHORIZED,
                 "a cycle with nothing else wrong with it still refuses: no"
                         + " validated early load exists for this pair");
-        check(!EarlyRootPolicy.earlyLoadCleared(FP, KSUD),
+        check(!EarlyRootPolicy.earlyLoadAuthorized(FP, KSUD),
                 "the ZZIC pair is not cleared for an early load");
-        check(!EarlyRootPolicy.earlyLoadCleared(
+        check(!EarlyRootPolicy.earlyLoadAuthorized(
                         "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
                                 + "S938BXXUCDZIF_OXMCDZIF:user/release-keys",
                         "f680f959472e994110eb1281d6aa47ed3cd934ae5775f5e9e378a2e94"
                                 + "6ae69e3"),
                 "the exact DZIF pair whose early load panicked the kernel is not"
                         + " cleared");
-        check(!EarlyRootPolicy.earlyLoadCleared(null, KSUD)
-                        && !EarlyRootPolicy.earlyLoadCleared(FP, null)
-                        && !EarlyRootPolicy.earlyLoadCleared("", "")
-                        && !EarlyRootPolicy.earlyLoadCleared(FP, ""),
+        check(!EarlyRootPolicy.earlyLoadAuthorized(null, KSUD)
+                        && !EarlyRootPolicy.earlyLoadAuthorized(FP, null)
+                        && !EarlyRootPolicy.earlyLoadAuthorized("", "")
+                        && !EarlyRootPolicy.earlyLoadAuthorized(FP, ""),
                 "a missing fingerprint or an unpinned daemon digest is not a"
                         + " cleared artefact; absence is never clearance");
         // Half a key is not a key: the pair is what was validated, so a daemon
         // carried to another firmware, or another daemon on this firmware, is a
         // different experiment.
-        check(!EarlyRootPolicy.earlyLoadCleared(FP, "0".repeat(64))
-                        && !EarlyRootPolicy.earlyLoadCleared("other/firmware", KSUD),
+        check(!EarlyRootPolicy.earlyLoadAuthorized(FP, "0".repeat(64))
+                        && !EarlyRootPolicy.earlyLoadAuthorized("other/firmware", KSUD),
                 "clearance is keyed on BOTH halves, so neither can speak for the"
                         + " other");
         // The suspension is about bytes, not about a boot, so nothing the device
@@ -701,7 +701,7 @@ public class EarlyRootPolicyTest {
         in.readinessState = EarlyBootProbePolicy.NETWORKSTACK_READY;
         in.journalRecord = null;
         in.autoRootJournalRecord = null;
-        refused(in, EarlyRootPolicy.ARTEFACT_NOT_CLEARED,
+        refused(in, EarlyRootPolicy.ARTEFACT_NOT_AUTHORIZED,
                 "a perfectly clean device does not lift the suspension");
 
         check(EarlyRootPolicy.MAX_ATTEMPTS_PER_BOOT == 1,

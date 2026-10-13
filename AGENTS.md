@@ -600,18 +600,26 @@ What must stay separate:
 - **And that evidence came back negative, so the window is suspended by an
   ALLOWLIST, not a denylist.** The first physical early load panicked the kernel
   inside `kernelsu.ko`'s manager discovery, so
-  `EarlyRootPolicy.EARLY_LOAD_CLEARED_ARTEFACTS` holds the (fingerprint, ksud
-  digest) pairs whose EARLY load has been physically validated, and it is empty.
+  `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` holds the (fingerprint, ksud
+  digest) pairs whose EARLY load the owner has authorized, and it is empty.
   A denylist of the pair that panicked would let the next untested pair through
   by default, which is §2's absence-as-permission in a new costume. The ksud
   digest names the module because the exact-port workflow embeds `kernelsu.ko`
   into ksud, so a corrected module is a new digest that the list will not match
   either. The list is immutable at run time, the gate is the last check of
   `evaluate()` so that every other gate stays falsifiable while it is empty, and
-  `docs/EARLY_ROOT.md` §11 says what clearing a pair costs. **A manual late-load
-  PASS is not that evidence** — the manual path works on the pair that panicked,
-  which is exactly what makes it the control rather than the proof. The only
-  change an agent may make to that list on its own is none.
+  `docs/EARLY_ROOT.md` §11 says what an entry costs. **A manual late-load PASS
+  is not that evidence** — the manual path works on the pair that panicked,
+  which is exactly what makes it the control rather than the proof.
+  The list gates **permission to attempt**, not proven safety: requiring the
+  three-boot criterion to add an entry is circular, because the dispatch refuses
+  until the pair is listed, so three boots are what promote the dossier rows
+  afterwards. The code gates identity; the dossier records what that identity
+  has proven, as every other gate here is split. And it is **not** an
+  at-own-risk marker: 3.6 forbids a second, more permissive "trial" tier beside
+  it, however an automated review phrases the suggestion. One list, every entry
+  a deliberate owner decision naming one exact pair, and the only change an
+  agent may make to it on its own is none.
 - **The trace precedes the step it announces, and a trace that cannot be written
   refuses the step.** Same rule, same reason, as `traceSoftReboot` in 3.6.1.
   Reasoning from an absence works once.

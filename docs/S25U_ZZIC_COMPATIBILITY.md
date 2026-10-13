@@ -1297,7 +1297,7 @@ inferred from a nearby firmware.
 | EARLY_ROOT_DISPATCH — the chain actually runs from that callback | **physical PASS up to `BEFORE_NATIVE`** | DZIF, `2.0.18-dzif`, boot `5a7c2537-9693-44f9-8b2e-e26a1b3a10f2`, 2026-10-12: the job fired in the correct boot at 15.960 s, readiness `NETWORKSTACK_READY`, service entered (`pid=2861`), hop sent and returned, controller received, remote preflight (transaction 6) accepted, `EARLY_ROOT_BEFORE_NATIVE` recorded durably at 16.555 s with journal `STARTED` / `attempts=1` / `native_started=1`. Twelve trace steps, all in one `boot_id`. **Every DFReroot boundary held; what came after it did not** — see the row below |
 | EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED — the first milestone | **physical FAIL** | same boot: `EARLY_ROOT_NATIVE_RETURNED`, `_POST_ROOT_COMPLETE`, `_SELINUX_ENFORCING` and `_BOOT_COMPLETED_OBSERVED` are all absent, and the journal is still `STARTED`. 6.2 s after `BEFORE_NATIVE` the kernel BUGged and the device rebooted. The one-attempt guarantee held: the journal was never rewritten to `COMPLETE` and no second attempt ran |
 | EARLY_ROOT_BOOT_HEALTH — the page-cache writes are survivable that early | **physical FAIL — kernel panic** | at kernel uptime 22.723473, `list_del corruption, …->next is LIST_POISON1`, `kernel BUG at lib/list_debug.c:58`, `pc : __list_del_entry_valid_or_report+0xb8/0xf0`, stack `my_actor+0x360/0x3ec [kernelsu]` ← f2fs_readdir/iterate_dir ← `search_manager+0x1b8/0x35c` ← `track_throne+0x360/0x3ac` ← `kernelsu_init+0x150/0x174` ← `do_init_module`. DropBox `SYSTEM_LAST_KMSG_566_20261012_223012_KP`; `/proc/reset_summary` `UPLOAD CAUSE = 0xc8000000 = KERNEL PANIC`. **Not** the `bootchecker_timeout` mode and **not** the 2026-09-29 `allowed_for_su` panic — a third, distinct failure. The early window is now suspended in code for every artefact; see the row below |
-| EARLY_ROOT_ARTEFACT_CLEARED — may any pair be loaded early at all? | **suspended: the allowlist is empty** | `EarlyRootPolicy.EARLY_LOAD_CLEARED_ARTEFACTS` holds no (fingerprint, ksud digest) pair, so the gate and the arming both refuse with `EARLY_ROOT_ARTEFACT_NOT_CLEARED`. An allowlist rather than a denylist of the panicking pair, because an untested pair must not read as permission. Clearing one needs the three-boot criterion in `docs/EARLY_ROOT.md` §8 — a manual late-load PASS is explicitly **not** that evidence |
+| EARLY_ROOT_ARTEFACT_AUTHORIZED — may any pair be loaded early at all? | **suspended: the allowlist is empty** | `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` holds no (fingerprint, ksud digest) pair, so the gate and the arming both refuse with `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED`. An allowlist rather than a denylist of the panicking pair, because an untested pair must not read as permission. The list gates **permission to attempt**, not proven safety: `docs/EARLY_ROOT.md` §11 says what an entry costs (all of it offline, before the first attempt), and the §8 three-boot criterion is what promotes the three rows above to physical PASS afterwards. A manual late-load PASS authorizes nothing — it is the control, not the proof |
 
 **Conclusion:** the exact ZZIC root chain is now physically demonstrated. The
 remaining blocker to calling the automated flow complete is the post-root
@@ -3106,9 +3106,12 @@ early attempt inherits that nondeterminism.
 #### Consequence in code
 
 The early window is suspended for every artefact, not only the one that
-panicked. `EarlyRootPolicy.EARLY_LOAD_CLEARED_ARTEFACTS` is an **empty
+panicked. `EarlyRootPolicy.EARLY_LOAD_AUTHORIZED_ARTEFACTS` is an **empty
 allowlist** of (fingerprint, ksud digest) pairs; the complete gate and
-`DfrEarlyRoot.arm()` both refuse with `EARLY_ROOT_ARTEFACT_NOT_CLEARED`.
+`DfrEarlyRoot.arm()` both refuse with `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED`.
+It gates permission to make the attempt, not proven safety - the three-boot
+criterion is what promotes the evidence afterwards, and requiring it to add an
+entry would have been circular (`docs/EARLY_ROOT.md` §11).
 
 The pair is the right key, and the ksud digest is enough to name the module:
 the RMGLabs exact-port workflow builds `kernelsu.ko` and **embeds it into
