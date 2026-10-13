@@ -67,6 +67,24 @@ object EarlyRootStore {
     const val TRACE_PATH = "/data/system/dfreroot-early-root-trace"
 
     /**
+     * An early run that reached transaction 5 and never reported a result.
+     *
+     * Deliberately NOT archived by [archivePreviousCycle], which is the whole
+     * reason it is a fourth record instead of a field in the journal. The
+     * journal and trace are per-cycle evidence and get moved aside so the next
+     * cycle's row is unambiguous; an unexplained death has to outlive the cycle
+     * it happened in, or re-arming would erase the only thing that remembers it.
+     *
+     * Written before the arming that detected it completes, and read by both
+     * entry points. Nothing clears it from code: the way out is a corrected
+     * artefact, which is a different ksud digest and therefore a different
+     * incident question, or an explicit in-source acknowledgement of that exact
+     * boot id in [EarlyRootPolicy]. A "clear incidents" action is the override
+     * AGENTS.md 3.6 forbids, wearing a maintenance hat.
+     */
+    const val INCIDENT_PATH = "/data/system/dfreroot-early-root-incident"
+
+    /**
      * Both the job callback's worker and the service's thread live in process
      * "system" and write these records, so their read-modify-write sequences
      * genuinely interleave. Every public entry point holds this for the whole
@@ -80,6 +98,33 @@ object EarlyRootStore {
     fun readJournal(): String? = synchronized(lock) { read(JOURNAL_PATH) }
 
     fun readTrace(): String? = synchronized(lock) { read(TRACE_PATH) }
+
+    fun readIncident(): String? = synchronized(lock) { read(INCIDENT_PATH) }
+
+    /**
+     * Record an unexplained death, durably, and say why when it cannot be done.
+     *
+     * A failure is RETURNED, not logged, for the reason [trace] documents: the
+     * caller's correct response is to refuse what it was about to do. An arming
+     * that proceeds after failing to record the incident it just detected is
+     * the absence-as-permission this record exists to prevent.
+     *
+     * Never overwrites an existing record. The first incident is the one with a
+     * live arm record beside it and therefore the one that could be attributed;
+     * a later observation of the same unexplained journal would rewrite it with
+     * whatever arm record happens to be on disk then, which is a different
+     * cycle's artefact. An existing unreadable record is a hard failure rather
+     * than something to replace - see AGENTS.md 3.9 on backups that restore
+     * nothing.
+     */
+    fun writeIncident(record: String): String? = synchronized(lock) {
+        when (read(INCIDENT_PATH)) {
+            AutoRootPolicy.RECORD_UNREADABLE ->
+                "an incident record exists and cannot be read; refusing to replace it"
+            null -> atomicWrite(INCIDENT_PATH, record)
+            else -> null // already recorded; the first attribution stands
+        }
+    }
 
     fun writeArm(record: String): String? = synchronized(lock) { atomicWrite(ARM_PATH, record) }
 

@@ -77,6 +77,24 @@ object DfrEarlyRoot {
                 " corruption in its manager discovery); see docs/EARLY_ROOT.md." +
                 " The manual run and Auto Root after a full boot are unaffected."
         }
+        /*
+         * And refused while a previous boot's early run is unaccounted for.
+         *
+         * This is the only place the detection can happen, which is why it is
+         * here and not only in the gate: the journal that carries the evidence
+         * is about to be moved to <path>.prev by archivePreviousCycle() below,
+         * and the arm record the artefact identity comes from is about to be
+         * overwritten. Both belong to the cycle being accounted for, and after
+         * this function they are no longer side by side.
+         *
+         * The durable record it writes is what the gate then reads on every
+         * later boot. A write that fails refuses the arming: an arming that
+         * proceeds after failing to record the incident it just found is the
+         * absence-as-permission the whole record exists to prevent.
+         */
+        val incidentFailure = recordPendingIncident(bootId)
+        if (incidentFailure != null) return incidentFailure
+
         val base = try {
             context.getSystemService(JobScheduler::class.java)
         } catch (t: Throwable) {
@@ -227,6 +245,56 @@ object DfrEarlyRoot {
      * boot ids, which cannot tell a stale record from a fresh one when the owner
      * re-arms in the boot the previous callback fired in.
      */
+    /**
+     * Detect, persist and refuse an unresolved fatal incident. null means clear.
+     *
+     * Three readings, each a separate refusal, because they are separate facts
+     * and the owner's next move differs for each (AGENTS.md 3.7): a record that
+     * cannot be read, a record this build cannot account for, and a record that
+     * is open against the artefact about to be armed.
+     */
+    private fun recordPendingIncident(bootId: String): String? {
+        val existing = EarlyRootStore.readIncident()
+        if (existing == AutoRootPolicy.RECORD_UNREADABLE) {
+            return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_UNREADABLE}" +
+                " - an early-root incident record exists and cannot be read." +
+                " Refusing rather than arming over it."
+        }
+        if (existing != null) {
+            val recorded = EarlyRootPolicy.parseIncident(existing)
+                ?: return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_MALFORMED}" +
+                    " - the early-root incident record is not a record this build" +
+                    " can account for (${EarlyRootStore.INCIDENT_PATH})."
+            if (EarlyRootPolicy.incidentBlocks(recorded, KsudStage.pinnedKsudSha256())) {
+                return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_UNRESOLVED}" +
+                    " - boot ${recorded.bootId} reached transaction 5 and never" +
+                    " reported a result. A corrected module is a new ksud digest;" +
+                    " see docs/EARLY_ROOT.md section 12."
+            }
+            // Attributed to a different artefact. It stays on disk as history.
+            return null
+        }
+
+        val pending = EarlyRootPolicy.detectIncident(
+            EarlyRootStore.readJournal(), EarlyRootStore.readArm(), bootId,
+            bootId, wallclockNow()
+        ) ?: return null
+
+        val failure = EarlyRootStore.writeIncident(
+            EarlyRootPolicy.formatIncident(pending))
+        if (failure != null) {
+            return "[x] EARLY_ROOT_NOT_ARMED: cannot record the unresolved early-root" +
+                " incident from boot ${pending.bootId} ($failure); refusing rather" +
+                " than arming over evidence that could not be preserved"
+        }
+        return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.INCIDENT_IN_JOURNAL}" +
+            " - boot ${pending.bootId} reached transaction 5 (native_started=1) and" +
+            " never reported a result. Recorded at ${EarlyRootStore.INCIDENT_PATH}." +
+            " Read /proc/last_kmsg, /proc/reset_summary and" +
+            " /sys/class/sec/sec_hw_param/extra_info for that boot before anything" +
+            " else; see docs/EARLY_ROOT.md section 12."
+    }
+
     fun armState(): String {
         val record = EarlyRootStore.readArm()
             ?: return "EARLY_ROOT_NOT_ARMED"

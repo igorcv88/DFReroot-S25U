@@ -704,6 +704,195 @@ public class EarlyRootPolicyTest {
         refused(in, EarlyRootPolicy.ARTEFACT_NOT_AUTHORIZED,
                 "a perfectly clean device does not lift the suspension");
 
+        // ------------------------------------------------------------------
+        // The unresolved-incident latch (P0-D).
+        //
+        // The shape the incident report requires: a journal left at STARTED
+        // with native_started=1, naming a boot that is not this one, next to an
+        // unexplained reboot. Before this latch existed it was discarded as
+        // "last boot's record" on the very next boot.
+        // ------------------------------------------------------------------
+        final String DEAD_BOOT = "5a7c2537-9693-44f9-8b2e-e26a1b3a10f2";
+        final String OTHER_KSUD = "b".repeat(64);
+
+        // Detection: exactly one shape is an incident.
+        check(EarlyRootPolicy.detectIncident(
+                        EarlyRootPolicy.formatJournal(DEAD_BOOT,
+                                AutoRootPolicy.PHASE_STARTED, 1, true),
+                        arm(), BOOT, BOOT, 0L) != null,
+                "STARTED with native_started=1 in a previous boot is an incident");
+        check(EarlyRootPolicy.detectIncident(
+                        EarlyRootPolicy.formatJournal(BOOT,
+                                AutoRootPolicy.PHASE_STARTED, 1, true),
+                        arm(), BOOT, BOOT, 0L) == null,
+                "a journal naming THIS boot is the one-attempt question, not an"
+                        + " incident");
+        check(EarlyRootPolicy.detectIncident(
+                        EarlyRootPolicy.formatJournal(DEAD_BOOT,
+                                AutoRootPolicy.PHASE_PREFLIGHT, 1, false),
+                        arm(), BOOT, BOOT, 0L) == null,
+                "native_started=0 means transaction 5 never issued, so provably"
+                        + " nothing was written");
+        check(EarlyRootPolicy.detectIncident(
+                        EarlyRootPolicy.formatJournal(DEAD_BOOT,
+                                AutoRootPolicy.PHASE_COMPLETE, 1, true),
+                        arm(), BOOT, BOOT, 0L) == null,
+                "a boot that completed reported its result");
+        check(EarlyRootPolicy.detectIncident(
+                        EarlyRootPolicy.formatJournal(DEAD_BOOT,
+                                AutoRootPolicy.PHASE_FAILED_LOCKED, 1, true),
+                        arm(), BOOT, BOOT, 0L) == null,
+                "a locked failure accounted for itself; an incident is a run that"
+                        + " did not");
+        check(EarlyRootPolicy.detectIncident(null, arm(), BOOT, BOOT, 0L) == null
+                        && EarlyRootPolicy.detectIncident("", arm(), BOOT, BOOT, 0L) == null,
+                "no journal is no incident");
+        check(EarlyRootPolicy.detectIncident("phase=nonsense\n", arm(), BOOT,
+                        BOOT, 0L) == null,
+                "an unparsable journal is NOT reported as 'no incident' here: the"
+                        + " caller already refuses on it, and answering would turn"
+                        + " the strictest refusal in the file into a pass");
+
+        // Attribution comes from the arm record, which is the same cycle's.
+        EarlyRootPolicy.Incident attributed = EarlyRootPolicy.detectIncident(
+                EarlyRootPolicy.formatJournal(DEAD_BOOT,
+                        AutoRootPolicy.PHASE_STARTED, 1, true),
+                arm(), BOOT, BOOT, 1759000000000L);
+        check(attributed != null && KSUD.equals(attributed.ksudSha256)
+                        && CODE == attributed.versionCode
+                        && DEAD_BOOT.equals(attributed.bootId),
+                "the incident is attributed to the artefact the arm record names");
+        EarlyRootPolicy.Incident unattributed = EarlyRootPolicy.detectIncident(
+                EarlyRootPolicy.formatJournal(DEAD_BOOT,
+                        AutoRootPolicy.PHASE_STARTED, 1, true),
+                null, BOOT, BOOT, 0L);
+        check(unattributed != null && unattributed.ksudSha256.isEmpty(),
+                "a missing arm record yields an UNATTRIBUTED incident, not no"
+                        + " incident");
+
+        // Applicability. The middle case is what keeps the latch usable.
+        check(EarlyRootPolicy.incidentBlocks(attributed, KSUD),
+                "an incident on this exact daemon digest refuses");
+        check(!EarlyRootPolicy.incidentBlocks(attributed, OTHER_KSUD),
+                "a corrected module is a new ksud digest, so the incident does not"
+                        + " refuse a different artefact");
+        check(EarlyRootPolicy.incidentBlocks(unattributed, KSUD)
+                        && EarlyRootPolicy.incidentBlocks(unattributed, OTHER_KSUD),
+                "an incident that could not be attributed refuses EVERY artefact;"
+                        + " absence is never agreement");
+        check(!EarlyRootPolicy.incidentBlocks(null, KSUD),
+                "no incident refuses nothing");
+        check(EarlyRootPolicy.incidentBlocks(attributed, null)
+                        && EarlyRootPolicy.incidentBlocks(attributed, ""),
+                "a dispatch that cannot name its own daemon digest cannot clear an"
+                        + " incident either");
+
+        // The record round-trips losslessly, including the unattributed case -
+        // if UNKNOWN came back as a digest, incidentBlocks would compare against
+        // it as if it were one.
+        EarlyRootPolicy.Incident reparsed = EarlyRootPolicy.parseIncident(
+                EarlyRootPolicy.formatIncident(attributed));
+        check(reparsed != null && DEAD_BOOT.equals(reparsed.bootId)
+                        && KSUD.equals(reparsed.ksudSha256)
+                        && CODE == reparsed.versionCode
+                        && reparsed.nativeStarted,
+                "an attributed incident record round-trips");
+        EarlyRootPolicy.Incident reparsedBlank = EarlyRootPolicy.parseIncident(
+                EarlyRootPolicy.formatIncident(unattributed));
+        check(reparsedBlank != null && reparsedBlank.ksudSha256.isEmpty()
+                        && reparsedBlank.versionName.isEmpty()
+                        && reparsedBlank.deviceFingerprint.isEmpty(),
+                "an unattributed incident round-trips as blank, not as the literal"
+                        + " UNKNOWN");
+
+        // Strict parse: one element spoiled at a time.
+        check(EarlyRootPolicy.parseIncident(null) == null
+                        && EarlyRootPolicy.parseIncident("") == null
+                        && EarlyRootPolicy.parseIncident(
+                                AutoRootPolicy.RECORD_UNREADABLE) == null,
+                "an absent or unreadable incident record does not parse");
+        String good = EarlyRootPolicy.formatIncident(attributed);
+        check(EarlyRootPolicy.parseIncident(
+                        good.replace("native_started=1", "native_started=0")) == null,
+                "an incident record claiming transaction 5 was never issued is not"
+                        + " an incident record");
+        check(EarlyRootPolicy.parseIncident(
+                        good.replace("phase=" + AutoRootPolicy.PHASE_STARTED,
+                                "phase=" + AutoRootPolicy.PHASE_COMPLETE)) == null,
+                "an incident record naming a phase that reported does not parse");
+        check(EarlyRootPolicy.parseIncident(good + "extra_key=1\n") == null
+                        && EarlyRootPolicy.parseIncident(
+                                good + "phase=" + AutoRootPolicy.PHASE_STARTED
+                                        + "\n") == null
+                        && EarlyRootPolicy.parseIncident(
+                                good.replace("observed_wallclock_ms=1759000000000",
+                                        "observed_wallclock_ms=soon")) == null
+                        && EarlyRootPolicy.parseIncident(
+                                good.replace("incident_boot_id=" + DEAD_BOOT + "\n",
+                                        "")) == null,
+                "an unknown key, a duplicate key, an unparsable number and a"
+                        + " missing key each refuse");
+
+        // And the gate itself, at the entry point, for each reading.
+        in = ready();
+        in.incidentRecord = AutoRootPolicy.RECORD_UNREADABLE;
+        refused(in, EarlyRootPolicy.INCIDENT_UNREADABLE,
+                "an unreadable incident record refuses; it may name an open one");
+        in = ready();
+        in.incidentRecord = "incident_boot_id=x\n";
+        refused(in, EarlyRootPolicy.INCIDENT_MALFORMED,
+                "an incident record this build cannot account for refuses");
+        in = ready();
+        in.incidentRecord = EarlyRootPolicy.formatIncident(attributed);
+        refused(in, EarlyRootPolicy.INCIDENT_UNRESOLVED,
+                "an open incident on this artefact refuses the dispatch");
+        in = ready();
+        in.incidentRecord = EarlyRootPolicy.formatIncident(unattributed);
+        refused(in, EarlyRootPolicy.INCIDENT_UNRESOLVED,
+                "an unattributable open incident refuses the dispatch");
+        // A corrected artefact: the arm record, the dispatch and the
+        // qualification all name the new digest, which is what actually happens
+        // after a rebuild. Changing only in.ksudSha256 would refuse at
+        // BUILD_MISMATCH first and prove nothing about the incident latch.
+        in = ready();
+        in.incidentRecord = EarlyRootPolicy.formatIncident(attributed);
+        in.ksudSha256 = OTHER_KSUD;
+        in.armRecord = EarlyRootPolicy.formatArm(ARMED_BOOT,
+                EarlyRootPolicy.EXPECTED_JOB_ID, NS, 15_000L, 1, CODE, NAME,
+                OTHER_KSUD, FP, 300_000L, 1759000000000L, GEN);
+        in.qualificationRecord = AutoRootPolicy.formatQualification(CODE, NAME,
+                OTHER_KSUD, FP, QUAL_BOOT, 1759000000000L, false, QUAL_BOOT);
+        // Not `allowed` in the strict sense: a new digest is also not in the
+        // (empty) authorisation allowlist, so the one remaining objection is
+        // that one - which is exactly what allowed() asserts.
+        allowed(in, "an incident attributed to the previous artefact is not a"
+                + " corrected one's objection");
+        in = ready();
+        in.incidentRecord = null;
+        in.journalRecord = EarlyRootPolicy.formatJournal(DEAD_BOOT,
+                AutoRootPolicy.PHASE_STARTED, 1, true);
+        refused(in, EarlyRootPolicy.INCIDENT_IN_JOURNAL,
+                "a stale STARTED journal with no incident record refuses, and with"
+                        + " its own code: the run that should have recorded it is"
+                        + " the run that died");
+        in = ready();
+        in.incidentRecord = null;
+        in.journalRecord = EarlyRootPolicy.formatJournal(DEAD_BOOT,
+                AutoRootPolicy.PHASE_COMPLETE, 1, true);
+        allowed(in, "a previous boot that COMPLETED is still last boot's record and"
+                + " must not lock this one");
+
+        // The latch is durable where the journal is not: archivePreviousCycle()
+        // moves the journal aside, so a cycle later only the incident record
+        // remembers. Both readings exist for that reason and this asserts the
+        // second one does not depend on the first.
+        in = ready();
+        in.incidentRecord = EarlyRootPolicy.formatIncident(attributed);
+        in.journalRecord = null;
+        refused(in, EarlyRootPolicy.INCIDENT_UNRESOLVED,
+                "the incident record refuses on its own, after the journal that"
+                        + " produced it has been archived");
+
         check(EarlyRootPolicy.MAX_ATTEMPTS_PER_BOOT == 1,
                 "the early path is one attempt per boot: there is no retry loop to"
                         + " bound, and a self-rescheduling root attempt must not exist");

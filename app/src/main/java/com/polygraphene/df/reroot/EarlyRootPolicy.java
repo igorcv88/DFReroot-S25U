@@ -186,6 +186,29 @@ public final class EarlyRootPolicy {
      * rest is even read.
      */
     public static final String ARTEFACT_NOT_AUTHORIZED = "EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED";
+    /*
+     * A previous boot's early run reached transaction 5 and never reported a
+     * result, and nothing has accounted for it since.
+     *
+     * Its own codes, three of them, because "there is an unresolved incident",
+     * "the incident record cannot be read" and "the incident record is not a
+     * record this build can account for" send the next physical run to
+     * different places (3.7). All three refuse.
+     */
+    public static final String INCIDENT_UNRESOLVED = "EARLY_ROOT_INCIDENT_UNRESOLVED";
+    public static final String INCIDENT_UNREADABLE = "EARLY_ROOT_INCIDENT_UNREADABLE";
+    public static final String INCIDENT_MALFORMED = "EARLY_ROOT_INCIDENT_MALFORMED";
+    /**
+     * A stale journal says a previous boot died after transaction 5, and no
+     * incident record accounts for it.
+     *
+     * Distinct from {@link #INCIDENT_UNRESOLVED}: that one is "the incident was
+     * recorded and is still open", this one is "the incident is in front of us
+     * and was never recorded at all" - which is the state a run finds when the
+     * dispatch that died was the one that should have recorded it. Collapsing
+     * the two would lose the only signal that the recording path was skipped.
+     */
+    public static final String INCIDENT_IN_JOURNAL = "EARLY_ROOT_INCIDENT_IN_JOURNAL";
 
     /*
      * The durable trace steps, in the order one boot can pass through them.
@@ -299,6 +322,48 @@ public final class EarlyRootPolicy {
 
     private static final Set<String> JOURNAL_KEYS = Set.of(
             "boot_id", "phase", "attempts", "native_started");
+
+    /*
+     * The incident record. Written only by this build, so the parse is as
+     * strict as every other one here: an exact key set, no optional fields.
+     *
+     * The journal format is deliberately NOT extended to carry the artefact
+     * identity. Its keys are read by a strict parser that requires the set to
+     * match exactly, so adding fields would refuse every journal written by a
+     * build that predates them - which is the mistake 3.6.1 records about
+     * making an optional marker required, in a new costume. The identity is
+     * copied here from the ARM record instead, which already carries it and
+     * which belongs to the same cycle as the journal being accounted for.
+     */
+    private static final Set<String> INCIDENT_KEYS = Set.of(
+            "incident_boot_id", "phase", "native_started", "version_code",
+            "version_name", "ksud_sha256", "device_fingerprint",
+            "observed_boot_id", "observed_wallclock_ms");
+
+    /*
+     * Incidents the owner has examined and closed, by the exact boot id they
+     * happened in.
+     *
+     * Needed because an incident that cannot name its artefact refuses every
+     * early dispatch, and the record on this device cannot: the journal format
+     * carries no artefact identity, so an incident detected from a journal
+     * written before this code existed has nothing to compare a corrected
+     * build against. Without a way to close it the early path would be dead
+     * even after the module defect is fixed, and the owner's only exit would be
+     * editing source anyway.
+     *
+     * So this is that exit, in the one shape 3.6 permits: identical in
+     * mechanism to EARLY_LOAD_AUTHORIZED_ARTEFACTS above. In-source,
+     * immutable, exact-match, empty as shipped, and one entry names one boot
+     * that has ALREADY happened - so it cannot pre-authorise a future
+     * incident, which a wildcard or a "clear incidents" action could.
+     *
+     * It is not an at-own-risk override and must not become one. It does not
+     * grant permission to run: an acknowledged incident merely stops being the
+     * reason for refusing, and every other gate - the authorisation allowlist
+     * included - still has to pass. An agent may only ever leave it empty.
+     */
+    private static final Set<String> ACKNOWLEDGED_INCIDENT_BOOTS = Set.of();
 
     /*
      * The (device fingerprint, ksud SHA-256) pairs whose EARLY load the owner
@@ -474,6 +539,195 @@ public final class EarlyRootPolicy {
         }
     }
 
+    /**
+     * A previous boot's early run that reached transaction 5 and never reported.
+     *
+     * The incident report's P0-D requirement, in one sentence: a journal left at
+     * {@code phase=STARTED} with {@code native_started=1} and no completion,
+     * next to an unexplained reboot, is a fatal incident pending investigation -
+     * and must not be allowed to self-correct into nothing.
+     *
+     * Before this existed it self-corrected into nothing on the next boot, by
+     * one line of {@code evaluate()}: "a journal naming another boot is last
+     * boot's record: it says nothing about this one and must not lock it". That
+     * is right for every ordinary shape - a boot that completed, a boot that
+     * refused, a boot that failed and locked - and wrong for exactly this one,
+     * because this shape is the signature of a run that died between writing
+     * {@code STARTED} and writing anything else. On 2026-10-12 that run took the
+     * kernel with it.
+     */
+    public static final class Incident {
+        public final String bootId;
+        public final String phase;
+        public final boolean nativeStarted;
+        /**
+         * The artefact the incident is attributed to, copied from the arm record
+         * of the cycle that produced it. Blank when the arm record was gone or
+         * unparsable at detection time, which is a weaker incident, not a
+         * resolvable one - see {@link #incidentBlocks}.
+         */
+        public final int versionCode;
+        public final String versionName;
+        public final String ksudSha256;
+        public final String deviceFingerprint;
+        /** The boot in which the incident was noticed, not the one it happened in. */
+        public final String observedBootId;
+        public final long observedWallclockMs;
+
+        private Incident(String bootId, String phase, boolean nativeStarted,
+                         int versionCode, String versionName, String ksudSha256,
+                         String deviceFingerprint, String observedBootId,
+                         long observedWallclockMs) {
+            this.bootId = bootId;
+            this.phase = phase;
+            this.nativeStarted = nativeStarted;
+            this.versionCode = versionCode;
+            this.versionName = versionName;
+            this.ksudSha256 = ksudSha256;
+            this.deviceFingerprint = deviceFingerprint;
+            this.observedBootId = observedBootId;
+            this.observedWallclockMs = observedWallclockMs;
+        }
+    }
+
+    /**
+     * Does this journal describe a fatal incident in a boot that is not this one?
+     *
+     * Pure, so both entry points can ask it and a host test can enumerate the
+     * shapes. {@code null} means no, for one of four separate reasons, and none
+     * of them is "probably fine":
+     *
+     * <ul>
+     *   <li>no journal at all - nothing has run;
+     *   <li>a journal naming THIS boot - that is the one-attempt-per-boot
+     *       question, answered elsewhere by {@link #BOOT_SPENT};
+     *   <li>{@code native_started=0} - transaction 5 was never issued, so
+     *       provably nothing was written (the R1 correction);
+     *   <li>{@code COMPLETE} or {@code FAILED_LOCKED} - the run reported. A
+     *       locked failure is a refusal that accounted for itself; an incident
+     *       is a run that did not.
+     * </ul>
+     *
+     * A journal that does not parse is NOT handled here and must not be: the
+     * caller already refuses on it ({@link #JOURNAL_MALFORMED}), and returning
+     * "no incident" for an unparsable record would turn the strictest refusal
+     * in this file into a pass.
+     *
+     * @param armRecord the arm record still on disk, which belongs to the same
+     *     cycle as {@code journalRecord} and is where the artefact identity
+     *     comes from. A missing or unparsable one yields an unattributed
+     *     incident rather than no incident.
+     */
+    public static Incident detectIncident(String journalRecord, String armRecord,
+                                          String currentBootId, String observedBootId,
+                                          long observedWallclockMs) {
+        if (blank(journalRecord)) return null;
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(journalRecord)) return null;
+        Journal journal = parseJournal(journalRecord);
+        if (journal == null) return null;
+        if (blank(currentBootId) || currentBootId.equals(journal.bootId)) return null;
+        if (!journal.nativeStarted) return null;
+        if (!AutoRootPolicy.PHASE_STARTED.equals(journal.phase)) return null;
+
+        Arm arm = parseArm(armRecord);
+        int versionCode = arm == null ? -1 : arm.versionCode;
+        String versionName = arm == null ? "" : nonNull(arm.versionName);
+        String ksud = arm == null ? "" : nonNull(arm.ksudSha256);
+        String fingerprint = arm == null ? "" : nonNull(arm.deviceFingerprint);
+        return new Incident(journal.bootId, journal.phase, true, versionCode,
+                versionName, ksud, fingerprint, nonNull(observedBootId),
+                observedWallclockMs);
+    }
+
+    /**
+     * Does this recorded incident refuse the dispatch of {@code ksudSha256}?
+     *
+     * Three answers, and the middle one is what makes the latch usable rather
+     * than terminal:
+     *
+     * <ul>
+     *   <li>the owner acknowledged this exact boot id - no. Not "it is safe":
+     *       every other gate still runs, this one just stops being the reason;
+     *   <li>the incident names a DIFFERENT daemon digest - no. A corrected
+     *       module is a new ksud digest, because the exact-port workflow embeds
+     *       the module in the daemon, so the artefact that died is not the
+     *       artefact in front of us. The record stays on disk as history;
+     *   <li>anything else - yes. Same digest, or an incident that could not name
+     *       its artefact at all. An unattributable incident refusing everything
+     *       is the fail-closed direction: absence is never agreement.
+     * </ul>
+     */
+    public static boolean incidentBlocks(Incident incident, String ksudSha256) {
+        if (incident == null) return false;
+        if (!blank(incident.bootId)
+                && ACKNOWLEDGED_INCIDENT_BOOTS.contains(incident.bootId.trim())) {
+            return false;
+        }
+        if (blank(incident.ksudSha256) || blank(ksudSha256)) return true;
+        return incident.ksudSha256.trim().equals(ksudSha256.trim());
+    }
+
+    public static String formatIncident(Incident incident) {
+        return "incident_boot_id=" + nonNull(incident.bootId) + "\n"
+                + "phase=" + nonNull(incident.phase) + "\n"
+                + "native_started=" + (incident.nativeStarted ? 1 : 0) + "\n"
+                + "version_code=" + incident.versionCode + "\n"
+                + "version_name=" + blankToUnknown(incident.versionName) + "\n"
+                + "ksud_sha256=" + blankToUnknown(incident.ksudSha256) + "\n"
+                + "device_fingerprint=" + blankToUnknown(incident.deviceFingerprint) + "\n"
+                + "observed_boot_id=" + blankToUnknown(incident.observedBootId) + "\n"
+                + "observed_wallclock_ms=" + incident.observedWallclockMs + "\n";
+    }
+
+    /**
+     * Strict incident parse. {@code null} means malformed, and the caller
+     * refuses on it - an incident record this build cannot account for is the
+     * last thing to read optimistically.
+     */
+    public static Incident parseIncident(String record) {
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(record)) return null;
+        Map<String, String> values = parse(record, INCIDENT_KEYS);
+        if (values == null) return null;
+        String bootId = values.get("incident_boot_id");
+        String phase = values.get("phase");
+        String nativeStarted = values.get("native_started");
+        if (blank(bootId)) return null;
+        if (!AutoRootPolicy.PHASE_STARTED.equals(phase)) return null;
+        if (!"1".equals(nativeStarted)) return null;
+        int versionCode;
+        long observed;
+        try {
+            versionCode = Integer.parseInt(values.get("version_code"));
+            observed = Long.parseLong(values.get("observed_wallclock_ms"));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        return new Incident(bootId, phase, true, versionCode,
+                unknownToBlank(values.get("version_name")),
+                unknownToBlank(values.get("ksud_sha256")),
+                unknownToBlank(values.get("device_fingerprint")),
+                unknownToBlank(values.get("observed_boot_id")), observed);
+    }
+
+    /*
+     * An empty value would make parse() refuse the whole record (it rejects a
+     * line whose '=' is last), so a field that was not known at detection time
+     * is written as UNKNOWN and read back as blank. The round trip has to be
+     * lossless in both directions or incidentBlocks() would read "we could not
+     * attribute this" as a digest to compare against.
+     */
+    private static String blankToUnknown(String value) {
+        return blank(value) ? EarlyBootProbePolicy.UNKNOWN : value;
+    }
+
+    private static String unknownToBlank(String value) {
+        return value == null || EarlyBootProbePolicy.UNKNOWN.equals(value) ? "" : value;
+    }
+
+    private static String nonNull(String value) {
+        return value == null ? "" : value;
+    }
+
     /** What the policy was asked about. Assembled by the caller, never trusted. */
     public static final class Inputs {
         public String armRecord;
@@ -498,6 +752,14 @@ public final class EarlyRootPolicy {
          * page cache may already have been written.
          */
         public String autoRootJournalRecord;
+        /**
+         * The durable incident record, if any.
+         *
+         * Read at both entry points, because an incident latch enforced only at
+         * the arming is a UI-only suspension (3.2) - and the arming is the entry
+         * point an already-pending job does not go through at all.
+         */
+        public String incidentRecord;
         public String qualificationRecord;
         public String currentBootId;
         /** The job id the scheduler actually called back with. */
@@ -940,6 +1202,58 @@ public final class EarlyRootPolicy {
                     + " nothing the milestone asks for");
         }
         /*
+         * The unresolved-incident latch, before the journal is read for the
+         * one-attempt-per-boot question.
+         *
+         * Two separate readings, in this order, because they fail for different
+         * reasons and only the first one survives the cycle that produced it:
+         *
+         *   1. the durable incident record, which outlives the arming that
+         *      archived the journal it was derived from;
+         *   2. the journal in front of us, in case the run that should have
+         *      recorded the incident is the run that died.
+         *
+         * Checking only (1) would miss the first boot after the incident;
+         * checking only (2) would forget it the moment the owner re-arms, since
+         * EarlyRootStore.archivePreviousCycle() moves the journal to
+         * <path>.prev. Together they cover both, which is why both are here and
+         * not one.
+         */
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(in.incidentRecord)) {
+            return refuse(INCIDENT_UNREADABLE, "an early-root incident record exists"
+                    + " but could not be read; it may name an unresolved fatal"
+                    + " incident, so this boot refuses");
+        }
+        if (!blank(in.incidentRecord)) {
+            Incident recorded = parseIncident(in.incidentRecord);
+            if (recorded == null) {
+                return refuse(INCIDENT_MALFORMED, "the early-root incident record is"
+                        + " not a record this build can account for; refusing rather"
+                        + " than reading it as absent");
+            }
+            if (incidentBlocks(recorded, in.ksudSha256)) {
+                return refuse(INCIDENT_UNRESOLVED, "an earlier boot ("
+                        + recorded.bootId + ") reached transaction 5 and never"
+                        + " reported a result"
+                        + (blank(recorded.ksudSha256)
+                            ? "; the incident could not be attributed to an artefact,"
+                              + " so every early dispatch refuses until the owner"
+                              + " accounts for it"
+                            : " on this daemon/module pair")
+                        + ". A corrected module is a new ksud digest; see"
+                        + " docs/EARLY_ROOT.md section 12");
+            }
+        }
+        Incident pending = detectIncident(in.journalRecord, in.armRecord,
+                in.currentBootId, in.currentBootId, 0L);
+        if (pending != null && incidentBlocks(pending, in.ksudSha256)) {
+            return refuse(INCIDENT_IN_JOURNAL, "the early-root journal says boot "
+                    + pending.bootId + " reached transaction 5 and never reported a"
+                    + " result, and no incident record accounts for it; refusing"
+                    + " rather than treating a previous boot's unexplained death as"
+                    + " last boot's business");
+        }
+        /*
          * The journal. An unreadable one is the worst case rather than a blank
          * slate: it may say STARTED, i.e. the page cache was already written in
          * this boot.
@@ -968,7 +1282,11 @@ public final class EarlyRootPolicy {
                         + "); a hard reboot is the boundary");
             }
             // A journal naming another boot is last boot's record: it says
-            // nothing about this one and must not lock it.
+            // nothing about this boot's one-attempt budget and must not lock it.
+            // The one shape that DOES carry forward - STARTED with
+            // native_started=1, a run that never reported - was already refused
+            // by the incident latch above, so what reaches here is a boot that
+            // completed, refused, or failed and locked.
         }
         /*
          * And the other trigger's journal, for the same boot.

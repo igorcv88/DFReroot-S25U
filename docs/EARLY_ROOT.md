@@ -140,6 +140,8 @@ refused:
 | `EARLY_ROOT_MARKER_PRESENT` / `MARKER_UNKNOWN` | `/dev/df` means hooks are armed; a probe that answered neither way is not an empty `/dev` (on this firmware it answers EACCES once rooted) |
 | `EARLY_ROOT_SELINUX_NOT_ENFORCING` | `-1` is an unreadable sysfs, never agreement |
 | `EARLY_ROOT_NETWORKSTACK_NOT_READY` | see §3 |
+| `EARLY_ROOT_INCIDENT_UNRESOLVED` / `INCIDENT_UNREADABLE` / `INCIDENT_MALFORMED` / `INCIDENT_IN_JOURNAL` | a previous boot reached transaction 5 and never reported a result. Four codes because "recorded and open", "cannot be read", "cannot be accounted for" and "never recorded at all" send the next run to different places — see §12 |
+| `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED` | the owner has not authorized an EARLY load of this (firmware, daemon+module) pair. A property of the artefact, so it refuses before the cycle, the arming or the boot is read — see §11 |
 
 Auto Root's `opt_in` flag is deliberately **not** consulted. That flag is Auto
 Root's separate owner decision; Early Root's opt-in is the arming itself.
@@ -390,19 +392,45 @@ may make to it is none.
    without the other. A pair still carrying digest `f680f959…` is the pair that
    panicked, whatever else was done to it, and the static guard refuses it
    permanently.
-2. **The root cause closed, not the symptom.** The decisive question needs no
-   device: is the list `my_actor` manipulates reachable from both discovery
-   passes? If each `search_manager` owns its list on its own stack, overlap
-   cannot explain the corruption and the fault is in shared throne/manager
-   state instead — a different patch. Close that fork first; a lock on the wrong
-   object trades the panic for a deadlock, and a `/data/app` scan under a
-   spinlock is worse than either.
+2. **The root cause closed, not the symptom.** This fork is now **answered**,
+   and the answer is the first one: the list is shared. At KernelSU's pinned
+   v3.3.0 tag, `kernel/manager/throne_tracker.c:59` declares
+
+   ```c
+   static struct list_head apk_path_hash_list = LIST_HEAD_INIT(apk_path_hash_list);
+   ```
+
+   — a file-scope global — and nothing in that file takes a lock around it. The
+   faulting instruction was resolved from the module's own bytes: `my_actor`
+   begins at `0x688c`, `.rela.text` carries
+   `0x6be8 R_AARCH64_CALL26 __list_del_entry_valid_or_report`, so the reported
+   `my_actor+0x360` is the return address of that call, and its DWARF line is
+   `throne_tracker.c:141` — the `list_del()` in the "Manager found, clear APK
+   cache list" loop. `kernel/manager/pkg_observer.c` then runs the whole
+   recursive `/data/app` scan **inline in the fsnotify handler**, so the thread
+   that writes `packages.list` is the second scanner.
+
+   The deadlock warning stood and was acted on: a mutex alone would have traded
+   the panic for a stalled system_server binder thread for the length of a
+   `/data/app` walk, so the fix both serialises the scan **and** moves the
+   observer's work to a coalescing workqueue. The full chain, the fix and its
+   gates are in RMGLabs-Payloads,
+   `docs/incidents/2026-10-12-dzif-early-load-throne-tracker-panic.md`.
 3. **Never by disabling the check that caught it.** `CONFIG_DEBUG_LIST` is why
    this was a panic at 22.7 s rather than silent corruption found later.
-4. **Concurrency proven off this device.** A harness forcing a `packages.list`
-   change during `INITIALIZING` and repeated notifications during enumeration,
-   under `CONFIG_DEBUG_LIST` and KASAN where available, over many interleavings.
-   Not on the owner's phone.
+4. **Concurrency proven off this device.** This now **exists**:
+   `kernelsu/tools/throne_tracker_harness/` in RMGLabs-Payloads compiles the
+   real scanner twice — pristine and patched — against shims whose `list_del()`
+   poisons and checks for poison exactly as `lib/list_debug.c` does, and runs
+   two threads doing what the device's two threads did. `make check` requires
+   the pristine source to reproduce the `LIST_POISON1` double unlink and the
+   patched source to report nothing, with no two scans ever inside the scanner
+   at once. Not on the owner's phone.
+
+   What it does **not** cover, and what therefore still has to be true before an
+   entry: the module has actually been rebuilt with the patch (no corrected
+   module exists yet — that needs one `workflow_dispatch`), and its own build
+   gate `tools/assert_observer_defers.py` passes on the new bytes.
 
 Only then does the owner add the pair, in a PR, with items 1–4 named beside the
 digest in the dossier.
@@ -425,3 +453,101 @@ proven. Every other gate in this repository is split the same way.
 exact pair that panicked — it is how the device was recovered on 2026-10-12 —
 which is what makes it the control that isolates the defect to load time, and
 never evidence for the early window.
+
+## 12. An unexplained early run latches, across boots
+
+The 2026-10-12 run left this on disk:
+
+```ini
+boot_id=5a7c2537-9693-44f9-8b2e-e26a1b3a10f2
+phase=STARTED
+attempts=1
+native_started=1
+```
+
+`native_started=1` is the pre-record for transaction 5 and nothing followed it:
+no `EARLY_ROOT_NATIVE_RETURNED`, no verdict, no post-root. The process died
+between issuing the destructive call and reporting anything about it, and the
+kernel died with it.
+
+On the next boot, that record used to mean **nothing at all**. The gate read it,
+saw a `boot_id` that was not the current one, and moved on — correctly for every
+other shape, by the one comment in `evaluate()` that says so: "a journal naming
+another boot is last boot's record: it says nothing about this one and must not
+lock it." A boot that completed, a boot that refused, a boot that failed and
+locked: all of those reported, and none of them is this boot's business.
+
+A run that never reported is not in that set. It is the one shape that carries
+forward, because the thing it failed to say is whether the page cache was
+written, whether the module loaded, or why the device rebooted.
+
+### What latches, and what unlatches it
+
+A fourth durable record, `/data/system/dfreroot-early-root-incident`, written
+with the artefact identity copied from the arm record of the cycle that produced
+it. It is **not** archived by `archivePreviousCycle()`, which is the whole reason
+it is a separate record rather than a field in the journal: the journal and trace
+are per-cycle evidence and get moved to `<path>.prev` on the next arming, and an
+unexplained death has to outlive the cycle it happened in.
+
+| state | verdict |
+|---|---|
+| incident open, same ksud digest | `EARLY_ROOT_INCIDENT_UNRESOLVED` |
+| incident open, no artefact identity | `EARLY_ROOT_INCIDENT_UNRESOLVED` — refuses **every** dispatch |
+| incident open, a different ksud digest | not this dispatch's objection; the record stays as history |
+| incident record unreadable | `EARLY_ROOT_INCIDENT_UNREADABLE` |
+| incident record unaccountable | `EARLY_ROOT_INCIDENT_MALFORMED` |
+| stale `STARTED`/`native_started=1` journal, no incident record | `EARLY_ROOT_INCIDENT_IN_JOURNAL` |
+
+The last row has its own code on purpose (3.7): "the incident was recorded and
+is still open" and "the incident is in front of us and was never recorded"
+describe different failures, and the second one means the path that should have
+recorded it was skipped — exactly what happens when the dispatch that died is
+the one that owed the record.
+
+**Detection happens at the arming, and only there it can.** The journal carrying
+the evidence is about to be moved aside and the arm record the attribution comes
+from is about to be overwritten; after `DfrEarlyRoot.arm()` they are no longer
+side by side. So the arming detects, persists, and refuses — and a write that
+fails refuses the arming too, because arming over evidence that could not be
+preserved is the absence-as-permission the record exists to prevent.
+`tools/profile_binding_audit.py` enforces that order, and that both entry points
+supply the record: a job already pending never goes through the arming again.
+
+**The ordinary way out is a corrected artefact.** The module is embedded in ksud
+by the exact-port workflow, so a fixed module is a new ksud digest, and an
+incident attributed to the old one stops applying. Nothing is deleted; the
+record remains as history. The early path is of course still gated by
+`EARLY_LOAD_AUTHORIZED_ARTEFACTS`, which is empty — the two gates are
+independent and both must pass.
+
+**The exception, and why it is shaped like the allowlist.** An incident that
+could not name its artefact refuses everything, forever, and the record on this
+device is one: the journal format carries no artefact identity, so an incident
+detected from a journal written before this code existed has nothing for a
+corrected build to differ from. `ACKNOWLEDGED_INCIDENT_BOOTS` in
+`EarlyRootPolicy` is the exit, in the one shape AGENTS.md 3.6 permits —
+in-source, immutable, exact-match, **empty as shipped**, one entry naming one
+boot that has already happened, so it cannot pre-authorise a future incident.
+An acknowledged incident does not become permission to run; it stops being the
+reason for refusing, and every other gate still has to pass. A runtime "clear
+incidents" action would be the override 3.6 forbids wearing a maintenance hat,
+and `tools/profile_binding_audit.py` fails if the list stops being a fixed empty
+set.
+
+### What to read before acknowledging one
+
+For the boot the incident names, in this order — AGENTS.md 3.6.1 earned this
+list the expensive way:
+
+1. `/sys/class/sec/sec_hw_param/extra_info` — survives a panic on this firmware
+   even at `ro.debug_level=0x4f4c`, and names `PC`, `LR`, the faulting task and
+   the panic string;
+2. `/proc/last_kmsg` with root — the full kernel log, which is where the
+   `list_del corruption` line and the stack actually came from;
+3. `/proc/reset_summary` — `UPLOAD CAUSE`, `panic_msg`, `PC`;
+4. `dumpsys dropbox --print` — read the **suffix**: `_KP` is a kernel panic,
+   `_RP` an ordinary reboot. The DropBox copy of `last_kmsg` was `[[TRUNCATED]]`
+   and mostly XBL/ABL on 2026-10-12, so it is not a substitute for (2).
+
+`pstore` and `logcat -L` are empty on this firmware and prove nothing.

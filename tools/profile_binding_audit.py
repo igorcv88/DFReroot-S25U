@@ -2459,6 +2459,61 @@ def audit():
         fail("the arm record no longer carries a generation; an interrupted re-arm "
              "would leave a new job authorised by an old record")
 
+    # --- the unresolved-incident latch is enforced at BOTH entry points -----
+    # A journal left at STARTED with native_started=1 and no completion, in a
+    # boot that is not this one, is a run that died after transaction 5. The
+    # policy's own negative cases cover the decision
+    # (EarlyRootPolicyTest); what cannot be unit-tested is the Kotlin that has
+    # to supply the record, write it, and refuse without it.
+    if "ACKNOWLEDGED_INCIDENT_BOOTS = Set.of()" not in early_root_policy_src:
+        fail("the acknowledged-incident list is no longer empty, or no longer a "
+             "fixed in-source exact-match set. An entry names one boot the owner "
+             "examined and closed; a wildcard, a parsed file or a runtime clear "
+             "action would be the execution override 3.6 forbids, since an "
+             "acknowledged incident stops being a reason to refuse")
+    for name, src in (("DfrEarlyRootJobService", early_root_job_src),
+                      ("DfrEarlyRootService", early_root_service_src)):
+        if "in0.incidentRecord = EarlyRootStore.readIncident()" not in src:
+            fail("%s does not supply the early-root incident record, so the latch "
+                 "evaluates it as absent and a previous boot's unexplained death "
+                 "stops refusing at this entry point (3.2)" % name)
+    for required, why in (
+            ("EarlyRootPolicy.detectIncident(",
+             "the arming no longer looks for an unaccounted-for previous boot - "
+             "and it is the only place that can, because archivePreviousCycle() "
+             "is about to move the journal aside and the arm record the "
+             "attribution comes from is about to be overwritten"),
+            ("EarlyRootStore.writeIncident(",
+             "the arming no longer persists the incident it detected, so the "
+             "evidence dies with the cycle that produced it"),
+            ("EarlyRootPolicy.INCIDENT_IN_JOURNAL",
+             "the arming no longer reports a detected incident as its own "
+             "refusal, so the owner cannot tell it apart from an ordinary "
+             "not-armed answer (3.7)")):
+        if required not in early_root_arm_src:
+            fail("early-root arming: %s (missing %s)" % (why, required))
+    # Order: detect and record BEFORE the archive moves the journal. Reversed,
+    # the detector reads a journal that is no longer there and the incident is
+    # silently lost - which is the exact self-correction P0-D forbids.
+    latch_order = order(early_root_arm_src,
+                        "recordPendingIncident(",
+                        "EarlyRootStore.archivePreviousCycle()")
+    if latch_order is None or latch_order != sorted(latch_order):
+        fail("the early-root arming archives the previous cycle before looking "
+             "for an unresolved incident in it; the journal that carries the "
+             "evidence is gone by then")
+    if "INCIDENT_PATH" not in early_root_store_src:
+        fail("EarlyRootStore no longer has a durable incident record; a field in "
+             "the per-cycle journal cannot do this job, because "
+             "archivePreviousCycle() moves that journal aside on the next arming")
+    archive_body = early_root_store_src[
+        early_root_store_src.find("private fun archiveLocked("):]
+    archive_body = archive_body[:archive_body.find("fun journalPhase(")]
+    if "INCIDENT_PATH" in archive_body:
+        fail("archivePreviousCycle() archives the incident record. An "
+             "unexplained death has to outlive the cycle it happened in, or "
+             "re-arming erases the only thing that remembers it")
+
     # --- inside the window is not the same as before boot completion --------
     # The window bounds the clock, not the boot: a persisted callback restored
     # at 43 s in a boot that completed at 30 s satisfies the 120 s bound. The
