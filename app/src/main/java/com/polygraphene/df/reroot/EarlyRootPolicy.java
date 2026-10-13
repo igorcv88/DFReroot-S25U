@@ -417,6 +417,29 @@ public final class EarlyRootPolicy {
      * boot's record, and the broadcast receiver is the only writer that is not
      * part of the thing being timed.
      */
+    /**
+     * `LOCKED_BOOT_COMPLETED` arrived at this time, with these properties.
+     *
+     * A PASSIVE observation, not a dispatch attempt, and the distinction is the
+     * whole reason it exists. The dispatch trigger used to leave a
+     * {@link #STEP_TRIGGER_ENTERED} line here, and on the first PASS boot that
+     * line - at 21 259 ms, with `bootanim_exit=1` while `BEFORE_NATIVE` at
+     * 18 715 ms still read 0 - was the ONLY record bracketing the animation's
+     * exit to within 2.5 s. Standing the trigger down for a spent arming
+     * removed the redundant attempt appends and took that measurement with
+     * them; without it the animation's exit can only be placed between
+     * `BEFORE_NATIVE` and the verdict steps, a window four times wider, and the
+     * margin is exactly the quantity the remaining work has to measure.
+     *
+     * So the observation is kept and the attempt is not. Written by
+     * {@link DfrBootReceiver} - the component that is not part of what it
+     * measures - once per boot, only when this boot already has a trace, and
+     * never gating anything: it cannot arm, claim or dispatch, and a failure to
+     * write it costs the measurement rather than the run. Same shape, same
+     * reasons, as {@link #STEP_BOOT_COMPLETED_OBSERVED} below.
+     */
+    public static final String STEP_LOCKED_BOOT_OBSERVED =
+            "EARLY_ROOT_LOCKED_BOOT_OBSERVED";
     public static final String STEP_BOOT_COMPLETED_OBSERVED =
             "EARLY_ROOT_BOOT_COMPLETED_OBSERVED";
 
@@ -428,7 +451,7 @@ public final class EarlyRootPolicy {
             STEP_CONTROLLER_RECEIVED, STEP_REMOTE_PREFLIGHT_PASS,
             STEP_BEFORE_NATIVE, STEP_NATIVE_RETURNED, STEP_POST_ROOT_COMPLETE,
             STEP_SELINUX_ENFORCING, STEP_FAILED, STEP_REFUSED,
-            STEP_BOOT_COMPLETED_OBSERVED);
+            STEP_LOCKED_BOOT_OBSERVED, STEP_BOOT_COMPLETED_OBSERVED);
 
     /**
      * Upper bound on one boot's trace.
@@ -1423,6 +1446,39 @@ public final class EarlyRootPolicy {
      * boots - exactly what AGENTS.md 3.8 forbids. A record with no accountable
      * line at all belongs to no boot, so it is not this one's either.
      */
+    /**
+     * Does this boot's trace already carry that step?
+     *
+     * Added because {@link #STEP_BOOT_COMPLETED_OBSERVED} was appended TWICE in
+     * one boot on 2026-10-13, and the second line moved the number the whole
+     * milestone is measured against.
+     *
+     * `ACTION_BOOT_COMPLETED` is not once per kernel boot. A framework restart
+     * re-delivers it - and `LOCKED_BOOT_COMPLETED` with it - under the SAME
+     * `boot_id`, which is exactly what the soft-reboot path relies on elsewhere
+     * in this app. On the first PASS boot it happened at 3 976 999 ms, 66
+     * minutes in, so the trace ended with a `BOOT_COMPLETED_OBSERVED` at
+     * 3 982 637 ms beside the real one at 42 457 ms.
+     *
+     * The comparison point of the milestone is the EARLIEST BOOT_COMPLETED of
+     * the boot: that is the moment the ordering claim is about. A later
+     * re-delivery is a different event, and keeping it as the step's timestamp
+     * replaces a 14.7 s margin with one 66 minutes off. So the writer checks
+     * first and the first line stands.
+     *
+     * Malformed lines are skipped rather than counted, like everywhere else
+     * here: a line the reader drops cannot satisfy a presence test.
+     */
+    public static boolean traceHasStep(String record, String step) {
+        if (blank(record) || blank(step)) return false;
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(record)) return false;
+        for (String line : record.split("\n")) {
+            TraceStep parsed = parseTraceLine(line);
+            if (parsed != null && step.equals(parsed.step)) return true;
+        }
+        return false;
+    }
+
     public static boolean traceBelongsToBoot(String record, String bootId) {
         if (blank(bootId) || blank(record)) return false;
         if (AutoRootPolicy.RECORD_UNREADABLE.equals(record)) return false;

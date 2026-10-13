@@ -3552,3 +3552,211 @@ had in its first revision and no longer has.
   finishes and its *display* time is recorded nowhere, so "the notification
   appeared well after the phone started" is not a measurement of when root
   existed. The trace is - once it is read.
+
+### Early Integrated Root — boot 1's PRIMARY evidence, read
+
+Collected with `tools/earlyroot_collect_pass.sh` as **uid 0** at uptime
+8287.72 s of boot `42da1cdd-ccfa-4c06-861c-ce42eac99d61` — the same boot the
+previous entry reported from the app's row, 2 h 18 min in, with no reboot
+between. DFReroot `2.0.24-dzif` / `versionCode 20024`, daemon `3861dbd4…`.
+This replaces the derived reading: the trace itself is now in the record.
+
+#### The trace, with per-step `elapsed_ms` and per-step `bootanim_exit`
+
+| step | `elapsed_ms` | `bootanim_exit` |
+|---|---:|---|
+| `JOB_ENTERED` (trigger=job) | 18169 | **0** |
+| `READINESS_PASS` (proc/pr/thread/scheduleReceiver_12 all PASS) | 18291 | 0 |
+| `CLAIMED` (generation `f95644d1…`) | 18304 | 0 |
+| `DISPATCHED` → `SERVICE_ENTERED` (pid 2994) | 18305 → 18336 | 0 |
+| `PREFLIGHT_PASS` (NETWORKSTACK_READY, selinux 1, marker ABSENT) | 18455 | 0 |
+| `COORDINATOR_ENTERED` → `KSUD_STAGING` | 18465 → 18467 | 0 |
+| `STAGEHOP_SENDING` → `STAGEHOP_SENT` | 18582 → 18600 | 0 |
+| `CONTROLLER_RECEIVED` → `REMOTE_PREFLIGHT_PASS` | 18645 → 18707 | 0 |
+| **`BEFORE_NATIVE`** (transaction 5 issued) | **18715** | **0** |
+| `TRIGGER_ENTERED` (trigger=locked-boot) → `REFUSED ARM_ALREADY_CLAIMED` | 21259 | **1** |
+| `NATIVE_RETURNED` | 24639 | 1 |
+| **`POST_ROOT_COMPLETE`** (`ksu=32601`) | **27747** | 1 |
+| **`SELINUX_ENFORCING`** (`live_selinux=1`) | **27759** | 1 |
+| **`BOOT_COMPLETED_OBSERVED`** | **42457** | 1 |
+
+#### §8's per-boot criterion, item by item
+
+| item | status |
+|---|---|
+| one `boot_id` across the whole trace | **PASS** — every line reads `42da1cdd…` |
+| `POST_ROOT_COMPLETE` and `SELINUX_ENFORCING` present, both before `BOOT_COMPLETED_OBSERVED` | **PASS** — 27747 and 27759 against 42457, a **14.70 s** margin. No longer an inference. **Against the BROADCAST only** — see the scoping section below; it does not establish root before `sys.boot_completed=1` |
+| `/data/system/dfreroot-post-root` valid for that `boot_id` | **PASS** — `boot_id=42da1cdd…`, `ksu_version=32601`, `uapi_version=2`, `runtime_mode=late-load`, `selinux=1`, `transport_fix=kdp-cred-1` |
+| `/sys/fs/selinux/enforce` read independently | **PASS** — `1` |
+| journal `phase=COMPLETE` / `attempts=1` | **PASS**, with `native_started=1` |
+| no `_KP` DropBox entry in that boot **or the one after it** | **this boot: PASS.** Exactly two `_KP` entries exist, both 2026-10-12 (`…164651_KP`, `…223012_KP` — the throne_tracker panic). None on 2026-10-13. The boot's own start is recorded `_RP` at 17:56 and `ro.boot.bootreason=reboot,userrequested`. **The next boot's clause is still open** |
+
+So boot 1 is complete except for the following boot's `_KP` reading. **Two more
+accepted boots are still required**, and the gate stays UNVERIFIED.
+
+#### The first positive evidence about the repaired module in the early window
+
+The 2026-10-12 panic fired 6.2 s after `BEFORE_NATIVE`. Here `BEFORE_NATIVE` was
+at 18.715 s and the boot ran **2 h 18 min with no `_KP`**, `kernelsu` loaded
+(`lsmod`: 180224, used by 3) and `ksud 3.3.0 (uapi: 2)` answering. That is the
+first evidence the corrected pair survives an early load. One boot.
+
+#### What each signal is, and what the 14.70 s margin is NOT
+
+The owner's review on PR #64 separated three things this entry's first revision
+ran together. All three corrections hold and they all narrow the claim.
+
+**1. The margin is against the broadcast, not against boot completion.**
+`BOOT_COMPLETED_OBSERVED` at 42457 is the arrival of `ACTION_BOOT_COMPLETED` at
+our receiver. But `sys.boot_completed` reads **UNKNOWN** (i.e. unset) at
+`BEFORE_NATIVE` (18715) and **1** at 21259, so the property turned 1 somewhere in
+between — **before** `POST_ROOT_COMPLETE` at 27747.
+
+So, precisely:
+
+| claim | verdict |
+|---|---|
+| root verified before `ACTION_BOOT_COMPLETED` reached us | **yes**, by 14.70 s |
+| root verified before `sys.boot_completed=1` | **no** — the property was already 1 by 21259, ~6.5-9.0 s earlier |
+| root verified before the animation left the screen | **no** — same window |
+
+`docs/EARLY_ROOT.md` §5 already states that the property and the broadcast are
+two facts and that the property moves first. The milestone in §2 is written
+against the broadcast, so it **is** satisfied as specified — and the stronger
+reading a reader might take from "before BOOT_COMPLETED" is not.
+
+**2. `POST_ROOT_COMPLETE` at 27747 is when verification SUCCEEDED, not when root
+appeared.** The coordinator polls for the same-boot post-root record; the step is
+appended when a poll finds it valid. 27747 is therefore an **upper bound** on
+when the capability existed, not the instant. Nothing in this capture dates that
+instant, and the 3108 ms `NATIVE_RETURNED → POST_ROOT_COMPLETE` segment is
+polling latency plus whatever ksud took, which this trace does not separate.
+
+**3. `service.bootanim.exit` 0→1 is the firmware's flag, not the launcher
+appearing.** It records that the animation was *asked* to leave. What the owner
+physically sees, and when, is not in any file here. So "root lands after the
+screen" is a statement about that flag's transition, and the visual claim behind
+the product goal still rests on the owner looking at the device.
+
+#### With that scoping: how far the product goal actually is
+
+The animation's exit flag moved between 18715 and 21259; `POST_ROOT_COMPLETE`
+is at 27747. **Root was verified roughly 6.5-9.0 s after the firmware asked the
+animation to leave, and after the boot had already been declared complete by the
+property.** The chain's destructive write happened inside the animation; its
+verdict did not.
+
+The gap decomposes as:
+
+| segment | cost |
+|---|---:|
+| `JOB_ENTERED` → `BEFORE_NATIVE` (gate, readiness, claim, hop, remote preflight) | 546 ms |
+| `BEFORE_NATIVE` → `NATIVE_RETURNED` (the native chain itself) | **5924 ms** |
+| `NATIVE_RETURNED` → `POST_ROOT_COMPLETE` (polling + whatever ksud took) | **3108 ms** |
+| total `JOB_ENTERED` → `POST_ROOT_COMPLETE` | 9578 ms |
+| animation-exit flag moved, measured from `JOB_ENTERED` | ≤ 3090 ms |
+
+To land root before that flag moves, the chain must finish in ≤3.1 s instead of
+9.6 s, or start ~6.5 s earlier. Neither of the two large segments has been
+profiled and nothing here says either can be reduced.
+
+#### The LOCKED_BOOT ordering, confirmed a third time and from inside a PASS boot
+
+`TRIGGER_ENTERED` for `trigger=locked-boot` at **21259 ms**, with
+`sys_boot_completed=1` and `bootanim_exit=1` already. Third sample, same
+direction, now in the same boot as a punctual job. It refused with
+`ARM_ALREADY_CLAIMED`, which is the two-trigger exclusion working.
+
+#### A framework restart 66 minutes in, and what it costs this capture
+
+The trace carries a second `TRIGGER_ENTERED` + `REFUSED` at **3 976 999 ms** and
+a second `BOOT_COMPLETED_OBSERVED` at **3 982 637 ms**, under the same
+`boot_id`. Both boot broadcasts were re-delivered 66.3 minutes into the boot,
+which is the signature of a userspace/framework restart (the same property the
+soft-reboot path relies on). **What caused it is not in this capture, and the
+owner has no record of it either** — asked directly, the answer was that nothing
+on hand distinguishes a soft reboot he triggered from a spontaneous framework
+restart. So this instance stays **permanently unattributed**, and no later
+reasoning may assume either.
+
+What would attribute the next one, and what the collector was not reading:
+DFReroot's own soft-reboot path writes `phase=CLAIMED` to
+`/data/system/dfreroot-softreboot-lock` **before** the daemon is ever invoked
+(AGENTS.md 3.6.1), traces each privileged step to `-softreboot-trace`, and
+records the firmware's verdict in `-softreboot-health`. Records present and
+naming the boot means this app asked for the restart; absent or naming an
+earlier boot means it did not. `tools/earlyroot_collect_pass.sh` now reads all
+three — which also makes it a standing check that the early trigger never
+reaches that path, since the audit forbids it in code and this would show it in
+evidence.
+
+The same revision fixed a path error of its own: the collector read
+`/data/system/dfreroot-early-boot-probe`, which does not exist —
+`EarlyBootProbeStore` uses the `-early-job-` prefix — so this packet reported an
+absence that was a wrong path rather than a missing record. The probe's four
+real records are now in the list.
+
+Two consequences:
+
+- **the 3.6.2 baseline is contaminated.** `dev.bootcomplete=1` and
+  `dev.platform_bootcomplete=1` were read at 138 min, i.e. 72 min *after* a
+  userspace re-creation, so this is **not** the clean "nothing tore userspace
+  down" baseline. What it does show: 72 min after that restart both flags read 1,
+  `init.svc.bootchecker=stopped`, and no rollback occurred. A boot with no
+  restart is still needed for the baseline;
+- **the device's own `bootchecker.rc` is now in the record, verbatim**, and it
+  confirms the mechanism 3.6.2 names:
+
+  ```
+  on property:init.svc.zygote=restarting
+      ...
+      setprop dev.platform_bootcomplete 0
+      restart bootchecker
+  ```
+
+  with a separate `on property:dev.bootcomplete=1` rule. Whether that second
+  rule re-fires after a restart is still unread.
+
+#### Corrections to the collection procedure
+
+- **the `/proc` reset pair comes and goes, and this entry first said it wrong.**
+  Both `/proc/reset_summary` and `/proc/reset_history` answered
+  `No such file or directory` here, as uid 0 — and the first revision of this
+  section concluded they "do not exist on this firmware". That is refuted by
+  this dossier's own 2026-10-12 record, where `/proc/reset_summary` answered
+  `UPLOAD CAUSE = 0xc8000000 = KERNEL PANIC` on the same device. Two samples:
+  present after a panic, ENOENT in a clean boot. Consistent with the nodes
+  existing only when the firmware has a reset record to report — **not
+  confirmed**, so an absent node is not proof of a clean boot either.
+  What has been read in both states, and is what a procedure may rely on: the
+  DropBox `SYSTEM_LAST_KMSG_*` listing and `extra_info`. AGENTS.md 3.6.1 and
+  `docs/EARLY_ROOT.md` §8 now say so; leaving the standing directive claiming
+  the `/proc` pair carries the log while this page said it was absent would have
+  handed the next investigation two mutually exclusive instructions.
+- `extra_info` read successfully and was **empty**, which is consistent with no
+  panic record in this boot rather than with an unreadable node.
+- `/data/system/dfreroot-early-boot-probe` was absent: the probe's own cycle had
+  been consumed and its record lives under a different name.
+
+#### Two defects this capture exposed, both fixed
+
+- `BOOT_COMPLETED_OBSERVED` was appended **twice**, because
+  `ACTION_BOOT_COMPLETED` is not once per kernel boot. A reader taking the last
+  step - which `DfrEarlyRoot.armState` does - read a margin 66 minutes wrong.
+  The writer now checks `EarlyRootPolicy.traceHasStep` first and the earliest
+  line stands, because the milestone is an ordering against the moment this boot
+  was *first* declared complete.
+- the broadcast trigger appended `TRIGGER_ENTERED` + `REFUSED` to the trace of
+  the boot being measured, for an arming the job had already claimed at 18.3 s -
+  twice, thanks to the restart. An arm record outlives its cycle, so "spent"
+  looked like "live". The trigger that fires in every boot now stands down
+  silently once the cycle is claimed; the job keeps its breadcrumb, because when
+  it fired is the punctuality measurement being collected.
+
+#### The gap this capture does not close
+
+**No APK build or physical validation followed the code changes made in response
+to it.** `traceHasStep`, the idempotent `BOOT_COMPLETED_OBSERVED`, the dispatch
+stand-down and the passive `LOCKED_BOOT_OBSERVED` observer are host-verified
+only; there is no NDK or Gradle in the environment they were written in. The
+next physical boot is the first time any of them runs.

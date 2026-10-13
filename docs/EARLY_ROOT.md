@@ -498,10 +498,19 @@ Then, in the new boot, collect **before anything else** — this is the order
 AGENTS.md 3.6.1 requires after any unexplained reboot:
 
 ```sh
-# panic/reboot record FIRST. On this firmware these survive at
-# ro.debug_level=0x4f4c; pstore and logcat -L are empty and prove nothing.
+# panic/reboot record FIRST. extra_info and the DropBox entries survive at
+# ro.debug_level=0x4f4c and have now been read in BOTH states; pstore and
+# logcat -L are empty here and prove nothing. extra_info reads EMPTY when there
+# is no panic record - a successful read of nothing, not a failed one.
+#
+# The /proc pair comes and goes: present on 2026-10-12 after the panic
+# (UPLOAD CAUSE = KERNEL PANIC), ENOENT as uid 0 on 2026-10-13 in a clean boot.
+# Consistent with the nodes existing only when the firmware has a record to
+# report, which is NOT confirmed - so an absent node is not proof of a clean
+# boot. Record which of them existed. AGENTS.md 3.6.1 carries the same rule.
 cat /sys/class/sec/sec_hw_param/extra_info
-cat /proc/reset_summary; cat /proc/reset_history
+cat /sys/class/sec/sec_hw_param/extrc_info
+cat /proc/reset_summary; cat /proc/reset_history   # may be absent; say which
 ls -l /data/system/dropbox | grep SYSTEM_LAST_KMSG   # _KP = panic, _RP = reboot
 
 # the trace, and the boot it belongs to

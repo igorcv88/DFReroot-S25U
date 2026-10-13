@@ -25,6 +25,63 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
+> **Boot 1's primary evidence is read, 2026-10-13 — and it says root lands
+> AFTER the screen. Everything below predates it.**
+>
+> `tools/earlyroot_collect_pass.sh` ran as uid 0 in boot
+> `42da1cdd-ccfa-4c06-861c-ce42eac99d61`, 2 h 18 min in. The trace is in the
+> dossier with per-step `elapsed_ms`. §8's per-boot criterion is **PASS on five
+> of six items**: one `boot_id`; `POST_ROOT_COMPLETE` 27747 and
+> `SELINUX_ENFORCING` 27759 against `BOOT_COMPLETED_OBSERVED` 42457 (a 14.70 s
+> margin, measured, not inferred); the post-root record valid for that boot with
+> `ksu_version=32601`; `/sys/fs/selinux/enforce` = 1 read independently; journal
+> `phase=COMPLETE` / `attempts=1`. The sixth - no `_KP` in that boot **or the
+> one after it** - passes for this boot (the only two `_KP` entries are
+> 2026-10-12) and **the next boot's half is still open**.
+>
+> **Two more accepted boots are required. The gate stays UNVERIFIED.**
+>
+> **THE NUMBER THIS WAS MISSING, scoped as the owner's PR #64 review requires:**
+> the animation-exit FLAG moved between `BEFORE_NATIVE` (18715,
+> `bootanim_exit=0`) and 21259 (`=1`), and `POST_ROOT_COMPLETE` is at 27747.
+> **Root was verified ~6.5-9.0 s after that flag moved, and after
+> `sys.boot_completed` was already 1.** Three scoping limits, all of which narrow
+> the claim: the 14.70 s margin is against the **broadcast**
+> (`ACTION_BOOT_COMPLETED` at 42457), not against the property, which turned 1 in
+> that same early window; `POST_ROOT_COMPLETE` is when **verification
+> succeeded**, an upper bound on when the capability appeared, not the instant;
+> and `service.bootanim.exit` is the firmware asking the animation to leave, not
+> the launcher being presented - what the owner sees is in no file here.
+>
+> The gap decomposes as 546 ms gate-to-transaction-5, **5924 ms inside the native
+> chain**, **3108 ms of polling plus whatever ksud took** - 9578 ms against
+> ≤3090 ms before the flag moved. To land root first, the chain must finish in
+> ≤3.1 s or start ~6.5 s earlier. Neither large segment has been profiled, and
+> nothing says either can be reduced.
+>
+> **First positive evidence for the repaired module in the early window:** the
+> 2026-10-12 panic was 6.2 s after `BEFORE_NATIVE`; this boot ran 2 h 18 min with
+> `kernelsu` loaded and no `_KP`. One boot.
+>
+> **The locked-boot timestamp is now a passive observation**
+> (`EARLY_ROOT_LOCKED_BOOT_OBSERVED`), written once per boot by `DfrBootReceiver`
+> and unable to arm, claim or dispatch anything. The dispatch trigger's
+> incidental `TRIGGER_ENTERED` at 21259 was the only line bracketing the
+> animation's exit to within 2.5 s, and standing that trigger down for a spent
+> arming would have taken the measurement with it - the owner's PR #64 review
+> caught that regression before it shipped.
+>
+> **A framework restart 66.3 min into that boot** re-delivered both boot
+> broadcasts under the same `boot_id`. Cause not in the capture. It means
+> `dev.platform_bootcomplete=1` read at 138 min is a **post-restart** reading,
+> so the 3.6.2 clean baseline still does not exist - but the device's own
+> `bootchecker.rc` is now in the record and confirms
+> `on property:init.svc.zygote=restarting → setprop dev.platform_bootcomplete 0`.
+>
+> **Procedure correction:** `/proc/reset_summary` and `/proc/reset_history`
+> **do not exist on DZIF**. The DropBox `SYSTEM_LAST_KMSG_*` entries and
+> `extra_info` are the sources that do.
+
 > **First run reporting COMPLETE, 2026-10-13 — and the evidence packet for it
 > does not exist yet. Everything below predates it.**
 >

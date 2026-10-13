@@ -450,6 +450,22 @@ paid off, and both belong in the next investigation:
   and the panic string.** `/proc/reset_summary`, `/proc/reset_history` and
   `extrc_info` carry the surrounding kernel log. Read them FIRST after any
   unexplained reboot; `pstore` and `logcat -L` are empty here and prove nothing.
+
+  **But the `/proc` pair is not always there, and its absence is a reading
+  rather than a missing tool.** On 2026-10-12, after the panic,
+  `/proc/reset_summary` answered `UPLOAD CAUSE = 0xc8000000 = KERNEL PANIC`. On
+  2026-10-13, in a boot with no panic, both it and `/proc/reset_history`
+  answered **ENOENT as uid 0** — absence, not a denial. Two samples, one with a
+  record and one without, which is consistent with the firmware creating these
+  nodes only when it has a reset record to report; that mechanism is **not
+  confirmed**, so do not read an absent node as proof of a clean boot.
+
+  What has now been observed in **both** states, and is therefore what a
+  procedure may rely on: the DropBox `SYSTEM_LAST_KMSG_*` entries and
+  `extra_info` — which reads **empty** when there is no panic record, which is
+  a successful read of nothing and must not be confused with a failed one. So:
+  read the DropBox listing and `extra_info` first and always, then the `/proc`
+  pair, and record which of them existed.
 - **A reboot record is not a panic record, and this firmware labels which is
   which.** The DropBox entries it writes are suffixed: `SYSTEM_LAST_KMSG_*_KP`
   for a kernel panic, `SYSTEM_LAST_KMSG_*_RP` for an ordinary reboot, each

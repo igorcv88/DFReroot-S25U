@@ -58,8 +58,14 @@ say ""
 
 # 1. Panic and reboot records, before anything else.
 show "sec_hw_param/extra_info" cat /sys/class/sec/sec_hw_param/extra_info
-show "reset_summary" cat /proc/reset_summary
-show "reset_history" cat /proc/reset_history
+# AGENTS.md 3.6.1 names this one as the carrier of the surrounding kernel log,
+# and the collector was not reading it.
+show "sec_hw_param/extrc_info" cat /sys/class/sec/sec_hw_param/extrc_info
+# These two come and go: present on 2026-10-12 after the panic, ENOENT in a
+# clean boot. show() records the exit status, so "absent" and "unreadable" stay
+# distinguishable - and neither is proof of a clean boot on its own.
+show "reset_summary (may be absent)" cat /proc/reset_summary
+show "reset_history (may be absent)" cat /proc/reset_history
 # The one block whose whole purpose is to prove an ABSENCE, so it is the one
 # block that must never report a failed read as a clean boot.
 #
@@ -102,7 +108,31 @@ show "early-root arm" cat /data/system/dfreroot-early-root-arm
 show "early-root incident log" cat /data/system/dfreroot-early-root-incident
 show "post-root record" cat /data/system/dfreroot-post-root
 show "auto-root journal" cat /data/system/dfreroot-autoroot-journal
-show "early-boot probe" cat /data/system/dfreroot-early-boot-probe
+# The probe's real record names. The first revision of this script read
+# "dfreroot-early-boot-probe", which does not exist - EarlyBootProbeStore uses
+# the -early-job- prefix - so the 2026-10-13 packet reported an absence that was
+# a wrong path rather than a missing record.
+show "early-job probe" cat /data/system/dfreroot-early-job-probe
+show "early-job arm" cat /data/system/dfreroot-early-job-arm
+show "early-job callback" cat /data/system/dfreroot-early-job-callback
+show "locked-boot marker" cat /data/system/dfreroot-locked-boot-marker
+
+# --- who tore userspace down, if anybody in THIS app did ------------------
+# The 2026-10-13 PASS boot had both boot broadcasts re-delivered 66.3 min in,
+# under the same boot_id - the signature of a framework restart - and neither
+# the capture nor the owner could say what caused it. It stays unattributed.
+#
+# These three are what would attribute the next one. DFReroot's soft-reboot path
+# writes phase=CLAIMED to the lock BEFORE the daemon is ever invoked
+# (AGENTS.md 3.6.1), traces each privileged step, and records the firmware's
+# boot-health verdict afterwards. So: records present and naming this boot means
+# this app asked for it; records absent or naming an earlier boot means it did
+# not, and the restart came from somewhere else. Either answer is worth more
+# than the question, and the chain never reaches this path from the early
+# trigger - which is itself the thing being checked.
+show "soft-reboot lock" cat /data/system/dfreroot-softreboot-lock
+show "soft-reboot trace" cat /data/system/dfreroot-softreboot-trace
+show "soft-reboot health" cat /data/system/dfreroot-softreboot-health
 
 # 3. The verdict's independent half.
 say "selinux_enforce=$(cat /sys/fs/selinux/enforce)"

@@ -2995,6 +2995,85 @@ def audit():
              "everything between the gate and transaction 5 takes real time and the "
              "two properties move at different moments on this firmware")
 
+    # BOOT_COMPLETED_OBSERVED is written once per boot, and the FIRST line wins.
+    # ACTION_BOOT_COMPLETED is re-delivered by a framework restart under the same
+    # boot_id - that is the property the soft-reboot path relies on - and on the
+    # first PASS boot it happened 66 minutes in, leaving the trace ending 66
+    # minutes past the moment the milestone is measured against.
+    observed_fn = receiver_code.find("private fun recordEarlyRootBootCompleted(")
+    observed_body = receiver_code[observed_fn:] if observed_fn >= 0 else ""
+    observed_body = observed_body[:observed_body.find("\n    private fun ", 1)] if \
+        observed_body.find("\n    private fun ", 1) > 0 else observed_body
+    if observed_fn < 0 or "EarlyRootPolicy.traceHasStep(" not in observed_body:
+        fail("BOOT_COMPLETED_OBSERVED can be appended more than once in one boot; "
+             "a re-delivered broadcast would move the number the milestone is "
+             "measured against")
+    guard_at = observed_body.find("EarlyRootPolicy.traceHasStep(")
+    write_at = observed_body.find("EarlyRootStore.trace(")
+    if not (0 < guard_at < write_at):
+        fail("the BOOT_COMPLETED_OBSERVED idempotence check runs after the append "
+             "it is supposed to prevent")
+    if "traceHasStep" not in early_root_policy_src:
+        fail("EarlyRootPolicy lost traceHasStep, so the writer's idempotence check "
+             "rests on nothing")
+    # The locked-boot timestamp survives that stand-down as a PASSIVE observation.
+    # On the first PASS boot the dispatch trigger's incidental TRIGGER_ENTERED at
+    # 21259 ms was the only line bracketing the animation's exit to within 2.5 s;
+    # standing the trigger down for a spent arming would have taken the
+    # measurement with it, and the margin is what the remaining work has to
+    # measure. The owner's review on PR #64 caught that.
+    locked_fn = receiver_code.find("private fun recordEarlyRootLockedBoot(")
+    locked_body = receiver_code[locked_fn:] if locked_fn >= 0 else ""
+    locked_body = locked_body[:locked_body.find("\n    private fun ", 1)] if \
+        locked_body.find("\n    private fun ", 1) > 0 else locked_body
+    if locked_fn < 0:
+        fail("the locked-boot arrival is no longer observed anywhere; the only "
+             "sample inside the window where bootanim_exit and sys.boot_completed "
+             "move would be gone, and with it the visual margin")
+    else:
+        for required, why in (
+                ("EarlyRootPolicy.STEP_LOCKED_BOOT_OBSERVED",
+                 "it writes no step of its own"),
+                ("EarlyRootPolicy.traceBelongsToBoot(",
+                 "it would append to last boot's record (3.8), and every boot of "
+                 "every install would pay for it"),
+                ("EarlyRootPolicy.traceHasStep(",
+                 "a framework restart re-delivers the broadcast under the same "
+                 "boot_id, and the measurement is about the first arrival")):
+            if required not in locked_body:
+                fail("the passive locked-boot observation is unsound: %s (%r "
+                     "missing)" % (why, required))
+        # Passive means passive: it may not arm, claim, dispatch or gate.
+        for forbidden in ("claimCycle", "bindCycle", "startService",
+                          "gateAndDispatch", "evaluateArmBinding",
+                          "journalPhase"):
+            if forbidden in locked_body:
+                fail("the locked-boot observation reaches a decision path (%r); a "
+                     "component that may refuse is not one that can be trusted to "
+                     "leave a timestamp behind" % forbidden)
+    if "STEP_LOCKED_BOOT_OBSERVED" not in early_root_policy_src:
+        fail("EARLY_ROOT_LOCKED_BOOT_OBSERVED left the closed step vocabulary; "
+             "writing it would refuse and the sample would go unrecorded")
+    if "EarlyRootPolicy.STEP_LOCKED_BOOT_OBSERVED" in early_root_dispatch_src:
+        fail("the dispatch writes the passive locked-boot observation; the "
+             "observer must be the component that is not part of what it measures")
+
+    # And the trigger that fires in EVERY boot stands down silently once the
+    # arming it would serve is claimed: an arm record outlives its cycle, so
+    # without this the evidence file of the boot being measured collects two
+    # fsync'd appends per broadcast for a refusal the cycle record already proves.
+    spent_at = early_root_dispatch_src.find("val spent = EarlyRootPolicy.parseCycle(")
+    crumb_at = early_root_dispatch_src.find("val breadcrumb = EarlyRootStore.trace(")
+    if spent_at < 0 or not (spent_at < crumb_at):
+        fail("the early-root dispatch writes its breadcrumb before noticing that "
+             "this arming is already claimed; the broadcast trigger fires in every "
+             "boot and would keep appending to a spent cycle's trace")
+    if "EarlyRootPolicy.TRIGGER_JOB != trigger" not in \
+            early_root_dispatch_src[spent_at - 400:spent_at + 200]:
+        fail("the spent-arming stand-down is not scoped to the trigger that fires "
+             "every boot; the job's breadcrumb in that state is the punctuality "
+             "measurement this path collects")
+
     # The row the owner reads before spending a reboot must read the cycle, not
     # only the arm record. Reading only the arm record is how it reported ARMED
     # over an arming that had already been claimed and run.
