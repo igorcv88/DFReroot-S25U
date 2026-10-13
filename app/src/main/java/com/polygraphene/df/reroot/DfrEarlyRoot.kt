@@ -5,7 +5,9 @@ import android.app.job.JobScheduler
 import android.content.ComponentName
 import android.content.Context
 import android.os.Build
+import android.os.PersistableBundle
 import android.os.SystemClock
+import java.security.SecureRandom
 
 /**
  * Explicit, one-shot owner arming for Early Integrated Root.
@@ -80,10 +82,39 @@ object DfrEarlyRoot {
                 "${existing.service}; refusing to replace it"
         }
 
+        /*
+         * The token that identifies THIS arming, minted before the job exists
+         * so it can be put in both halves.
+         *
+         * scheduling and the durable arm record cannot be made one atomic
+         * operation. If this process dies after the new job is persisted and
+         * before the new record replaces the old one, the next boot finds a new
+         * job beside a stale authorisation whose job id, namespace, version,
+         * ksud digest and fingerprint all still agree - none of them identify
+         * the arming - and whose armed_boot_id names an earlier boot, so even
+         * ARM_SAME_BOOT stops applying. The token is the field that moves with
+         * the operation, and EarlyRootPolicy refuses when the two halves
+         * disagree or either is missing.
+         *
+         * SecureRandom rather than a counter or a timestamp: a counter resets
+         * with the process and a wallclock can repeat across a reboot, and
+         * either collision reads as agreement.
+         */
+        val generation = try {
+            val raw = ByteArray(16)
+            SecureRandom().nextBytes(raw)
+            raw.joinToString("") { "%02x".format(it) }
+        } catch (t: Throwable) {
+            return "[x] EARLY_ROOT_NOT_ARMED: cannot mint an arming generation ($t)"
+        }
+
         val job = try {
             JobInfo.Builder(JOB_ID, component)
                 .setPersisted(true)
                 .setMinimumLatency(MINIMUM_LATENCY_MS)
+                .setExtras(PersistableBundle().apply {
+                    putString(EarlyRootPolicy.EXTRA_GENERATION, generation)
+                })
                 .build()
         } catch (t: Throwable) {
             return "[x] EARLY_ROOT_NOT_ARMED: JobInfo build failed ($t)"
@@ -107,6 +138,23 @@ object DfrEarlyRoot {
             cancelOwned(scheduler, component)
             return "[x] EARLY_ROOT_NOT_ARMED: scheduled job did not verify as" +
                 " pending/persisted"
+        }
+        /*
+         * And that the token is in the job the scheduler actually holds. Written
+         * into a builder is not stored: an extras bundle the JobStore dropped
+         * would make every callback refuse with GENERATION_MISSING, in the boot
+         * the owner spent a reboot on. Better to learn it here, while the only
+         * cost is the arming.
+         */
+        val storedGeneration = try {
+            pending.extras?.getString(EarlyRootPolicy.EXTRA_GENERATION)
+        } catch (t: Throwable) {
+            null
+        }
+        if (storedGeneration != generation) {
+            cancelOwned(scheduler, component)
+            return "[x] EARLY_ROOT_NOT_ARMED: the scheduled job does not carry this" +
+                " arming's generation (stored=$storedGeneration)"
         }
 
         val elapsed = monotonicNow()
@@ -132,7 +180,7 @@ object DfrEarlyRoot {
             bootId, JOB_ID, namespaceForRuntime(), MINIMUM_LATENCY_MS, result,
             AutoRootStore.versionCode(), AutoRootStore.versionName(),
             KsudStage.pinnedKsudSha256(), AutoRootStore.deviceFingerprint(),
-            elapsed, wallclock
+            elapsed, wallclock, generation
         )
         val failure = EarlyRootStore.writeArm(record)
         if (failure != null) {
@@ -140,7 +188,8 @@ object DfrEarlyRoot {
             return "[x] EARLY_ROOT_NOT_ARMED: durable arm record failed ($failure)"
         }
         return "[*] EARLY_ROOT_ARMED job_id=$JOB_ID namespace=${namespaceForRuntime()} " +
-            "schedule_result=$result persisted=1 min_latency_ms=$MINIMUM_LATENCY_MS; " +
+            "schedule_result=$result persisted=1 generation=$generation " +
+            "min_latency_ms=$MINIMUM_LATENCY_MS; " +
             "start the FULL reboot within ${REBOOT_WITHIN_MS / 1000}s. The chain will " +
             "run inside the boot animation; a hard reboot is the recovery boundary."
     }

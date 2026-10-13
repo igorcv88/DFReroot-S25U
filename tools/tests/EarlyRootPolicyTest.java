@@ -45,9 +45,17 @@ public class EarlyRootPolicyTest {
                 1759000000000L, false, QUAL_BOOT);
     }
 
+    private static final String GEN = "7a1c3e5f90b2d4681357abcdef024680";
+    private static final String STALE_GEN = "0011223344556677889900aabbccddee";
+
     private static String arm() {
+        return arm(GEN);
+    }
+
+    private static String arm(String generation) {
         return EarlyRootPolicy.formatArm(ARMED_BOOT, EarlyRootPolicy.EXPECTED_JOB_ID,
-                NS, 15_000L, 1, CODE, NAME, KSUD, FP, 300_000L, 1759000000000L);
+                NS, 15_000L, 1, CODE, NAME, KSUD, FP, 300_000L, 1759000000000L,
+                generation);
     }
 
     /** Every element satisfied; each test below spoils exactly one. */
@@ -59,6 +67,7 @@ public class EarlyRootPolicyTest {
         in.currentBootId = BOOT;
         in.callbackJobId = EarlyRootPolicy.EXPECTED_JOB_ID;
         in.callbackNamespace = NS;
+        in.callbackGeneration = GEN;
         in.expectedNamespace = NS;
         in.readinessState = EarlyBootProbePolicy.NETWORKSTACK_READY;
         in.callbackElapsedMs = 15_300L;   // the captured boots: 14.6-17.1 s
@@ -363,6 +372,56 @@ public class EarlyRootPolicyTest {
         in = ready();
         in.callbackElapsedMs = EarlyRootPolicy.EARLY_WINDOW_MS;
         allowed(in, "the window boundary itself is inside it");
+
+        // --- the arming is one operation, and the token is what says so ------
+        // schedule() and the durable arm record cannot be atomic. The reachable
+        // state: the process dies after the new job is persisted and before the
+        // new record replaces the old one, so the next boot finds a NEW job
+        // beside an OLD authorisation. Every other field still agrees, because
+        // none of them identify the arming - and the stale record names an
+        // earlier boot, so ARM_SAME_BOOT does not fire either.
+        in = ready();
+        in.armRecord = arm(STALE_GEN);
+        refused(in, EarlyRootPolicy.GENERATION_MISMATCH,
+                "a job that outlived the authorisation it was scheduled with refuses:"
+                        + " job id, namespace, version, ksud digest and fingerprint"
+                        + " all still agree, so nothing else could have caught it");
+        in = ready();
+        in.callbackGeneration = "";
+        refused(in, EarlyRootPolicy.GENERATION_MISSING,
+                "a callback whose extras carry no generation refuses; it may be a job"
+                        + " restored from a build that minted none");
+        in = ready();
+        in.callbackGeneration = null;
+        refused(in, EarlyRootPolicy.GENERATION_MISSING,
+                "and an unreadable extras bundle is the same refusal, not a skipped"
+                        + " comparison");
+        check(EarlyRootPolicy.parseArm(EarlyRootPolicy.formatArm(ARMED_BOOT,
+                        EarlyRootPolicy.EXPECTED_JOB_ID, NS, 15_000L, 1, CODE, NAME,
+                        KSUD, FP, 300_000L, 1759000000000L, "")) == null,
+                "an arm record with a blank generation does not parse as an arming;"
+                        + " a record that cannot name its operation is the ambiguity"
+                        + " the token removes");
+        check(EarlyRootPolicy.parseArm(
+                        "state=" + EarlyRootPolicy.STATE_ARMED + "\n"
+                        + "armed_boot_id=" + ARMED_BOOT + "\n"
+                        + "job_id=" + EarlyRootPolicy.EXPECTED_JOB_ID + "\n"
+                        + "namespace=" + NS + "\n"
+                        + "minimum_latency_ms=15000\n"
+                        + "schedule_result=1\n"
+                        + "version_code=" + CODE + "\n"
+                        + "version_name=" + NAME + "\n"
+                        + "ksud_sha256=" + KSUD + "\n"
+                        + "device_fingerprint=" + FP + "\n"
+                        + "armed_elapsed_ms=300000\n"
+                        + "armed_wallclock_ms=1759000000000\n") == null,
+                "an arm record in the OLD format, with no generation key at all,"
+                        + " refuses rather than being accepted on fields that do not"
+                        + " identify the arming");
+        in = ready();
+        in.armRecord = arm(GEN);
+        in.callbackGeneration = GEN;
+        allowed(in, "the two halves of one arming agree and the run is permitted");
 
         // The window bounds the clock; it does not bound the boot. Without a
         // state of its own, a callback the scheduler restored at 43 s in a boot

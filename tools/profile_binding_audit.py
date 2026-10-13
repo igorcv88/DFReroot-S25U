@@ -2425,6 +2425,40 @@ def audit():
     if "STEP_REMOTE_PREFLIGHT_PASS" not in early_root_policy_src:
         fail("EARLY_ROOT_REMOTE_PREFLIGHT_PASS left the closed step vocabulary; "
              "writing it would refuse and the boundary would go unrecorded")
+    # --- the arming is one operation, and it has to say which one -----------
+    # schedule() and the durable arm record cannot be made atomic, and the
+    # window between them is reachable: a process that dies after the new job is
+    # persisted and before the new record replaces the old leaves a NEW job
+    # beside an OLD authorisation whose job id, namespace, version, ksud digest
+    # and fingerprint all still agree. The policy's negative cases cover the
+    # comparison; what cannot be unit-tested is that the token is actually
+    # minted, stored in the JobInfo, verified to have survived the scheduler,
+    # read back from the live callback and relayed to the service.
+    for required, why in (
+            ("SecureRandom()", "a counter resets with the process and a wallclock "
+                               "can repeat across a reboot; either collision reads "
+                               "as agreement"),
+            ("EarlyRootPolicy.EXTRA_GENERATION", "the token is not put in the "
+                                                 "JobInfo extras, so the callback "
+                                                 "has nothing to be compared with"),
+            ("pending.extras", "nobody checks that the scheduler actually stored "
+                               "the extras; a dropped bundle would refuse every "
+                               "callback in the boot the owner spent a reboot on")):
+        if required not in early_root_arm_src:
+            fail("the early-root arming no longer binds a generation token (%s): %s"
+                 % (required, why))
+    if "params.extras" not in early_root_job_src:
+        fail("the early-root callback does not read the arming generation out of the "
+             "live JobParameters; comparing our own file against itself proves the "
+             "record self-consistent, not that it scheduled this job")
+    if "in0.callbackGeneration" not in early_root_job_src \
+            or "in0.callbackGeneration" not in early_root_service_src:
+        fail("one of the two early-root entry points does not supply the arming "
+             "generation, so its gate compares nothing (3.2)")
+    if "generation" not in code_only(early_root_policy_src):
+        fail("the arm record no longer carries a generation; an interrupted re-arm "
+             "would leave a new job authorised by an old record")
+
     # --- inside the window is not the same as before boot completion --------
     # The window bounds the clock, not the boot: a persisted callback restored
     # at 43 s in a boot that completed at 30 s satisfies the 120 s bound. The

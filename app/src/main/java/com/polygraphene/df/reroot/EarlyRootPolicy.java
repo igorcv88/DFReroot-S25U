@@ -57,6 +57,16 @@ import java.util.Set;
  */
 public final class EarlyRootPolicy {
 
+    /**
+     * The JobInfo extras key the arming's generation token travels in.
+     *
+     * Named here, beside the record format it has to agree with, because two
+     * private copies of a string literal is how one side starts reading a key
+     * the other side never wrote - and a generation nobody can compare is the
+     * same as no generation at all.
+     */
+    public static final String EXTRA_GENERATION = "dfr_early_root_generation";
+
     /** Marks an arm record the owner created for the NEXT full boot. */
     public static final String STATE_ARMED = "EARLY_ROOT_ARMED";
 
@@ -153,6 +163,9 @@ public final class EarlyRootPolicy {
     public static final String BOOT_ALREADY_COMPLETED =
             "EARLY_ROOT_BOOT_ALREADY_COMPLETED";
     public static final String BOOT_STATE_UNKNOWN = "EARLY_ROOT_BOOT_STATE_UNKNOWN";
+    public static final String GENERATION_MISSING = "EARLY_ROOT_ARM_GENERATION_MISSING";
+    public static final String GENERATION_MISMATCH =
+            "EARLY_ROOT_ARM_GENERATION_MISMATCH";
     public static final String JOURNAL_UNREADABLE = "EARLY_ROOT_JOURNAL_UNREADABLE";
     public static final String JOURNAL_MALFORMED = "EARLY_ROOT_JOURNAL_MALFORMED";
     public static final String BOOT_SPENT = "EARLY_ROOT_BOOT_ALREADY_ATTEMPTED";
@@ -273,7 +286,8 @@ public final class EarlyRootPolicy {
     private static final Set<String> ARM_KEYS = Set.of(
             "state", "armed_boot_id", "job_id", "namespace", "minimum_latency_ms",
             "schedule_result", "version_code", "version_name", "ksud_sha256",
-            "device_fingerprint", "armed_elapsed_ms", "armed_wallclock_ms");
+            "device_fingerprint", "armed_elapsed_ms", "armed_wallclock_ms",
+            "generation");
 
     private static final Set<String> JOURNAL_KEYS = Set.of(
             "boot_id", "phase", "attempts", "native_started");
@@ -304,10 +318,12 @@ public final class EarlyRootPolicy {
         public final String versionName;
         public final String ksudSha256;
         public final String deviceFingerprint;
+        /** Identifies the one arming operation this record was written by. */
+        public final String generation;
 
         private Arm(String armedBootId, int jobId, String namespace, long minimumLatencyMs,
                     int versionCode, String versionName, String ksudSha256,
-                    String deviceFingerprint) {
+                    String deviceFingerprint, String generation) {
             this.armedBootId = armedBootId;
             this.jobId = jobId;
             this.namespace = namespace;
@@ -316,6 +332,7 @@ public final class EarlyRootPolicy {
             this.versionName = versionName;
             this.ksudSha256 = ksudSha256;
             this.deviceFingerprint = deviceFingerprint;
+            this.generation = generation;
         }
     }
 
@@ -382,6 +399,26 @@ public final class EarlyRootPolicy {
         public int callbackJobId;
         /** The namespace the scheduler actually called back in. */
         public String callbackNamespace;
+        /**
+         * The generation token the scheduler actually called back with, out of
+         * the JobInfo extras.
+         *
+         * Why a token and not the fields already here: scheduling the job and
+         * writing the arm record cannot be made one atomic operation, and the
+         * window between them is reachable. If the process dies after the new
+         * job is persisted and before the new record replaces the old one, the
+         * next boot finds a NEW job beside an OLD authorisation whose job id,
+         * namespace, version, ksud digest and fingerprint all still agree -
+         * because none of those identify the arming. Worse than a stale
+         * allowance: the stale record names an earlier boot, so
+         * {@link #ARM_SAME_BOOT} - the guard that stops a job firing in the
+         * boot it was armed in - stops applying as well.
+         *
+         * The token is minted once per arming, written into the JobInfo extras
+         * and into the record, and compared here. One of the two halves missing
+         * is a refusal.
+         */
+        public String callbackGeneration;
         /** The namespace THIS runtime would have armed in. */
         public String expectedNamespace;
         /** One of the three {@code EarlyBootProbePolicy.NETWORKSTACK_*} states. */
@@ -454,7 +491,7 @@ public final class EarlyRootPolicy {
                                    long minimumLatencyMs, int scheduleResult,
                                    int versionCode, String versionName, String ksudSha256,
                                    String deviceFingerprint, long elapsedMs,
-                                   long wallclockMs) {
+                                   long wallclockMs, String generation) {
         return "state=" + STATE_ARMED + "\n"
                 + "armed_boot_id=" + bootId + "\n"
                 + "job_id=" + jobId + "\n"
@@ -466,7 +503,8 @@ public final class EarlyRootPolicy {
                 + "ksud_sha256=" + ksudSha256 + "\n"
                 + "device_fingerprint=" + deviceFingerprint + "\n"
                 + "armed_elapsed_ms=" + elapsedMs + "\n"
-                + "armed_wallclock_ms=" + wallclockMs + "\n";
+                + "armed_wallclock_ms=" + wallclockMs + "\n"
+                + "generation=" + generation + "\n";
     }
 
     /** null means malformed, unreadable, incomplete, or never actually scheduled. */
@@ -480,6 +518,15 @@ public final class EarlyRootPolicy {
                 || blank(values.get("device_fingerprint"))) {
             return null;
         }
+        /*
+         * No generation, no arming. An arm record written by a build that did
+         * not mint one cannot be told apart from a stale record left by an
+         * interrupted arming, and that is exactly the ambiguity the token
+         * exists to remove - so the older format refuses rather than being
+         * accepted on the strength of fields that do not identify the
+         * operation (3.5: bind the claim to bytes that move with it).
+         */
+        if (blank(values.get("generation"))) return null;
         try {
             int jobId = Integer.parseInt(values.get("job_id"));
             String namespace = values.get("namespace");
@@ -503,7 +550,7 @@ public final class EarlyRootPolicy {
             }
             return new Arm(values.get("armed_boot_id"), jobId, namespace, latency,
                     versionCode, values.get("version_name"), values.get("ksud_sha256"),
-                    values.get("device_fingerprint"));
+                    values.get("device_fingerprint"), values.get("generation"));
         } catch (NumberFormatException e) {
             return null;
         }
@@ -673,6 +720,32 @@ public final class EarlyRootPolicy {
         if (in.callbackJobId != arm.jobId || in.callbackJobId != EXPECTED_JOB_ID) {
             return refuse(BINDING_MISMATCH, "the callback job id " + in.callbackJobId
                     + " is not the armed job " + arm.jobId);
+        }
+        /*
+         * And bound to the one arming operation, not merely to this feature.
+         *
+         * See Inputs.callbackGeneration for the window: schedule() and the
+         * durable arm record cannot be one atomic step, so a new job can
+         * outlive the old record. Every other field here still agrees in that
+         * state - and the stale record names an earlier boot, so ARM_SAME_BOOT
+         * stops protecting the same-boot case too. The token is the only field
+         * that moves with the operation.
+         *
+         * A missing half is its own code: "the scheduler called back without
+         * the extras we armed with" and "the extras name a different arming"
+         * are different failures, and the first can also mean a job restored
+         * from a build that minted no token.
+         */
+        if (blank(in.callbackGeneration)) {
+            return refuse(GENERATION_MISSING, "the callback carries no arming"
+                    + " generation; the job was not scheduled by an arming of this"
+                    + " build, or its extras did not survive");
+        }
+        if (!in.callbackGeneration.equals(arm.generation)) {
+            return refuse(GENERATION_MISMATCH, "the callback's arming generation "
+                    + in.callbackGeneration + " is not the armed record's "
+                    + arm.generation + "; a job outlived the authorisation it was"
+                    + " scheduled with");
         }
         /*
          * Three namespaces must agree, and they are three different facts.

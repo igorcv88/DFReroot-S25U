@@ -58,11 +58,13 @@ class DfrEarlyRootJobService : JobService() {
         val callbackElapsedMs = EarlyRootEnv.monotonicNow()
         val jobId = params.jobId
         val callbackNamespace = callbackNamespace(params)
+        val callbackGeneration = callbackGeneration(params)
         val token = RunToken(jobId)
         activeRun = token
         val task = Runnable {
             try {
-                gateAndDispatch(token, callbackNamespace, callbackElapsedMs)
+                gateAndDispatch(token, callbackNamespace, callbackGeneration,
+                    callbackElapsedMs)
             } catch (t: Throwable) {
                 Log.e(TAG, "[DFR][EARLY_ROOT] gate worker failed", t)
             } finally {
@@ -125,6 +127,7 @@ class DfrEarlyRootJobService : JobService() {
     private fun gateAndDispatch(
         token: RunToken,
         callbackNamespace: String,
+        callbackGeneration: String,
         callbackElapsedMs: Long,
     ) {
         val context = applicationContext
@@ -164,8 +167,8 @@ class DfrEarlyRootJobService : JobService() {
          * told so. It is not a separate gate: evaluate() re-runs all of it.
          */
         val durable = EarlyRootPolicy.evaluateBeforeReadiness(
-            inputs(bootId, token.jobId, callbackNamespace, callbackElapsedMs,
-                readinessState = null)
+            inputs(bootId, token.jobId, callbackNamespace, callbackGeneration,
+                callbackElapsedMs, readinessState = null)
         )
         if (!durable.allow) {
             refuse(bootId, callbackElapsedMs, bootState, durable)
@@ -180,8 +183,8 @@ class DfrEarlyRootJobService : JobService() {
         val readiness = StageHop.probeReadiness(context)
         if (abandonIfStopped(token, bootId, "after_readiness")) return
         val decision = EarlyRootPolicy.evaluate(
-            inputs(bootId, token.jobId, callbackNamespace, EarlyRootEnv.monotonicNow(),
-                readiness.state)
+            inputs(bootId, token.jobId, callbackNamespace, callbackGeneration,
+                EarlyRootEnv.monotonicNow(), readiness.state)
         )
         if (!decision.allow) {
             refuse(bootId, EarlyRootEnv.monotonicNow(), EarlyRootEnv.bootState(context),
@@ -225,6 +228,15 @@ class DfrEarlyRootJobService : JobService() {
             context.startService(
                 Intent(context, DfrEarlyRootService::class.java)
                     .putExtra(EXTRA_CALLBACK_ELAPSED_MS, callbackElapsedMs)
+                    /*
+                     * Relayed, because the service re-derives the whole gate
+                     * and the generation is the one input it cannot read for
+                     * itself: the live JobParameters exist only here. The
+                     * authority it is compared against is still the root-owned
+                     * arm record in /data/system, so a relayed value that does
+                     * not match it refuses.
+                     */
+                    .putExtra(EarlyRootPolicy.EXTRA_GENERATION, callbackGeneration)
             )
         } catch (t: Throwable) {
             Log.e(TAG, "[DFR][EARLY_ROOT] FAIL cannot start the early-root service: $t", t)
@@ -275,6 +287,7 @@ class DfrEarlyRootJobService : JobService() {
         bootId: String,
         jobId: Int,
         callbackNamespace: String,
+        callbackGeneration: String,
         callbackElapsedMs: Long,
         readinessState: String?,
     ): EarlyRootPolicy.Inputs {
@@ -289,6 +302,7 @@ class DfrEarlyRootJobService : JobService() {
         in0.currentBootId = bootId
         in0.callbackJobId = jobId
         in0.callbackNamespace = callbackNamespace
+        in0.callbackGeneration = callbackGeneration
         in0.expectedNamespace = DfrEarlyRoot.namespaceForRuntime()
         in0.readinessState = readinessState
         in0.callbackElapsedMs = callbackElapsedMs
@@ -328,6 +342,22 @@ class DfrEarlyRootJobService : JobService() {
      * The namespace the scheduler itself called us back in. Before API 34 there
      * are no namespaces, so the only honest answer is the default one.
      */
+    /**
+     * The arming generation out of the live callback's extras.
+     *
+     * Read from JobParameters rather than from our own file, for the same
+     * reason the job id and namespace are: the record proves itself
+     * self-consistent, the callback is what ties it to the scheduler. An
+     * absent or unreadable value comes back empty and the policy refuses with
+     * GENERATION_MISSING - never with a plausible substitute.
+     */
+    private fun callbackGeneration(params: JobParameters): String = try {
+        params.extras?.getString(EarlyRootPolicy.EXTRA_GENERATION) ?: ""
+    } catch (t: Throwable) {
+        Log.e(TAG, "[DFR][EARLY_ROOT] callback extras unreadable: $t")
+        ""
+    }
+
     private fun callbackNamespace(params: JobParameters): String = try {
         if (Build.VERSION.SDK_INT >= 34) {
             params.jobNamespace ?: EarlyRootPolicy.DEFAULT_UID_NAMESPACE

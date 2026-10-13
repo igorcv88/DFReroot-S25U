@@ -164,6 +164,31 @@ boot watchdog is still deciding whether this boot completed, and **nobody has
 observed what that costs.** A persistent form is a promotion for after the first
 runs come back clean, decided in the open by the repository owner.
 
+### The arming is one operation, and the record says which one
+
+`JobScheduler.schedule()` and the durable arm record cannot be made one atomic
+step. The window between them is reachable: if the process dies after the new
+job is persisted and before the new record replaces the old one, the next boot
+finds a **new job beside an old authorisation**. Job id, namespace,
+`versionCode`, `versionName`, the ksud digest and the fingerprint all still
+agree, because none of them identify the arming - and the stale record names an
+earlier boot, so `EARLY_ROOT_ARMED_THIS_BOOT`, the guard against a job firing in
+its own arming boot, stops applying as well.
+
+So each arming mints a 128-bit `generation` token (`SecureRandom`, not a counter
+or a wallclock: both can repeat, and a collision reads as agreement), writes it
+into the JobInfo extras **and** into the arm record, verifies that the scheduler
+actually stored it, and the callback compares the two. `parseArm` requires the
+key, so an arm record in the old format refuses rather than being accepted on
+fields that do not identify the operation.
+
+Two refusals, because they are two facts: `EARLY_ROOT_ARM_GENERATION_MISSING`
+(the callback carried no token - possibly a job restored from a build that
+minted none) and `EARLY_ROOT_ARM_GENERATION_MISMATCH` (the token names a
+different arming). The arm record under `/data/system` stays the authority; the
+service receives the token relayed through the dispatch intent, because the live
+`JobParameters` exist only in the callback.
+
 ## 7. The durable trace
 
 `/data/system/dfreroot-early-root-trace`, append-only, fsync'd per step,

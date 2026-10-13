@@ -67,6 +67,11 @@ class DfrEarlyRootService : Service() {
         val serviceStartMs = EarlyRootEnv.monotonicNow()
         val callbackElapsedMs = intent?.getLongExtra(
             DfrEarlyRootJobService.EXTRA_CALLBACK_ELAPSED_MS, -1L) ?: -1L
+        // Relayed from the callback: the live JobParameters do not exist here.
+        // An absent value stays empty and the re-derived gate refuses with
+        // GENERATION_MISSING rather than skipping the comparison.
+        val callbackGeneration = intent?.getStringExtra(
+            EarlyRootPolicy.EXTRA_GENERATION) ?: ""
         Log.i(TAG, "[DFR][EARLY_ROOT][TIMELINE] service_start" +
             " service_elapsed_ms=$serviceStartMs" +
             " callback_elapsed_ms=$callbackElapsedMs")
@@ -92,7 +97,7 @@ class DfrEarlyRootService : Service() {
                     Log.e(TAG, "[DFR][EARLY_ROOT] no wakelock: $t")
                     null
                 }
-                drive(serviceStartMs)
+                drive(serviceStartMs, callbackGeneration)
             } catch (t: Throwable) {
                 Log.e(TAG, "[DFR][EARLY_ROOT] FAIL unexpected: $t", t)
             } finally {
@@ -107,7 +112,7 @@ class DfrEarlyRootService : Service() {
     }
 
     /** One pass: re-derive the gate, claim the boot's single attempt, run once. */
-    private fun drive(serviceStartMs: Long) {
+    private fun drive(serviceStartMs: Long, callbackGeneration: String) {
         val context = applicationContext
         val bootId = DfrRootCoordinator.readBootId()
         if (bootId.isEmpty()) {
@@ -132,7 +137,8 @@ class DfrEarlyRootService : Service() {
          * uid and the early window must not be movable that way.
          */
         val readiness = StageHop.probeReadiness(context)
-        val decision = EarlyRootPolicy.evaluate(inputs(bootId, readiness.state))
+        val decision = EarlyRootPolicy.evaluate(
+            inputs(bootId, readiness.state, callbackGeneration))
         if (!decision.allow) {
             Log.i(TAG, "[DFR][EARLY_ROOT] REFUSED ${decision.code}: ${decision.reason}")
             trace(bootId, EarlyRootPolicy.STEP_REFUSED,
@@ -381,7 +387,8 @@ class DfrEarlyRootService : Service() {
         return failure
     }
 
-    private fun inputs(bootId: String, readinessState: String): EarlyRootPolicy.Inputs {
+    private fun inputs(bootId: String, readinessState: String,
+                       callbackGeneration: String): EarlyRootPolicy.Inputs {
         val in0 = EarlyRootPolicy.Inputs()
         in0.armRecord = EarlyRootStore.readArm()
         in0.journalRecord = EarlyRootStore.readJournal()
@@ -407,6 +414,7 @@ class DfrEarlyRootService : Service() {
         in0.expectedNamespace = DfrEarlyRoot.namespaceForRuntime()
         in0.readinessState = readinessState
         in0.callbackElapsedMs = EarlyRootEnv.monotonicNow()
+        in0.callbackGeneration = callbackGeneration
         in0.bootCompletedState = EarlyRootEnv.bootCompletedState()
         in0.markerState = DfrRootCoordinator.markerState()
         in0.liveSelinux = DfrRootCoordinator.readLiveSelinux()
