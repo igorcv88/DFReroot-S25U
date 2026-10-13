@@ -62,12 +62,19 @@ public class EarlyRootPolicyTest {
         in.expectedNamespace = NS;
         in.readinessState = EarlyBootProbePolicy.NETWORKSTACK_READY;
         in.callbackElapsedMs = 15_300L;   // the captured boots: 14.6-17.1 s
+        in.bootCompletedState = EarlyRootPolicy.BOOT_NOT_COMPLETED;
         in.markerState = AutoRootPolicy.MARKER_ABSENT;
         in.liveSelinux = 1;
         in.versionCode = CODE;
         in.versionName = NAME;
         in.ksudSha256 = KSUD;
         in.deviceFingerprint = FP;
+        return in;
+    }
+
+    private static EarlyRootPolicy.Inputs bootCompleted() {
+        EarlyRootPolicy.Inputs in = ready();
+        in.bootCompletedState = EarlyRootPolicy.BOOT_COMPLETED;
         return in;
     }
 
@@ -356,6 +363,52 @@ public class EarlyRootPolicyTest {
         in = ready();
         in.callbackElapsedMs = EarlyRootPolicy.EARLY_WINDOW_MS;
         allowed(in, "the window boundary itself is inside it");
+
+        // The window bounds the clock; it does not bound the boot. Without a
+        // state of its own, a callback the scheduler restored at 43 s in a boot
+        // that completed at 30 s passes every condition and is recorded as
+        // evidence for an ordering it violated.
+        in = ready();
+        in.callbackElapsedMs = 43_000L;
+        in.bootCompletedState = EarlyRootPolicy.BOOT_COMPLETED;
+        refused(in, EarlyRootPolicy.BOOT_ALREADY_COMPLETED,
+                "a callback inside the 120 s window but AFTER boot completion refuses:"
+                        + " the late path is already proven and this one's whole"
+                        + " purpose is the ordering");
+        in = ready();
+        in.callbackElapsedMs = 1_000L;
+        in.bootCompletedState = EarlyRootPolicy.BOOT_COMPLETED;
+        refused(in, EarlyRootPolicy.BOOT_ALREADY_COMPLETED,
+                "and an early clock does not excuse it; the two facts are checked"
+                        + " separately because they are separate facts");
+        in = ready();
+        in.bootCompletedState = EarlyBootProbePolicy.UNKNOWN;
+        refused(in, EarlyRootPolicy.BOOT_STATE_UNKNOWN,
+                "a boot state nobody could read refuses; an ordering claim with one"
+                        + " end missing proves nothing");
+        in = ready();
+        in.bootCompletedState = null;
+        refused(in, EarlyRootPolicy.BOOT_STATE_UNKNOWN,
+                "an absent boot state refuses rather than reading as not-completed");
+        in = ready();
+        in.bootCompletedState = "0";
+        refused(in, EarlyRootPolicy.BOOT_STATE_UNKNOWN,
+                "a value outside the vocabulary refuses instead of being guessed at,"
+                        + " even one that looks like the right answer");
+        in = ready();
+        in.bootCompletedState = EarlyRootPolicy.BOOT_NOT_COMPLETED;
+        allowed(in, "an UNSET sys.boot_completed is the normal early state and must"
+                + " read NOT_COMPLETED, never UNKNOWN: mapping unset to UNKNOWN would"
+                + " refuse every genuine early run");
+        check(!EarlyRootPolicy.BOOT_NOT_COMPLETED.equals(EarlyBootProbePolicy.UNKNOWN)
+                        && !EarlyRootPolicy.BOOT_COMPLETED.equals(
+                                EarlyBootProbePolicy.UNKNOWN),
+                "the three boot states are three distinct values");
+        check(EarlyRootPolicy.evaluateBeforeReadiness(
+                        bootCompleted()).code.equals(
+                                EarlyRootPolicy.BOOT_ALREADY_COMPLETED),
+                "the cheap pre-readiness stage refuses a completed boot too, before"
+                        + " paying for the AMS sweep");
 
         in = ready();
         in.journalRecord = AutoRootPolicy.RECORD_UNREADABLE;

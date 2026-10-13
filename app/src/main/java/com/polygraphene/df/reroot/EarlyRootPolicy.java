@@ -105,6 +105,39 @@ public final class EarlyRootPolicy {
      */
     public static final long EARLY_WINDOW_MS = 120_000L;
 
+    /**
+     * The three answers to "has this boot been declared complete".
+     *
+     * A separate fact from {@link #EARLY_WINDOW_MS}, and the window alone does
+     * not imply it (3.7). The window is a bound on the clock; this is the state
+     * of the boot. With only the window, a callback the scheduler restored at
+     * 43 s - after {@code sys.boot_completed} went to 1 at 30 s - satisfies
+     * every condition and runs, because 43 s is inside 120 s. That run is not
+     * early: it is the already-proven late path wearing the early path's name,
+     * and it would be recorded as evidence for a milestone stated as
+     * "POST_ROOT_COMPLETE before BOOT_COMPLETED".
+     *
+     * Not a hazard that the window missed - the chain after boot completion is
+     * what the button and Auto Root already do safely on this device. What it
+     * costs is the measurement, which is the entire point of the path.
+     *
+     * {@code UNKNOWN} refuses, because a boot nobody could place is a boot this
+     * run cannot be timed against. The reading that produces these is
+     * {@code EarlyRootEnv.bootCompletedState()}, and the distinction it has to
+     * keep is the one that makes this gate safe to add: an UNSET
+     * {@code sys.boot_completed} is the normal early state and reads
+     * NOT_COMPLETED, while a property lookup that THREW reads UNKNOWN. Mapping
+     * unset to UNKNOWN would refuse every genuine early run - the same shape of
+     * mistake as making a record's optional key required (3.6.1).
+     *
+     * This is also not {@code ACTION_BOOT_COMPLETED}. The broadcast is what
+     * {@link #STEP_BOOT_COMPLETED_OBSERVED} records, from a component that is
+     * not part of what it measures; the property is what this gate reads. They
+     * are separate facts with separate values, and the property moves first.
+     */
+    public static final String BOOT_NOT_COMPLETED = "BOOT_NOT_COMPLETED";
+    public static final String BOOT_COMPLETED = "BOOT_COMPLETED";
+
     /** Verdict codes. Separate values because they are separate facts (3.7). */
     public static final String ALLOW = "EARLY_ROOT_ALLOW";
     public static final String NO_BOOT_ID = "EARLY_ROOT_NO_BOOT_ID";
@@ -117,6 +150,9 @@ public final class EarlyRootPolicy {
     public static final String NOT_QUALIFIED = "EARLY_ROOT_NOT_QUALIFIED";
     public static final String CLOCK_UNAVAILABLE = "EARLY_ROOT_CLOCK_UNAVAILABLE";
     public static final String PAST_WINDOW = "EARLY_ROOT_PAST_EARLY_WINDOW";
+    public static final String BOOT_ALREADY_COMPLETED =
+            "EARLY_ROOT_BOOT_ALREADY_COMPLETED";
+    public static final String BOOT_STATE_UNKNOWN = "EARLY_ROOT_BOOT_STATE_UNKNOWN";
     public static final String JOURNAL_UNREADABLE = "EARLY_ROOT_JOURNAL_UNREADABLE";
     public static final String JOURNAL_MALFORMED = "EARLY_ROOT_JOURNAL_MALFORMED";
     public static final String BOOT_SPENT = "EARLY_ROOT_BOOT_ALREADY_ATTEMPTED";
@@ -352,6 +388,11 @@ public final class EarlyRootPolicy {
         public String readinessState;
         /** Locally sampled ms since kernel boot. Negative refuses. */
         public long callbackElapsedMs = -1;
+        /**
+         * One of {@link #BOOT_NOT_COMPLETED}, {@link #BOOT_COMPLETED} or
+         * {@code EarlyBootProbePolicy.UNKNOWN}. Anything else refuses.
+         */
+        public String bootCompletedState;
         /** One of {@code AutoRootPolicy.MARKER_*}. */
         public int markerState = AutoRootPolicy.MARKER_UNKNOWN;
         /** 1, 0, or -1 when /sys/fs/selinux/enforce could not be read. */
@@ -700,6 +741,25 @@ public final class EarlyRootPolicy {
                     + (in.callbackElapsedMs / 1000) + "s after kernel boot, past the "
                     + (EARLY_WINDOW_MS / 1000) + "s early window; Auto Root's own"
                     + " trigger covers this boot");
+        }
+        /*
+         * Inside the window is not the same as before boot completion. See
+         * BOOT_NOT_COMPLETED: the window bounds the clock, this bounds the
+         * boot, and a callback restored at 43 s in a boot that completed at
+         * 30 s passes the first and must fail the second. An unrecognised
+         * value refuses rather than falling through, like every other enum
+         * here.
+         */
+        if (BOOT_COMPLETED.equals(in.bootCompletedState)) {
+            return refuse(BOOT_ALREADY_COMPLETED, "sys.boot_completed is already 1 at "
+                    + (in.callbackElapsedMs / 1000) + "s; this boot is no longer the"
+                    + " early window and Auto Root's own trigger covers it");
+        }
+        if (!BOOT_NOT_COMPLETED.equals(in.bootCompletedState)) {
+            return refuse(BOOT_STATE_UNKNOWN, "whether this boot has completed could"
+                    + " not be determined (" + in.bootCompletedState + "); a run that"
+                    + " cannot be placed before or after BOOT_COMPLETED proves"
+                    + " nothing the milestone asks for");
         }
         /*
          * The journal. An unreadable one is the worst case rather than a blank

@@ -121,6 +121,36 @@ refused:
 Auto Root's `opt_in` flag is deliberately **not** consulted. That flag is Auto
 Root's separate owner decision; Early Root's opt-in is the arming itself.
 
+### Inside the window is not the same as before boot completion
+
+The 120 s bound on the callback's clock and the state of the boot are two
+conditions, and the first does not imply the second. A persisted job the
+scheduler restores at 43 s, in a boot where `sys.boot_completed` went to 1 at
+30 s, satisfies the window: 43 s is inside 120 s. That run is not early. It is
+the late path - the one the button and Auto Root already prove on this device -
+wearing the early path's name, and it would be collected as evidence for a
+milestone stated as "POST_ROOT_COMPLETE before BOOT_COMPLETED".
+
+So `bootCompletedState` is its own element, with its own refusals:
+`EARLY_ROOT_BOOT_ALREADY_COMPLETED` and `EARLY_ROOT_BOOT_STATE_UNKNOWN`. Two
+properties make it safe to have:
+
+- **An unset `sys.boot_completed` reads `BOOT_NOT_COMPLETED`, never `UNKNOWN`.**
+  Unset is the normal state of the early window. Only a property lookup that
+  *threw* is UNKNOWN. A gate that mapped unset to UNKNOWN would refuse every
+  genuine early run, which is the same mistake as making an optional record key
+  required (AGENTS.md 3.6.1).
+- **It is re-read at the point of no return.** Everything between the gate and
+  transaction 5 takes real time - the readiness sweep, ksud staging, the hop,
+  the 90 s controller wait, transaction 6 - and the property can move inside it.
+  `beforeNativeRun` refuses a run that crossed the line mid-flight, before any
+  page-cache write.
+
+It is not `ACTION_BOOT_COMPLETED`. The broadcast is what
+`EARLY_ROOT_BOOT_COMPLETED_OBSERVED` records, from the one component that is not
+part of what it measures; the property is what the gate reads, and it moves
+first.
+
 ## 6. Arming is one-shot, and that is the point
 
 The owner taps **Arm Early Integrated Root (one boot)**, then starts a full

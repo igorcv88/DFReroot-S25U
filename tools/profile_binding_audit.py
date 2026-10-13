@@ -2425,6 +2425,38 @@ def audit():
     if "STEP_REMOTE_PREFLIGHT_PASS" not in early_root_policy_src:
         fail("EARLY_ROOT_REMOTE_PREFLIGHT_PASS left the closed step vocabulary; "
              "writing it would refuse and the boundary would go unrecorded")
+    # --- inside the window is not the same as before boot completion --------
+    # The window bounds the clock, not the boot: a persisted callback restored
+    # at 43 s in a boot that completed at 30 s satisfies the 120 s bound. The
+    # policy's own negative cases cover the gate (EarlyRootPolicyTest); what
+    # cannot be unit-tested is that both entry points actually SUPPLY the
+    # reading, and that it is re-taken at the point of no return - everything
+    # between the gate and transaction 5 takes real time, and the property can
+    # move inside it.
+    for name, src in (("DfrEarlyRootJobService", early_root_job_src),
+                      ("DfrEarlyRootService", early_root_service_src)):
+        if "EarlyRootEnv.bootCompletedState()" not in src:
+            fail("%s does not supply the boot-completion reading, so the gate "
+                 "evaluates it as absent and the early path would refuse every "
+                 "run - or, if the refusal is removed, run after boot completion "
+                 "and be recorded as evidence for an ordering it violated" % name)
+    # Scoped to the method body: the Inputs population reads the same accessor
+    # earlier in the file, so a whole-file ordering would pass on that alone.
+    recheck_at = early_root_service_src.find("override fun beforeNativeRun()")
+    recheck_body = early_root_service_src[recheck_at:] if recheck_at >= 0 else ""
+    recheck = order(recheck_body,
+                    "EarlyRootEnv.bootCompletedState()",
+                    "EarlyRootPolicy.BOOT_NOT_COMPLETED",
+                    "EarlyRootStore.journalPhase(")
+    if recheck_at < 0 or recheck is None or recheck != sorted(recheck):
+        fail("the early-root service no longer re-reads the boot state at the "
+             "point of no return; sys.boot_completed can go to 1 during the "
+             "readiness sweep, staging, the hop and the 90 s controller wait, and "
+             "a run that crosses that line mid-flight is not the early path")
+    if "EarlyRootEnv.bootCompletedState()" in early_root_store_src:
+        fail("EarlyRootStore reads the boot state; the decision belongs in the "
+             "pure policy, and a second reader is a second place it can start "
+             "answering a plausible default")
     before_hop = early_root_service_src.find("override fun beforeHop()")
     if before_hop < 0:
         fail("the early-root service does not implement beforeHop, so it takes no "

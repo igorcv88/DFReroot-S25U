@@ -265,6 +265,28 @@ class DfrEarlyRootService : Service() {
                  * If either cannot be persisted, the run is abandoned with
                  * nothing written to the page cache.
                  */
+                /*
+                 * Re-read the boot state HERE, not only in the gate.
+                 *
+                 * Everything between the policy's reading and this point takes
+                 * real time - the readiness sweep, ksud staging, the hop, the
+                 * 90 s controller wait, transaction 6 - and sys.boot_completed
+                 * can go to 1 inside it. A run that crosses that line mid-flight
+                 * is not the early path any more, and the page-cache writes have
+                 * not happened yet, so the cheap thing to do is refuse. A
+                 * reading that cannot be taken refuses too: the milestone is an
+                 * ordering claim, and one end of it would be missing.
+                 */
+                val bootNow = EarlyRootEnv.bootCompletedState()
+                if (!EarlyRootPolicy.BOOT_NOT_COMPLETED.equals(bootNow)) {
+                    Log.e(TAG, "[DFR][EARLY_ROOT] REFUSED boot state at the point of" +
+                        " no return is $bootNow, not " +
+                        EarlyRootPolicy.BOOT_NOT_COMPLETED)
+                    trace(bootId, EarlyRootPolicy.STEP_REFUSED,
+                        "code=${EarlyRootPolicy.BOOT_ALREADY_COMPLETED}" +
+                            " boot_state=$bootNow at the point of no return")
+                    return false
+                }
                 val journalled = EarlyRootStore.journalPhase(
                     bootId, AutoRootPolicy.PHASE_STARTED, ATTEMPT_NO, true)
                 if (journalled != null) {
@@ -385,6 +407,7 @@ class DfrEarlyRootService : Service() {
         in0.expectedNamespace = DfrEarlyRoot.namespaceForRuntime()
         in0.readinessState = readinessState
         in0.callbackElapsedMs = EarlyRootEnv.monotonicNow()
+        in0.bootCompletedState = EarlyRootEnv.bootCompletedState()
         in0.markerState = DfrRootCoordinator.markerState()
         in0.liveSelinux = DfrRootCoordinator.readLiveSelinux()
         in0.versionCode = AutoRootStore.versionCode()

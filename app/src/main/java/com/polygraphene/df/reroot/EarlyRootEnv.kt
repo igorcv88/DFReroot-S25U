@@ -60,14 +60,51 @@ object EarlyRootEnv {
     }
 
     /**
+     * Has this boot been declared complete? Three answers, never two.
+     *
+     * Distinct from [systemProperty] on purpose, and the distinction is the
+     * whole reason this gate is safe to have: `systemProperty` maps an empty
+     * value to `UNKNOWN`, which is right for a trace field - nobody should read
+     * "" as a measurement - and would be catastrophic here, because an UNSET
+     * `sys.boot_completed` is exactly the normal state of the early window. A
+     * gate reading that as UNKNOWN would refuse every genuine early run, which
+     * is the same shape of mistake as making an optional record key required
+     * (AGENTS.md 3.6.1).
+     *
+     * So: a successful lookup returning "1" is [EarlyRootPolicy.BOOT_COMPLETED];
+     * a successful lookup returning anything else, unset included, is
+     * [EarlyRootPolicy.BOOT_NOT_COMPLETED]; and only a lookup that THREW is
+     * UNKNOWN, which refuses. The reflection is reached once and its failure is
+     * never a plausible default.
+     *
+     * This is not `ACTION_BOOT_COMPLETED`. The broadcast is what
+     * [DfrBootReceiver] records as the milestone's comparison point; this
+     * property is what the gate reads, and it moves first.
+     */
+    fun bootCompletedState(): String = try {
+        val cls = Class.forName("android.os.SystemProperties")
+        val get = cls.getMethod("get", String::class.java)
+        val raw = (get.invoke(null, "sys.boot_completed") as String?)?.trim() ?: ""
+        if (raw == "1") EarlyRootPolicy.BOOT_COMPLETED
+        else EarlyRootPolicy.BOOT_NOT_COMPLETED
+    } catch (t: Throwable) {
+        Log.e(TAG, "[DFR][EARLY_ROOT] sys.boot_completed unreadable: $t")
+        EarlyBootProbePolicy.UNKNOWN
+    }
+
+    /**
      * The three facts that place a step inside or outside the boot animation.
      *
-     * Recorded as evidence and never gated on. `sys.boot_completed` is exactly
-     * the property Auto Root requires and the early window is defined by its
-     * absence, so reading it here is how the claim "this ran before
-     * BOOT_COMPLETED" becomes checkable rather than asserted - not how the
-     * decision is made. The decision is [EarlyRootPolicy]'s, and it rests on
-     * StageHop readiness.
+     * This composite string is recorded as evidence and never gated on: it is
+     * how the claim "this ran before BOOT_COMPLETED" becomes checkable rather
+     * than asserted. What the gate reads is [bootCompletedState], which answers
+     * one question with three values instead of pasting three readings into a
+     * line for a human - a string a parser has to split is evidence, not a
+     * decision input, and the two must not be confused.
+     *
+     * The decision is [EarlyRootPolicy]'s. It rests on StageHop readiness for
+     * "can the hop work" AND on [bootCompletedState] for "is this still the
+     * early window" - separate facts, separate values (AGENTS.md 3.7).
      */
     fun bootState(context: Context?): String =
         "sys_boot_completed=${systemProperty("sys.boot_completed")}" +

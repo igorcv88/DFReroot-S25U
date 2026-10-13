@@ -292,6 +292,7 @@ class DfrEarlyRootJobService : JobService() {
         in0.expectedNamespace = DfrEarlyRoot.namespaceForRuntime()
         in0.readinessState = readinessState
         in0.callbackElapsedMs = callbackElapsedMs
+        in0.bootCompletedState = EarlyRootEnv.bootCompletedState()
         in0.markerState = DfrRootCoordinator.markerState()
         in0.liveSelinux = DfrRootCoordinator.readLiveSelinux()
         in0.versionCode = AutoRootStore.versionCode()
