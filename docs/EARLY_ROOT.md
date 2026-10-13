@@ -443,6 +443,18 @@ a deliberate owner decision naming one exact pair.
 Only then does the owner add the pair, in a PR, with items 1–4 named beside the
 digest in the dossier.
 
+**Arming correction, 2026-10-13:** on boot
+`a41ea6d4-d041-4838-aaef-2f871512dab0`, the repaired daemon passed manual
+DirtyFrag again but the first ARM attempt persisted the historical incident
+and then unconditionally returned `EARLY_ROOT_INCIDENT_IN_JOURNAL`. The
+acknowledgement already worked in the dispatch gate; the arming returned
+before reaching it. `recordPendingIncident()` now saves the record first,
+then checks `incidentAcknowledged()` for the pending record. Any other
+newly detected incident still causes the first ARM call to refuse; later
+calls use `blockingIncident()` with the recorded daemon identity. This
+changes neither the historical record nor the one-attempt rule.
+No early load occurred in that boot.
+
 **Owner decision, 2026-10-13:** after the repaired daemon was bundled in PR #58
 and manual DZIF root reached `POST_ROOT_COMPLETE` on boot
 `0a6a0849-b320-4642-9376-2cb386d1056e`, the owner authorized one first
@@ -573,9 +585,11 @@ the one that owed the record.
 **Detection happens at the arming, and only there it can.** The journal carrying
 the evidence is about to be moved aside and the arm record the attribution comes
 from is about to be overwritten; after `DfrEarlyRoot.arm()` they are no longer
-side by side. So the arming detects, persists, and refuses — and a write that
-fails refuses the arming too, because arming over evidence that could not be
-preserved is the absence-as-permission the record exists to prevent.
+side by side. The arming detects and persists the incident before deciding
+whether it is the exact acknowledged historical boot. A write failure refuses.
+Every other newly detected incident refuses on that first arming; later arming
+checks its recorded daemon identity. The single acknowledged 2026-10-12 boot
+continues immediately. The record stays on disk in either case.
 `tools/profile_binding_audit.py` enforces that order, and that both entry points
 supply the record: a job already pending never goes through the arming again.
 

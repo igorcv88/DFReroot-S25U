@@ -650,6 +650,12 @@ public final class EarlyRootPolicy {
                 observedWallclockMs);
     }
 
+    /** A source-level acknowledgement of one examined, historical boot. */
+    public static boolean incidentAcknowledged(Incident incident) {
+        return incident != null && !blank(incident.bootId)
+                && ACKNOWLEDGED_INCIDENT_BOOTS.contains(incident.bootId.trim());
+    }
+
     /**
      * Does this recorded incident refuse the dispatch of {@code ksudSha256}?
      *
@@ -669,11 +675,7 @@ public final class EarlyRootPolicy {
      * </ul>
      */
     public static boolean incidentBlocks(Incident incident, String ksudSha256) {
-        if (incident == null) return false;
-        if (!blank(incident.bootId)
-                && ACKNOWLEDGED_INCIDENT_BOOTS.contains(incident.bootId.trim())) {
-            return false;
-        }
+        if (incident == null || incidentAcknowledged(incident)) return false;
         if (blank(incident.ksudSha256) || blank(ksudSha256)) return true;
         return incident.ksudSha256.trim().equals(ksudSha256.trim());
     }
