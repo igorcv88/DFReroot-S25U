@@ -1423,6 +1423,39 @@ public final class EarlyRootPolicy {
      * boots - exactly what AGENTS.md 3.8 forbids. A record with no accountable
      * line at all belongs to no boot, so it is not this one's either.
      */
+    /**
+     * Does this boot's trace already carry that step?
+     *
+     * Added because {@link #STEP_BOOT_COMPLETED_OBSERVED} was appended TWICE in
+     * one boot on 2026-10-13, and the second line moved the number the whole
+     * milestone is measured against.
+     *
+     * `ACTION_BOOT_COMPLETED` is not once per kernel boot. A framework restart
+     * re-delivers it - and `LOCKED_BOOT_COMPLETED` with it - under the SAME
+     * `boot_id`, which is exactly what the soft-reboot path relies on elsewhere
+     * in this app. On the first PASS boot it happened at 3 976 999 ms, 66
+     * minutes in, so the trace ended with a `BOOT_COMPLETED_OBSERVED` at
+     * 3 982 637 ms beside the real one at 42 457 ms.
+     *
+     * The comparison point of the milestone is the EARLIEST BOOT_COMPLETED of
+     * the boot: that is the moment the ordering claim is about. A later
+     * re-delivery is a different event, and keeping it as the step's timestamp
+     * replaces a 14.7 s margin with one 66 minutes off. So the writer checks
+     * first and the first line stands.
+     *
+     * Malformed lines are skipped rather than counted, like everywhere else
+     * here: a line the reader drops cannot satisfy a presence test.
+     */
+    public static boolean traceHasStep(String record, String step) {
+        if (blank(record) || blank(step)) return false;
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(record)) return false;
+        for (String line : record.split("\n")) {
+            TraceStep parsed = parseTraceLine(line);
+            if (parsed != null && step.equals(parsed.step)) return true;
+        }
+        return false;
+    }
+
     public static boolean traceBelongsToBoot(String record, String bootId) {
         if (blank(bootId) || blank(record)) return false;
         if (AutoRootPolicy.RECORD_UNREADABLE.equals(record)) return false;

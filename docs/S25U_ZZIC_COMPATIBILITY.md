@@ -3552,3 +3552,138 @@ had in its first revision and no longer has.
   finishes and its *display* time is recorded nowhere, so "the notification
   appeared well after the phone started" is not a measurement of when root
   existed. The trace is - once it is read.
+
+### Early Integrated Root — boot 1's PRIMARY evidence, read
+
+Collected with `tools/earlyroot_collect_pass.sh` as **uid 0** at uptime
+8287.72 s of boot `42da1cdd-ccfa-4c06-861c-ce42eac99d61` — the same boot the
+previous entry reported from the app's row, 2 h 18 min in, with no reboot
+between. DFReroot `2.0.24-dzif` / `versionCode 20024`, daemon `3861dbd4…`.
+This replaces the derived reading: the trace itself is now in the record.
+
+#### The trace, with per-step `elapsed_ms` and per-step `bootanim_exit`
+
+| step | `elapsed_ms` | `bootanim_exit` |
+|---|---:|---|
+| `JOB_ENTERED` (trigger=job) | 18169 | **0** |
+| `READINESS_PASS` (proc/pr/thread/scheduleReceiver_12 all PASS) | 18291 | 0 |
+| `CLAIMED` (generation `f95644d1…`) | 18304 | 0 |
+| `DISPATCHED` → `SERVICE_ENTERED` (pid 2994) | 18305 → 18336 | 0 |
+| `PREFLIGHT_PASS` (NETWORKSTACK_READY, selinux 1, marker ABSENT) | 18455 | 0 |
+| `COORDINATOR_ENTERED` → `KSUD_STAGING` | 18465 → 18467 | 0 |
+| `STAGEHOP_SENDING` → `STAGEHOP_SENT` | 18582 → 18600 | 0 |
+| `CONTROLLER_RECEIVED` → `REMOTE_PREFLIGHT_PASS` | 18645 → 18707 | 0 |
+| **`BEFORE_NATIVE`** (transaction 5 issued) | **18715** | **0** |
+| `TRIGGER_ENTERED` (trigger=locked-boot) → `REFUSED ARM_ALREADY_CLAIMED` | 21259 | **1** |
+| `NATIVE_RETURNED` | 24639 | 1 |
+| **`POST_ROOT_COMPLETE`** (`ksu=32601`) | **27747** | 1 |
+| **`SELINUX_ENFORCING`** (`live_selinux=1`) | **27759** | 1 |
+| **`BOOT_COMPLETED_OBSERVED`** | **42457** | 1 |
+
+#### §8's per-boot criterion, item by item
+
+| item | status |
+|---|---|
+| one `boot_id` across the whole trace | **PASS** — every line reads `42da1cdd…` |
+| `POST_ROOT_COMPLETE` and `SELINUX_ENFORCING` present, both before `BOOT_COMPLETED_OBSERVED` | **PASS** — 27747 and 27759 against 42457, a **14.70 s** margin. No longer an inference |
+| `/data/system/dfreroot-post-root` valid for that `boot_id` | **PASS** — `boot_id=42da1cdd…`, `ksu_version=32601`, `uapi_version=2`, `runtime_mode=late-load`, `selinux=1`, `transport_fix=kdp-cred-1` |
+| `/sys/fs/selinux/enforce` read independently | **PASS** — `1` |
+| journal `phase=COMPLETE` / `attempts=1` | **PASS**, with `native_started=1` |
+| no `_KP` DropBox entry in that boot **or the one after it** | **this boot: PASS.** Exactly two `_KP` entries exist, both 2026-10-12 (`…164651_KP`, `…223012_KP` — the throne_tracker panic). None on 2026-10-13. The boot's own start is recorded `_RP` at 17:56 and `ro.boot.bootreason=reboot,userrequested`. **The next boot's clause is still open** |
+
+So boot 1 is complete except for the following boot's `_KP` reading. **Two more
+accepted boots are still required**, and the gate stays UNVERIFIED.
+
+#### The first positive evidence about the repaired module in the early window
+
+The 2026-10-12 panic fired 6.2 s after `BEFORE_NATIVE`. Here `BEFORE_NATIVE` was
+at 18.715 s and the boot ran **2 h 18 min with no `_KP`**, `kernelsu` loaded
+(`lsmod`: 180224, used by 3) and `ksud 3.3.0 (uapi: 2)` answering. That is the
+first evidence the corrected pair survives an early load. One boot.
+
+#### THE MEASUREMENT THAT MATTERS FOR THE PRODUCT GOAL: root lands after the screen
+
+The animation exited **between 18715 and 21259 ms** — `bootanim_exit` is 0 at
+`BEFORE_NATIVE` and 1 by the locked-boot trigger. And `POST_ROOT_COMPLETE` is at
+27747.
+
+**So root completed roughly 6.5–9.0 s AFTER the boot animation left the
+screen.** The chain started inside the animation and its destructive write
+happened inside it, but the verdict did not. The product goal - one visible
+initialisation with root already live - is **not** met by this run, and the gap
+is now a number instead of a question. Its decomposition:
+
+| segment | cost |
+|---|---:|
+| `JOB_ENTERED` → `BEFORE_NATIVE` (gate, readiness, claim, hop, remote preflight) | 546 ms |
+| `BEFORE_NATIVE` → `NATIVE_RETURNED` (the native chain itself) | **5924 ms** |
+| `NATIVE_RETURNED` → `POST_ROOT_COMPLETE` (post-root polling) | **3108 ms** |
+| total `JOB_ENTERED` → `POST_ROOT_COMPLETE` | 9578 ms |
+| animation left, measured from `JOB_ENTERED` | ≤ 3090 ms |
+
+To land root before the screen is handed over, the chain must finish in ≤3.1 s
+instead of 9.6 s, or start ~6.5 s earlier. The two segments worth attacking are
+named above; neither has been profiled, and nothing here says either can be
+reduced.
+
+#### The LOCKED_BOOT ordering, confirmed a third time and from inside a PASS boot
+
+`TRIGGER_ENTERED` for `trigger=locked-boot` at **21259 ms**, with
+`sys_boot_completed=1` and `bootanim_exit=1` already. Third sample, same
+direction, now in the same boot as a punctual job. It refused with
+`ARM_ALREADY_CLAIMED`, which is the two-trigger exclusion working.
+
+#### A framework restart 66 minutes in, and what it costs this capture
+
+The trace carries a second `TRIGGER_ENTERED` + `REFUSED` at **3 976 999 ms** and
+a second `BOOT_COMPLETED_OBSERVED` at **3 982 637 ms**, under the same
+`boot_id`. Both boot broadcasts were re-delivered 66.3 minutes into the boot,
+which is the signature of a userspace/framework restart (the same property the
+soft-reboot path relies on). **What caused it is not in this capture.**
+
+Two consequences:
+
+- **the 3.6.2 baseline is contaminated.** `dev.bootcomplete=1` and
+  `dev.platform_bootcomplete=1` were read at 138 min, i.e. 72 min *after* a
+  userspace re-creation, so this is **not** the clean "nothing tore userspace
+  down" baseline. What it does show: 72 min after that restart both flags read 1,
+  `init.svc.bootchecker=stopped`, and no rollback occurred. A boot with no
+  restart is still needed for the baseline;
+- **the device's own `bootchecker.rc` is now in the record, verbatim**, and it
+  confirms the mechanism 3.6.2 names:
+
+  ```
+  on property:init.svc.zygote=restarting
+      ...
+      setprop dev.platform_bootcomplete 0
+      restart bootchecker
+  ```
+
+  with a separate `on property:dev.bootcomplete=1` rule. Whether that second
+  rule re-fires after a restart is still unread.
+
+#### Corrections to the collection procedure
+
+- **`/proc/reset_summary` and `/proc/reset_history` do not exist on this
+  firmware** — both answered `No such file or directory`. §8's command list and
+  AGENTS.md 3.6.1 name them as sources; on DZIF the DropBox `SYSTEM_LAST_KMSG_*`
+  entries and `/sys/class/sec/sec_hw_param/extra_info` are the ones that exist.
+- `extra_info` read successfully and was **empty**, which is consistent with no
+  panic record in this boot rather than with an unreadable node.
+- `/data/system/dfreroot-early-boot-probe` was absent: the probe's own cycle had
+  been consumed and its record lives under a different name.
+
+#### Two defects this capture exposed, both fixed
+
+- `BOOT_COMPLETED_OBSERVED` was appended **twice**, because
+  `ACTION_BOOT_COMPLETED` is not once per kernel boot. A reader taking the last
+  step - which `DfrEarlyRoot.armState` does - read a margin 66 minutes wrong.
+  The writer now checks `EarlyRootPolicy.traceHasStep` first and the earliest
+  line stands, because the milestone is an ordering against the moment this boot
+  was *first* declared complete.
+- the broadcast trigger appended `TRIGGER_ENTERED` + `REFUSED` to the trace of
+  the boot being measured, for an arming the job had already claimed at 18.3 s -
+  twice, thanks to the restart. An arm record outlives its cycle, so "spent"
+  looked like "live". The trigger that fires in every boot now stands down
+  silently once the cycle is claimed; the job keeps its breadcrumb, because when
+  it fired is the punctuality measurement being collected.

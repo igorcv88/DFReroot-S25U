@@ -393,6 +393,27 @@ class DfrBootReceiver : BroadcastReceiver() {
         // would build one apparent sequence out of two boots (AGENTS.md 3.8);
         // EarlyRootStore rotates it instead when the early path next writes.
         if (!EarlyRootPolicy.traceBelongsToBoot(trace, bootId)) return
+        /*
+         * Once per boot, and the first one wins.
+         *
+         * ACTION_BOOT_COMPLETED is not once per kernel boot: a framework restart
+         * re-delivers it under the same boot_id, which is the very property the
+         * soft-reboot path relies on elsewhere. On the first PASS boot that
+         * happened 66 minutes in, and the second append left the trace ending at
+         * 3 982 637 ms beside the real comparison point at 42 457 ms - so a
+         * reader taking the last step, as DfrEarlyRoot's row does, read a margin
+         * 66 minutes wrong.
+         *
+         * The milestone is an ordering against the moment this boot was first
+         * declared complete, so the earliest line is the one that answers it.
+         */
+        if (EarlyRootPolicy.traceHasStep(
+                trace, EarlyRootPolicy.STEP_BOOT_COMPLETED_OBSERVED)) {
+            Log.i(TAG, "[DFR][EARLY_ROOT] BOOT_COMPLETED_OBSERVED=SKIP already" +
+                " recorded in boot $bootId; a re-delivered broadcast is a" +
+                " different event and must not move the comparison point")
+            return
+        }
         if (arrivalMs < 0) {
             Log.e(TAG, "[DFR][EARLY_ROOT] BOOT_COMPLETED_OBSERVED=UNKNOWN" +
                 " reason=monotonic_clock_unavailable boot_id=$bootId")

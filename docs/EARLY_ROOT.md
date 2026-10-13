@@ -498,10 +498,13 @@ Then, in the new boot, collect **before anything else** — this is the order
 AGENTS.md 3.6.1 requires after any unexplained reboot:
 
 ```sh
-# panic/reboot record FIRST. On this firmware these survive at
-# ro.debug_level=0x4f4c; pstore and logcat -L are empty and prove nothing.
+# panic/reboot record FIRST. On this firmware extra_info and the DropBox
+# entries survive at ro.debug_level=0x4f4c; pstore and logcat -L are empty and
+# prove nothing. /proc/reset_summary and /proc/reset_history DO NOT EXIST on
+# DZIF - both answered ENOENT on 2026-10-13 - so their absence is the firmware,
+# not a failed read. extra_info reads EMPTY when there is no panic record.
 cat /sys/class/sec/sec_hw_param/extra_info
-cat /proc/reset_summary; cat /proc/reset_history
+cat /proc/reset_summary; cat /proc/reset_history   # absent on DZIF
 ls -l /data/system/dropbox | grep SYSTEM_LAST_KMSG   # _KP = panic, _RP = reboot
 
 # the trace, and the boot it belongs to

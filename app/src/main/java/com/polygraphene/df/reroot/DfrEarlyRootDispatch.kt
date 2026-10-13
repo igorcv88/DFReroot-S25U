@@ -104,6 +104,38 @@ object DfrEarlyRootDispatch {
                 "$trigger trigger writes nothing")
             return false
         }
+        /*
+         * One read of the cycle record for the whole sequence, and it comes
+         * before the breadcrumb for the same reason the arm record does.
+         *
+         * An arm record OUTLIVES its cycle, so "spent" looks exactly like "live"
+         * to the check above. On the first PASS boot that meant the broadcast
+         * trigger appended TRIGGER_ENTERED + REFUSED to the trace of the boot
+         * being measured - twice, because a framework restart re-delivered the
+         * broadcast 66 minutes in - for an arming the job had already claimed at
+         * 18.3 s. Two fsync'd appends per broadcast, forever, in the evidence
+         * file, to record a refusal the cycle record already proves.
+         *
+         * So the trigger that fires in EVERY boot stands down silently once this
+         * arming is claimed. The job keeps its breadcrumb in that state: it only
+         * exists because somebody armed it, and WHEN it fired is the punctuality
+         * measurement this path is collecting.
+         *
+         * Fail-closed on anything else: an unreadable or unaccountable cycle
+         * writes the breadcrumb and lets the gate refuse with its own code,
+         * because "cannot be read" is not "already spent".
+         */
+        val cycleRecord = EarlyRootStore.readCycle()
+        if (EarlyRootPolicy.TRIGGER_JOB != trigger) {
+            val spent = EarlyRootPolicy.parseCycle(cycleRecord)
+            if (spent != null && spent.claimed()
+                && spent.generation == EarlyRootPolicy.parseArm(armRecord)?.generation) {
+                Log.i(TAG, "[DFR][EARLY_ROOT] this arming was already claimed by" +
+                    " the ${spent.trigger} trigger in boot ${spent.runBootId};" +
+                    " the $trigger trigger writes nothing")
+                return false
+            }
+        }
         val bootState = EarlyRootEnv.bootState(context)
         /*
          * The breadcrumb, before anything expensive and before any
@@ -146,7 +178,6 @@ object DfrEarlyRootDispatch {
         } else {
             EarlyRootPolicy.parseArm(armRecord)?.generation ?: ""
         }
-        val cycleRecord = EarlyRootStore.readCycle()
         /*
          * The IMMUTABLE half of the gate first: does this arming belong to this
          * device, this build and this boot, and is it still unspent? A device
