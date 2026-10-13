@@ -229,6 +229,26 @@ public class EarlyRootPolicyTest {
         check(!EarlyRootPolicy.traceBelongsToBoot(
                         AutoRootPolicy.RECORD_UNREADABLE, BOOT),
                 "an unreadable trace is never claimed by this boot");
+        // Transaction 6's boundary is in the vocabulary, and it is NOT the local
+        // gate's step. A trace that could only say CONTROLLER_RECEIVED would
+        // read the same for "the remote domain refused, nothing written" and
+        // "the process died before transaction 5" (3.7).
+        check(EarlyRootPolicy.parseTraceLine(
+                        EarlyRootPolicy.formatTraceStep(
+                                EarlyRootPolicy.STEP_REMOTE_PREFLIGHT_PASS, BOOT,
+                                20L, "x", "remote result=0")) != null,
+                "the remote preflight boundary is an accountable step, so writing"
+                        + " it does not refuse the step it announces");
+        check(!EarlyRootPolicy.STEP_REMOTE_PREFLIGHT_PASS.equals(
+                        EarlyRootPolicy.STEP_PREFLIGHT_PASS),
+                "the remote preflight is a different fact from this process's own"
+                        + " local gate, and carries a different step");
+        check(EarlyRootPolicy.parseTraceLine(
+                        EarlyRootPolicy.formatTraceStep("EARLY_ROOT_PREFLIGHT_OK",
+                                BOOT, 20L, "x", "y")) == null,
+                "a step name outside the closed vocabulary is unaccountable, so a"
+                        + " typo refuses instead of logging a line nobody can place");
+
         StringBuilder full = new StringBuilder();
         for (int i = 0; i < EarlyRootPolicy.MAX_TRACE_STEPS; i++) {
             full.append(EarlyRootPolicy.formatTraceStep(

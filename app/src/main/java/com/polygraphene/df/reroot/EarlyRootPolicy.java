@@ -173,6 +173,27 @@ public final class EarlyRootPolicy {
     public static final String STEP_STAGEHOP_SENDING = "EARLY_ROOT_STAGEHOP_SENDING";
     public static final String STEP_STAGEHOP_SENT = "EARLY_ROOT_STAGEHOP_SENT";
     public static final String STEP_CONTROLLER_RECEIVED = "EARLY_ROOT_CONTROLLER_RECEIVED";
+    /**
+     * The remote non-destructive syscall preflight answered 0, inside
+     * {@code network_stack}, before anything was written.
+     *
+     * Its own step, and not an implication of
+     * {@link #STEP_CONTROLLER_RECEIVED}, because transaction 6 runs between
+     * that one and {@link #STEP_BEFORE_NATIVE} and can refuse there (3.7).
+     * Without this line a trace ending at CONTROLLER_RECEIVED would mean
+     * either "the remote probes refused, nothing was written, and Auto Root's
+     * own trigger may still run later in this boot" or "the process did not
+     * survive between the binder arriving and the point of no return" - two
+     * facts that send the next physical run to completely different places,
+     * collapsed into one reading.
+     *
+     * Separate from {@link #STEP_PREFLIGHT_PASS}, which is this process's own
+     * gate evaluated locally before the service dispatches. That one says the
+     * durable evidence permitted a run; this one says the remote domain can
+     * actually make the syscalls the chain needs.
+     */
+    public static final String STEP_REMOTE_PREFLIGHT_PASS =
+            "EARLY_ROOT_REMOTE_PREFLIGHT_PASS";
     public static final String STEP_BEFORE_NATIVE = "EARLY_ROOT_BEFORE_NATIVE";
     public static final String STEP_NATIVE_RETURNED = "EARLY_ROOT_NATIVE_RETURNED";
     public static final String STEP_POST_ROOT_COMPLETE = "EARLY_ROOT_POST_ROOT_COMPLETE";
@@ -197,7 +218,7 @@ public final class EarlyRootPolicy {
             STEP_JOB_ENTERED, STEP_READINESS_PASS, STEP_DISPATCHED,
             STEP_SERVICE_ENTERED, STEP_PREFLIGHT_PASS, STEP_COORDINATOR_ENTERED,
             STEP_KSUD_STAGING, STEP_STAGEHOP_SENDING, STEP_STAGEHOP_SENT,
-            STEP_CONTROLLER_RECEIVED,
+            STEP_CONTROLLER_RECEIVED, STEP_REMOTE_PREFLIGHT_PASS,
             STEP_BEFORE_NATIVE, STEP_NATIVE_RETURNED, STEP_POST_ROOT_COMPLETE,
             STEP_SELINUX_ENFORCING, STEP_FAILED, STEP_REFUSED,
             STEP_BOOT_COMPLETED_OBSERVED);
@@ -205,7 +226,7 @@ public final class EarlyRootPolicy {
     /**
      * Upper bound on one boot's trace.
      *
-     * The chain has fourteen steps and the job is one-shot, so a file that
+     * The chain has sixteen steps and the job is one-shot, so a file that
      * outgrows this is not a long run - it is something re-entering, and an
      * append log that grows without bound in /data/system is a defect of its
      * own. Refusing the append is the fail-closed direction: the caller treats a

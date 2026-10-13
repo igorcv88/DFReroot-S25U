@@ -195,6 +195,18 @@ class DfrEarlyRootService : Service() {
                     DfrRootCoordinator.Phase.CONTROLLER_READY ->
                         EarlyRootPolicy.STEP_CONTROLLER_RECEIVED
                     /*
+                     * Transaction 6 came back 0. Reported between
+                     * CONTROLLER_READY and beforeNativeRun, so a trace that
+                     * stops at CONTROLLER_RECEIVED means the remote probes
+                     * refused - nothing written, native_started=0, Auto Root's
+                     * own trigger may still run later in this boot - while one
+                     * that stops here means the process did not survive to the
+                     * point of no return. Two different next steps for the
+                     * owner, so two different lines (3.7).
+                     */
+                    DfrRootCoordinator.Phase.REMOTE_PREFLIGHT_PASS ->
+                        EarlyRootPolicy.STEP_REMOTE_PREFLIGHT_PASS
+                    /*
                      * The coordinator reports WAIT_POST_ROOT only when the
                      * native call returned 0, so this line means exactly
                      * "transaction 5 came back clean and the post-root wait has

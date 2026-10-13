@@ -2400,6 +2400,31 @@ def audit():
              "before StageHop.hopToNetworkStack; a caller's durable record of the "
              "hop would be a post-record, and a death inside the hop would be "
              "indistinguishable from a hop never attempted")
+    # --- transaction 6 is a boundary of its own, in the durable record ------
+    # The remote non-destructive preflight sits between CONTROLLER_READY and the
+    # caller's point-of-no-return record, and it can refuse there. Collapsing it
+    # into CONTROLLER_READY would make a trace ending at that step mean either
+    # "the remote domain refused, nothing was written, Auto Root's own trigger
+    # may still run later in this boot" or "the process did not survive to
+    # beforeNativeRun" - two readings that send the next physical run to
+    # different places, which is exactly what 3.7 forbids.
+    preflight_order = order(coord_src,
+                            "host.phase(Phase.CONTROLLER_READY)",
+                            "c.transact(6, preflightData, preflightReply, 0)",
+                            "host.phase(Phase.REMOTE_PREFLIGHT_PASS)",
+                            "if (!host.beforeNativeRun())")
+    if preflight_order is None or preflight_order != sorted(preflight_order):
+        fail("DfrRootCoordinator no longer reports the remote preflight's success "
+             "as its own phase between CONTROLLER_READY and beforeNativeRun; a "
+             "caller's durable record could not tell a transaction-6 refusal "
+             "from a death before the point of no return")
+    if "EarlyRootPolicy.STEP_REMOTE_PREFLIGHT_PASS" not in early_root_service_src:
+        fail("the early-root service does not record the remote preflight boundary, "
+             "so its trace collapses a clean remote refusal into the same reading "
+             "as a process that died before transaction 5")
+    if "STEP_REMOTE_PREFLIGHT_PASS" not in early_root_policy_src:
+        fail("EARLY_ROOT_REMOTE_PREFLIGHT_PASS left the closed step vocabulary; "
+             "writing it would refuse and the boundary would go unrecorded")
     before_hop = early_root_service_src.find("override fun beforeHop()")
     if before_hop < 0:
         fail("the early-root service does not implement beforeHop, so it takes no "

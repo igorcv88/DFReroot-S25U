@@ -600,6 +600,14 @@ What must stay separate:
 - **The trace precedes the step it announces, and a trace that cannot be written
   refuses the step.** Same rule, same reason, as `traceSoftReboot` in 3.6.1.
   Reasoning from an absence works once.
+- **Every boundary that can refuse gets its own step, including transaction 6.**
+  The remote non-destructive preflight runs between `CONTROLLER_READY` and the
+  caller's point-of-no-return record and can refuse there, so
+  `EARLY_ROOT_REMOTE_PREFLIGHT_PASS` exists to keep "the remote domain refused
+  and nothing was written" apart from "the process died before transaction 5" -
+  two readings with different next steps for the owner (3.7). It looks
+  redundant next to `CONTROLLER_RECEIVED` and is not;
+  `tools/profile_binding_audit.py` fails if the phase or the step disappears.
 
 ---
 

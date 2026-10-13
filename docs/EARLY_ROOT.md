@@ -163,6 +163,7 @@ EARLY_ROOT_KSUD_STAGING
 EARLY_ROOT_STAGEHOP_SENDING
 EARLY_ROOT_STAGEHOP_SENT
 EARLY_ROOT_CONTROLLER_RECEIVED
+EARLY_ROOT_REMOTE_PREFLIGHT_PASS
 EARLY_ROOT_BEFORE_NATIVE
 EARLY_ROOT_NATIVE_RETURNED
 EARLY_ROOT_POST_ROOT_COMPLETE
@@ -233,6 +234,8 @@ that investigation does not have.
 | `EARLY_ROOT_KSUD_STAGING` and nothing after | staging itself threw or failed its digest check. The step says STAGING, not STAGED, because the coordinator reports that phase *before* it stages — a step claiming STAGED would be false in exactly this run |
 | `EARLY_ROOT_STAGEHOP_SENDING`, no `EARLY_ROOT_STAGEHOP_SENT` | the process did not survive the hop. This pair exists to separate that from a hop that was never attempted: `WAIT_CONTROLLER` is reported only after `hopToNetworkStack` returned |
 | `EARLY_ROOT_STAGEHOP_SENT`, no `EARLY_ROOT_CONTROLLER_RECEIVED` | the hop landed and returned, but `network_stack` could not answer inside 90 s. Nothing was written: `native_started=0`, so Auto Root may still try later in this boot |
+| `EARLY_ROOT_CONTROLLER_RECEIVED`, no `EARLY_ROOT_REMOTE_PREFLIGHT_PASS` | the remote non-destructive syscall preflight (transaction 6) refused, or the process died before it answered. Nothing was written either way: `native_started=0`. The logcat line `[DFR][PREFLIGHT] remote result=` names the failing mask when the refusal is the former |
+| `EARLY_ROOT_REMOTE_PREFLIGHT_PASS` and nothing after | the remote domain can make the syscalls the chain needs, and the process did not survive to the point of no return. Still nothing written, and the boot is not spent |
 | `EARLY_ROOT_BEFORE_NATIVE` and nothing after | **the important one.** Transaction 5 was issued and the process did not survive the call. Read the panic record first; `journal phase=STARTED` / `native_started=1` means a hard reboot is the recovery boundary |
 | `EARLY_ROOT_NATIVE_RETURNED` and nothing after | a different failure, and the step exists to separate them: the native call came back **clean** (the coordinator only reports that phase on result 0) and the process died during the 120 s post-root wait. Root may be established with nobody left to verify it |
 | `EARLY_ROOT_POST_ROOT_COMPLETE`, no `EARLY_ROOT_SELINUX_ENFORCING` | the same-boot record verified and the final `/sys/fs/selinux/enforce` read back as something other than `1`. The coordinator refuses to call that success |

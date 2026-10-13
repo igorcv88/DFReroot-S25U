@@ -81,8 +81,8 @@ object DfrRootCoordinator {
      * pre-record that refused.
      */
     enum class Phase {
-        PREFLIGHT, STAGE_KSUD, WAIT_CONTROLLER, CONTROLLER_READY, RUN_NATIVE,
-        WAIT_POST_ROOT, DONE
+        PREFLIGHT, STAGE_KSUD, WAIT_CONTROLLER, CONTROLLER_READY,
+        REMOTE_PREFLIGHT_PASS, RUN_NATIVE, WAIT_POST_ROOT, DONE
     }
 
     interface Host {
@@ -389,6 +389,15 @@ object DfrRootCoordinator {
                 preflightData.recycle()
                 preflightReply.recycle()
             }
+            /*
+             * The remote probes answered 0. Reported as its own fact because
+             * transaction 6 sits between CONTROLLER_READY and the caller's
+             * point-of-no-return record and can refuse there: without this,
+             * a caller's durable record ending at CONTROLLER_READY would
+             * conflate "the remote domain refused and nothing was written"
+             * with "the process died before beforeNativeRun" (AGENTS.md 3.7).
+             */
+            host.phase(Phase.REMOTE_PREFLIGHT_PASS)
 
             if (!host.beforeNativeRun()) {
                 return refused("the caller withdrew before the native run", bootId)
