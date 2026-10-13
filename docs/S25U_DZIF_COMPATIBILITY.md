@@ -9,9 +9,14 @@
 > RMGLabs-Payloads has since built the repaired pair (daemon SHA-256
 > `3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee`,
 > module build ID `cc25bef1fe27d0567035cf578e2325ac065cf0e5`). See
-> `docs/HANDOFF.md` for the **current** binary-import gate and
-> `docs/EARLY_ROOT.md` for the continuing Early Root suspension. No corrected
-> module has been physically accepted yet.
+> The repaired daemon was bundled in DFReroot PR #58 and passed manual
+> full-boot DirtyFrag on the owner's DZIF device (boot
+> `0a6a0849-b320-4642-9376-2cb386d1056e`, `POST_ROOT_COMPLETE`, SELinux
+> Enforcing). On 2026-10-13 the owner authorized only this corrected firmware
+> and daemon pair for its first Early Integrated Root attempt, and acknowledged
+> the examined 2026-10-12 panic boot by exact boot id. The incident history
+> remains recorded. Early Integrated Root has not physically passed. See
+> `docs/EARLY_ROOT.md` §11–12 and `docs/HANDOFF.md` for the current gate.
 
 Offline-only record for the firmware `S938BXXUCDZIF`. It is the firmware the
 owner's device updates to from `S938BXXUCZZIC`, which is what every physical

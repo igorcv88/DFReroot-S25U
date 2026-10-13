@@ -382,8 +382,7 @@ panicked, and refuses a mutable list.
 
 **It is not an at-own-risk marker and must not grow one.** AGENTS.md 3.6
 forbids a second, more permissive "trial" tier beside it: one list, every entry
-a deliberate owner decision naming one exact pair, and the only change an agent
-may make to it is none.
+a deliberate owner decision naming one exact pair.
 
 ### What an entry costs — all of it before the first attempt
 
@@ -443,6 +442,19 @@ may make to it is none.
 
 Only then does the owner add the pair, in a PR, with items 1–4 named beside the
 digest in the dossier.
+
+**Owner decision, 2026-10-13:** after the repaired daemon was bundled in PR #58
+and manual DZIF root reached `POST_ROOT_COMPLETE` on boot
+`0a6a0849-b320-4642-9376-2cb386d1056e`, the owner authorized one first
+early attempt for fingerprint
+`samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OXMCDZIF:user/release-keys`
+and daemon SHA-256
+`3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee`.
+That manual PASS verifies the bundled corrected pair in the late-load path;
+it does not establish early-load safety. The prior unattributed panic boot
+`5a7c2537-9693-44f9-8b2e-e26a1b3a10f2` is acknowledged by exact boot id
+in source after the kernel log investigation. Its incident record remains on
+disk. Any new incident, unreadable record or different daemon still refuses.
 
 ### What three boots are for
 
@@ -571,7 +583,7 @@ supply the record: a job already pending never goes through the arming again.
 by the exact-port workflow, so a fixed module is a new ksud digest, and an
 incident attributed to the old one stops applying. Nothing is deleted; the
 record remains as history. The early path is of course still gated by
-`EARLY_LOAD_AUTHORIZED_ARTEFACTS`, which is empty — the two gates are
+`EARLY_LOAD_AUTHORIZED_ARTEFACTS`, which holds only the owner-authorized repaired DZIF pair — the two gates are
 independent and both must pass.
 
 **The exception, and why it is shaped like the allowlist.** An incident that
@@ -580,13 +592,13 @@ device is one: the journal format carries no artefact identity, so an incident
 detected from a journal written before this code existed has nothing for a
 corrected build to differ from. `ACKNOWLEDGED_INCIDENT_BOOTS` in
 `EarlyRootPolicy` is the exit, in the one shape AGENTS.md 3.6 permits —
-in-source, immutable, exact-match, **empty as shipped**, one entry naming one
+in-source, immutable, exact-match, one acknowledged entry naming one
 boot that has already happened, so it cannot pre-authorise a future incident.
 An acknowledged incident does not become permission to run; it stops being the
 reason for refusing, and every other gate still has to pass. A runtime "clear
 incidents" action would be the override 3.6 forbids wearing a maintenance hat,
-and `tools/profile_binding_audit.py` fails if the list stops being a fixed empty
-set.
+and `tools/profile_binding_audit.py` checks that the set contains only this
+examined boot id.
 
 ### What to read before acknowledging one
 

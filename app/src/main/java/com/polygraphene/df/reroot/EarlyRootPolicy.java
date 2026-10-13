@@ -356,16 +356,21 @@ public final class EarlyRootPolicy {
      *
      * So this is that exit, in the one shape 3.6 permits: identical in
      * mechanism to EARLY_LOAD_AUTHORIZED_ARTEFACTS above. In-source,
-     * immutable, exact-match, empty as shipped, and one entry names one boot
+     * immutable and exact-match. The acknowledged entry names one boot
      * that has ALREADY happened - so it cannot pre-authorise a future
      * incident, which a wildcard or a "clear incidents" action could.
      *
      * It is not an at-own-risk override and must not become one. It does not
      * grant permission to run: an acknowledged incident merely stops being the
      * reason for refusing, and every other gate - the authorisation allowlist
-     * included - still has to pass. An agent may only ever leave it empty.
+     * included - still has to pass. The 2026-10-12 DZIF incident was examined:
+     * the old KernelSU manager scanner raced its own fsnotify callback and
+     * panicked in list_del. Its record predates artefact attribution. The owner
+     * acknowledged this exact historical boot while separately authorizing the
+     * corrected DZIF pair below; the incident remains on disk as history.
      */
-    private static final Set<String> ACKNOWLEDGED_INCIDENT_BOOTS = Set.of();
+    private static final Set<String> ACKNOWLEDGED_INCIDENT_BOOTS = Set.of(
+            "5a7c2537-9693-44f9-8b2e-e26a1b3a10f2");
 
     /*
      * The (device fingerprint, ksud SHA-256) pairs whose EARLY load the owner
@@ -388,9 +393,10 @@ public final class EarlyRootPolicy {
      * It is NOT an at-own-risk marker, and must not become one. Section 3.6
      * forbids an agent adding a second, more permissive "trial" tier beside
      * this one: there is one list, every entry is a deliberate owner decision
-     * naming one exact pair, and an agent may only ever leave it empty.
+     * naming one exact pair. The owner explicitly authorized the repaired DZIF
+     * daemon/module pair on 2026-10-13 for its first early-load attempt.
      *
-     * It is deliberately EMPTY, and an allowlist rather than a denylist, which
+     * It is an allowlist rather than a denylist, which
      * is the whole point. A denylist of the artefact that panicked would let the
      * next unvalidated pair through by default, and "we have not tested this one
      * yet" is exactly the absence section 2 forbids treating as permission.
@@ -432,8 +438,8 @@ public final class EarlyRootPolicy {
      * digest means one `kernelsu.ko`, and the digest already pinned in
      * {@link KsudStage} is a complete identity for both. A corrected module
      * therefore arrives as a new ksud digest, which this list will not match
-     * either - re-clearing it is an explicit decision, taken in the open, with
-     * the physical evidence named beside the entry.
+     * either - authorizing its first early attempt is an explicit owner
+     * decision, distinct from proving that attempt passed.
      *
      * The fingerprint is in the key because the same daemon on another firmware
      * is another experiment: the early window's contents are the platform's.
@@ -444,7 +450,10 @@ public final class EarlyRootPolicy {
      * which is what makes it the control that isolates the defect to load time,
      * never evidence for the early window.
      */
-    private static final Set<String> EARLY_LOAD_AUTHORIZED_ARTEFACTS = Set.of();
+    private static final Set<String> EARLY_LOAD_AUTHORIZED_ARTEFACTS = Set.of(
+            artefactKey(
+                    "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OXMCDZIF:user/release-keys",
+                    "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee"));
 
     private EarlyRootPolicy() {}
 

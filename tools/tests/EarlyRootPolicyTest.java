@@ -91,9 +91,9 @@ public class EarlyRootPolicyTest {
      * The element under test is not an objection.
      *
      * It used to assert `d.allow`, and that stopped being the right assertion
-     * when the early window was suspended for every artefact: the allowlist in
-     * EarlyRootPolicy is empty, so a cycle with nothing wrong with it now ends
-     * on ARTEFACT_NOT_AUTHORIZED. Weakening these to "refuses with something" would
+     * when the DZIF panic suspended the early window: this suite's default ZZIC
+     * fixture is not on the exact-pair allowlist and ends on
+     * ARTEFACT_NOT_AUTHORIZED. Weakening these to "refuses with something" would
      * have thrown away what they test, and asserting `allow` would have required
      * un-suspending the window from a test.
      *
@@ -101,7 +101,7 @@ public class EarlyRootPolicyTest {
      * permitted, OR the only thing standing in its way is the artefact
      * suspension. Any other code means this element refused, which is the
      * regression these cases exist to catch - and the assertion keeps holding
-     * unchanged on the day a validated pair is added to the allowlist.
+     * unchanged when another explicitly authorized pair is added.
      */
     private static void allowed(EarlyRootPolicy.Inputs in, String what) {
         EarlyRootPolicy.Decision d = EarlyRootPolicy.evaluate(in);
@@ -661,12 +661,9 @@ public class EarlyRootPolicyTest {
                 "a failure BEFORE transaction 5 provably wrote nothing, so it does"
                         + " not lock the boot against Auto Root's own trigger");
 
-        // --- the early window is suspended for every artefact ----------------
-        // The first physical early load of the DZIF pair ended in a kernel panic
-        // inside kernelsu.ko (list_del corruption in its manager discovery,
-        // boot 5a7c2537, 2026-10-12). The allowlist is empty as a result, and an
-        // allowlist rather than a denylist because "we have not tested this pair
-        // yet" must not read as permission.
+        // --- early load is authorized only for one exact repaired DZIF pair --
+        // The old DZIF pair panicked during KernelSU manager discovery.
+        // The owner's new authorization names one exact firmware and daemon.
         in = ready();
         refused(in, EarlyRootPolicy.ARTEFACT_NOT_AUTHORIZED,
                 "a cycle with nothing else wrong with it still refuses: no"
@@ -680,12 +677,30 @@ public class EarlyRootPolicyTest {
                                 + "6ae69e3"),
                 "the exact DZIF pair whose early load panicked the kernel is not"
                         + " cleared");
-        check(!EarlyRootPolicy.earlyLoadAuthorized(
-                        "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
-                                + "S938BXXUCDZIF_OXMCDZIF:user/release-keys",
-                        "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee"),
-                "the new repaired DZIF daemon/module pair has no physical early"
-                        + " acceptance and must not be auto-authorized by repinning");
+        final String DZIF_FP = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
+                + "S938BXXUCDZIF_OXMCDZIF:user/release-keys";
+        final String REPAIRED_KSUD =
+                "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee";
+        check(EarlyRootPolicy.earlyLoadAuthorized(DZIF_FP, REPAIRED_KSUD),
+                "the owner authorized this exact repaired DZIF pair for an early"
+                        + " attempt, without claiming physical early acceptance");
+        check(!EarlyRootPolicy.earlyLoadAuthorized(DZIF_FP, "b".repeat(64))
+                        && !EarlyRootPolicy.earlyLoadAuthorized("other/firmware",
+                                REPAIRED_KSUD),
+                "neither a different daemon nor a different firmware inherits"
+                        + " the owner authorization");
+        in = ready();
+        in.deviceFingerprint = DZIF_FP;
+        in.ksudSha256 = REPAIRED_KSUD;
+        in.armRecord = EarlyRootPolicy.formatArm(ARMED_BOOT,
+                EarlyRootPolicy.EXPECTED_JOB_ID, NS, 15_000L, 1, CODE, NAME,
+                REPAIRED_KSUD, DZIF_FP, 300_000L, 1759000000000L, GEN);
+        in.qualificationRecord = AutoRootPolicy.formatQualification(CODE, NAME,
+                REPAIRED_KSUD, DZIF_FP, QUAL_BOOT, 1759000000000L, false,
+                QUAL_BOOT);
+        check(EarlyRootPolicy.evaluate(in).allow,
+                "an otherwise valid cycle with the authorized exact DZIF pair"
+                        + " reaches the dispatch decision");
         check(!EarlyRootPolicy.earlyLoadAuthorized(null, KSUD)
                         && !EarlyRootPolicy.earlyLoadAuthorized(FP, null)
                         && !EarlyRootPolicy.earlyLoadAuthorized("", "")
@@ -708,7 +723,7 @@ public class EarlyRootPolicyTest {
         in.journalRecord = null;
         in.autoRootJournalRecord = null;
         refused(in, EarlyRootPolicy.ARTEFACT_NOT_AUTHORIZED,
-                "a perfectly clean device does not lift the suspension");
+                "a clean device does not authorize an unrelated artefact");
 
         // ------------------------------------------------------------------
         // The unresolved-incident latch (P0-D).
@@ -718,8 +733,37 @@ public class EarlyRootPolicyTest {
         // unexplained reboot. Before this latch existed it was discarded as
         // "last boot's record" on the very next boot.
         // ------------------------------------------------------------------
-        final String DEAD_BOOT = "5a7c2537-9693-44f9-8b2e-e26a1b3a10f2";
+        final String ACKNOWLEDGED_BOOT =
+                "5a7c2537-9693-44f9-8b2e-e26a1b3a10f2";
+        final String DEAD_BOOT = "11111111-aaaa-bbbb-cccc-222222222222";
         final String OTHER_KSUD = "b".repeat(64);
+
+        EarlyRootPolicy.Incident acknowledged = EarlyRootPolicy.detectIncident(
+                EarlyRootPolicy.formatJournal(ACKNOWLEDGED_BOOT,
+                        AutoRootPolicy.PHASE_STARTED, 1, true),
+                null, BOOT, BOOT, 0L);
+        check(acknowledged != null && acknowledged.ksudSha256.isEmpty()
+                        && !EarlyRootPolicy.incidentBlocks(acknowledged,
+                                REPAIRED_KSUD),
+                "the examined historical boot is acknowledged even though its"
+                        + " incident could not identify its daemon");
+        EarlyRootPolicy.Inputs authorizedWithHistory = ready();
+        authorizedWithHistory.deviceFingerprint = DZIF_FP;
+        authorizedWithHistory.ksudSha256 = REPAIRED_KSUD;
+        authorizedWithHistory.armRecord = EarlyRootPolicy.formatArm(ARMED_BOOT,
+                EarlyRootPolicy.EXPECTED_JOB_ID, NS, 15_000L, 1, CODE, NAME,
+                REPAIRED_KSUD, DZIF_FP, 300_000L, 1759000000000L, GEN);
+        authorizedWithHistory.qualificationRecord =
+                AutoRootPolicy.formatQualification(CODE, NAME, REPAIRED_KSUD,
+                        DZIF_FP, QUAL_BOOT, 1759000000000L, false, QUAL_BOOT);
+        authorizedWithHistory.incidentRecord =
+                EarlyRootPolicy.formatIncident(acknowledged);
+        authorizedWithHistory.journalRecord =
+                EarlyRootPolicy.formatJournal(ACKNOWLEDGED_BOOT,
+                        AutoRootPolicy.PHASE_STARTED, 1, true);
+        check(EarlyRootPolicy.evaluate(authorizedWithHistory).allow,
+                "the acknowledged historical record stays present while the"
+                        + " exact authorized pair passes the full gate");
 
         // Detection: exactly one shape is an incident.
         check(EarlyRootPolicy.detectIncident(
