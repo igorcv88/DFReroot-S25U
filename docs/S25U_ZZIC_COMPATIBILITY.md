@@ -3464,3 +3464,91 @@ against anything but `0`, so the new values break no contract.
 `tools/tests/test_post_root_contract.py` guards the separation, the ordering that
 decides undeterminable first, and the reason the two positive readings can be
 told apart; both new guards were mutation-checked.
+
+### Early Integrated Root — first run reporting COMPLETE; primary evidence NOT yet collected
+
+> **This section does not record a physical PASS, and the heading says so on
+> purpose.** An earlier revision of it was titled "FIRST PHYSICAL PASS, boot 1
+> of 3" and presented a table of verified facts derived from the app's summary
+> row. Codex caught it on PR #63 and the finding was correct: this is the
+> authoritative record of what is *proven*, and four of the six per-boot items
+> §8 requires were not in hand - including the one artefact the ordering claim
+> rested on. The row is what the app reported; it is not the evidence packet.
+
+DZIF, 2026-10-13, `main` at `6031fa1`. Armed in boot
+`ebb03f9d-f478-4e2e-aba5-b7299a1feed0`, reported in boot
+`42da1cdd-ccfa-4c06-861c-ce42eac99d61`. **Auto Root was switched off**, so
+nothing else in this app could have established root in that boot.
+
+The app's own row, derived from the cycle record, the journal and the trace:
+
+```text
+EARLY_ROOT_SPENT job_id=1145459282 namespace=dfr-early-root
+armed_boot_id=ebb03f9d-f478-4e2e-aba5-b7299a1feed0
+claimed_by=job claim_boot_id=42da1cdd-ccfa-4c06-861c-ce42eac99d61
+claim_elapsed_ms=18300
+phase=COMPLETE attempts=1 native_started=1
+journal_boot_id=42da1cdd-ccfa-4c06-861c-ce42eac99d61
+last_step=EARLY_ROOT_BOOT_COMPLETED_OBSERVED elapsed_ms=42457
+bootanim_exit=1 steps=19 detail=action=BOOT_COMPLETED
+```
+
+#### What the row does support
+
+| fact | why the row carries it |
+|---|---|
+| the **job** trigger claimed this arming, at 18.3 s | `claimed_by=job`, `claim_elapsed_ms=18300`; the cycle record is written by the claiming dispatcher and names the trigger |
+| one boot, one attempt | `claim_boot_id == journal_boot_id`, `attempts=1` |
+| transaction 5 was issued | `native_started=1`, the pre-record written before the destructive call |
+| the chain's **own** verdict was success | `phase=COMPLETE`, which `terminalPhase` writes only for `nativeResult == 0` **and** a same-boot `POST_ROOT_COMPLETE` record **and** the chain's own `liveSelinux == 1` reading |
+| a trace exists for this boot with 19 accountable steps, ending at `BOOT_COMPLETED_OBSERVED` at 42.457 s | the row parses the stored trace and reports its last step and count |
+
+#### What the row does NOT support, and the inference that was wrong
+
+- **It does not establish the milestone ordering.** The earlier revision argued
+  that `phase=COMPLETE` plus an append-only trace means
+  `EARLY_ROOT_POST_ROOT_COMPLETE` and `EARLY_ROOT_SELINUX_ENFORCING` were
+  written before `BOOT_COMPLETED_OBSERVED`. That does not follow:
+  `DfrEarlyRootService` writes those two verdict steps with the return value of
+  `trace()` **ignored** (unlike `beforeNativeRun`, which aborts), so a failed
+  append leaves `phase=COMPLETE` on disk with the step absent. The journal
+  proves root was verified in that boot; only the trace file proves the
+  *ordering*, and it has not been read.
+- **It does not name the 19 steps.** `steps=19` is a count. Step identities and
+  the per-step `bootanim_exit` values - which are how "inside the animation"
+  stops being an assumption - are in the file.
+- **Four of §8's six per-boot items are missing:** the trace with its per-step
+  `elapsed_ms`, `/data/system/dfreroot-post-root` for that `boot_id`,
+  `/sys/fs/selinux/enforce` read *independently* of the chain, and the DropBox
+  `_KP` listing for that boot **and the one after it**.
+
+So `EARLY_ROOT_POST_ROOT_BEFORE_BOOT_COMPLETED` stays **UNVERIFIED**, and this
+boot is not yet one of the three. `tools/earlyroot_collect_pass.sh` collects the
+packet; §8's `_KP` clause spans two boots, so three accepted boots need **four**
+runs of it.
+
+#### What it does rule out
+
+Nothing yet - but one thing is worth stating so the next run knows what to look
+for. The 2026-10-12 panic was at 22.7 s, i.e. **after** the equivalent point of
+this run, and this boot reached `BOOT_COMPLETED` at 42.457 s with the chain
+reporting success. If the DropBox listing for this boot and the next comes back
+with no `_KP`, that is the first evidence the repaired module survives an early
+load. It is not that evidence until the listing is read, and an unreadable
+listing is a refusal rather than a clean boot - which is a defect this collector
+had in its first revision and no longer has.
+
+#### What it does not touch
+
+- **The modules.** `DfrEarlyRootService` ends at `POST_ROOT_COMPLETE` and never
+  reaches the module lifecycle or the soft-reboot transport; the audit fails if
+  it does. The owner observing that modules were not initialised is the designed
+  behaviour (`docs/EARLY_ROOT.md` §9).
+- **The job's punctuality in general.** This callback was at 18.3 s; three
+  recent boots were at 299 s, 334.4 s and 521.7 s with the same JobInfo. The
+  ready-and-deferred vs not-ready fork in the previous entry is untouched, and
+  `tools/earlyroot_job_probe.sh` is the read for the next **late** boot.
+- **What the owner saw.** The verdict notification is posted when the run
+  finishes and its *display* time is recorded nowhere, so "the notification
+  appeared well after the phone started" is not a measurement of when root
+  existed. The trace is - once it is read.

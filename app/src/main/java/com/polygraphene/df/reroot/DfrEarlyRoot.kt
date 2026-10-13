@@ -546,8 +546,16 @@ object DfrEarlyRoot {
         }
         val step = last
         if (step == null) return "trace holds no accountable step"
+        /*
+         * No label of our own on the boot state. `step.bootCompleted` is the
+         * whole composite EarlyRootEnv.bootState() wrote - three readings with
+         * their own names - so prefixing it with one of those names produced
+         * `sys_boot_completed=sys_boot_completed=1 bootanim_exit=1 ...` in the
+         * row the owner reads before spending a reboot, with the first label
+         * claiming to introduce a field it does not introduce.
+         */
         return "last_step=${step.step} elapsed_ms=${step.elapsedMs} " +
-            "sys_boot_completed=${step.bootCompleted} steps=$steps detail=${step.detail}"
+            "${step.bootCompleted} steps=$steps detail=${step.detail}"
     }
 
     private fun cancelOwned(scheduler: JobScheduler, component: ComponentName) {
