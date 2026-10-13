@@ -1,5 +1,18 @@
 # DFReroot — Galaxy S25 Ultra SM-S938B / One UI 9 Stable / DZIF
 
+> **Historical evidence notice (2026-10-13):** The opening sections of this
+> dossier describe the initial offline-only DZIF investigation; phrases such
+> as "no DZIF target profile" were correct **at that earlier milestone**, not
+> current repository status. The exact DZIF profile was subsequently merged
+> and physically qualified for manual DirtyFrag root. The first Early
+> Integrated Root attempt then caused a KernelSU manager-scanner panic.
+> RMGLabs-Payloads has since built the repaired pair (daemon SHA-256
+> `3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee`,
+> module build ID `cc25bef1fe27d0567035cf578e2325ac065cf0e5`). See
+> `docs/HANDOFF.md` for the **current** binary-import gate and
+> `docs/EARLY_ROOT.md` for the continuing Early Root suspension. No corrected
+> module has been physically accepted yet.
+
 Offline-only record for the firmware `S938BXXUCDZIF`. It is the firmware the
 owner's device updates to from `S938BXXUCZZIC`, which is what every physical
 result in `docs/S25U_ZZIC_COMPATIBILITY.md` was observed on.

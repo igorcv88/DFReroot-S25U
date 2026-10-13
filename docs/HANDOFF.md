@@ -5,25 +5,15 @@ what is physically proven now, what still needs to be implemented, and the
 acceptance criteria for the next signed build. If this file disagrees with
 `docs/S25U_ZZIC_COMPATIBILITY.md` about evidence, the compatibility dossier wins.
 
-> **One UI 9 Stable (`S938BXXUCDZIF`) is covered separately, offline only, in
-> `docs/S25U_DZIF_COMPATIBILITY.md`.** Short version: a DZIF device classifies
-> `MISMATCH` and refuses everything, which is correct and needed no change; no
-> DZIF profile exists and **none is publishable yet** — the design is portable
-> today, what is missing is provenance/runtime values, so this is an incomplete
-> implementation and not a technical incompatibility. Three fields that were
-> open there are now closed by later owner-supplied inputs (`Build.FINGERPRINT`
-> read on hardware, `P0_KERNEL_PHYS_LOAD` derived from the XBL FDT, and the
-> modversions CRC table derived from 446 stock witnesses) — see §6a of that
-> record. The Dirty
-> Frag and `remove_waiter` windows are byte-identical to ZZIC with the
-> reference fix absent (re-hashed, not quoted), and CVE-2026-49881 is **fixed**
-> — which costs this fork nothing, since it reaches `network_stack` through
-> `StageHop` from inside `system_server` rather than through Telecom. Do not
-> revive that entry. Gate G and `POST_SOFT_REBOOT_STABILITY` remain the
-> blockers, and DZIF's own vermagic means the module question has to be
-> answered again for it. `S938BXXUCZZHL`, a build identifier reported in
-> delta/OTA metadata beside the DZIF material, is a named non-input and must
-> not feed any DZIF gate.
+> **DZIF status update (2026-10-13):** The text originally below this
+> heading described the initial *offline-only* phase, before the DZIF exact
+> profile and physical evidence existed. That phase is superseded: the exact
+> `S938BXXUCDZIF` profile has since been integrated, the manual root chain
+> passed on the owner's device, and the first physical Early Integrated Root
+> run exposed a kernel panic during KernelSU manager discovery. The original
+> evidence and chronological decisions remain in
+> `docs/S25U_DZIF_COMPATIBILITY.md`; the up-to-date repaired artifact
+> identity and the remaining APK asset import are specified immediately below.
 
 > **Open, and where to start — the early path is suspended after a kernel panic.**
 >
@@ -53,13 +43,35 @@ acceptance criteria for the next signed build. If this file disagrees with
 > scanner. See RMGLabs-Payloads
 > `docs/incidents/2026-10-12-dzif-early-load-throne-tracker-panic.md`.
 >
-> **Next step, and it is not DFReroot's:** the fix is in RMGLabs-Payloads and
-> gated offline there, but **no corrected module has been built**. That needs one
-> `workflow_dispatch` of `.github/workflows/build-dzif-exact-port.yml`, which
-> spends runner minutes and publishes a new pair — an owner decision. A corrected
-> build is a new ksud digest, so `EARLY_LOAD_AUTHORIZED_ARTEFACTS` will not match
-> it either; `docs/EARLY_ROOT.md` §11 is what authorizing a pair requires, and
-> §12 is the incident latch below.
+> **DZIF KernelSU source repair compiled; DFR repin in progress (2026-10-13).**
+> RMGLabs-Payloads merged the throne-tracker serialization fix and published a
+> new DFR-specific daemon/module pair in commit `bbd765b048cf26d91c05788d8bf08b85f1ccaff1`.
+> The new `ksud` has SHA-256
+> `3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee`
+> (6,670,840 bytes). Its embedded `kernelsu.ko` has SHA-256
+> `dd193d36d13caea129572e9ffdeedfeebdadb860fcb7d8d7a72b1e3e58301220`,
+> GNU build ID `cc25bef1fe27d0567035cf578e2325ac065cf0e5`. Source
+> `kernelsu/<ksud>.module-provenance.txt` records the exact kernel, patch set,
+> KernelSU commit and source commit. The build is NOT hardware proof.
+>
+> **The final app step is to replace the APK asset** `app/src/main/assets/ksud-dzif`
+> with these exact bytes. This branch updates `KsudStage.kt`,
+> `target_profile.c` and `tools/dzif_profile.json` to the new digest and size,
+> but the app must NOT ship until the binary is imported. The private source
+> repository's bytes cannot be transferred via the text-only GitHub connection.
+> In a checkout authenticated to both repositories, run
+> `python3 tools/import_repaired_dzif_ksud.py` to fetch the immutable source
+> commit with `gh api`, verify both provenance and digest, and atomically
+> replace the asset. Then run the normal host/CI/Gradle checks: specifically,
+> `python3 tools/dzif_profile_binding_audit.py` must pass. This required FAIL
+> while the old asset remains is intentional — do not bypass it.
+>
+> The corrected module is still **not physically validated** in manual full-boot
+> mode or early boot. `EARLY_LOAD_AUTHORIZED_ARTEFACTS` and
+> `ACKNOWLEDGED_INCIDENT_BOOTS` remain empty. Requalify Auto Root after any
+> daemon digest and app build change. The observational probe and manual
+> DirtyFrag path remain separate from the early-root suspension; no part of this
+> repin grants authorization for the dangerous early-load window.
 >
 > **And that run now latches.** Its journal — `phase=STARTED`,
 > `native_started=1`, no completion — used to mean nothing on the next boot,
