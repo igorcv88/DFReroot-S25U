@@ -36,7 +36,7 @@ check("tbnz w0, #31, marker_fail" in stage[helper_marker:namespace],
 check("/system/bin/setenforce" in stage and "cbz x28, exit_stage2" in stage,
       "post-helper stage2 failures converge on enforcing cleanup")
 
-check("int mark1 = has_mark(1);" in exp,
+check("mark1 = has_mark(1);" in exp,
       "runAll probes the HELPER_SUCCESS marker")
 check("mark1 == 1 && mark2 == 1 && mark3 == 1" in exp,
       "native bootstrap success requires helper, namespace and bind")
@@ -88,3 +88,32 @@ check("ships disabled" in release_notes,
       "generated release notes still say Auto Root ships off")
 
 print(f"test_post_root_contract: {len(checks)}/{len(checks)} passed")
+
+# --- the three bootstrap failures stay three ---------------------------------
+# `df=1 helper=0 ns=0 bind=0 exec_fail=0` and `df=0 ...` printed one sentence and
+# one return code until the 2026-10-13 manual FAIL, and they are not the same
+# event: stage1.S opens /dev/df with O_CREAT|O_EXCL as its first action and
+# returns if that fails, so the mutex existing is positive proof stage 1 ran -
+# and proof that no later attempt in this boot can reach stage 2. One of these
+# failures is recoverable by retrying and the other needs a hard reboot.
+runall = exp[exp.index("Java_org_lsposed_lspromise_DirtyFrag_runAll"):]
+check("int mark = -1, mark1 = -1" in runall,
+      "the final verdict reads the last observed markers, initialised to "
+      "undeterminable rather than to absent")
+check(runall.count("return 2;") == 1 and "return 4;" in runall
+      and "return 5;" in runall,
+      "stage-1-never-ran, mutex-claimed-without-stage-2 and "
+      "markers-undeterminable have three distinct return codes")
+mutex_verdict = runall.index("return 4;")
+never_ran = runall.index("return 2;")
+undeterminable = runall.index("return 5;")
+check(undeterminable < mutex_verdict < never_ran,
+      "the undeterminable case is decided before either positive reading; an "
+      "unreadable /dev must not be reported as an absent marker")
+check("HARD" in runall[:never_ran] and "hard reboot" not in runall[never_ran:],
+      "only the mutex-claimed verdict names the hard reboot boundary: the "
+      "stage-1-never-ran case armed nothing and a retry is a fresh attempt")
+for fact in ("dfm4 is created by STAGE 2", "O_CREAT|O_EXCL"):
+    check(fact in runall,
+          "the verdict comment keeps the reason it can tell the two apart (%r)"
+          % fact)

@@ -171,6 +171,46 @@ one. It is before the first unlock; that is not the same as "the animation is
 still on the screen", which is why §5 now reads the animation directly instead
 of inferring it from a broadcast's position in the boot.
 
+### Correction, 2026-10-13: on DZIF the broadcast arrives AFTER the animation
+
+The table above says the broadcast is "later than the job at its best, and
+bounded". The second half holds. The first half is worse than it sounds on this
+firmware, and the owner's own capture says so:
+
+| boot | `sf_stop_bootanim` | `LOCKED_BOOT_COMPLETED` dispatched |
+|---|---|---|
+| 2026-10-13, `2.0.23-dzif` | 15:26:40.469 | 15:26:40.760 — **291 ms later** |
+| earlier `2.0.23` attempt | before 24.915 s | 24.915 s, with `service.bootanim.exit` **already 1** |
+
+Twice, in the same direction: **the animation is stopped first and the broadcast
+is dispatched after it.** So on DZIF a punctual broadcast trigger lands outside
+the window its own gate requires, and `EARLY_ROOT_BOOTANIM_ALREADY_EXITED` is
+the correct, permanent answer for it. The cycle still binds (§4b), nothing is
+claimed, and the boot's arming is spent - which is the designed behaviour and
+also means the broadcast cannot be the trigger this path relies on here.
+
+What that leaves: **the persisted job is the only trigger that can meet the goal
+on this firmware.** When it is punctual it fires at 14.6-17.0 s, which is well
+inside the animation; its problem is that it is not reliably punctual (§4a), and
+that is now the single blocking question rather than one option among several.
+
+Two things this does **not** establish, and neither may be asserted without the
+read that settles it:
+
+- **that the ordering is structural rather than two coincidences.** Two samples
+  in one direction, one of them 291 ms apart, is consistent with the animation
+  being stopped as part of the same sequence that leads to the broadcast - and
+  also with a race that could land the other way. What would settle it is the
+  pair of timestamps over three boots. What would refute it is one boot where
+  the broadcast arrives with `service.bootanim.exit` unset or 0;
+- **the margin a punctual job actually has.** If the 15:31:33.273 job activity
+  and the 334.417 s callback are the same boot, then boot started ≈15:25:58.9,
+  the animation ran to ≈41.6 s of uptime, and a 15 s callback would have had
+  ≈26 s of animation left - enough for the chain, which took 6.2 s to the module
+  load and ~10 s to `POST_ROOT_COMPLETE` on 2026-10-12. That arithmetic rests on
+  the two records belonging to one boot, which the capture lists separately and
+  nothing here proves. Confirm it from one `boot_id` before using the number.
+
 ## 4b. One arming, one boot, one claimed run
 
 Until the broadcast trigger existed, this was the **scheduler's** doing:

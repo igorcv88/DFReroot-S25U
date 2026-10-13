@@ -3334,3 +3334,133 @@ architecture, and it is a design change rather than a tuning:
 `tools/tests/EarlyRootPolicyTest.java` carries one negative case per new element
 and `tools/profile_binding_audit.py` guards the Kotlin that cannot be
 unit-tested, including that both triggers route through one gate.
+
+### Early Integrated Root — third physical run, and what AOSP source refutes
+
+DZIF, 2026-10-13, `2.0.23-dzif` / `versionCode 20023`, repaired daemon
+`3861dbd4…`, `main` at `0c612b3`. Owner capture. **No native transaction was
+issued by the early path in this boot either**, so nothing here is evidence
+about the repaired module's early load.
+
+| observation | value |
+|---|---|
+| callback entered | **334.417 s** of uptime (previous attempt: 521.707 s) |
+| `JobSchedulerService` init | 15:26:34.625 |
+| JobStore reports reading 201 persisted jobs | 15:26:34.692 |
+| `sf_stop_bootanim` | 15:26:40.469 |
+| `LOCKED_BOOT_COMPLETED` dispatched | 15:26:40.760 |
+| `BOOT_COMPLETED` dispatched | 15:26:47.222 |
+| DFReroot job wakelock | 15:31:33.273 — **298.6 s after the JobStore read** |
+| `dumpsys jobscheduler` accounting | `1x pending`, `1x active`, `1x successful_finish`, bucket **EXEMPTED** |
+| cycle record | bound to the boot, **never claimed**; no native journal |
+
+#### REFUTED, from AOSP source: force-batching is not the cause
+
+The device's own constants invited this hypothesis —
+`min_ready_non_active_jobs_count=2`, `min_ready_cpu_only_jobs_count=2`,
+`max_non_active_job_batch_delay_ms=1860000` (31 min),
+`max_cpu_only_job_batch_delay_ms=1860000`, `batch_active_bucket_jobs=false` —
+and 299 s of waiting next to a 31-minute batch delay reads like a match.
+
+It is not. `JobSchedulerService.java`'s batching predicate carries the same term
+in **both** branches of the `Flags.batchActiveBucketJobs()` split:
+
+```java
+shouldForceBatchJob = batchingEnabled
+        && job.getEffectiveStandbyBucket() != EXEMPTED_INDEX
+        && !batchDelayExpired;
+```
+
+and the connectivity branch repeats `!= EXEMPTED_INDEX` as well. `dumpsys` puts
+this job in **EXEMPTED** (`EXEMPTED_INDEX = 6`, assigned by
+`standbyBucketToBucketIndex` for `STANDBY_BUCKET_EXEMPTED` and below), so no
+value of those five constants can hold it. The line is closed — and closed by
+reading the code that would have had to do it, not by failing to reproduce it.
+
+#### The remaining fork, and the one field that decides it
+
+Two hypotheses survive, and they have opposite fixes:
+
+- **(a) ready-and-deferred.** Constraints satisfied, job in the pending queue,
+  scheduler does not run it. Cause is scheduler-side (concurrency slots,
+  standby, quota, an OEM change) and the next step is to read which.
+- **(b) not-ready.** `TIMING_DELAY` unsatisfied because the restored
+  earliest-run time is in the future. AOSP converts a persisted
+  latency/deadline from wallclock at restore
+  (`nowElapsed + max(storedRtc - nowWallclock, 0)`), and `TimeController` arms
+  the delay with `AlarmManager.ELAPSED_REALTIME` + `WINDOW_HEURISTIC` — a
+  **non-wakeup, inexact** alarm the framework may coalesce freely (the deadline
+  alarm is `ELAPSED_REALTIME_WAKEUP`, also inexact). Cause is how DFReroot
+  expresses its timing, which is ours to change.
+
+**Nothing in the captures collected so far distinguishes them**, and the
+distinguishing read has to happen *while the wait is in progress*: the job's
+satisfied/unsatisfied constraints and its earliest/latest run times.
+`tools/earlyroot_job_probe.sh` takes exactly that sample on a loop, from Termux
+or `rish`, with no root and no ADB, into `/sdcard/Download/`. Until it has run,
+changing the scheduling would be a guess — including the obvious one of dropping
+the minimum latency, which is only correct under (b).
+
+**Not sustained as an explanation:** DFReroot's own telemetry. The callback
+timestamp is the first statement of `onStartJob`, so the 298.6 s elapsed before
+any of this app's code ran.
+
+#### The trigger ordering on DZIF, and the correction it forces
+
+`sf_stop_bootanim` at 15:26:40.469 and `LOCKED_BOOT_COMPLETED` at 15:26:40.760:
+the animation is stopped **291 ms before** the earliest manifest broadcast a
+direct-boot-aware app receives. The earlier `2.0.23` attempt agrees — the
+broadcast arrived at 24.915 s with `service.bootanim.exit` already 1.
+
+So the deterministic trigger added in PR #61 cannot satisfy its own gate on this
+firmware, and `EARLY_ROOT_BOOTANIM_ALREADY_EXITED` is its permanent answer here.
+The persisted job is the only trigger that can meet the goal on DZIF.
+`docs/EARLY_ROOT.md` §4a carries the correction, including the two things it does
+**not** establish: that the ordering is structural rather than two coincidences,
+and the margin a punctual job would have had.
+
+### Manual DirtyFrag — bootstrap FAIL attributable to the stage-1/stage-2 handoff
+
+Same device, after another reboot, `2.0.23-dzif`. Preflights and all six
+patching stages passed; the bootstrap loop then ended after eight rounds:
+
+```text
+[DFR][MARKER] df=1 helper=0 ns=0 bind=0 exec_fail=0
+[DFR][BOOTSTRAP] FAIL no complete helper/ns/bind handoff signal
+runAll done res=2
+```
+
+**CONFIRMED, from `stage1.S`:** stage 1 ran. It executes only as uid 0 on tid 1
+and its first action is `openat("/dev/df", O_CREAT|O_EXCL)`, returning
+immediately if that fails — so `/dev/df` existing (the owner observed it go from
+`0` to `1` during this attempt) is positive proof that the page-cache write took
+effect and something exec'd through the patched `libc`.
+
+**CONFIRMED:** stage 2 never ran. `dfm1`/`dfm2`/`dfm3` are all created by stage 2,
+and all three answered a clean ENOENT. So the handoff died between the mutex and
+stage 2 — the `clone`, the `/proc/self/attr/exec` write to
+`u:r:vendor_modprobe:s0`, or the `execve("/vendor/bin/modprobe")`. `dfm4` is also
+a stage-2 marker, so its absence is **not** evidence that the exec succeeded; it
+is the absence of a stage that never ran.
+
+**CONFIRMED:** the seven rounds after the first could not have changed the
+outcome. O_EXCL fails for every later stage-1 invocation once the mutex exists,
+so no retry in that boot can reach stage 2, and a hard reboot is the recovery
+boundary.
+
+**NOT established:** which of the three steps in the handoff failed, and why this
+appeared now on a pair that reached `POST_ROOT_COMPLETE` on
+`0a6a0849-b320-4642-9376-2cb386d1056e`. This is a separate investigation from the
+scheduling delay and must not be merged with it.
+
+#### Consequence in code
+
+`runAll` reported these as one sentence and one return code. They are now three,
+because they are three events with three different next steps (AGENTS.md 3.7):
+`return 2` stage 1 never ran and **nothing was armed**; `return 4` the mutex was
+claimed and stage 2 never ran, so a **hard reboot** is the boundary; `return 5`
+the markers were undeterminable, which is neither. Nothing compares this result
+against anything but `0`, so the new values break no contract.
+`tools/tests/test_post_root_contract.py` guards the separation, the ordering that
+decides undeterminable first, and the reason the two positive readings can be
+told apart; both new guards were mutation-checked.

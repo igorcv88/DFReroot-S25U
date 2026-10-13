@@ -1657,16 +1657,25 @@ Java_org_lsposed_lspromise_DirtyFrag_runAll(JNIEnv *env, jobject thiz) {
     if (patch_cxx(0, reporter)) {
         return 3;
     }
+    /*
+     * Hoisted out of the loop so the FINAL verdict can report what was last
+     * observed instead of a sentence that fits every failure.
+     *
+     * Initialised to -1 - undeterminable - because that is the honest value
+     * before anything has been probed, and because `0` here would mean "absent",
+     * which is a measurement nobody has taken yet (AGENTS.md 2).
+     */
+    int mark = -1, mark1 = -1, mark2 = -1, mark3 = -1, mark4 = -1;
     for (int i = 0; i < 8; i++) {
         usleep(500000);
         REPORTLN("* trying to trigger (%d)..", i);
         createOrphanProcess();
         usleep(500000);
-        int mark = has_mutex();
-        int mark1 = has_mark(1);
-        int mark2 = has_mark(2);
-        int mark3 = has_mark(3);
-        int mark4 = has_mark(4);
+        mark = has_mutex();
+        mark1 = has_mark(1);
+        mark2 = has_mark(2);
+        mark3 = has_mark(3);
+        mark4 = has_mark(4);
         REPORTLN("[DFR][MARKER] df=%d helper=%d ns=%d bind=%d exec_fail=%d"
                  " (1=present 0=absent -1=undeterminable)",
                  mark, mark1, mark2, mark3, mark4);
@@ -1691,6 +1700,60 @@ Java_org_lsposed_lspromise_DirtyFrag_runAll(JNIEnv *env, jobject thiz) {
                      " helper/ns evidence; dfm3 is never final success");
         }
     }
-    REPORTLN("[DFR][BOOTSTRAP] FAIL no complete helper/ns/bind handoff signal");
+    /*
+     * Three different failures, three different verdicts and three different
+     * return codes. They used to be one sentence and one code, and the 2026-10-13
+     * manual FAIL is why that was not good enough: `df=1 helper=0 ns=0 bind=0
+     * exec_fail=0` and `df=0 helper=0 ns=0 bind=0 exec_fail=0` printed the same
+     * line, and they are not the same event in any respect that matters - not
+     * the cause, not what was written to the device, and not what the owner has
+     * to do next (AGENTS.md 3.7).
+     *
+     * What separates them is stage1.S. Stage 1 runs only as uid 0 on tid 1, and
+     * its FIRST action is `openat("/dev/df", O_CREAT|O_EXCL)`; if that fails it
+     * returns immediately. So the mutex existing is positive proof that stage 1
+     * executed - the page-cache write took effect and something exec'd through
+     * the patched libc - and the mutex NOT existing is proof that it never did.
+     *
+     * And the consequence for the next attempt is opposite in the two cases:
+     *
+     *  - mutex absent: nothing was armed. No marker, no clone, no exec. Another
+     *    attempt in this boot is a fresh attempt.
+     *  - mutex present with no stage-2 marker at all: stage 1 claimed the mutex
+     *    and the handoff died between it and stage 2 - the clone, the
+     *    `/proc/self/attr/exec` write, or the exec into `vendor_modprobe`.
+     *    O_EXCL now fails for every later stage-1 invocation in this boot, so no
+     *    retry can reach stage 2 and a hard reboot is the recovery boundary.
+     *    Saying "no complete handoff signal" and letting the owner try again is
+     *    sending them into eight seconds that provably cannot do anything.
+     *
+     * dfm4 is created by STAGE 2, not by stage 1, so its absence here is not
+     * evidence that the exec succeeded - it is the absence of a stage that never
+     * ran. That is why this case is not reported as an exec failure.
+     *
+     * The return codes are new values rather than reuses: nothing compares this
+     * result against anything but 0 (AutoRootPolicy.isSuccessful), so a distinct
+     * number costs nothing and a reader of a log line two boots later gets the
+     * fact instead of a guess.
+     */
+    if (mark < 0 || mark1 < 0 || mark2 < 0 || mark3 < 0 || mark4 < 0) {
+        REPORTLN("[DFR][BOOTSTRAP] FAIL markers undeterminable at the end"
+                 " (df=%d helper=%d ns=%d bind=%d exec_fail=%d); whether the"
+                 " handoff happened cannot be established, so this is neither"
+                 " outcome", mark, mark1, mark2, mark3, mark4);
+        return 5;
+    }
+    if (mark == 1) {
+        REPORTLN("[DFR][BOOTSTRAP] FAIL stage 1 claimed /dev/df and stage 2 never"
+                 " ran (df=1 helper=0 ns=0 bind=0 exec_fail=0). The page-cache"
+                 " write took effect and the handoff died between the mutex and"
+                 " the vendor_modprobe exec. The mutex is held for the rest of"
+                 " this boot, so no further attempt can reach stage 2: a HARD"
+                 " REBOOT is the recovery boundary.");
+        return 4;
+    }
+    REPORTLN("[DFR][BOOTSTRAP] FAIL stage 1 never ran (/dev/df absent): nothing"
+             " exec'd through the patched libc as uid 0 on tid 1, so no marker,"
+             " no clone and no exec happened. Nothing was armed in this boot.");
     return 2;
 }
