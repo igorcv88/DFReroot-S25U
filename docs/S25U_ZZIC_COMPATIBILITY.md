@@ -3319,7 +3319,12 @@ architecture, and it is a design change rather than a tuning:
   trigger that claims it runs; the other refuses with
   `EARLY_ROOT_ARM_ALREADY_CLAIMED`, a later boot with `EARLY_ROOT_ARM_EXPIRED`,
   and the service now requires a claim of its own
-  (`EARLY_ROOT_CLAIM_MISSING`, `…_CLAIM_NOT_THIS_BOOT`);
+  (`EARLY_ROOT_CLAIM_MISSING`, `…_CLAIM_NOT_THIS_BOOT`). The gate is split for
+  this - `evaluateArmBinding()` is what refuses identically in every boot, the
+  bind follows it, and only then are the clock, the window, the animation and
+  the journals weighed. Binding after those, as the first revision of this
+  change did, leaves the arming live in a boot that refused and lets the next
+  boot inherit it; Codex caught it on PR #61;
 - the row in the app reads the cycle record and the scheduler, so
   "already claimed and run" and "a callback that refused and went home" stop
   reading as `ARMED` and `CALLBACK_INCOMPLETE` — both observed in this boot,

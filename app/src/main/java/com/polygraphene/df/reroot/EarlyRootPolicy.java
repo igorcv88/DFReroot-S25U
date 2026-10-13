@@ -1447,7 +1447,42 @@ public final class EarlyRootPolicy {
      * so there is exactly one place where "may this proceed" is answered in full.
      * A caller may use this to skip work; it may never use it to proceed.
      */
-    public static Decision evaluateBeforeReadiness(Inputs in) {
+    /**
+     * The half of the gate that cannot change inside one boot - and therefore
+     * the half that must pass BEFORE the arming is bound to this boot.
+     *
+     * ## Why this is a separate function, and why Codex was right
+     *
+     * The split was not here, and the invariant the cycle record exists for
+     * leaked straight through the gap. {@link #evaluateBeforeReadiness} refuses
+     * on conditions that are properties of *this moment in this boot* -
+     * {@link #PAST_WINDOW}, {@link #BOOT_ALREADY_COMPLETED},
+     * {@link #BOOTANIM_ALREADY_EXITED}, {@link #AUTO_BOOT_SPENT} - and the
+     * dispatcher bound the cycle only after all of them had passed.
+     *
+     * So: owner arms in boot A; in boot B the broadcast arrives after the
+     * animation has already exited, or the job is restored late as it was on
+     * 2026-10-13, and the gate refuses. Nothing is bound. The arm record is
+     * still live, {@code LOCKED_BOOT_COMPLETED} arrives again in boot C, the
+     * animation is up this time - and the chain runs in a boot the owner never
+     * armed. That is the standing switch docs/EARLY_ROOT.md section 6 says is an
+     * owner decision made in the open, reached by accident, and it is exactly
+     * the failure the cycle record was added to prevent.
+     *
+     * What belongs here is everything that refuses the SAME WAY in every boot:
+     * the arming parses, it names this job and this arming, it is for this build
+     * and this firmware, the build is qualified, the cycle is not already
+     * claimed or bound elsewhere, and no unexplained death is open against the
+     * artefact. A refusal from any of those means this arming does not belong to
+     * this device or is already spent, so leaving it unbound costs nothing - a
+     * later boot refuses identically.
+     *
+     * What belongs in the transient half is everything a boot can pass through:
+     * the clock, the window, boot completion, the animation and both journals.
+     * Those refuse in one boot and allow in the next, which is precisely why the
+     * arming has to be consumed before they are weighed.
+     */
+    public static Decision evaluateArmBinding(Inputs in) {
         if (in == null) return refuse(NO_BOOT_ID, "no inputs");
         /*
          * Which trigger, and which side of the dispatch, before anything else.
@@ -1598,6 +1633,76 @@ public final class EarlyRootPolicy {
                     + " build: a manual run must first end in verified same-boot"
                     + " POST_ROOT_COMPLETE");
         }
+        /*
+         * The unresolved-incident latch, before the journal is read for the
+         * one-attempt-per-boot question.
+         *
+         * Two separate readings, in this order, because they fail for different
+         * reasons and only the first one survives the cycle that produced it:
+         *
+         *   1. the durable incident record, which outlives the arming that
+         *      archived the journal it was derived from;
+         *   2. the journal in front of us, in case the run that should have
+         *      recorded the incident is the run that died.
+         *
+         * Checking only (1) would miss the first boot after the incident;
+         * checking only (2) would forget it the moment the owner re-arms, since
+         * EarlyRootStore.archivePreviousCycle() moves the journal to
+         * <path>.prev. Together they cover both, which is why both are here and
+         * not one.
+         */
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(in.incidentRecord)) {
+            return refuse(INCIDENT_UNREADABLE, "an early-root incident record exists"
+                    + " but could not be read; it may name an unresolved fatal"
+                    + " incident, so this boot refuses");
+        }
+        if (!blank(in.incidentRecord)) {
+            List<Incident> recorded = parseIncidents(in.incidentRecord);
+            if (recorded == null) {
+                return refuse(INCIDENT_MALFORMED, "the early-root incident log holds"
+                        + " an entry this build cannot account for; refusing rather"
+                        + " than skipping it, because the entry it cannot read may"
+                        + " be the one that would have blocked");
+            }
+            Incident blocking = blockingIncident(recorded, in.ksudSha256);
+            if (blocking != null) {
+                return refuse(INCIDENT_UNRESOLVED, "an earlier boot ("
+                        + blocking.bootId + ") reached transaction 5 and never"
+                        + " reported a result"
+                        + (blank(blocking.ksudSha256)
+                            ? "; the incident could not be attributed to an artefact,"
+                              + " so every early dispatch refuses until the owner"
+                              + " accounts for it"
+                            : " on this daemon/module pair")
+                        + ". A corrected module is a new ksud digest; see"
+                        + " docs/EARLY_ROOT.md section 12");
+            }
+        }
+        Incident pending = detectIncident(in.journalRecord, in.armRecord,
+                in.currentBootId, in.currentBootId, 0L);
+        if (pending != null && incidentBlocks(pending, in.ksudSha256)) {
+            return refuse(INCIDENT_IN_JOURNAL, "the early-root journal says boot "
+                    + pending.bootId + " reached transaction 5 and never reported a"
+                    + " result, and no incident record accounts for it; refusing"
+                    + " rather than treating a previous boot's unexplained death as"
+                    + " last boot's business");
+        }
+        return new Decision(true, ALLOW,
+                "EARLY_ROOT_ARM_BINDING=PASS (this arming belongs to this boot)");
+    }
+
+    /**
+     * The whole durable gate: the immutable half, then everything a boot can
+     * pass through on its own.
+     *
+     * Both entry points call this, and the dispatcher calls it a second time
+     * after binding the cycle. The order is not cosmetic: every refusal below is
+     * reachable in a boot whose arming is already bound, and binding is what
+     * stops the next boot from inheriting it.
+     */
+    public static Decision evaluateBeforeReadiness(Inputs in) {
+        Decision binding = evaluateArmBinding(in);
+        if (!binding.allow) return binding;
         if (in.callbackElapsedMs < 0) {
             return refuse(CLOCK_UNAVAILABLE, "time since kernel boot is unavailable;"
                     + " a callback that cannot be placed in the early window is"
@@ -1655,60 +1760,6 @@ public final class EarlyRootPolicy {
                     + " still on screen could not be determined ("
                     + in.bootanimState + "); a run that cannot be placed inside"
                     + " the animation proves nothing the milestone asks for");
-        }
-        /*
-         * The unresolved-incident latch, before the journal is read for the
-         * one-attempt-per-boot question.
-         *
-         * Two separate readings, in this order, because they fail for different
-         * reasons and only the first one survives the cycle that produced it:
-         *
-         *   1. the durable incident record, which outlives the arming that
-         *      archived the journal it was derived from;
-         *   2. the journal in front of us, in case the run that should have
-         *      recorded the incident is the run that died.
-         *
-         * Checking only (1) would miss the first boot after the incident;
-         * checking only (2) would forget it the moment the owner re-arms, since
-         * EarlyRootStore.archivePreviousCycle() moves the journal to
-         * <path>.prev. Together they cover both, which is why both are here and
-         * not one.
-         */
-        if (AutoRootPolicy.RECORD_UNREADABLE.equals(in.incidentRecord)) {
-            return refuse(INCIDENT_UNREADABLE, "an early-root incident record exists"
-                    + " but could not be read; it may name an unresolved fatal"
-                    + " incident, so this boot refuses");
-        }
-        if (!blank(in.incidentRecord)) {
-            List<Incident> recorded = parseIncidents(in.incidentRecord);
-            if (recorded == null) {
-                return refuse(INCIDENT_MALFORMED, "the early-root incident log holds"
-                        + " an entry this build cannot account for; refusing rather"
-                        + " than skipping it, because the entry it cannot read may"
-                        + " be the one that would have blocked");
-            }
-            Incident blocking = blockingIncident(recorded, in.ksudSha256);
-            if (blocking != null) {
-                return refuse(INCIDENT_UNRESOLVED, "an earlier boot ("
-                        + blocking.bootId + ") reached transaction 5 and never"
-                        + " reported a result"
-                        + (blank(blocking.ksudSha256)
-                            ? "; the incident could not be attributed to an artefact,"
-                              + " so every early dispatch refuses until the owner"
-                              + " accounts for it"
-                            : " on this daemon/module pair")
-                        + ". A corrected module is a new ksud digest; see"
-                        + " docs/EARLY_ROOT.md section 12");
-            }
-        }
-        Incident pending = detectIncident(in.journalRecord, in.armRecord,
-                in.currentBootId, in.currentBootId, 0L);
-        if (pending != null && incidentBlocks(pending, in.ksudSha256)) {
-            return refuse(INCIDENT_IN_JOURNAL, "the early-root journal says boot "
-                    + pending.bootId + " reached transaction 5 and never reported a"
-                    + " result, and no incident record accounts for it; refusing"
-                    + " rather than treating a previous boot's unexplained death as"
-                    + " last boot's business");
         }
         /*
          * The journal. An unreadable one is the worst case rather than a blank

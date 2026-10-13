@@ -148,18 +148,30 @@ object DfrEarlyRootDispatch {
         }
         val cycleRecord = EarlyRootStore.readCycle()
         /*
-         * The durable half of the gate first, so a device that was never armed -
-         * which is every device, almost always, and now on every single boot
-         * because of this trigger - never pays for an AMS walk to be told so.
-         * It is not a separate gate: evaluate() re-runs all of it.
+         * The IMMUTABLE half of the gate first: does this arming belong to this
+         * device, this build and this boot, and is it still unspent? A device
+         * that was never armed - which is every device, almost always, and now
+         * on every single boot because of this trigger - never pays for an AMS
+         * walk to be told so.
+         *
+         * It is also the half that decides whether the arming is consumed, and
+         * the ordering against bindCycle() below is the whole invariant. See
+         * EarlyRootPolicy.evaluateArmBinding.
          */
-        val durable = EarlyRootPolicy.evaluateBeforeReadiness(
+        val binding = EarlyRootPolicy.evaluateArmBinding(
             inputs(context, bootId, trigger, EarlyRootPolicy.ROLE_DISPATCH,
                 armRecord, cycleRecord, null, callbackJobId, callbackNamespace,
                 generation, entryElapsedMs)
         )
-        if (!durable.allow) {
-            refuse(bootId, context, entryElapsedMs, durable)
+        if (!binding.allow) {
+            /*
+             * Nothing is bound, deliberately. Every refusal in that half refuses
+             * identically in every boot - not this build, not this firmware, not
+             * qualified, already claimed, already bound elsewhere, an incident
+             * still open - so leaving the arming untouched costs nothing and a
+             * later boot reaches the same answer.
+             */
+            refuse(bootId, context, entryElapsedMs, binding)
             return false
         }
         /*
@@ -172,11 +184,18 @@ object DfrEarlyRootDispatch {
          * in every later boot too - the standing switch docs/EARLY_ROOT.md
          * section 6 says is an owner decision, arrived at by accident.
          *
-         * Deliberately before readiness and after identity: a refusal that costs
-         * nothing (not armed, wrong build, already claimed) must not consume the
-         * owner's arming, and a refusal inside the right boot must not leave the
-         * arming live for the next one. A failed write refuses the dispatch,
-         * because an arming that runs without being bound is unbounded.
+         * Deliberately between the immutable half and EVERY transient one: a
+         * refusal that costs nothing (not armed, wrong build, already claimed)
+         * must not consume the owner's arming, and a refusal that depends on
+         * where this boot has got to - the window, boot completion, the
+         * animation, the other trigger's journal, readiness - must not leave the
+         * arming live for the boots after this one. Codex caught the second half
+         * of that on PR #61: the bind used to sit after the clock, the window,
+         * the boot state and the animation, so a boot that arrived a second too
+         * late left the arming live and the NEXT boot ran unarmed.
+         *
+         * A failed write refuses the dispatch, because an arming that runs
+         * without being bound is unbounded.
          */
         val bind = EarlyRootStore.bindCycle(generation, bootId, entryElapsedMs)
         if (bind != null) {
@@ -184,6 +203,21 @@ object DfrEarlyRootDispatch {
                 " boot: $bind")
             trace(bootId, context, EarlyRootPolicy.STEP_REFUSED,
                 "cycle bind failed: $bind")
+            return false
+        }
+        /*
+         * Now the transient half, on an arming this boot owns: the clock, the
+         * window, boot completion, the animation and both journals. Any of these
+         * can refuse here, and the arming is spent either way - which is what
+         * "one arming, one boot" means.
+         */
+        val durable = EarlyRootPolicy.evaluateBeforeReadiness(
+            inputs(context, bootId, trigger, EarlyRootPolicy.ROLE_DISPATCH,
+                armRecord, EarlyRootStore.readCycle(), null, callbackJobId,
+                callbackNamespace, generation, EarlyRootEnv.monotonicNow())
+        )
+        if (!durable.allow) {
+            refuse(bootId, context, EarlyRootEnv.monotonicNow(), durable)
             return false
         }
         if (abandoned("before_readiness")) {

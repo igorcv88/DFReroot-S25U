@@ -198,11 +198,35 @@ claim_elapsed_ms=<ms, or -1 while BOUND>
 ```
 
 - **BOUND** is written by the first trigger of the first boot that finds a live
-  arming, before the readiness sweep and after the identity half of the gate.
-  Before identity, every boot of every install would write one; after readiness,
-  a boot where the framework was slow would leave the arming live for the *next*
-  boot. A failed write refuses the dispatch: an arming that runs without being
-  bound is unbounded;
+  arming, and **where it is written is the invariant.** The gate is split in two
+  for this, and the bind goes between the halves:
+
+  - `EarlyRootPolicy.evaluateArmBinding()` is everything that refuses the same
+    way in *every* boot - the arming parses, names this job and this arming, is
+    for this build and this firmware, the build is qualified, the cycle is not
+    already claimed or bound elsewhere, no unexplained death is open. A refusal
+    there leaves the arming untouched, correctly: a later boot reaches the same
+    answer, so nothing is exploitable and the owner's arming is not spent on a
+    device that was never armed;
+  - then the bind;
+  - then `evaluateBeforeReadiness()`'s transient half - the clock, the window,
+    boot completion, the animation, both journals - and then readiness. **Every
+    one of those can refuse in one boot and allow in the next**, which is why
+    the arming must already be consumed before they are weighed.
+
+  Codex caught this on PR #61, and the finding was correct. With the bind after
+  the transient checks, the sequence was: arm in boot A; in boot B the broadcast
+  arrives a second after the animation exited, or the job is restored late as it
+  was in run 2, and the gate refuses with nothing bound; boot C's broadcast finds
+  the same live arm record with the animation still up, and the chain runs in a
+  boot nobody armed. A one-shot control that is really a standing switch - the
+  exact failure this record was added to prevent.
+
+  `tools/tests/EarlyRootPolicyTest.java` holds the contract as paired
+  assertions - each transient refusal is checked to still *bind* - and
+  `tools/profile_binding_audit.py` fails if the dispatcher's order drifts or if a
+  transient code moves into the immutable half. A failed write refuses the
+  dispatch: an arming that runs without being bound is unbounded;
 - **CLAIMED** is written by the trigger that is about to start the service. It is
   the mutual exclusion between the two triggers - both can pass the gate in one
   boot and exactly one may run - and the loser is the one whose claim fails, so

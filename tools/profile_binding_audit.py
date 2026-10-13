@@ -2332,8 +2332,9 @@ def audit():
                  "starting the service that re-derives the gate" % forbidden)
     gate_order = order(early_root_dispatch_src,
                        "EarlyRootStore.trace(",
-                       "EarlyRootPolicy.evaluateBeforeReadiness(",
+                       "EarlyRootPolicy.evaluateArmBinding(",
                        "EarlyRootStore.bindCycle(",
+                       "EarlyRootPolicy.evaluateBeforeReadiness(",
                        "StageHop.probeReadiness(",
                        "EarlyRootPolicy.evaluate(",
                        "EarlyRootPolicy.STEP_READINESS_PASS",
@@ -2343,24 +2344,48 @@ def audit():
                        "context.startService(")
     if gate_order is None or gate_order != sorted(gate_order):
         fail("the early-root dispatch order drifted: it must record the entry "
-             "breadcrumb, refuse on the durable evidence before paying for the AMS "
-             "sweep, bind the arming to this boot, re-evaluate the full gate with "
-             "that sweep's result, claim the arming exclusively, and only then "
-             "start the service")
+             "breadcrumb, refuse on the IMMUTABLE half of the gate, bind the "
+             "arming to this boot, only then weigh the transient half, pay for "
+             "the AMS sweep, re-evaluate the full gate with its result, claim the "
+             "arming exclusively, and only then start the service")
     # The bind sits between the durable half of the gate and the readiness sweep,
     # and both sides of that are load-bearing. Before identity, a device that was
     # never armed would write a cycle record on every boot - the broadcast arrives
     # in every boot now. After readiness, a boot in which the framework was too
     # slow would leave the arming live for the NEXT boot, which is the standing
     # switch docs/EARLY_ROOT.md section 6 says is an owner decision.
+    # The bind sits between the two halves of the durable gate, and the split is
+    # the invariant. Codex caught this on PR #61: with the bind after the
+    # transient checks, a boot that arrived a second too late left the arm record
+    # live, and the next boot's LOCKED_BOOT_COMPLETED - which arrives in every
+    # boot - ran unarmed. EarlyRootPolicyTest holds the contract that keeps the
+    # halves apart; what this asserts is that the dispatcher respects it.
     bind_at = early_root_dispatch_src.find("EarlyRootStore.bindCycle(")
+    binding_at = early_root_dispatch_src.find("EarlyRootPolicy.evaluateArmBinding(")
     durable_at = early_root_dispatch_src.find("EarlyRootPolicy.evaluateBeforeReadiness(")
     sweep_at = early_root_dispatch_src.find("StageHop.probeReadiness(")
-    if not (0 < durable_at < bind_at < sweep_at):
-        fail("the early-root dispatch does not bind the arming to this boot between "
-             "the identity gate and the readiness sweep; either every boot of every "
-             "install writes a cycle record, or an unclaimed arming stays live for "
-             "the boots after this one")
+    if not (0 < binding_at < bind_at < durable_at < sweep_at):
+        fail("the early-root dispatch does not bind the arming between the "
+             "immutable and the transient halves of the gate; either a refusal "
+             "that costs nothing consumes the owner's arming, or a boot that "
+             "refused on the clock, the window, the animation or a journal leaves "
+             "it live for the boots after this one")
+    # ...and the halves stay apart in the policy, not only in the dispatcher.
+    binding_fn = early_root_policy_src.find("public static Decision evaluateArmBinding(")
+    binding_end = early_root_policy_src.find(
+        "public static Decision evaluateBeforeReadiness(")
+    if not (0 < binding_fn < binding_end):
+        fail("EarlyRootPolicy no longer separates the immutable half of the gate "
+             "from the transient one; the bind has nothing to sit between")
+    immutable_body = early_root_policy_src[binding_fn:binding_end]
+    for transient in ("PAST_WINDOW,", "BOOT_ALREADY_COMPLETED,",
+                      "BOOTANIM_ALREADY_EXITED,", "BOOT_SPENT,",
+                      "AUTO_BOOT_SPENT,", "CLOCK_UNAVAILABLE,"):
+        if transient in immutable_body:
+            fail("the transient refusal %s moved into evaluateArmBinding; it can "
+                 "refuse in one boot and allow in the next, so refusing there "
+                 "leaves the arming live for a boot the owner never armed"
+                 % transient)
     bind_guard = re.search(r"if \(bind != null\) \{(?:[^}]|\}(?!\n        \}))*return false",
                            early_root_dispatch_src, flags=re.S)
     if not bind_guard:

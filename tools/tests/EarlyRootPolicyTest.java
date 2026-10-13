@@ -140,6 +140,27 @@ public class EarlyRootPolicyTest {
                 what + " (code=" + d.code + " reason=" + d.reason + ")");
     }
 
+    /**
+     * The immutable half allows, i.e. this arming is this boot's to consume.
+     *
+     * The assertion the cycle-record invariant actually rests on. A transient
+     * refusal that reaches {@code evaluateArmBinding} means the dispatcher never
+     * binds the arming in the boot that refused, the arm record stays live, and
+     * the next boot's broadcast runs unarmed - a one-shot control that is
+     * really a standing switch.
+     */
+    private static void binds(EarlyRootPolicy.Inputs in, String what) {
+        EarlyRootPolicy.Decision d = EarlyRootPolicy.evaluateArmBinding(in);
+        check(d.allow, what + " (code=" + d.code + " reason=" + d.reason + ")");
+    }
+
+    private static void refusedBinding(EarlyRootPolicy.Inputs in, String code,
+                                       String what) {
+        EarlyRootPolicy.Decision d = EarlyRootPolicy.evaluateArmBinding(in);
+        check(!d.allow && code.equals(d.code),
+                what + " (code=" + d.code + " reason=" + d.reason + ")");
+    }
+
     private static void refused(EarlyRootPolicy.Inputs in, String code, String what) {
         EarlyRootPolicy.Decision d = EarlyRootPolicy.evaluate(in);
         check(!d.allow && code.equals(d.code),
@@ -1340,6 +1361,91 @@ public class EarlyRootPolicyTest {
                 STALE_GEN, BOOT, EarlyRootPolicy.TRIGGER_JOB, 15_100L, 15_400L);
         refused(run, EarlyRootPolicy.CYCLE_FOREIGN,
                 "a claim naming another arming refuses for the claimed run too");
+
+        // --- the arming is consumed BEFORE any transient refusal -----------
+        // Codex caught this on PR #61 and the finding was correct: the
+        // dispatcher bound the cycle only after the clock, the window, the boot
+        // state and the animation had all passed, so a boot that arrived a
+        // second too late left the arm record live and the NEXT boot's
+        // LOCKED_BOOT_COMPLETED ran unarmed. These cases are the contract that
+        // keeps the two halves apart, and they are the reason the split is a
+        // function rather than a comment.
+        EarlyRootPolicy.Inputs t = ready();
+        t.callbackElapsedMs = 521_707L;
+        refused(t, EarlyRootPolicy.PAST_WINDOW, "the run-2 callback still refuses");
+        binds(t, "...and the arming is still bound to that boot, so a later boot"
+                + " cannot inherit it");
+        t = ready();
+        t.bootCompletedState = EarlyRootPolicy.BOOT_COMPLETED;
+        refused(t, EarlyRootPolicy.BOOT_ALREADY_COMPLETED,
+                "a boot that already completed refuses");
+        binds(t, "...and still consumes the arming");
+        t = ready();
+        t.bootanimState = EarlyRootPolicy.BOOTANIM_EXITED;
+        refused(t, EarlyRootPolicy.BOOTANIM_ALREADY_EXITED,
+                "a boot whose animation already exited refuses");
+        binds(t, "...and still consumes the arming: arriving a second too late"
+                + " must not leave the arming live for the next boot");
+        t = ready();
+        t.bootanimState = EarlyBootProbePolicy.UNKNOWN;
+        binds(t, "an unreadable animation state refuses the run and still consumes"
+                + " the arming");
+        t = ready();
+        t.callbackElapsedMs = -1L;
+        refused(t, EarlyRootPolicy.CLOCK_UNAVAILABLE, "an unreadable clock refuses");
+        binds(t, "...and still consumes the arming");
+        t = ready();
+        t.autoRootJournalRecord = EarlyRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_FAILED_LOCKED, 1, true);
+        refused(t, EarlyRootPolicy.AUTO_BOOT_SPENT,
+                "Auto Root having reached transaction 5 in this boot refuses");
+        binds(t, "...and still consumes the arming");
+        t = ready();
+        t.journalRecord = EarlyRootPolicy.formatJournal(BOOT,
+                AutoRootPolicy.PHASE_PREFLIGHT, 1, false);
+        refused(t, EarlyRootPolicy.BOOT_SPENT,
+                "a second entry in this boot refuses");
+        binds(t, "...and still consumes the arming");
+
+        // And the other direction: everything that refuses the same way in
+        // EVERY boot belongs in the immutable half, where it must NOT consume
+        // the owner's arming - a later boot reaches the same answer anyway.
+        t = ready();
+        t.armRecord = null;
+        refusedBinding(t, EarlyRootPolicy.ARM_NO_RECORD,
+                "an unarmed device never binds anything");
+        t = ready();
+        t.versionCode = CODE + 1;
+        refusedBinding(t, EarlyRootPolicy.BUILD_MISMATCH,
+                "an app update between the arming and the boot does not consume"
+                        + " the arming");
+        t = ready();
+        t.qualificationRecord = null;
+        refusedBinding(t, EarlyRootPolicy.NOT_QUALIFIED,
+                "an unqualified build does not consume the arming");
+        t = ready();
+        t.cycleRecord = claimedCycle(EarlyRootPolicy.TRIGGER_JOB, BOOT);
+        refusedBinding(t, EarlyRootPolicy.ARM_ALREADY_CLAIMED,
+                "an arming already claimed refuses in the immutable half, so the"
+                        + " second trigger of a boot never rewrites the claim");
+        t = ready();
+        t.cycleRecord = EarlyRootPolicy.formatCycle(EarlyRootPolicy.CYCLE_BOUND,
+                GEN, DEAD_BOOT, EarlyRootPolicy.TRIGGER_NONE, 15_100L, -1L);
+        refusedBinding(t, EarlyRootPolicy.ARM_EXPIRED,
+                "an arming bound to a boot that has passed refuses in the"
+                        + " immutable half");
+        t = ready();
+        t.incidentRecord = AutoRootPolicy.RECORD_UNREADABLE;
+        refusedBinding(t, EarlyRootPolicy.INCIDENT_UNREADABLE,
+                "an unreadable incident log refuses in the immutable half: it"
+                        + " refuses every boot alike, so it must not spend an arming");
+        t = ready();
+        t.trigger = null;
+        refusedBinding(t, EarlyRootPolicy.TRIGGER_UNRECOGNISED,
+                "a dispatch that names no trigger binds nothing");
+        t = ready();
+        binds(t, "a clean early window binds, which is what the dispatcher does"
+                + " before it weighs anything transient");
 
         check(EarlyRootPolicy.MAX_ATTEMPTS_PER_BOOT == 1,
                 "the early path is one attempt per boot: there is no retry loop to"
