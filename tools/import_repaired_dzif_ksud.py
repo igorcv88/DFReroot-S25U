@@ -6,10 +6,15 @@ igorcv88/RMGLabs-Payloads:
 
     python3 tools/import_repaired_dzif_ksud.py
 
+Or, with the verified file already downloaded to the phone (no private access):
+
+    python3 tools/import_repaired_dzif_ksud.py --from-file /sdcard/Download/ksud-pa3q-S938BXXUCDZIF-dfreroot-v3.3.0
+
 The script writes only app/src/main/assets/ksud-dzif, after checking that the
 bytes, sidecar and module provenance agree with the pinned immutable source
 commit. It never authorizes Early Root or changes its allowlists.
 """
+import argparse
 import hashlib
 import json
 import os
@@ -63,6 +68,10 @@ def assert_pins() -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--from-file", type=Path, metavar="KSUD",
+                        help="use a locally supplied daemon instead of downloading it")
+    args = parser.parse_args()
     try:
         assert_pins()
         ASSET.parent.mkdir(parents=True, exist_ok=True)
@@ -71,40 +80,51 @@ def main() -> int:
             binary = temp / NAME
             sidecar = temp / "sha256"
             provenance = temp / "module-provenance.txt"
-            for remote, local in [
-                (NAME, binary),
-                (NAME + ".sha256", sidecar),
-                (NAME + ".module-provenance.txt", provenance),
-            ]:
-                gh_get(remote, local)
+            if args.from_file is not None:
+                # SHA-256 binds these bytes to the exact module provenance
+                # independently confirmed in RMGLabs-Payloads@SOURCE_COMMIT.
+                # Do not depend on the uploaded filename or supplied metadata.
+                with args.from_file.open("rb") as source, binary.open("wb") as dest:
+                    for block in iter(lambda: source.read(1024 * 1024), b""):
+                        dest.write(block)
+            else:
+                for remote, local in [
+                    (NAME, binary),
+                    (NAME + ".sha256", sidecar),
+                    (NAME + ".module-provenance.txt", provenance),
+                ]:
+                    gh_get(remote, local)
+
             sha = checksum(binary)
             size = binary.stat().st_size
             if (sha, size) != (EXPECTED_SHA256, EXPECTED_BYTES):
                 raise RuntimeError(f"daemon mismatch: {size} bytes, sha256={sha}")
-            expected_sidecar = f"{EXPECTED_SHA256}  kernelsu/{NAME}"
-            if sidecar.read_text().strip() != expected_sidecar:
-                raise RuntimeError("daemon checksum sidecar disagrees with pinned data")
-            fields = dict(
-                line.split("=", 1) for line in provenance.read_text().splitlines()
-                if "=" in line
-            )
-            required = {
-                "staging_profile": "dfreroot",
-                "kernel_release": "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k",
-                "ksu_commit": EXPECTED_KSU_COMMIT,
-                "ksud_name": NAME,
-                "ksud_size": str(EXPECTED_BYTES),
-                "ksud_sha256": EXPECTED_SHA256,
-                "module_sha256": EXPECTED_MODULE_SHA256,
-                "module_build_id": EXPECTED_BUILD_ID,
-                "module_size": "3618008",
-                "source_commit": "aa7cd863ed5a4c75303b929976d8f6a063e02b1c",
-            }
-            for field, expected in required.items():
-                if fields.get(field) != expected:
-                    raise RuntimeError(f"provenance {field} differs: {fields.get(field)!r}")
-            if "throne-tracker-serialise" not in fields.get("ksu_patches", ""):
-                raise RuntimeError("repaired manager-scanner patch absent from provenance")
+
+            if args.from_file is None:
+                expected_sidecar = f"{EXPECTED_SHA256}  kernelsu/{NAME}"
+                if sidecar.read_text().strip() != expected_sidecar:
+                    raise RuntimeError("daemon checksum sidecar disagrees with pinned data")
+                fields = dict(
+                    line.split("=", 1) for line in provenance.read_text().splitlines()
+                    if "=" in line
+                )
+                required = {
+                    "staging_profile": "dfreroot",
+                    "kernel_release": "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k",
+                    "ksu_commit": EXPECTED_KSU_COMMIT,
+                    "ksud_name": NAME,
+                    "ksud_size": str(EXPECTED_BYTES),
+                    "ksud_sha256": EXPECTED_SHA256,
+                    "module_sha256": EXPECTED_MODULE_SHA256,
+                    "module_build_id": EXPECTED_BUILD_ID,
+                    "module_size": "3618008",
+                    "source_commit": "aa7cd863ed5a4c75303b929976d8f6a063e02b1c",
+                }
+                for field, expected in required.items():
+                    if fields.get(field) != expected:
+                        raise RuntimeError(f"provenance {field} differs: {fields.get(field)!r}")
+                if "throne-tracker-serialise" not in fields.get("ksu_patches", ""):
+                    raise RuntimeError("repaired manager-scanner patch absent from provenance")
             # Avoid truncating the existing asset if the download/verification fails.
             temp_asset = ASSET.with_name(ASSET.name + ".verified.tmp")
             try:
