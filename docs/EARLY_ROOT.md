@@ -427,10 +427,19 @@ may make to it is none.
    patched source to report nothing, with no two scans ever inside the scanner
    at once. Not on the owner's phone.
 
-   What it does **not** cover, and what therefore still has to be true before an
-   entry: the module has actually been rebuilt with the patch (no corrected
-   module exists yet — that needs one `workflow_dispatch`), and its own build
-   gate `tools/assert_observer_defers.py` passes on the new bytes.
+   **Build update (2026-10-13):** the repaired DZIF `dfreroot` module **has**
+   been compiled and published by RMGLabs-Payloads, source
+   `aa7cd863ed5a4c75303b929976d8f6a063e02b1c`, daemon SHA-256
+   `3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee`,
+   module SHA-256
+   `dd193d36d13caea129572e9ffdeedfeebdadb860fcb7d8d7a72b1e3e58301220`,
+   build ID `cc25bef1fe27d0567035cf578e2325ac065cf0e5`.
+   The build and its source-side gates do **not** amount to physical acceptance:
+   the APK must actually bundle the new daemon, the new pair must pass a
+   manual full-boot `POST_ROOT_COMPLETE` on the owner's DZIF hardware, and the
+   incident and exact-pair owner-authorization gates must be evaluated before
+   any early-root trial. As of this documentation change, these last gates
+   are still open.
 
 Only then does the owner add the pair, in a PR, with items 1–4 named beside the
 digest in the dossier.
