@@ -352,7 +352,7 @@ class DfrEarlyRootJobService : JobService() {
      * GENERATION_MISSING - never with a plausible substitute.
      */
     private fun callbackGeneration(params: JobParameters): String = try {
-        params.extras?.getString(EarlyRootPolicy.EXTRA_GENERATION) ?: ""
+        params.extras.getString(EarlyRootPolicy.EXTRA_GENERATION) ?: ""
     } catch (t: Throwable) {
         Log.e(TAG, "[DFR][EARLY_ROOT] callback extras unreadable: $t")
         ""

@@ -284,7 +284,7 @@ class DfrEarlyRootService : Service() {
                  * ordering claim, and one end of it would be missing.
                  */
                 val bootNow = EarlyRootEnv.bootCompletedState()
-                if (!EarlyRootPolicy.BOOT_NOT_COMPLETED.equals(bootNow)) {
+                if (bootNow != EarlyRootPolicy.BOOT_NOT_COMPLETED) {
                     Log.e(TAG, "[DFR][EARLY_ROOT] REFUSED boot state at the point of" +
                         " no return is $bootNow, not " +
                         EarlyRootPolicy.BOOT_NOT_COMPLETED)

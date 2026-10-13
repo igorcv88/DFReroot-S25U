@@ -147,7 +147,7 @@ object DfrEarlyRoot {
          * cost is the arming.
          */
         val storedGeneration = try {
-            pending.extras?.getString(EarlyRootPolicy.EXTRA_GENERATION)
+            pending.extras.getString(EarlyRootPolicy.EXTRA_GENERATION)
         } catch (t: Throwable) {
             null
         }
