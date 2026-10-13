@@ -176,8 +176,8 @@ const struct TargetProfile DFR_PROFILE_DZIF = {
      * bytes it must bind before any privileged handoff.
      */
     .ksud_sha256 =
-        "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee",
-    .ksud_size        = 6670840,
+        "f680f959472e994110eb1281d6aa47ed3cd934ae5775f5e9e378a2e946ae69e3",
+    .ksud_size        = 6665720,
     .post_root_record = "/data/system/dfreroot-post-root",
     .kernelsu_version = 32601,
     .kernelsu_uapi_version = 2,
