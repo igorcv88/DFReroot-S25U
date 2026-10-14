@@ -269,7 +269,7 @@ object EarlyRootStore {
      * the job it authorised.
      *
      * The parent is fsynced for the same reason every write here is: the
-     * rollback is immediately followed by the owner rebooting manually, and an
+     * rollback is immediately followed by the owner rebooting manually, and a
      * removal that has not reached the disk did not happen.
      */
     fun deleteArm(): String? = synchronized(lock) {
@@ -282,7 +282,7 @@ object EarlyRootStore {
              * returns false for ANY failed stat, EACCES and EIO included. Here
              * that would report "already gone" for a record that is present and
              * unreachable, which is the rollback claiming to have removed an
-             * authorisation that is still on disk. Unlinking and reading the
+             * authorisation that is still on disk. Removing and inspecting the
              * errno keeps absent and unreadable apart (same rule as read()).
              */
             try {
