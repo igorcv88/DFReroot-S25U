@@ -7,6 +7,7 @@ import android.content.Context
 import android.os.Build
 import android.os.PersistableBundle
 import android.os.SystemClock
+import android.util.Log
 import java.security.SecureRandom
 
 /**
@@ -26,6 +27,8 @@ import java.security.SecureRandom
  * not a default to ship ahead of it.
  */
 object DfrEarlyRoot {
+    private const val TAG = "DFReroot"
+
     val JOB_ID: Int = EarlyRootPolicy.EXPECTED_JOB_ID
     val NAMESPACE: String = EarlyRootPolicy.EXPECTED_NAMESPACE
 
@@ -595,6 +598,62 @@ object DfrEarlyRoot {
          */
         return "last_step=${step.step} elapsed_ms=${step.elapsedMs} " +
             "${step.bootCompleted} steps=$steps detail=${step.detail}"
+    }
+
+    /**
+     * Undo an arming: cancel the job we own and remove the arm record.
+     *
+     * The one caller is the rollback after a confirmed arming whose automatic
+     * reboot was refused. The owner's decision for that case is that nothing
+     * stays pending - a cancelled job beside a live arm record, or the reverse,
+     * is worse than either, because the UI would report one state and the
+     * scheduler hold another.
+     *
+     * BOTH halves are attempted even if the first fails, and the line names
+     * each outcome separately. A rollback that stops at the first error leaves
+     * exactly the half-state it exists to prevent, and "I cancelled the job"
+     * and "I removed the authorisation" are different facts (AGENTS.md 3.7).
+     *
+     * The job is only cancelled when it is OURS: the uid is shared with every
+     * system component, and cancelling another client's job id would be a
+     * defect of its own. That is the same ownership check the arming makes.
+     */
+    fun disarm(context: Context): String {
+        val base = try {
+            context.getSystemService(JobScheduler::class.java)
+        } catch (t: Throwable) {
+            null
+        }
+        val jobOutcome = if (base == null) {
+            "job=UNKNOWN (JobScheduler unavailable)"
+        } else {
+            val scheduler =
+                if (Build.VERSION.SDK_INT >= 34) base.forNamespace(NAMESPACE) else base
+            val component = ComponentName(context, DfrEarlyRootJobService::class.java)
+            try {
+                cancelOwned(scheduler, component)
+                val still = try {
+                    scheduler.getPendingJob(JOB_ID)
+                } catch (_: Throwable) {
+                    null
+                }
+                if (still != null && still.service == component) {
+                    "job=STILL_PENDING"
+                } else {
+                    "job=CANCELLED"
+                }
+            } catch (t: Throwable) {
+                "job=UNKNOWN ($t)"
+            }
+        }
+        val recordFailure = EarlyRootStore.deleteArm()
+        val recordOutcome =
+            if (recordFailure == null) "arm_record=REMOVED"
+            else "arm_record=STILL_PRESENT ($recordFailure)"
+        val clean = jobOutcome == "job=CANCELLED" && recordFailure == null
+        val prefix = if (clean) "[*] EARLY_ROOT_DISARMED" else "[x] EARLY_ROOT_DISARM_INCOMPLETE"
+        Log.i(TAG, "[DFR][EARLY_ROOT] DISARM $jobOutcome $recordOutcome")
+        return "$prefix $jobOutcome $recordOutcome"
     }
 
     private fun cancelOwned(scheduler: JobScheduler, component: ComponentName) {

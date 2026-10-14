@@ -482,6 +482,48 @@ public final class EarlyRootPolicy {
     public static final int MAX_TRACE_STEPS = 64;
 
     /*
+     * --- what an arming attempt actually ended as ---------------------------
+     *
+     * Why this is a policy and not a string test in the Activity.
+     *
+     * `arm()` returns one line, and the two outcomes differ by a few
+     * characters: `[*] EARLY_ROOT_ARMED …` against
+     * `[x] EARLY_ROOT_NOT_ARMED: …`. The owner's report is that this is not
+     * enough - a log pane scrolls, both lines look like activity, and the
+     * assumption is that it armed. So the UI has to react to the outcome, not
+     * to the text, and the classification has to be somewhere the host suite
+     * can prove rather than inside an Activity that cannot be tested here.
+     *
+     * The direction is fail-closed in the UI's own terms: anything this does
+     * not recognise is NOT success. Painting "armed" on a line nobody can
+     * account for would be precisely the confusion being fixed.
+     */
+    public static final String ARM_OUTCOME_ARMED = "ARM_OUTCOME_ARMED";
+    public static final String ARM_OUTCOME_NOT_ARMED = "ARM_OUTCOME_NOT_ARMED";
+    public static final String ARM_OUTCOME_UNRECOGNISED = "ARM_OUTCOME_UNRECOGNISED";
+
+    /** The marker every refusal from arm() carries, and the one success line's. */
+    private static final String ARM_LINE_REFUSED = "[x] EARLY_ROOT_NOT_ARMED";
+    private static final String ARM_LINE_ARMED = "[*] EARLY_ROOT_ARMED";
+
+    /**
+     * Classify one line returned by {@code DfrEarlyRoot.arm()}.
+     *
+     * Refused is checked FIRST and matched anywhere in the line, because a
+     * refusal is the outcome that must never be missed; success is required to
+     * be at the start, because that is where the writer puts it and a success
+     * marker appearing mid-line is a line this build cannot account for.
+     */
+    public static String armOutcome(String line) {
+        if (line == null) return ARM_OUTCOME_UNRECOGNISED;
+        String trimmed = line.trim();
+        if (trimmed.isEmpty()) return ARM_OUTCOME_UNRECOGNISED;
+        if (trimmed.contains(ARM_LINE_REFUSED)) return ARM_OUTCOME_NOT_ARMED;
+        if (trimmed.startsWith(ARM_LINE_ARMED)) return ARM_OUTCOME_ARMED;
+        return ARM_OUTCOME_UNRECOGNISED;
+    }
+
+    /*
      * --- arming-time thermal gate -------------------------------------------
      *
      * Why there is one at all. ThermalStatusRestriction restricts a

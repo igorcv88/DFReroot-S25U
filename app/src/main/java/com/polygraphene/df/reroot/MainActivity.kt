@@ -87,8 +87,14 @@ class MainActivity : Activity() {
          */
         findViewById<Button>(R.id.btnArmEarlyRoot).setOnClickListener {
             runBg {
-                append(DfrEarlyRoot.arm(applicationContext))
-                runOnUiThread { refreshEarlyRoot() }
+                val line = DfrEarlyRoot.arm(applicationContext)
+                // Still in the log: the modal carries the verdict, the log
+                // keeps the full line for a collection afterwards.
+                append(line)
+                runOnUiThread {
+                    refreshEarlyRoot()
+                    showArmOutcome(line)
+                }
             }
         }
         refreshAutoRoot()
@@ -210,6 +216,61 @@ class MainActivity : Activity() {
                 statusChip.text = getString(R.string.chip_marker_unknown)
                 statusChip.setBackgroundResource(R.drawable.chip_warn)
             }
+        }
+    }
+
+    /**
+     * The arming outcome as a MODAL, both ways.
+     *
+     * Why a dialog and not only the log line, in the owner's words: the two
+     * outcomes differ by a few characters, the pane scrolls, "só vê o log se
+     * mexendo e acha que deu certo" - and the cost of that mistake is a reboot
+     * spent on a job that was never scheduled. Not arming is not the expected
+     * behaviour, so it must not look like the expected behaviour.
+     *
+     * Both outcomes get one, because the owner asked for both and because a
+     * modal that only ever appears on failure trains you to ignore the absence
+     * of one. The titles are deliberately nothing alike - "Armed - reboot now"
+     * against "NOT ARMED - do not reboot" - since similar wording is the whole
+     * defect being fixed.
+     *
+     * The classification is [EarlyRootPolicy.armOutcome], not a string test
+     * here: this is an Activity and cannot be unit-tested on the host, while
+     * that is pure and is. It is also fail-closed in the UI's own direction -
+     * a line this build cannot account for reports NOT ARMED rather than
+     * guessing, because painting "armed" over an unknown outcome is exactly
+     * the confusion being removed.
+     *
+     * Deliberately NOT built here: the soft-reboot action and an "arm with /
+     * without the probe" choice the owner sketched for later. This is the
+     * surface they would live on, and adding them now would be building a
+     * decision nobody has made - the probe question in particular is unmeasured
+     * (see docs/HANDOFF.md), and both jobs are armed by separate buttons today,
+     * so it can be answered without any new code.
+     */
+    private fun showArmOutcome(line: String) {
+        if (isFinishing || isDestroyed) return
+        val outcome = EarlyRootPolicy.armOutcome(line)
+        val titleRes = when (outcome) {
+            EarlyRootPolicy.ARM_OUTCOME_ARMED -> R.string.early_root_arm_ok_title
+            EarlyRootPolicy.ARM_OUTCOME_NOT_ARMED -> R.string.early_root_arm_refused_title
+            else -> R.string.early_root_arm_unknown_title
+        }
+        val body = if (outcome == EarlyRootPolicy.ARM_OUTCOME_UNRECOGNISED) {
+            getString(R.string.early_root_arm_unknown_body) + "\n\n" + line
+        } else {
+            line
+        }
+        try {
+            AlertDialog.Builder(this)
+                .setTitle(titleRes)
+                .setMessage(body)
+                .setPositiveButton(R.string.early_root_arm_close, null)
+                .show()
+        } catch (t: Throwable) {
+            // A dialog that cannot be shown must not take the arming's result
+            // with it; the line is already in the log.
+            Log.e(TAG, "[DFR][EARLY_ROOT] arm outcome dialog failed", t)
         }
     }
 

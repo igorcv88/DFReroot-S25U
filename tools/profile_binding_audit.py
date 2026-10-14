@@ -2491,6 +2491,82 @@ def audit():
             fail("%s captures the stop diagnostics outside onStopJob; only that "
                  "callback runs at the instant the scheduler reclaimed the "
                  "execution" % name)
+    # --- unresolved references in the Kotlin we cannot compile ----------
+    #
+    # This host has no Kotlin compiler, so every Kotlin change here is verified
+    # by reading plus a brace/paren balance - and a balance check cannot see a
+    # missing import. On 2026-10-14 that gap shipped: the arming thermal gate
+    # added `Log.i(TAG, ...)` to DfrEarlyRoot.kt, which imported neither
+    # `android.util.Log` nor defined `TAG`, and the whole offline gate set
+    # passed on a file that could not compile.
+    #
+    # So the two symbols that mistake actually used are checked across every
+    # Kotlin source. It is a narrow check and deliberately so: it catches the
+    # error that happened, in every file, rather than pretending to be a
+    # compiler.
+    dfr_dir = os.path.join(ROOT, "app", "src", "main", "java", "com",
+                           "polygraphene", "df", "reroot")
+    kt_sources = sorted(
+        os.path.join(dfr_dir, n) for n in os.listdir(dfr_dir) if n.endswith(".kt")
+    )
+    if not kt_sources:
+        fail("no DFReroot Kotlin sources found; this check would silently "
+             "guard nothing")
+    for src_path in kt_sources:
+        with open(src_path, encoding="utf-8") as f:
+            body = code_only(f.read())
+        name = rel(src_path)
+        if re.search(r"\bLog\.[deiwv]\s*\(", body) \
+                and "import android.util.Log" not in body:
+            fail("%s calls Log.* without importing android.util.Log; this host "
+                 "cannot compile Kotlin, so nothing else here would catch it"
+                 % name)
+        if re.search(r"\bLog\.[deiwv]\s*\(\s*TAG\b", body) \
+                and not re.search(r"\bTAG\s*=", body):
+            fail("%s passes TAG to Log.* without defining it; a brace balance "
+                 "cannot see an unresolved reference" % name)
+
+    # --- the arming outcome is a modal ----------------------------------
+    # MainActivity needs an Android runtime and cannot be unit-tested here
+    # (AGENTS.md §5), so the shape is asserted instead.
+    #
+    # Why it exists: `[*] EARLY_ROOT_ARMED` and `[x] EARLY_ROOT_NOT_ARMED`
+    # differ by a few characters in a pane that scrolls, so a refusal was being
+    # read as a success and a reboot spent on a job that was never scheduled.
+    # Not arming is not the expected behaviour and must not look like it.
+    main_src = code_only(dfr_source("MainActivity.kt"))
+    if "showArmOutcome(" not in main_src:
+        fail("MainActivity no longer shows the arming outcome as a dialog; the "
+             "log line alone is what let a refusal read as a success")
+    # It is called from the arm handler, after the arm() call - a dialog that
+    # is never reached is the same as not having one.
+    arm_at = main_src.find("DfrEarlyRoot.arm(")
+    show_at = main_src.find("showArmOutcome(line)")
+    if arm_at < 0 or show_at < 0 or show_at < arm_at:
+        fail("the arming outcome dialog is not shown from the arm handler after "
+             "arm() returns; the owner would be back to reading the log")
+    # The classification is the host-tested policy, not a string test in an
+    # Activity nobody can test here.
+    if "EarlyRootPolicy.armOutcome(" not in main_src:
+        fail("MainActivity classifies the arming outcome itself instead of "
+             "using the host-tested policy; a string test in an untestable "
+             "Activity is how 'armed' gets painted over a refusal")
+    # BOTH outcomes get a dialog. A modal that only appears on failure trains
+    # the reader to ignore its absence.
+    for res in ("early_root_arm_ok_title", "early_root_arm_refused_title",
+                "early_root_arm_unknown_title"):
+        if res not in main_src:
+            fail("MainActivity does not reference R.string.%s; both arming "
+                 "outcomes and the unaccountable one each need their own, or "
+                 "the dialog stops distinguishing them" % res)
+    # And the unrecognised branch must NOT be the success title: a line this
+    # build cannot account for reports NOT ARMED rather than guessing.
+    else_at = main_src.find("else -> R.string.early_root_arm_unknown_title")
+    if else_at < 0:
+        fail("the unrecognised arming outcome no longer falls through to the "
+             "NOT ARMED title; painting 'armed' over an unknown outcome is "
+             "exactly the confusion this dialog removes")
+
     # --- the arming-time thermal gate -----------------------------------
     # The owner's ask: do not spend a reboot on a callback the scheduler will
     # veto. ThermalStatusRestriction restricts PRIORITY_DEFAULT outright from

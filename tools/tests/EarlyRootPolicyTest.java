@@ -1510,6 +1510,48 @@ public class EarlyRootPolicyTest {
                         + " probe, so arming a probe can never reach transaction 5");
 
         System.out.println("");
+        // --- what the arming dialog is told ----------------------------------
+        // The owner's report: `[*] EARLY_ROOT_ARMED` and
+        // `[x] EARLY_ROOT_NOT_ARMED` differ by a few characters in a log pane
+        // that scrolls, so a failed arming reads as a successful one. The UI
+        // reacts to THIS, not to the text, and anything unrecognised is not
+        // success - painting "armed" on a line nobody can account for is the
+        // confusion being fixed.
+        check(EarlyRootPolicy.ARM_OUTCOME_ARMED.equals(EarlyRootPolicy.armOutcome(
+                        "[*] EARLY_ROOT_ARMED job_id=1145459282 namespace=dfr-early-root")),
+                "the success line classifies as ARMED");
+        check(EarlyRootPolicy.ARM_OUTCOME_NOT_ARMED.equals(EarlyRootPolicy.armOutcome(
+                        "[x] EARLY_ROOT_NOT_ARMED: EARLY_ROOT_THERMAL_RESTRICTED")),
+                "a refusal classifies as NOT_ARMED");
+        // Every refusal arm() can return carries the same marker; spot-check the
+        // shapes that differ most, including the multi-line thermal one.
+        check(EarlyRootPolicy.ARM_OUTCOME_NOT_ARMED.equals(EarlyRootPolicy.armOutcome(
+                        "[x] EARLY_ROOT_NOT_ARMED: EARLY_ROOT_THERMAL_NO_MARGIN\n"
+                                + "thermal headroom is 0.91, at or past the 0.85"
+                                + " arming limit\nstatus=1 headroom=0.91")),
+                "a multi-line refusal still classifies as NOT_ARMED");
+        check(EarlyRootPolicy.ARM_OUTCOME_NOT_ARMED.equals(EarlyRootPolicy.armOutcome(
+                        "[x] EARLY_ROOT_NOT_ARMED: boot_id unavailable")),
+                "the earliest refusal classifies as NOT_ARMED");
+        // UNRECOGNISED is never success. A build that changes the line shape
+        // must stop claiming it armed, not start lying about it.
+        for (String bogus : new String[] {
+                null, "", "   ", "EARLY_ROOT_ARMED", "armed", "[?] something",
+                "[*] EARLY_ROOT_ARM", "nothing to do with arming" }) {
+            check(EarlyRootPolicy.ARM_OUTCOME_UNRECOGNISED.equals(
+                            EarlyRootPolicy.armOutcome(bogus)),
+                    "an unaccountable arming line is UNRECOGNISED, never ARMED: "
+                            + (bogus == null ? "null" : "'" + bogus + "'"));
+        }
+        // And the refusal marker wins wherever it appears, because a missed
+        // refusal is the failure mode; a success marker must be at the start.
+        check(EarlyRootPolicy.ARM_OUTCOME_NOT_ARMED.equals(EarlyRootPolicy.armOutcome(
+                        "something happened then [x] EARLY_ROOT_NOT_ARMED: why")),
+                "a refusal is recognised wherever it appears in the line");
+        check(EarlyRootPolicy.ARM_OUTCOME_UNRECOGNISED.equals(EarlyRootPolicy.armOutcome(
+                        "prefixed [*] EARLY_ROOT_ARMED job_id=1")),
+                "a success marker that is not at the start is not accepted");
+
         // --- the arming-time thermal gate -----------------------------------
         // The owner's point: the restriction is what holds the job, a reboot
         // raises the temperature, so refusing the ARMING costs a sentence where
