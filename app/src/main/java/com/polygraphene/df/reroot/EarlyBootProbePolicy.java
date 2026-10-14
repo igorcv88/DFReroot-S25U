@@ -1,7 +1,6 @@
 package com.polygraphene.df.reroot;
 
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -68,6 +67,23 @@ public final class EarlyBootProbePolicy {
 
     private static final Set<String> CALLBACK_STOPPED_KEYS = Set.of(
             "state", "fired_boot_id", "job_id", "stopped_at", "callback_elapsed_ms");
+
+    /**
+     * Keys a stop record MAY carry, and whose absence is not a deviation.
+     *
+     * `stop_reason` and `thermal_status` were added after builds that write
+     * neither. This set is the whole reason they do not break those records:
+     * {@link #strictFields} demands the key set EXACTLY, so a required
+     * `stop_reason` would make every record written by an earlier build parse
+     * as malformed - refusing good evidence because the reader got newer. That
+     * is AGENTS.md 3.6.1's rule in its original form: a marker is required to
+     * ACT, never to PARSE.
+     *
+     * They are diagnostics. Nothing decides on them, so a record without them
+     * is complete for every purpose the parser serves.
+     */
+    private static final Set<String> CALLBACK_STOPPED_OPTIONAL_KEYS = Set.of(
+            "stop_reason", "thermal_status");
 
     private static final Set<String> FIRE_STATES = Set.of(
             "EARLY_JOB_NOT_ARMED", STATE_FIRED_SAME_BOOT, STATE_FIRED_NEW_BOOT);
@@ -147,14 +163,25 @@ public final class EarlyBootProbePolicy {
         public final int jobId;
         public final long callbackElapsedMs;
         public final String stoppedAt;
+        /**
+         * Why the scheduler reclaimed the execution, and the thermal status
+         * read at that moment - UNKNOWN when the record predates these fields
+         * or the reading could not be taken. Diagnostics: nothing decides on
+         * them, which is what lets the parser treat them as optional.
+         */
+        public final String stopReason;
+        public final String thermalStatus;
 
         private Callback(String state, String firedBootId, int jobId,
-                         long callbackElapsedMs, String stoppedAt) {
+                         long callbackElapsedMs, String stoppedAt,
+                         String stopReason, String thermalStatus) {
             this.state = state;
             this.firedBootId = firedBootId;
             this.jobId = jobId;
             this.callbackElapsedMs = callbackElapsedMs;
             this.stoppedAt = stoppedAt;
+            this.stopReason = stopReason;
+            this.thermalStatus = thermalStatus;
         }
     }
 
@@ -273,19 +300,30 @@ public final class EarlyBootProbePolicy {
             long callbackWallclock = parseOptionalLong(entered.get("callback_wallclock_ms"));
             if (jobId < 0 || callbackElapsed == Long.MIN_VALUE
                     || callbackWallclock == Long.MIN_VALUE) return null;
+            // An ENTERED record is not a stop, so there is no stop reason to
+            // report and nothing may invent one.
             return new Callback(CALLBACK_ENTERED, entered.get("fired_boot_id"),
-                    jobId, callbackElapsed, null);
+                    jobId, callbackElapsed, null, UNKNOWN, UNKNOWN);
         }
 
-        Map<String, String> stopped = strictFields(record, CALLBACK_STOPPED_KEYS);
+        Map<String, String> stopped = fields(record, CALLBACK_STOPPED_KEYS,
+                CALLBACK_STOPPED_OPTIONAL_KEYS);
         if (stopped != null && CALLBACK_STOPPED.equals(stopped.get("state"))) {
             int jobId = parseExpectedJobId(stopped.get("job_id"));
             long callbackElapsed = parseOptionalLong(stopped.get("callback_elapsed_ms"));
             String boundary = stopped.get("stopped_at");
             if (jobId < 0 || callbackElapsed == Long.MIN_VALUE
                     || !STOP_BOUNDARIES.contains(boundary)) return null;
+            // Absent is UNKNOWN, not a defect: a record from a build that did
+            // not write these fields is still a complete stop record.
+            String stopReason = optionalPlatformInt(stopped.get("stop_reason"));
+            String thermal = optionalPlatformInt(stopped.get("thermal_status"));
+            // Absent is UNKNOWN, not a defect: a record from a build that did
+            // not write these fields is still a complete stop record. A value
+            // outside the domain is a different fact and refuses.
+            if (stopReason == null || thermal == null) return null;
             return new Callback(CALLBACK_STOPPED, stopped.get("fired_boot_id"),
-                    jobId, callbackElapsed, boundary);
+                    jobId, callbackElapsed, boundary, stopReason, thermal);
         }
         return null;
     }
@@ -483,7 +521,56 @@ public final class EarlyBootProbePolicy {
      * key=value lines, every key in {@code keys} present exactly once and no key
      * outside it. Returns null on any deviation.
      */
+    /**
+     * An optional diagnostic's value domain.
+     *
+     * ABSENT reads UNKNOWN - that is the backward-compatibility half, and the
+     * only reason these keys are optional at all: a record written by a build
+     * that did not have the field is complete.
+     *
+     * PRESENT BUT OUTSIDE THE DOMAIN REFUSES THE WHOLE RECORD. The writers emit
+     * either the literal token or a non-negative platform integer
+     * (`JobParameters.getStopReason()`, `PowerManager.getCurrentThermalStatus()`),
+     * so `stop_reason=garbage` or `thermal_status=HOT` is a record nobody in
+     * this codebase wrote - a corrupted or externally edited file - and
+     * accepting it would display invented values as durable evidence in the one
+     * experiment they exist to decide. This is exactly the rule
+     * {@link #parseOptionalLong} already applies to a numeric `-1`, and Codex
+     * caught that these two fields were not holding to it (PR #68).
+     *
+     * Returns null for a value this parser cannot account for; the caller
+     * refuses the record.
+     */
+    private static String optionalPlatformInt(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return UNKNOWN;
+        if (UNKNOWN.equals(raw)) return UNKNOWN;
+        try {
+            // A negative is not a second spelling of UNKNOWN: both platform
+            // getters return a non-negative constant, so a negative is a value
+            // no writer here produced.
+            return Integer.parseInt(raw) < 0 ? null : raw;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     private static Map<String, String> strictFields(String record, Set<String> keys) {
+        return fields(record, keys, Set.of());
+    }
+
+    /**
+     * key=value lines: every key in {@code required} present exactly once, keys
+     * from {@code optional} allowed at most once each, nothing else accepted.
+     * Returns null on any deviation.
+     *
+     * The optional half exists so a diagnostic field can be ADDED without
+     * invalidating records written before it. Everything else about the parser
+     * is unchanged and deliberately unforgiving: an unknown key, a duplicate, a
+     * valueless line or a missing required key all still refuse, because a
+     * record this code cannot account for is not evidence.
+     */
+    private static Map<String, String> fields(String record, Set<String> required,
+                                              Set<String> optional) {
         if (record == null || record.trim().isEmpty()) return null;
         Map<String, String> values = new HashMap<>();
         for (String raw : record.split("\\n", -1)) {
@@ -492,10 +579,10 @@ public final class EarlyBootProbePolicy {
             int separator = line.indexOf('=');
             if (separator <= 0 || separator == line.length() - 1) return null;
             String key = line.substring(0, separator);
-            if (!keys.contains(key)) return null;
+            if (!required.contains(key) && !optional.contains(key)) return null;
             if (values.putIfAbsent(key, line.substring(separator + 1)) != null) return null;
         }
-        if (!new LinkedHashSet<>(values.keySet()).equals(keys)) return null;
+        if (!values.keySet().containsAll(required)) return null;
         return values;
     }
 

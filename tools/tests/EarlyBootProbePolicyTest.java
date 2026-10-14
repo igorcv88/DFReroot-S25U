@@ -289,6 +289,60 @@ public class EarlyBootProbePolicyTest {
                         && EarlyBootProbePolicy.STOP_AFTER_READINESS.equals(
                                 stoppedCallback.stoppedAt),
                 "a stopped callback breadcrumb preserves its cancellation boundary");
+        // --- the optional stop diagnostics -----------------------------------
+        // stop_reason and thermal_status were added after builds that write
+        // neither. They are evidence, nothing decides on them, and a required
+        // key would make every record an older build wrote parse as malformed -
+        // refusing good evidence because the reader got newer (AGENTS.md 3.6.1:
+        // required to ACT, never to PARSE). Both directions are asserted here
+        // because only one of them is the obvious one.
+        expect(stoppedCallback != null
+                        && EarlyBootProbePolicy.UNKNOWN.equals(stoppedCallback.stopReason)
+                        && EarlyBootProbePolicy.UNKNOWN.equals(
+                                stoppedCallback.thermalStatus),
+                "a stop record without the diagnostics still parses, as UNKNOWN");
+        EarlyBootProbePolicy.Callback diagnosed = EarlyBootProbePolicy.parseCallback(
+                stopped + "stop_reason=4\n" + "thermal_status=2\n");
+        expect(diagnosed != null && "4".equals(diagnosed.stopReason)
+                        && "2".equals(diagnosed.thermalStatus),
+                "a stop record carrying the diagnostics preserves both");
+        expect(EarlyBootProbePolicy.parseCallback(stopped + "stop_reason=4\n") != null,
+                "one diagnostic without the other still parses");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped + "stop_reason=4\nstop_reason=9\n") == null,
+                "a duplicated optional key still refuses");
+        expect(EarlyBootProbePolicy.parseCallback(stopped + "stop_reason=\n") == null,
+                "an optional key with no value still refuses");
+        // The value DOMAIN, not just the key. The writers emit either UNKNOWN or
+        // a non-negative platform integer, so anything else is a record nobody
+        // here wrote - and displaying an invented value as durable evidence
+        // would corrupt the one experiment these fields decide. Same rule
+        // parseOptionalLong already applies to a numeric -1.
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped + "stop_reason=garbage\n") == null,
+                "a non-numeric stop reason refuses the record");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped + "thermal_status=HOT\n") == null,
+                "a non-numeric thermal status refuses the record");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped + "stop_reason=-1\n") == null,
+                "a negative stop reason refuses: no writer here produces one");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped + "thermal_status=0\n") != null,
+                "zero is a real platform value and must be accepted");
+        EarlyBootProbePolicy.Callback literal = EarlyBootProbePolicy.parseCallback(
+                stopped + "stop_reason=" + EarlyBootProbePolicy.UNKNOWN + "\n");
+        expect(literal != null
+                        && EarlyBootProbePolicy.UNKNOWN.equals(literal.stopReason),
+                "the literal UNKNOWN token is accepted, as the writer emits it");
+        // The optional set must not leak into the OTHER record shape: an
+        // ENTERED breadcrumb is not a stop and has no reason to report.
+        expect(EarlyBootProbePolicy.parseCallback(entered + "stop_reason=4\n") == null,
+                "a stop diagnostic on an entry breadcrumb refuses");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped.replace("fired_boot_id=boot-b\n", "")) == null,
+                "a required key is still required when optionals exist");
+
         expect(EarlyBootProbePolicy.parseCallback(entered + "extra=1\n") == null,
                 "an unknown callback key refuses");
         expect(EarlyBootProbePolicy.parseCallback(

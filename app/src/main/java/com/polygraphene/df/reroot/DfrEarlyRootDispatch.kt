@@ -69,6 +69,25 @@ object DfrEarlyRootDispatch {
         callbackJobId: Int,
         callbackNamespace: String,
         schedulerGeneration: String,
+        /*
+         * Why the scheduler took the execution back, for the record only.
+         *
+         * Read lazily, and only once [abandoned] has already said yes, so a
+         * trigger that was never stopped never pays for it. The default is
+         * UNKNOWN because the broadcast trigger has no live callback for the
+         * scheduler to reclaim - there is no reason to report, and inventing
+         * one would be the absence-as-evidence this repository exists to
+         * prevent.
+         */
+        stopReason: () -> String = { EarlyBootProbePolicy.UNKNOWN },
+        /*
+         * The thermal status captured AT THE STOP, supplied by the trigger that
+         * observed it. The dispatch must not read it itself: the worker reaches
+         * a boundary an unbounded time after the scheduler reclaimed the
+         * execution, so a reading taken here would describe a different instant
+         * than the reason it is recorded beside (AGENTS.md 3.7).
+         */
+        stopThermal: () -> String = { EarlyBootProbePolicy.UNKNOWN },
         abandoned: (String) -> Boolean,
     ): Boolean {
         val bootId = DfrRootCoordinator.readBootId()
@@ -155,7 +174,7 @@ object DfrEarlyRootDispatch {
             return false
         }
         if (abandoned("before_gate")) {
-            abandon(bootId, context, "before_gate")
+            abandon(bootId, context, "before_gate", stopReason(), stopThermal())
             return false
         }
         /*
@@ -252,7 +271,7 @@ object DfrEarlyRootDispatch {
             return false
         }
         if (abandoned("before_readiness")) {
-            abandon(bootId, context, "before_readiness")
+            abandon(bootId, context, "before_readiness", stopReason(), stopThermal())
             return false
         }
         /*
@@ -262,7 +281,7 @@ object DfrEarlyRootDispatch {
          */
         val readiness = StageHop.probeReadiness(context)
         if (abandoned("after_readiness")) {
-            abandon(bootId, context, "after_readiness")
+            abandon(bootId, context, "after_readiness", stopReason(), stopThermal())
             return false
         }
         val decision = EarlyRootPolicy.evaluate(
@@ -288,7 +307,7 @@ object DfrEarlyRootDispatch {
             return false
         }
         if (abandoned("before_claim")) {
-            abandon(bootId, context, "before_claim")
+            abandon(bootId, context, "before_claim", stopReason(), stopThermal())
             return false
         }
         /*
@@ -452,11 +471,35 @@ object DfrEarlyRootDispatch {
         }
     }
 
-    private fun abandon(bootId: String, context: Context, boundary: String) {
+    /**
+     * The scheduler reclaimed this execution. Record WHERE and WHY.
+     *
+     * The boundary alone was not enough. On 2026-10-13, boot `f4b7cac2`, the
+     * callback arrived at 81.499 s and this record was written at 81.503 s -
+     * four milliseconds - and it could say only that the scheduler had stopped
+     * us at `before_gate`. Which pressure did it is a different fact with a
+     * different fix: `ThermalStatusRestriction` declares
+     * `STOP_REASON_DEVICE_STATE`, while a constraint, a preemption and a
+     * timeout each point elsewhere, so one value for all of them is 3.7's
+     * collapse.
+     *
+     * The thermal reading is recorded beside it because that boot's delay
+     * tracks the thermal transitions and nothing else in the window: it is the
+     * number that makes the next late boot interpretable rather than re-argued.
+     * It is handed in by the trigger that observed the stop, never read here -
+     * this runs at the next boundary, an unbounded time later, so a reading
+     * taken here would describe a different instant than the reason beside it.
+     * Both are evidence. Neither is consulted by any gate, and an unobtainable
+     * reading is UNKNOWN rather than a refusal - this is a diagnostic, and a
+     * diagnostic that can change an outcome is not one (AGENTS.md 3.6.1).
+     */
+    private fun abandon(bootId: String, context: Context, boundary: String,
+                        stopReason: String, thermal: String) {
         Log.i(TAG, "[DFR][EARLY_ROOT] CALLBACK_ABANDONED boundary=$boundary" +
-            " boot_id=$bootId")
+            " stop_reason=$stopReason thermal_status=$thermal boot_id=$bootId")
         trace(bootId, context, EarlyRootPolicy.STEP_REFUSED,
-            "the scheduler stopped this execution at $boundary")
+            "the scheduler stopped this execution at $boundary" +
+                " stop_reason=$stopReason thermal_status=$thermal")
     }
 
     private fun trace(bootId: String, context: Context, step: String,

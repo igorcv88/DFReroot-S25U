@@ -25,6 +25,66 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
+> **Thermal is the leading cause for ONE boot, verified in logcat — and a
+> SECOND, separate failure appeared. 2026-10-13/14. Everything below predates
+> this.**
+>
+> Boot `f4b7cac2`, callback at **81.499 s**. Re-read from the owner's archive,
+> with both clocks anchored independently (`boot_progress_start: 6739` and our
+> own `BOOT_COMPLETED_OBSERVED elapsed_ms=109290` agree on boot-zero to 65 ms).
+> `ThermalStatusRestriction` logs **exactly three** transitions that boot: to 2
+> at 23:43:20.535, to 1 at **23:44:24.848** (sensor `[SKIN,3,39.9,1,2]` one
+> millisecond earlier), back to 2 at 23:44:59.808. Our job's wakelock appears at
+> **23:44:24.870 — 22 ms later** — and `EARLY_ROOT_JOB_ENTERED` at 23:44:24.93.
+> A dozen other jobs are released in the same ~50 ms sweep, which is what one
+> restriction lifting looks like. The predicate matches: `isJobRestricted`
+> restricts `PRIORITY_DEFAULT` outright from `MODERATE` up, only `MIN`/`LOW` at
+> `LIGHT`; this job is `Priority: 300 [DEFAULT]`.
+>
+> **OLAF is excluded for this boot, more strongly than by correlation.** The only
+> `restrictJobsByOlaf` transition in the window is
+> `restrict=true, uid=-1, reason=Anim_Unlock` at 23:44:39.867 — 15 s *after* the
+> dispatch, in the **restricting** direction, caused by the owner's unlock.
+> **Concurrency is weakened** (starvation clears staggered; this was a burst) but
+> not excluded.
+>
+> **It does NOT carry over to the long waits, and one reading argues against
+> doing so.** Those were 299 s, 334.4 s, 521.7 s and ~675 s — three to eight
+> times this one — and the ~675 s capture recorded thermal **1**, where the
+> predicate does *not* restrict a DEFAULT job. Either the status was 2 for most
+> of that wait and the sample missed it, or that boot had a different cause.
+> High confidence here, **no conclusion there**.
+>
+> **The second failure, which is not the delay.** Four milliseconds after entry
+> the scheduler reclaimed both executions: `EARLY_ROOT_REFUSED` at 81503
+> (`before_gate`), probe `stopped_at=before_arm_read` at 81500. Journal absent,
+> cycle `BOUND` with `claim_elapsed_ms=-1`: nothing claimed, no native
+> transaction — the fail-closed path worked. **Cause unassigned, deliberately.**
+> Thermal returned to 2 only 35 s later, so the obvious guess does not fit 4 ms;
+> the device was also in `DOZE_SUSPEND` across the dispatch (until a `KEY` wake
+> at 23:44:37.750). The records could say *where* and not *why*.
+>
+> **So `params.stopReason` is now persisted in both `onStopJob`**, read *before*
+> the stop flag is set — once that flag is true the worker may write the record,
+> so a reason assigned after it can lose the race and record UNKNOWN. Thermal
+> status is recorded beside it, read on the worker after the stop check (binder
+> call; this app is on `system_server`'s main looper).
+>
+> **Both are evidence and neither can gate anything.**
+> `tools/profile_binding_audit.py` fails if either policy takes a live thermal
+> reading, and `EarlyRootPolicy` may not name a thermal value at all, so a future
+> edit has nothing to compare against. The probe's stop keys are **optional at
+> parse time**: its parser demands the key set exactly, and a required
+> `stop_reason` would refuse every record an earlier build wrote — 3.6.1's rule,
+> required to *act*, never to *parse*. Six audit guards, each mutation-checked;
+> `EarlyBootProbePolicyTest` 86/86 with both halves asserted.
+>
+> **Next physical step, and it has a defined question.** Collect one late boot
+> with this build and read three fields together: `stop_reason`,
+> `thermal_status`, and the callback elapsed. That separates the cause of the
+> *delay* from the cause of the *stop*, which is the pair this boot could not
+> distinguish. No scheduling change until it does.
+
 > **The scheduler fork is HALF-CLOSED, 2026-10-13/14: the wait is past the
 > constraint layer, and which post-constraint term holds the job is NOT yet
 > established. Everything below this block predates it, including the two places

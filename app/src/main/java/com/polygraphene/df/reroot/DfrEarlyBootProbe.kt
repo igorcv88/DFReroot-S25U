@@ -134,7 +134,9 @@ object DfrEarlyBootProbe {
             val callback = EarlyBootProbePolicy.parseCallback(callbackRecord)
                 ?: return "EARLY_JOB_CALLBACK_MALFORMED $armed"
             return if (callback.state == EarlyBootProbePolicy.CALLBACK_STOPPED) {
-                "EARLY_JOB_CALLBACK_STOPPED stopped_at=${callback.stoppedAt} $armed\n" +
+                "EARLY_JOB_CALLBACK_STOPPED stopped_at=${callback.stoppedAt} " +
+                    "stop_reason=${callback.stopReason} " +
+                    "thermal_status=${callback.thermalStatus} $armed\n" +
                     "Probe consumed; re-arm before the next full reboot."
             } else {
                 "EARLY_JOB_CALLBACK_INCOMPLETE $armed\n" +
