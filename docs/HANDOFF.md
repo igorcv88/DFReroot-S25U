@@ -74,11 +74,35 @@ acceptance criteria for the next signed build. If this file disagrees with
 > per-job block by keyword and dropped those lines, and its second run read
 > **zero** samples and died with `dumpsys: not found` because the environment
 > inherited through `su -c` need not carry `/system/bin`. Both were defects of
-> the instrument. The current revision captures the per-job block whole and then
-> narrows to those two lines, resolves `dumpsys`/`cmd` by absolute path with a
-> `FATAL` exit if either is missing, and makes each `/data/system` record report
-> its own read status, because `rish` could not read some of them and an
-> unreadable record must not print like an absent one (AGENTS.md 3.7).
+> the instrument, and so were the next two.
+>
+> **The extractor has now been wrong three times, in three different ways, and
+> every one of them would have cost the measurement.** `grep -A 80` read a
+> fixed line count: on a uid with many registered jobs it ran past the target
+> into the next job's block - a fixture shows it emitting three
+> `Restricted due to:` lines under one heading, the second naming **OLAF**,
+> which is precisely the wrong attribution - while a longer block put the wanted
+> line past the limit. Its replacement required `JOB #` in the header, and
+> `JobStatus.printUniqueId` prints `#` **only for a job with no namespace**
+> (`<namespace>:<uid>/<id>` otherwise), so it matched neither of ours: **zero
+> lines against the real capture**, as the owner confirmed on PR #66. That one
+> shipped, and it passed a test whose fixture I had invented from memory instead
+> of taking from the device's own output - a verification that proved the
+> opposite of what the device does.
+>
+> So the extractor now has a host test, in `run_tests.sh`:
+> `tools/tests/test_job_probe_extractor.sh` reads the awk program **out of the
+> shipped script** rather than a copy, carries **both** real header shapes, and
+> is mutation-checked against all three defects (require `#` → 7 of 8 checks
+> fail; drop the stop at the next header → 6 of 8 fail).
+>
+> The current revision also queries each job under **its own namespace**
+> (`dfr-early-root` vs `dfr-early-boot-probe`; the namespace is part of a job's
+> identity, so the probe was being asked about where it does not exist),
+> resolves `dumpsys`/`cmd` by absolute path with a `FATAL` exit if either is
+> missing, and makes each `/data/system` record report its own read status,
+> because `rish` could not read some of them and an unreadable record must not
+> print like an absent one (AGENTS.md 3.7).
 >
 > **No scheduling change is justified yet, and that is the operative
 > instruction.** The candidates imply divergent work - OLAF would mean

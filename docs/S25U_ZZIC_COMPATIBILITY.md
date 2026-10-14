@@ -3517,10 +3517,20 @@ Both are defects of the instrument, not readings of the device:
   can misattribute them. `grep -A 80` was wrong in both directions: on a system
   uid with many registered jobs it runs past the target's block into the next
   one's, while a longer block puts the wanted line beyond the limit.
-  Demonstrated on a synthetic dump, where the old form emitted **three**
+  Demonstrated on a dump fixture, where the old form emitted **three**
   `Restricted due to:` lines under one job's heading — the second of them
   naming OLAF, i.e. the exact wrong attribution that would have selected the
-  wrong fix;
+  wrong fix. The first replacement for it was **also wrong, in the opposite
+  direction**: it required `JOB #` in the header, and
+  `JobStatus.printUniqueId` prints `#` only for a job with **no namespace**
+  (`<namespace>:<uid>/<id>` otherwise), so it excluded exactly the two
+  namespaced jobs the probe exists to read. The owner ran it against the real
+  capture and it returned **zero lines**. That defect passed a test whose
+  fixture had been invented from memory rather than taken from the device's own
+  output — which is why the extractor now has a host test
+  (`tools/tests/test_job_probe_extractor.sh`) carrying **both** real header
+  shapes, mutation-checked against both historical defects, and reading the awk
+  program out of the shipped script rather than a copy;
 - `dumpsys` and `cmd` are resolved by absolute path, the `PATH` is exported, and
   a missing binary is a `FATAL` exit rather than a quiet run of nothing;
 - the per-boot records report their own read status, because `rish` could not

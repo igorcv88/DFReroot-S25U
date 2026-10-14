@@ -154,10 +154,28 @@ while [ "$(cut -d. -f1 /proc/uptime)" -lt "$END" ]; do
         # So the block is cut at the next job header instead of at a line count.
         # `job_block` is used for both the raw copy and the narrowed lines, so
         # the two can never disagree about which block they came from.
-        job_block() { echo "$DUMP" | awk -v id="/$1:" '
-            index($0, id) && /JOB #/ { inb = 1; print; next }
-            inb && /JOB #/          { exit }
-            inb                      { print }
+        # The header shape is NOT a guess, and the previous revision's was
+        # wrong in a way that would have captured nothing. From
+        # JobSchedulerService's dump: `pw.print("JOB ")`,
+        # `job.printUniqueId(pw)`, `pw.print(": ")`. And from
+        # JobStatus.printUniqueId: it prints the namespace then `:` when the
+        # job HAS a namespace, and `#` only when it does NOT. So:
+        #
+        #   JOB dfr-early-root:1000/1145459282: ...      <- ours, namespaced
+        #   JOB #u0a211/999: ...                         <- a namespace-less job
+        #
+        # A matcher requiring `#` therefore excludes exactly the two jobs this
+        # probe exists to read. The owner ran the previous revision's awk
+        # against the real capture (dfr_job_probe_20261013_211631.txt) and it
+        # returned ZERO lines. Match any header, start only on the one whose id
+        # ends in `/<job>:`, and stop at the next header whatever its shape.
+        job_block() { printf '%s\n' "$DUMP" | awk -v id="/$1:" '
+            /^[[:space:]]*JOB[[:space:]]/ {
+                if (inb) exit
+                if (index($0, id)) { inb = 1; print }
+                next
+            }
+            inb { print }
         '; }
         BLOCK=$(job_block "$J")
         if [ -z "$BLOCK" ]; then
