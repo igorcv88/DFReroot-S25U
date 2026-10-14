@@ -68,19 +68,43 @@ object DfrRootCoordinator {
     const val POST_ROOT_TIMEOUT_MS = 120_000L
 
     /**
-     * Hard cap on the native profile's marks.
+     * How many of the native profile's marks are kept, at each end.
      *
-     * The native chain's reporter is chatty on some paths (per-SA progress
-     * dots, per-artefact hash lines), and this list lives on a binder thread
-     * inside the very interval it measures. A cap bounds both the memory and
-     * the one line's length; the emitted line says CAPPED when it is hit, so a
-     * truncated timeline is never mistaken for a short one.
+     * A single leading cap was WRONG, and wrong in the way that wastes the
+     * physical run it exists to serve: `gate_target` alone holds 51 REPORT
+     * sites and is called three times - once per owning stage - all of it
+     * before `runAll`'s trigger loop reports anything. A 96-entry leading cap
+     * is therefore spent inside the third gate, and every successful run would
+     * come back CAPPED without one `* trying to trigger (N)..` line in it.
+     * Codex caught this on PR #69.
      *
-     * 96 is above the step count the chain actually reports on the success
-     * path - the eight-iteration trigger loop reports twice per iteration -
-     * so the normal run is complete rather than truncated.
+     * So both ends are kept and the middle is dropped with the count said out
+     * loud. The head carries what the three gates and the patches cost; the
+     * tail carries the trigger loop, which is the question. A gap that is
+     * stated is evidence; a gap that is silent is the 3.7 failure this whole
+     * file is built against.
      */
-    const val NATIVE_PROFILE_MAX_MARKS = 96
+    const val NATIVE_PROFILE_HEAD_MARKS = 24
+    const val NATIVE_PROFILE_TAIL_MARKS = 56
+
+    /**
+     * How long the profile may wait for the reporter to go quiet, and how long
+     * quiet has to be.
+     *
+     * `DirtyFrag.report()` sends each callback with `IBinder.FLAG_ONEWAY`, so
+     * the remote native thread does NOT wait for our `onTransact` to run.
+     * Callbacks can therefore still be in flight when transaction 5 returns,
+     * and reading the accumulator right then yields a partial timeline that
+     * looks complete - worse than no timeline, because nothing marks it short.
+     *
+     * The wait is bounded and it is taken AFTER the post-root wait, off the
+     * critical path, so on the success path it finds everything long settled
+     * and costs nothing. The emitted line carries `settle_ms` and says
+     * SETTLE_TIMEOUT when the deadline won, because "quiet" and "gave up
+     * waiting for quiet" are different facts.
+     */
+    const val NATIVE_PROFILE_QUIET_MS = 30L
+    const val NATIVE_PROFILE_SETTLE_MAX_MS = 250L
 
     /**
      * A reporter line reduced to something a timeline can carry.
@@ -325,6 +349,22 @@ object DfrRootCoordinator {
         var postRootComplete = false
         var nativeStarted = false
         var reason = "run did not reach a verdict"
+        /*
+         * Native profile state, run-scoped because the EMIT happens after the
+         * post-root wait rather than inside the transaction.
+         *
+         * `DirtyFrag.report()` sends each callback with IBinder.FLAG_ONEWAY, so
+         * the remote native thread does not wait for our onTransact to run and
+         * callbacks can still be in flight when transaction 5 returns. Reading
+         * the accumulator right then yields a partial timeline that LOOKS
+         * complete, which is worse than none. Emitting after the wait costs
+         * nothing on the success path - by then the callbacks are long settled -
+         * and keeps the measurement off the interval it measures.
+         */
+        val profileMarks = ConcurrentLinkedQueue<String>()
+        val profileCount = AtomicInteger(0)
+        var profileStart = 0L
+        var nativeMs = -1L
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 try {
@@ -465,41 +505,31 @@ object DfrRootCoordinator {
                  * formatting beyond a short label, and a hard cap, because all
                  * of it runs inside the interval being measured.
                  */
-                val profileStart = EarlyRootEnv.monotonicNow()
+                profileStart = EarlyRootEnv.monotonicNow()
                 /*
-                 * Concurrent, not ArrayList, and the reason is the threading of
-                 * this transaction rather than taste.
-                 *
-                 * `reporter` is a Binder we hand to the remote process, so its
-                 * callbacks are dispatched on OUR binder thread pool while this
-                 * thread sits blocked inside transact(5). The native side
-                 * reports sequentially, but nothing says the pool uses one
-                 * thread for all of them, and `transact` returning establishes
-                 * no happens-before with those writes. An ArrayList here is a
-                 * race on both counts: a corrupted list, and a timeline the
-                 * reader may not see in full.
-                 *
-                 * A queue plus an atomic count keeps the add lock-free, which
-                 * matters because every one of these runs inside the interval
-                 * being measured.
+                 * The accumulator is concurrent and run-scoped (declared above)
+                 * for two independent reasons. The callbacks arrive on OUR
+                 * binder thread pool while this thread is blocked inside
+                 * transact(5), and `transact` returning establishes no
+                 * happens-before with those writes - so a plain ArrayList races
+                 * on both visibility and structure. And because the callbacks
+                 * are FLAG_ONEWAY, the emit has to happen later than this block.
                  */
-                val marks = ConcurrentLinkedQueue<String>()
-                val markCount = AtomicInteger(0)
                 val reporter = object : Binder() {
                     override fun onTransact(
                         code: Int, data: Parcel, reply: Parcel?, flags: Int
                     ): Boolean {
                         try {
                             val line = data.readString() ?: ""
-                            // getAndIncrement, not size-then-add: two callbacks
-                            // on different pool threads must not both pass the
-                            // cap check and overshoot it.
-                            if (markCount.getAndIncrement() < NATIVE_PROFILE_MAX_MARKS) {
-                                marks.add(
-                                    "${EarlyRootEnv.monotonicNow() - profileStart}" +
-                                        ":${profileLabel(line)}"
-                                )
-                            }
+                            // Every mark is kept here and the WINDOW is applied
+                            // at emit time. A leading cap would spend itself in
+                            // the gates and lose the trigger loop, which is the
+                            // only part anyone is waiting to see.
+                            profileCount.incrementAndGet()
+                            profileMarks.add(
+                                "${EarlyRootEnv.monotonicNow() - profileStart}" +
+                                    ":${profileLabel(line)}"
+                            )
                             host.log(line)
                         } catch (t: Throwable) {
                             Log.e(TAG, "reporter recv failed", t)
@@ -512,24 +542,7 @@ object DfrRootCoordinator {
                 if (c.transact(5, p, r, 0)) {
                     runResult = r.readInt()
                     host.log("\nrunAll done res=$runResult\n")
-                    // After the transaction, so it cannot lengthen it. One call,
-                    // one line, whatever the host does with it.
-                    try {
-                        // `reported` is every callback the native side made;
-                        // `marks` is what the cap let us keep. Recording both is
-                        // what makes a truncated timeline say so instead of
-                        // reading as a short one.
-                        val reported = markCount.get()
-                        val kept = marks.toList()
-                        host.nativeProfile(
-                            "total_ms=${EarlyRootEnv.monotonicNow() - profileStart}" +
-                                " reported=$reported kept=${kept.size}" +
-                                (if (reported > kept.size) " CAPPED" else "") +
-                                " " + kept.joinToString(" ")
-                        )
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "native profile emit failed", t)
-                    }
+                    nativeMs = EarlyRootEnv.monotonicNow() - profileStart
                     if (runResult == 0) {
                         host.log("[DFR][POST_ROOT] WAIT_POST_ROOT: native bootstrap complete;" +
                             " final success is still pending\n")
@@ -575,6 +588,62 @@ object DfrRootCoordinator {
          * enforcing state back, and evidence in one run must not contradict
          * itself.
          */
+        /*
+         * The native profile, once, here - after the post-root wait and before
+         * the verdict.
+         *
+         * Here and not inside the transaction for two reasons that point the
+         * same way. The reporter is FLAG_ONEWAY, so callbacks can still be
+         * arriving when transaction 5 returns and reading the accumulator there
+         * yields a partial timeline that looks complete. And a wait taken there
+         * would sit on the critical path, lengthening the very interval being
+         * measured. By this point the success path has already spent its
+         * post-root wait, so the settle below finds everything quiet and costs
+         * nothing; on a native failure there was no wait, and a bounded 250 ms
+         * on a run that already failed is affordable.
+         */
+        if (nativeStarted) {
+            try {
+                val settleStart = EarlyRootEnv.monotonicNow()
+                var seen = profileCount.get()
+                var quietSince = settleStart
+                var timedOut = false
+                while (true) {
+                    val now = EarlyRootEnv.monotonicNow()
+                    val count = profileCount.get()
+                    if (count != seen) {
+                        seen = count
+                        quietSince = now
+                    } else if (now - quietSince >= NATIVE_PROFILE_QUIET_MS) {
+                        break
+                    }
+                    if (now - settleStart >= NATIVE_PROFILE_SETTLE_MAX_MS) {
+                        timedOut = true
+                        break
+                    }
+                    try {
+                        Thread.sleep(5L)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        timedOut = true
+                        break
+                    }
+                }
+                val settleMs = EarlyRootEnv.monotonicNow() - settleStart
+                val all = profileMarks.toList()
+                host.nativeProfile(
+                    "native_ms=$nativeMs reported=${profileCount.get()}" +
+                        " kept=${all.size} settle_ms=$settleMs" +
+                        (if (timedOut) " SETTLE_TIMEOUT" else "") +
+                        " " + EarlyRootPolicy.profileWindow(all,
+                            NATIVE_PROFILE_HEAD_MARKS, NATIVE_PROFILE_TAIL_MARKS)
+                )
+            } catch (t: Throwable) {
+                // A lost measurement, never a lost run.
+                Log.e(TAG, "native profile emit failed", t)
+            }
+        }
+
         val liveSelinux = readLiveSelinux()
         val success = runResult == 0 && postRootComplete && liveSelinux == 1
         if (runResult == 0 && postRootComplete && liveSelinux != 1) {

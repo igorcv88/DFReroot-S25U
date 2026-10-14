@@ -3582,20 +3582,39 @@ native window, and contains **zero** reporter lines.
 
 The reporter is the only clock inside the transaction, so each callback is
 timestamped into an in-memory list and the whole timeline is written as **one
-line, once, after the transaction returns**. Three properties, each guarded in
-`tools/profile_binding_audit.py` and each mutation-checked:
+line, once, after the POST-ROOT WAIT** — not after the transaction, which was
+the first attempt and was wrong twice over. `DirtyFrag.report()` sends each
+callback with `IBinder.FLAG_ONEWAY`, so the remote native thread does not wait
+for our `onTransact`: callbacks can still be in flight when transaction 5
+returns, and reading the accumulator there yields a partial timeline that
+*looks* complete. Waiting for quiet at that point would instead sit on the
+critical path and lengthen the interval being measured. Emitting after the wait
+costs nothing on the success path, where the callbacks are long settled, and a
+bounded 250 ms settle covers the native-failure path, where there is no wait
+and the run already failed. Codex caught both on PR #69.
+
+Four properties, each guarded in `tools/profile_binding_audit.py` and each
+mutation-checked:
 
 - **one emit, after transaction 5.** Inside the reporter callback it would add
   I/O to every native progress line, on a binder thread, inside the interval
   being measured. Instrumentation that lengthens what it measures is worthless;
-- **the accumulator is capped and concurrent.** Capped because a chatty path
-  would otherwise grow a list on that binder thread without bound, and the line
-  carries `reported=` beside `kept=` plus `CAPPED`, so a truncated timeline says
-  so instead of reading as a short one. Concurrent because the reporter's
-  callbacks are dispatched on *binder threads* while this thread is blocked
-  inside `transact(5)`, and `transact` returning establishes no happens-before
-  with those writes - a plain `ArrayList` races on both visibility and
-  structure, and a size-then-add cap check lets two pool threads both pass it;
+- **the retention keeps the TAIL, and the gap is stated.** A single leading cap
+  was the first attempt and it would have wasted the physical run outright:
+  `gate_target` alone holds **51 REPORT sites** and is called three times, all
+  before `runAll`'s trigger loop reports anything, so a 96-entry leading cap is
+  spent inside the third gate and every successful run comes back truncated
+  without one `* trying to trigger (N)..` line — the only part the measurement
+  exists for. Both ends are now kept with `...dropped=N...` between them, and
+  the rule lives in `EarlyRootPolicy.profileWindow` **in Java, host-tested**,
+  because a leading cap passed every static check;
+- **the accumulator is concurrent.** The callbacks are dispatched on *binder
+  threads* while this thread is blocked inside `transact(5)`, and `transact`
+  returning establishes no happens-before with those writes — a plain
+  `ArrayList` races on both visibility and structure;
+- **the settle is bounded and reports itself** (`settle_ms=`,
+  `SETTLE_TIMEOUT`): an unbounded wait on a one-way stream never returns, and a
+  silent one makes "quiet" and "gave up waiting for quiet" the same line;
 - **no gate reads it.** It is a timing measurement, never permission, and
   neither policy may name it.
 

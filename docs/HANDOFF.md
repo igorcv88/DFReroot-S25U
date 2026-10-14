@@ -75,15 +75,23 @@ acceptance criteria for the next signed build. If this file disagrees with
 > 10:37:54–10:40:31 (the whole native window) and holds **zero** reporter lines.
 >
 > **So `EARLY_ROOT_NATIVE_PROFILE` now records that timeline**: every reporter
-> callback timestamped in memory, emitted as ONE line after the transaction
-> returns. One emit and it is after transaction 5 (inside the callback it would
-> add I/O to every progress line, on a binder thread, inside the measured
-> interval); the accumulator is capped AND concurrent - the callbacks arrive on
-> binder threads while `transact(5)` blocks the caller, so a plain `ArrayList`
-> races on visibility and structure and a size-then-add cap check lets two pool
-> threads past it - and the line carries `reported=` beside `kept=` so a
-> truncated timeline says so; no gate may read it. Five audit guards, each
-> mutation-checked. `EarlyRootPolicyTest` 238/238.
+> callback timestamped in memory, emitted as ONE line **after the post-root
+> wait**. Not after the transaction, which was wrong twice over and Codex caught
+> both on PR #69: `DirtyFrag.report()` is `IBinder.FLAG_ONEWAY`, so callbacks
+> can still be in flight when transaction 5 returns and the timeline would be
+> partial while looking complete; and waiting for quiet there would sit on the
+> critical path. After the wait it costs nothing on the success path, with a
+> bounded 250 ms settle for the native-failure path.
+>
+> **And the retention keeps the TAIL.** A leading cap would have wasted the run:
+> `gate_target` holds 51 REPORT sites and runs three times, all before the
+> trigger loop, so 96 entries are spent in the third gate and no
+> `* trying to trigger (N)..` line survives. Both ends kept, `...dropped=N...`
+> between, and the rule is in `EarlyRootPolicy.profileWindow` **in Java,
+> host-tested** - because a leading cap passed every static check. The
+> accumulator is concurrent (binder threads vs. a blocked caller), the settle is
+> bounded and says `settle_ms=`/`SETTLE_TIMEOUT`, and no gate may read any of
+> it. Nine audit guards, each mutation-checked. `EarlyRootPolicyTest` 249/249.
 >
 > **Second thermal data point, in the predicted direction.** Punctual callback
 > with `Thermal Status: 1`, which is what the predicate predicts for a

@@ -1417,6 +1417,38 @@ public final class EarlyRootPolicy {
                 + clean(bootCompleted) + "\t" + clean(detail) + "\n";
     }
 
+    /**
+     * Head + tail of a native-profile timeline, with the dropped count named.
+     *
+     * In Java and tested on the host because this retention rule is the thing
+     * that was wrong: a single LEADING cap spent itself inside the three
+     * `gate_target` calls - 51 REPORT sites each time, all before `runAll`'s
+     * trigger loop - so every successful run came back truncated without one
+     * `* trying to trigger (N)..` line, which is the only part the measurement
+     * exists for. Codex caught it on PR #69.
+     *
+     * The head carries what the gates and patches cost, the tail carries the
+     * trigger loop, and the gap is SAID rather than implied: a stated gap is
+     * evidence, a silent one is the collapse this repository is built against
+     * (AGENTS.md 3.7). Non-positive bounds keep nothing from that end rather
+     * than throwing, because a diagnostic must not be able to fail a run.
+     */
+    public static String profileWindow(List<String> marks, int head, int tail) {
+        if (marks == null || marks.isEmpty()) return "";
+        int h = Math.max(head, 0);
+        int t = Math.max(tail, 0);
+        if (marks.size() <= h + t) return String.join(" ", marks);
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < h; i++) {
+            out.append(marks.get(i)).append(' ');
+        }
+        out.append("...dropped=").append(marks.size() - h - t).append("...");
+        for (int i = marks.size() - t; i < marks.size(); i++) {
+            out.append(' ').append(marks.get(i));
+        }
+        return out.toString();
+    }
+
     private static String clean(String raw) {
         if (raw == null || raw.isEmpty()) return EarlyBootProbePolicy.UNKNOWN;
         String out = raw.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim();
