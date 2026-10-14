@@ -65,9 +65,22 @@ that is easy to mistake for it, and neither may pass.
 ## 2. Why no satisfiable DZIF profile can be published yet
 
 `DFR_PROFILE_ZZIC` pins twelve identity fields and eight artefact/provenance
-facts. The identity side is now **complete** for DZIF; the artefact side is
-still largely unpinned, because those values are *runtime or vendor-partition*
-captures.
+facts. Both sides are now almost entirely closed for DZIF: the identity fields
+were read off the device, and RMG's root run made the artefact and provenance
+captures possible, so the table below reads mostly **KNOWN** where an earlier
+revision read UNKNOWN.
+
+Two things still hold the profile back, and only two:
+
+1. **No DZIF `dirtyfrag-android15-6.6.ko` exists.** Both modules built for DZIF
+   are KernelSU's. Gate G for DirtyFrag's own module is not merely unproven, it
+   has nothing to audit yet (§7a).
+2. **`vbmeta_digest` is observed, not reproduced.** `getprop` gives the
+   bootloader's answer; re-deriving it offline needs the three chained vbmeta
+   blobs, which is the standard `tools/verify_zzic_avb.py` holds for ZZIC.
+
+Everything else in the table is pinnable today. The profile is withheld on
+those two, not on a long list.
 
 The input set has grown since this record was first written, and the table
 below reflects that: beyond the original kernel bundle and the
@@ -85,20 +98,20 @@ since supplied `DZIF_BL_CORE.tar.gz` and `DZIF_STOCK_MODULES.tar.gz` and read
 | `kernel_image_sha256` | known: `b1b300e7e70d1aea03fcaff33dfc203b06f6322ac7ca177e6b9a39b6599713aa` |
 | `btf_sha256` | known: `e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c` (byte-identical to ZZIC, by extraction) |
 | `fingerprint` | **KNOWN** — `samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OXMCDZIF:user/release-keys`, read with `getprop ro.build.fingerprint` on DZIF hardware and pinned in the RMG target header. It is the shape the ZZIC entry predicted, which is exactly why it had to be read rather than written down |
-| `crashdump_sha256` | **UNKNOWN, but obtainable offline** — the path the chain hashes is `/apex/com.android.runtime/bin/crash_dump64` (`exp.c:82`, `target_profile.h:105`), *not* `/system/bin/`. The runtime APEX is not in the bundle (only the ART and Tethering ones are), but it ships inside `system_a.img`, which was extracted and hashed — so this needs an APEX extraction, not a device |
-| `vendor_target_sha256`, `vendor_target_size` | **UNKNOWN** — `/vendor/lib64/libstagefrighthw.so` needs `vendor_a.img`, which was not extracted. Offline once it is |
-| `vendor_target_context` | **UNKNOWN, device-only** — the live SELinux label |
-| `vbmeta_digest` | **STILL UNKNOWN** — the DZIF top-level `vbmeta.img` arrived in `DZIF_BL_CORE.tar.gz`, but the digest is not a hash of that file: it is SHA-256 over its blob followed by the blob of each chained vbmeta. DZIF chains the same three as ZZIC (`dtbo`, `optics`, `prism`, in that order), and none of those three was supplied, so the digest cannot be reproduced. §7a says exactly which bytes close it |
+| `crashdump_sha256` | **KNOWN** — `9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f`, 567,912 bytes, `u:object_r:crash_dump_exec:s0`, read root-side on the DZIF device (`evidence/dzif/README.md`). The path is `/apex/com.android.runtime/bin/crash_dump64` (`exp.c:82`), *not* `/system/bin/` |
+| `vendor_target_sha256`, `vendor_target_size` | **KNOWN** — `308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049`, 51,632 bytes, read root-side. This is ZZIC's pinned value, and §2a is why that is a measurement rather than a shortcut |
+| `vendor_target_context` | **KNOWN** — `u:object_r:vendor_file:s0`, read root-side |
+| `vbmeta_digest` | **OBSERVED, not reproduced** — `be1e4709a8e7befe4479147f914341cab7fd43c615fa1cfaf1fa1511bb87a0a6` from `ro.boot.vbmeta.digest` on the rooted device. That is one device's word for it, and this repository holds the standard of re-deriving it: the digest is SHA-256 over the top-level vbmeta blob followed by each chained vbmeta's blob, DZIF chains the same three as ZZIC (`dtbo`, `optics`, `prism`, in that order), and none of those three has been supplied. `tools/verify_zzic_avb.py` exists for exactly this, so the row stays short of KNOWN until the three blobs allow it to agree with the value above |
 | `vbmeta_hash_alg` | **known: `sha256`** — read from the signed descriptors in the DZIF `vbmeta.img` |
-| `vbmeta_avb_version` | **STILL UNKNOWN, device-only** — and it is *not* the `required_libavb_version` in the vbmeta header, which reads `1.0` on DZIF and `1.0` on ZZIC alike while ZZIC pins `1.2`. `ro.boot.vbmeta.avb_version` is the AVB library version the *bootloader* used; the header field is the minimum version an image requires. Reading the header value into this field would pin the wrong quantity and would make ZZIC's own profile fail |
-| the signed `vendor` hashtree descriptor (root digest, salt, dm-verity geometry) | **KNOWN, read out of the DZIF `vbmeta.img`** — and it differs from ZZIC in exactly the way that matters. See §2a |
+| `vbmeta_avb_version` | **KNOWN: `1.2`** — `getprop ro.boot.vbmeta.avb_version` on the device. Worth keeping the trap recorded: this is *not* the `required_libavb_version` in the vbmeta header, which reads `1.0` on DZIF and `1.0` on ZZIC alike. Reading the header value into this field would have pinned the wrong quantity and made ZZIC's own profile fail |
+| the signed `vendor` hashtree descriptor (root digest, salt, dm-verity geometry) | **KNOWN, read out of the DZIF `vbmeta.img`** — identical geometry to ZZIC, a fresh salt, a different root digest. §2a explains why that last difference proves nothing on its own |
 | `verified_boot_state`, `vbmeta_device_state`, `flash_locked` | **known: `green`, `locked`, `1`** — read off the DZIF device |
-| `verity_mode`, `vendor_fstype`, `vendor_mount_ro` | **UNKNOWN, device-only** — `ro.boot.veritymode` and the live `/vendor` mount, which no firmware file can answer |
-| `libc_sha256`, `libcxx_sha256` | **UNKNOWN, but obtainable offline** — bionic ships in the runtime APEX, same extraction as `crash_dump64` |
+| `verity_mode`, `vendor_fstype`, `vendor_mount_ro` | **KNOWN** — `enforcing`, `erofs`, `ro` (on `/dev/block/dm-10`), read on the device |
+| `libc_sha256`, `libcxx_sha256` | **KNOWN** — `88fba68b3d1fded4bfd25197f6de24f5b8794d3253de860ee261a4272be9e861` (1,330,432 bytes) and `cb118e98c74d3454858921123b9b51ba13df9cad7dfa141dd892c453661a4d78` (1,152,760), read root-side. Note the paths: `gate_hash` reads `/system/lib64/libc.so` and `/system/lib64/libc++.so`, which resolve into the runtime APEX; `exp.c:1127` only `readlink`s them for the record |
 | `network_stack_cap_eff` | **known: `0x800003c00`** — read from the live `network_stack` process on DZIF, together with uid 1073 and `u:r:network_stack:s0`. It is the same bitmask ZZIC carries, which is a fact about this capability set and not a reason to copy anything else across |
-| `ksud_sha256`, `ksud_size` | **UNKNOWN** — the exact RMG DZIF daemon has not been built |
+| `ksud_sha256`, `ksud_size` | **KNOWN** — the DFR-contract daemon is built and published; see §7a for the digest and the contract strings that were checked rather than assumed from its name |
 
-## 2a. The `/vendor` hashtree: same geometry, different bytes
+## 2a. The `/vendor` hashtree: same geometry, a fresh salt, the same file
 
 Read with `tools/avb.py` out of each firmware's own top-level `vbmeta.img` -
 the DZIF one from `DZIF_BL_CORE.tar.gz`
@@ -404,20 +417,19 @@ matters because it decides where the work happens.
 | what | where it comes from |
 | --- | --- |
 | `dtbo`, `optics`, `prism` vbmeta blobs | the DZIF AP tar (`dtbo.img`) and CSC tar (`optics.img`, `prism.img`). Each partition carries an AVB footer in its last 64 bytes - magic `AVBf`, then `vbmeta_offset` and `vbmeta_size` as big-endian u64s - and the blob at that range is what is needed. ZZIC's three are 2,112 / 2,176 / 2,176 bytes, so these are tiny. With them, `tools/avb.py` reproduces `vbmeta_digest` the same way it does for ZZIC, and `AGENTS.md` §3.3's chain stops being one field short |
-| `crash_dump64`, `libc.so`, `libc++.so` | `com.android.runtime` APEX out of `system_a.img`. Note the path the chain hashes is `/apex/com.android.runtime/bin/crash_dump64`, not `/system/bin/` |
-| `/vendor/lib64/libstagefrighthw.so` and its `st_size` | `vendor_a.img` out of `super.img`. §2a proves this cannot be taken from ZZIC |
+| ~~`crash_dump64`, `libc.so`, `libc++.so`~~ | **read root-side instead**, see §2. No extraction needed |
+| ~~`/vendor/lib64/libstagefrighthw.so` and its `st_size`~~ | **read root-side instead**, see §2. An earlier revision of this row said "§2a proves this cannot be taken from ZZIC" - §2a proves no such thing, and the value turned out to equal ZZIC's. The rule that survives is that it had to be re-read, not that it had to differ |
 
-### Needs the booted DZIF device
+### ~~Needs the booted DZIF device~~ — collected
 
-Four of these are one `getprop` each and can be collected in a single session:
+Every row this section listed has been read on the rooted device and is
+recorded in `evidence/dzif/README.md`: `verity_mode`, `vbmeta_avb_version`,
+`vbmeta_digest`, `/vendor`'s filesystem type and read-only flag, and the vendor
+ELF's SELinux label. §2 carries the values.
 
-| what | command |
-| --- | --- |
-| `verity_mode` | `getprop ro.boot.veritymode` |
-| `vbmeta_avb_version` | `getprop ro.boot.vbmeta.avb_version` (the bootloader's value - see §2) |
-| `vbmeta_digest`, to corroborate the reproduced one | `getprop ro.boot.vbmeta.digest` |
-| `vendor_fstype`, `vendor_mount_ro` | the `/vendor` line of `/proc/self/mountinfo` |
-| `vendor_target_context` | the live SELinux label of the vendor ELF, which needs a domain allowed to `getattr` it; `AGENTS.md` §3.3 records `SKIP` when it is not obtainable, and absence is never agreement |
+The one thing the device could not supply is a *reproduced* `vbmeta_digest`:
+`getprop` gives the bootloader's own answer, and re-deriving it needs the three
+chained vbmeta blobs listed above.
 
 ### Needs a build, not a read
 
