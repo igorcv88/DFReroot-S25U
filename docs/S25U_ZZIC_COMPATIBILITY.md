@@ -3505,6 +3505,67 @@ different fixes:
   675 s window, so it does not yet refute anything. The owner's review of
   PR #66 makes the same point.
 
+#### The arming-time thermal gate: refuse the arming, not the reboot
+
+The owner's observation, and it is the right one: the restriction is what holds
+the job, a reboot restarts every process and so raises the temperature, and
+discovering the veto at the callback costs a whole boot. So the arming is where
+this is cheap to refuse.
+
+`DfrEarlyRoot.arm()` now reads `getCurrentThermalStatus()` and
+`getThermalHeadroom(0)` and refuses on either of two conditions:
+
+| condition | code | why |
+|---|---|---|
+| status ≥ **MODERATE (2)** | `EARLY_ROOT_THERMAL_RESTRICTED` | the scheduler's own condition — `isJobRestricted` restricts a `PRIORITY_DEFAULT` job outright from there up |
+| headroom ≥ **0.85** | `EARLY_ROOT_THERMAL_NO_MARGIN` | the margin: this device publishes `Temperature headroom thresholds: [NaN, 0.8333, 0.9, 1.0, …]`, i.e. **MODERATE at 0.9**, and the reboot itself heats the device |
+
+**0.85 is a choice, not a measurement.** Nobody has measured how much a reboot
+raises headroom on this firmware. That is why the readings are also written into
+the arm record (`armed_thermal_status`, `armed_thermal_headroom`): with the
+callback-side readings already recorded, the before/after pairing the threshold
+should be derived from starts accumulating instead of being argued about.
+
+**Four properties, each guarded and mutation-checked:**
+
+- **it runs before the first durable write.** Placed with the other read-only
+  arming refusals and before `recordPendingIncident`, so a refusal leaves no
+  job, no rewritten arm record, no archived cycle and no incident write — which
+  is what lets the message say so truthfully;
+- **the arm record's new keys are OPTIONAL at parse time.** `parse` demands the
+  key set exactly, deliberately, for the *required* fields — a record with no
+  generation cannot be told from a stale one. An optional diagnostic is a
+  different case, and making it required would turn a precise
+  `EARLY_ROOT_BUILD_MISMATCH` after an app upgrade into a bare
+  `EARLY_ROOT_NOT_ARMED`. Required to **act**, never to **parse**;
+- **there is deliberately NO matching check at the callback.** If the scheduler
+  dispatched us, the restriction was *not* in force — so a check there could
+  only withhold a run the platform had already permitted, which is the wrong
+  direction for a gate whose purpose is to save a reboot. The audit fails if
+  `evaluateArmingThermal` appears in the dispatch, and separately if the
+  chain-authorising evaluations (`evaluate`, `evaluateBeforeReadiness`,
+  `evaluateArmBinding`) consult a thermal value at all;
+- **an unreadable reading ALLOWS, recorded as `EARLY_ROOT_THERMAL_UNREADABLE`.**
+
+**That last one is the opposite of this repository's usual direction and it is
+deliberate.** This gate protects the owner's *time*, not the device. Every gate
+that protects the device still runs at the callback, unchanged. A diagnostic
+that can permanently withhold a capability when it cannot read itself is exactly
+the failure AGENTS.md 3.6.1 names — a probe whose worst outcome is worse than
+the thing it diagnoses — so a `PowerManager` that answers nothing must not block
+Early Root for good in order to save a reboot that might well have worked. `NaN`
+is likewise propagated unchanged, because `getThermalHeadroom` returns it when
+it has too little data or is called more than once a second: "not measured" must
+never arrive at a gate looking like a cool device.
+
+The asymmetry is pinned in **both** directions, on the exact return
+(`new Decision(true, THERMAL_UNREADABLE`) rather than on the body containing
+`new Decision(true` anywhere — the first version of that guard made exactly that
+mistake and caught nothing. `EarlyRootPolicyTest` is 269/269, with the margin
+boundary (0.8499 allows, 0.85 refuses), NaN not rescuing a MODERATE status, a
+status-only pass reading `THERMAL_OK` rather than `UNREADABLE`, and both arm
+record directions.
+
 #### Boot `2e7d56e5`, 2026-10-14, `2.0.28-dzif`: the first COMPLETE early run — and the goal is still missed by 5.1 s
 
 The chain ran end to end from the persisted job, inside the animation, and

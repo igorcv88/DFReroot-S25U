@@ -25,6 +25,33 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
+> **The arming now refuses when the device is too hot, so a hot phone costs a
+> sentence instead of a reboot. Owner's request, 2026-10-14.**
+>
+> `arm()` reads `getCurrentThermalStatus()` and `getThermalHeadroom(0)` and
+> refuses at **status ≥ MODERATE (2)** — the scheduler's own condition for
+> restricting a `PRIORITY_DEFAULT` job outright — or at **headroom ≥ 0.85**,
+> which is the margin: this device publishes MODERATE at 0.9, and a reboot
+> restarts every process and raises it further. **0.85 is a choice, not a
+> measurement**, which is why both readings also go into the arm record
+> (`armed_thermal_status`, `armed_thermal_headroom`) — the before-the-reboot
+> half of the pairing the threshold has to be derived from.
+>
+> It runs **before the first durable write**, so a refusal leaves no job, no
+> rewritten arm record, no archived cycle and no incident write. The arm
+> record's new keys are **optional at parse time**, or an app upgrade would turn
+> a precise `BUILD_MISMATCH` into a bare `NOT_ARMED`. And there is deliberately
+> **no matching check at the callback**: a dispatched callback proves the
+> restriction was not in force, so a check there could only withhold a run that
+> was going to work.
+>
+> **An unreadable reading ALLOWS**, recorded as `THERMAL_UNREADABLE`. That is
+> the opposite of this repo's usual direction and it is deliberate: this gate
+> protects the owner's time, not the device, every device-protecting gate still
+> runs at the callback, and a diagnostic that withholds a capability when it
+> cannot read itself is 3.6.1's failure. Pinned in both directions.
+> `EarlyRootPolicyTest` 269/269.
+
 > **FIRST COMPLETE EARLY RUN, 2026-10-14, `2.0.28-dzif`, boot `2e7d56e5` — the
 > chain works end to end inside the animation and STILL misses the goal by
 > 5.1 s. The bottleneck has moved into the native chain. Everything below

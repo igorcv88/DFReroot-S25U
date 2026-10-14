@@ -24,7 +24,6 @@ class MainActivity : Activity() {
     private lateinit var log: TextView
     private lateinit var autoRoot: CheckBox
     private lateinit var autoRootState: TextView
-    private lateinit var earlyBootProbeState: TextView
     private lateinit var earlyRootState: TextView
 
     private var runDialogLog: TextView? = null
@@ -44,7 +43,6 @@ class MainActivity : Activity() {
         log = findViewById(R.id.log)
         autoRoot = findViewById(R.id.autoRoot)
         autoRootState = findViewById(R.id.autoRootState)
-        earlyBootProbeState = findViewById(R.id.earlyBootProbeState)
         earlyRootState = findViewById(R.id.earlyRootState)
 
         status.text = myIdentity()
@@ -66,12 +64,6 @@ class MainActivity : Activity() {
             append(AutoRootStore.setOptIn(autoRoot.isChecked))
             refreshAutoRoot()
         }
-        findViewById<Button>(R.id.btnArmEarlyBootProbe).setOnClickListener {
-            runBg {
-                append(DfrEarlyBootProbe.arm(applicationContext))
-                runOnUiThread { refreshEarlyBootProbe() }
-            }
-        }
         /*
          * Early Integrated Root is armed one boot at a time, never switched on.
          *
@@ -86,13 +78,26 @@ class MainActivity : Activity() {
          * physical run comes back.
          */
         findViewById<Button>(R.id.btnArmEarlyRoot).setOnClickListener {
+            /*
+             * The thermal state is read BEFORE the confirmation, so the owner
+             * is never asked to confirm a reboot that will not happen. It is
+             * ergonomics on top of the gate, never instead of it: arm() reads
+             * its own and remains the authority, and a refusal there shows the
+             * same dialog.
+             */
             runBg {
-                append(DfrEarlyRoot.arm(applicationContext))
-                runOnUiThread { refreshEarlyRoot() }
+                val status = EarlyRootEnv.thermalStatusValue(applicationContext)
+                val headroom = EarlyRootEnv.thermalHeadroom(applicationContext)
+                val thermal = EarlyRootPolicy.evaluateArmingThermal(status, headroom)
+                val reading = "status=${EarlyRootPolicy.formatThermalStatus(status)}" +
+                    " headroom=${EarlyRootPolicy.formatHeadroom(headroom)}"
+                runOnUiThread {
+                    if (thermal.allow) showArmConfirm(reading)
+                    else showTooHot(thermal, reading)
+                }
             }
         }
         refreshAutoRoot()
-        refreshEarlyBootProbe()
         refreshEarlyRoot()
         /*
          * The soft-reboot boot-health observation for THIS boot, printed once at
@@ -120,7 +125,6 @@ class MainActivity : Activity() {
         super.onResume()
         updateChip()
         refreshAutoRoot()
-        refreshEarlyBootProbe()
         refreshEarlyRoot()
     }
 
@@ -142,9 +146,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun refreshEarlyBootProbe() {
-        earlyBootProbeState.text = DfrEarlyBootProbe.armState()
-    }
 
     /**
      * Painted from the stored records and from the scheduler, never from memory.
@@ -156,8 +157,19 @@ class MainActivity : Activity() {
      * because the one state no file can see - whether the persisted job is still
      * pending - belongs in the row too. See [DfrEarlyRoot.armState].
      */
+    /**
+     * One row for both jobs, now that there is one button.
+     *
+     * The probe lost its own button but not its state: it is armed from the
+     * dialog's checkbox and is still a separate persisted job with its own
+     * record, so hiding whether it is armed would make the comparison the
+     * checkbox exists for unreadable. Two labelled lines, not one merged
+     * verdict - they are different jobs and their states are different facts
+     * (AGENTS.md 3.7).
+     */
     private fun refreshEarlyRoot() {
-        earlyRootState.text = DfrEarlyRoot.armState(applicationContext)
+        earlyRootState.text = DfrEarlyRoot.armState(applicationContext) +
+            "\nPROBE: " + DfrEarlyBootProbe.armState()
     }
 
     private fun runDfAll() {
@@ -209,6 +221,177 @@ class MainActivity : Activity() {
             else -> {
                 statusChip.text = getString(R.string.chip_marker_unknown)
                 statusChip.setBackgroundResource(R.drawable.chip_warn)
+            }
+        }
+    }
+
+    /**
+     * The arming outcome as a MODAL, both ways.
+     *
+     * Why a dialog and not only the log line, in the owner's words: the two
+     * outcomes differ by a few characters, the pane scrolls, "só vê o log se
+     * mexendo e acha que deu certo" - and the cost of that mistake is a reboot
+     * spent on a job that was never scheduled. Not arming is not the expected
+     * behaviour, so it must not look like the expected behaviour.
+     *
+     * Both outcomes get one, because the owner asked for both and because a
+     * modal that only ever appears on failure trains you to ignore the absence
+     * of one. The titles are deliberately nothing alike - "Armed - reboot now"
+     * against "NOT ARMED - do not reboot" - since similar wording is the whole
+     * defect being fixed.
+     *
+     * The classification is [EarlyRootPolicy.armOutcome], not a string test
+     * here: this is an Activity and cannot be unit-tested on the host, while
+     * that is pure and is. It is also fail-closed in the UI's own direction -
+     * a line this build cannot account for reports NOT ARMED rather than
+     * guessing, because painting "armed" over an unknown outcome is exactly
+     * the confusion being removed.
+     *
+     * Deliberately NOT built here: the soft-reboot action and an "arm with /
+     * without the probe" choice the owner sketched for later. This is the
+     * surface they would live on, and adding them now would be building a
+     * decision nobody has made - the probe question in particular is unmeasured
+     * (see docs/HANDOFF.md), and both jobs are armed by separate buttons today,
+     * so it can be answered without any new code.
+     */
+    private fun showArmOutcome(line: String) {
+        if (isFinishing || isDestroyed) return
+        val outcome = EarlyRootPolicy.armOutcome(line)
+        val titleRes = when (outcome) {
+            EarlyRootPolicy.ARM_OUTCOME_ARMED -> R.string.early_root_arm_ok_title
+            EarlyRootPolicy.ARM_OUTCOME_NOT_ARMED -> R.string.early_root_arm_refused_title
+            else -> R.string.early_root_arm_unknown_title
+        }
+        val body = if (outcome == EarlyRootPolicy.ARM_OUTCOME_UNRECOGNISED) {
+            getString(R.string.early_root_arm_unknown_body) + "\n\n" + line
+        } else {
+            line
+        }
+        try {
+            AlertDialog.Builder(this)
+                .setTitle(titleRes)
+                .setMessage(body)
+                .setPositiveButton(R.string.early_root_arm_close, null)
+                .show()
+        } catch (t: Throwable) {
+            // A dialog that cannot be shown must not take the arming's result
+            // with it; the line is already in the log.
+            Log.e(TAG, "[DFR][EARLY_ROOT] arm outcome dialog failed", t)
+        }
+    }
+
+    /**
+     * Too hot to arm: one OK, and how long to wait.
+     *
+     * No second button, because there is nothing to decide - the scheduler
+     * would veto the job. The cooling estimate is labelled as an estimate and
+     * sits beside the actual reading, which is the fact; the number comes from
+     * one observation of this device (boot f4b7cac2: SKIN 43.1 degC to 39.9 degC in
+     * 65 s with the screen in DOZE, then back over the line 35 s after the
+     * screen was woken) and is rounded up from it.
+     */
+    private fun showTooHot(thermal: EarlyRootPolicy.Decision, reading: String) {
+        if (isFinishing || isDestroyed) return
+        val body = thermal.reason + "\n\n" + reading + "\n\n" +
+            getString(R.string.early_root_cooldown_hint, COOLDOWN_HINT_MINUTES)
+        try {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.early_root_too_hot_title)
+                .setMessage(body)
+                .setPositiveButton(R.string.early_root_arm_close, null)
+                .show()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] too-hot dialog failed", t)
+        }
+        append("[x] EARLY_ROOT_NOT_ARMED: ${thermal.code} $reading\n")
+    }
+
+    /**
+     * The confirmation, which is also the reboot.
+     *
+     * One button arms AND reboots, and that is the whole point: the arming is
+     * valid for DfrEarlyRoot.REBOOT_WITHIN_MS and the owner reports that
+     * reaching the system menu by hand takes most of it on a device that has
+     * just slowed down again, so the arming sometimes expires before the
+     * reboot starts. The body says so before it happens.
+     *
+     * The soft-reboot checkbox is present and disabled: the owner asked for
+     * the place it will live to exist now, so enabling it later is one
+     * attribute rather than a redesign.
+     */
+    private fun showArmConfirm(reading: String) {
+        if (isFinishing || isDestroyed) return
+        val view = layoutInflater.inflate(R.layout.dialog_arm_early_root, null)
+        view.findViewById<TextView>(R.id.armConfirmBody).text = getString(
+            R.string.early_root_confirm_body,
+            (DfrEarlyRoot.REBOOT_WITHIN_MS / 1000L).toInt()
+        )
+        view.findViewById<TextView>(R.id.armConfirmThermal).text = reading
+        val probeBox = view.findViewById<CheckBox>(R.id.armConfirmProbe)
+        try {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.early_root_confirm_title)
+                .setView(view)
+                .setNegativeButton(R.string.early_root_confirm_cancel, null)
+                .setPositiveButton(R.string.early_root_confirm_reboot_now) { _, _ ->
+                    armThenReboot(probeBox.isChecked)
+                }
+                .show()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] arm confirmation dialog failed", t)
+        }
+    }
+
+    /**
+     * Arm, then reboot, then - only if we are still alive - roll the arming back.
+     *
+     * The order is the contract. The root arming comes first because it is the
+     * one that matters; the probe is armed after and only when asked for, so a
+     * probe failure cannot cost the root arming. A root refusal stops here and
+     * shows the outcome dialog instead of rebooting.
+     *
+     * Reaching the line after requestReboot() means the reboot did NOT happen,
+     * by construction - a successful one takes this process with it. The
+     * owner's decision for that case is that nothing stays pending, so the
+     * arming is rolled back and the dialog says the rollback happened. Leaving
+     * it armed would hand them the ten-second race they asked to be rid of,
+     * without telling them the clock had started.
+     */
+    private fun armThenReboot(alsoArmProbe: Boolean) {
+        runBg {
+            val line = DfrEarlyRoot.arm(applicationContext)
+            append(line)
+            if (EarlyRootPolicy.armOutcome(line) != EarlyRootPolicy.ARM_OUTCOME_ARMED) {
+                runOnUiThread {
+                    refreshEarlyRoot()
+                    showArmOutcome(line)
+                }
+                return@runBg
+            }
+            if (alsoArmProbe) append(DfrEarlyBootProbe.arm(applicationContext))
+            runOnUiThread { refreshEarlyRoot() }
+
+            val failure = RebootRequest.requestReboot(
+                applicationContext, "dfreroot-early-root"
+            )
+            // Still here: the reboot did not happen.
+            val rollback = DfrEarlyRoot.disarm(applicationContext)
+            append("[x] EARLY_ROOT_REBOOT_FAILED $failure\n$rollback\n")
+            runOnUiThread {
+                refreshEarlyRoot()
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                try {
+                    AlertDialog.Builder(this)
+                        .setTitle(R.string.early_root_reboot_failed_title)
+                        .setMessage(
+                            getString(R.string.early_root_reboot_failed_body) +
+                                "\n$failure\n\n$rollback"
+                        )
+                        .setPositiveButton(R.string.early_root_arm_close, null)
+                        .show()
+                } catch (t: Throwable) {
+                    Log.e(TAG, "[DFR][EARLY_ROOT] reboot-failure dialog failed", t)
+                }
             }
         }
     }
@@ -355,6 +538,21 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        /**
+         * How long to tell the owner to wait, in minutes.
+         *
+         * Rounded UP from one observation, and labelled as an estimate in the
+         * string it feeds. Boot f4b7cac2: SKIN 43.1 degC at 23:43:19 to 39.9 degC at
+         * 23:44:24 with the screen in DOZE from 23:43:28 - about 3 degC per minute -
+         * and back over the MODERATE line 35 s after the screen was woken at
+         * 23:44:37. Getting from refused to a margin needs one or two degrees,
+         * which took under a minute there, so two is the generous number.
+         *
+         * It is a hint beside a real reading, never a gate: the dialog shows
+         * the status and headroom, and those are the facts.
+         */
+        const val COOLDOWN_HINT_MINUTES = 2
+
         const val TAG = "DFReroot"
     }
 }

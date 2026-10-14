@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The arming confirmation. One button arms AND reboots, so this has to explain
+  that before it happens rather than after.
+
+  The soft-reboot row is present and DISABLED on purpose: the owner asked for
+  the place it will live to exist now, so that enabling it later is a change to
+  one attribute rather than a redesign. It carries its own note saying why it
+  is off, because a greyed control with no explanation reads as a bug.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:id="@+id/armConfirmBody"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/armConfirmThermal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textSize="11sp"
+            android:textColor="@color/textSecondary" />
+
+        <CheckBox
+            android:id="@+id/armConfirmProbe"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:checked="true"
+            android:text="@string/early_root_confirm_probe" />
+
+        <CheckBox
+            android:id="@+id/armConfirmSoftReboot"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="false"
+            android:enabled="false"
+            android:text="@string/early_root_confirm_soft_reboot" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="32dp"
+            android:text="@string/early_root_confirm_soft_reboot_note"
+            android:textSize="11sp"
+            android:textColor="@color/textSecondary" />
+    </LinearLayout>
+</ScrollView>

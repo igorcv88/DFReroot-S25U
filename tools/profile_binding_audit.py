@@ -2491,6 +2491,262 @@ def audit():
             fail("%s captures the stop diagnostics outside onStopJob; only that "
                  "callback runs at the instant the scheduler reclaimed the "
                  "execution" % name)
+    # --- the arm-and-reboot flow ----------------------------------------
+    # MainActivity and RebootRequest need an Android runtime, so the shape is
+    # asserted (AGENTS.md §5). The owner's reasons are the invariants.
+    main_flow = code_only(dfr_source("MainActivity.kt"))
+    reboot_src = code_only(dfr_source("RebootRequest.kt"))
+
+    # ONE arm button. The probe is a checkbox in the dialog now; two buttons
+    # were the UI the owner asked to simplify.
+    if "btnArmEarlyBootProbe" in main_flow:
+        fail("MainActivity still wires a separate Early Boot Probe button; the "
+             "owner asked for one arm button with the probe as a dialog option")
+    # ...but the probe's state is still reported, or the comparison the
+    # checkbox exists for becomes unreadable.
+    if "DfrEarlyBootProbe.armState(" not in main_flow:
+        fail("the probe's arm state is no longer reported anywhere; it is still "
+             "a separate persisted job and the checkbox exists to compare "
+             "arming with and without it")
+
+    # The thermal state is read BEFORE the confirmation, so nobody confirms a
+    # reboot that will not happen.
+    confirm_at = main_flow.find("showArmConfirm(")
+    precheck_at = main_flow.find("EarlyRootPolicy.evaluateArmingThermal(")
+    if confirm_at < 0 or precheck_at < 0 or precheck_at > confirm_at:
+        fail("MainActivity does not pre-check the thermal state before the arm "
+             "confirmation; the owner would confirm a reboot the scheduler was "
+             "going to veto")
+
+    # THE CENTRAL INVARIANT of this flow: reaching the line after the reboot
+    # request means the reboot did NOT happen, and the owner's decision is that
+    # nothing stays pending. An arming left live there hands them the
+    # ten-second race they asked to be rid of, without saying the clock started.
+    arm_then = main_flow.find("private fun armThenReboot(")
+    if arm_then < 0:
+        fail("the arm-and-reboot flow is gone; the arming would again depend on "
+             "reaching the system menu inside REBOOT_WITHIN_MS")
+    else:
+        end = main_flow.find("\n    }", arm_then)
+        body = main_flow[arm_then:end if end > 0 else len(main_flow)]
+        req_at = body.find("RebootRequest.requestReboot(")
+        dis_at = body.find("DfrEarlyRoot.disarm(")
+        if req_at < 0:
+            fail("armThenReboot does not request the reboot; the whole point is "
+                 "not to depend on the owner reaching the menu in time")
+        elif dis_at < 0 or dis_at < req_at:
+            fail("armThenReboot does not roll the arming back AFTER the reboot "
+                 "request returns; returning from it means the reboot did not "
+                 "happen, and leaving the arming live is the ten-second race "
+                 "the owner asked to remove - silently")
+        if "early_root_reboot_failed_title" not in body:
+            fail("armThenReboot does not report the refused reboot in a dialog; "
+                 "a log line is what let a failed arming read as a success")
+        # A root refusal must not reboot. The probe is observational and must
+        # never be the reason a root arming is skipped or kept.
+        if "ARM_OUTCOME_ARMED" not in body:
+            fail("armThenReboot does not check that the root arming actually "
+                 "succeeded before rebooting; it would reboot on a refusal")
+
+    # RebootRequest must treat a NORMAL RETURN as failure. A successful reboot
+    # takes the process with it, so a return means the call did nothing - and
+    # reporting that as success is exactly the dialog that lies.
+    if "returned without rebooting" not in reboot_src:
+        fail("RebootRequest no longer treats a normal return from pm.reboot as "
+             "a failure; a successful reboot never returns, so a return that "
+             "reads as success leaves the owner staring at a dialog that "
+             "claimed to reboot")
+    # And it must name the exception, because the first physical press is the
+    # measurement of whether the uid-level REBOOT argument holds at all.
+    if "javaClass.simpleName" not in reboot_src:
+        fail("RebootRequest does not name the exception class on failure; that "
+             "is the measurement that says whether Shizuku is the next rung")
+    # The manifest has to declare the permission it attempts to use.
+    with open(os.path.join(ROOT, "app", "src", "main", "AndroidManifest.xml"),
+              encoding="utf-8") as f:
+        manifest_raw = f.read()
+    if "android.permission.REBOOT" not in manifest_raw:
+        fail("the manifest does not declare android.permission.REBOOT while "
+             "RebootRequest attempts it")
+    # The excluded rung stays excluded: RootTransport is gated by 3.6.1 because
+    # its first privileged step panicked this kernel.
+    if "RootTransport" in reboot_src:
+        fail("RebootRequest reaches for RootTransport; that transport is gated "
+             "by AGENTS.md 3.6.1 because its first privileged step panicked "
+             "this kernel, and a convenience reboot must not drag that in")
+
+    # --- unresolved references in the Kotlin we cannot compile ----------
+    #
+    # This host has no Kotlin compiler, so every Kotlin change here is verified
+    # by reading plus a brace/paren balance - and a balance check cannot see a
+    # missing import. On 2026-10-14 that gap shipped: the arming thermal gate
+    # added `Log.i(TAG, ...)` to DfrEarlyRoot.kt, which imported neither
+    # `android.util.Log` nor defined `TAG`, and the whole offline gate set
+    # passed on a file that could not compile.
+    #
+    # So the two symbols that mistake actually used are checked across every
+    # Kotlin source. It is a narrow check and deliberately so: it catches the
+    # error that happened, in every file, rather than pretending to be a
+    # compiler.
+    dfr_dir = os.path.join(ROOT, "app", "src", "main", "java", "com",
+                           "polygraphene", "df", "reroot")
+    kt_sources = sorted(
+        os.path.join(dfr_dir, n) for n in os.listdir(dfr_dir) if n.endswith(".kt")
+    )
+    if not kt_sources:
+        fail("no DFReroot Kotlin sources found; this check would silently "
+             "guard nothing")
+    for src_path in kt_sources:
+        with open(src_path, encoding="utf-8") as f:
+            body = code_only(f.read())
+        name = rel(src_path)
+        if re.search(r"\bLog\.[deiwv]\s*\(", body) \
+                and "import android.util.Log" not in body:
+            fail("%s calls Log.* without importing android.util.Log; this host "
+                 "cannot compile Kotlin, so nothing else here would catch it"
+                 % name)
+        if re.search(r"\bLog\.[deiwv]\s*\(\s*TAG\b", body) \
+                and not re.search(r"\bTAG\s*=", body):
+            fail("%s passes TAG to Log.* without defining it; a brace balance "
+                 "cannot see an unresolved reference" % name)
+
+    # --- the arming outcome is a modal ----------------------------------
+    # MainActivity needs an Android runtime and cannot be unit-tested here
+    # (AGENTS.md §5), so the shape is asserted instead.
+    #
+    # Why it exists: `[*] EARLY_ROOT_ARMED` and `[x] EARLY_ROOT_NOT_ARMED`
+    # differ by a few characters in a pane that scrolls, so a refusal was being
+    # read as a success and a reboot spent on a job that was never scheduled.
+    # Not arming is not the expected behaviour and must not look like it.
+    main_src = code_only(dfr_source("MainActivity.kt"))
+    if "showArmOutcome(" not in main_src:
+        fail("MainActivity no longer shows the arming outcome as a dialog; the "
+             "log line alone is what let a refusal read as a success")
+    # It is called from the arm handler, after the arm() call - a dialog that
+    # is never reached is the same as not having one.
+    arm_at = main_src.find("DfrEarlyRoot.arm(")
+    show_at = main_src.find("showArmOutcome(line)")
+    if arm_at < 0 or show_at < 0 or show_at < arm_at:
+        fail("the arming outcome dialog is not shown from the arm handler after "
+             "arm() returns; the owner would be back to reading the log")
+    # The classification is the host-tested policy, not a string test in an
+    # Activity nobody can test here.
+    if "EarlyRootPolicy.armOutcome(" not in main_src:
+        fail("MainActivity classifies the arming outcome itself instead of "
+             "using the host-tested policy; a string test in an untestable "
+             "Activity is how 'armed' gets painted over a refusal")
+    # BOTH outcomes get a dialog. A modal that only appears on failure trains
+    # the reader to ignore its absence.
+    for res in ("early_root_arm_ok_title", "early_root_arm_refused_title",
+                "early_root_arm_unknown_title"):
+        if res not in main_src:
+            fail("MainActivity does not reference R.string.%s; both arming "
+                 "outcomes and the unaccountable one each need their own, or "
+                 "the dialog stops distinguishing them" % res)
+    # And the unrecognised branch must NOT be the success title: a line this
+    # build cannot account for reports NOT ARMED rather than guessing.
+    else_at = main_src.find("else -> R.string.early_root_arm_unknown_title")
+    if else_at < 0:
+        fail("the unrecognised arming outcome no longer falls through to the "
+             "NOT ARMED title; painting 'armed' over an unknown outcome is "
+             "exactly the confusion this dialog removes")
+
+    # --- the arming-time thermal gate -----------------------------------
+    # The owner's ask: do not spend a reboot on a callback the scheduler will
+    # veto. ThermalStatusRestriction restricts PRIORITY_DEFAULT outright from
+    # MODERATE up, so the arming is where that is cheap to refuse.
+    early_root_src = code_only(dfr_source("DfrEarlyRoot.kt"))
+    if "EarlyRootPolicy.evaluateArmingThermal(" not in early_root_src:
+        fail("DfrEarlyRoot no longer consults the arming thermal gate; the owner "
+             "spends a whole reboot discovering what one read answers")
+    # It has to come BEFORE the first durable write, or a refusal leaves a
+    # rewritten record behind and the message that says otherwise is false.
+    gate_at = early_root_src.find("EarlyRootPolicy.evaluateArmingThermal(")
+    incident_at = early_root_src.find("recordPendingIncident(")
+    sched_at = early_root_src.find("scheduler.schedule(")
+    if incident_at >= 0 and gate_at > incident_at:
+        fail("the arming thermal gate runs after recordPendingIncident; a "
+             "refusal would then leave a durable write behind, and the refusal "
+             "message says nothing was changed")
+    if sched_at >= 0 and gate_at > sched_at:
+        fail("the arming thermal gate runs after the job is scheduled; the "
+             "point is to refuse before anything exists")
+    # And the readings reach the record, which is the before-the-reboot half of
+    # the pairing the threshold has to be derived from.
+    for key in ("armed_thermal_status", "armed_thermal_headroom"):
+        if key not in code_only(dfr_source("EarlyRootPolicy.java")):
+            fail("the arm record no longer carries %r; without it the 0.85 "
+                 "headroom limit can never stop being a guess" % key)
+    # Pinned on the CALL SHAPE, not on a constant's name: an earlier version of
+    # this guard searched for "ARM_OPTIONAL_KEYS" and a mutation that merely
+    # renamed the constant still satisfied it by substring.
+    if "parse(record, ARM_KEYS, ARM_OPTIONAL_KEYS)" not in code_only(
+            dfr_source("EarlyRootPolicy.java")):
+        fail("parseArm no longer reads the thermal fields as OPTIONAL; a record "
+             "written before they existed would read as malformed, turning a "
+             "precise BUILD_MISMATCH after an app upgrade into a bare "
+             "NOT_ARMED")
+    # A thermal refusal must REPORT any surviving arming.
+    #
+    # The gate returns before the job is inspected and before any record is
+    # touched, which is what makes "this attempt changed nothing" true - but a
+    # reader takes NOT ARMED to mean the DEVICE is not armed. Arm while cool,
+    # wait, press Arm once it has heated, and the earlier job and arm record are
+    # still live: the dialog would say "do not reboot" over an armed device,
+    # which is the owner's own complaint inverted and the more dangerous
+    # direction. Codex caught it on PR #70.
+    thermal_refusal_at = early_root_src.find("if (!thermal.allow)")
+    if thermal_refusal_at < 0:
+        fail("the arming thermal refusal branch is gone; this guard cannot "
+             "speak for what it reports")
+    else:
+        branch_end = early_root_src.find("\n        }", thermal_refusal_at)
+        branch = early_root_src[thermal_refusal_at:
+                                branch_end if branch_end > 0 else len(early_root_src)]
+        if "armState(" not in branch:
+            fail("the arming thermal refusal does not report the prior arming "
+                 "state; it would say NOT ARMED over a device that is still "
+                 "armed and will consume the next reboot")
+        if "ARM_NO_RECORD" not in branch:
+            fail("the arming thermal refusal does not distinguish 'no previous "
+                 "arming' from one that survived; collapsing those is what "
+                 "makes the message a lie in one of the two cases")
+        # And it must not CANCEL as a side effect: that would make its own
+        # "changed no record" sentence false and would throw away an arming the
+        # owner deliberately made. disarm() is an action they take.
+        for forbidden in ("disarm(", "cancelOwned(", "deleteArm("):
+            if forbidden in branch:
+                fail("the arming thermal refusal calls %s; a read-only check "
+                     "must not destroy a valid arming as a side effect, and it "
+                     "claims in the same message that it changed nothing"
+                     % forbidden)
+
+    # THE ASYMMETRY, pinned in both directions because it is the one place this
+    # file deliberately allows on missing evidence. This gate protects a reboot,
+    # not the device; a diagnostic that cannot read itself must not withhold a
+    # capability (3.6.1), and every gate that protects the device still runs at
+    # the callback. A future edit in EITHER direction should have to say so.
+    policy_src = code_only(dfr_source("EarlyRootPolicy.java"))
+    if "THERMAL_UNREADABLE" not in policy_src:
+        fail("the unreadable thermal verdict is gone; an unobtainable reading "
+             "must be recorded as such, never folded into a pass")
+    # Pinned on the exact return, because the function also returns
+    # `new Decision(true, THERMAL_OK, ...)` - so looking for "new Decision(true"
+    # anywhere in the body passes whatever the unreadable branch does. An
+    # earlier version of this guard made that mistake and caught nothing.
+    if "new Decision(true, THERMAL_UNREADABLE" not in policy_src:
+        fail("evaluateArmingThermal no longer ALLOWS on an unreadable reading; "
+             "that turns a failed diagnostic into a permanent refusal of the "
+             "capability, which is the 3.6.1 failure this gate must not become "
+             "- it protects a reboot, not the device")
+    # There must be NO matching check at the callback: if the scheduler
+    # dispatched us the restriction was not in force, so a check there could
+    # only withhold a run the platform already permitted.
+    if "evaluateArmingThermal" in code_only(dfr_source("DfrEarlyRootDispatch.kt")):
+        fail("the dispatch consults the arming thermal gate; a dispatched "
+             "callback proves the restriction was not in force, so a check "
+             "there can only withhold a run that was going to work")
+
     # --- the native profile ---------------------------------------------
     # The measurement of the 5767 ms that boot 2e7d56e5 could not account for.
     # Four properties, and each one is the difference between a measurement and
@@ -2624,28 +2880,40 @@ def audit():
             if key not in stop_rec:
                 fail("the probe's stop RECORD does not carry %s, so the two "
                      "jobs' stops stop being comparable" % key)
-    # And neither is ever an input. A thermal reading is evidence about the
-    # device, not about whether this chain may run, and a diagnostic that can
-    # change an outcome is not a diagnostic (AGENTS.md 3.6.1).
-    #
-    # The guard targets the MECHANISM, not the word. EarlyBootProbePolicy's
-    # Callback legitimately carries a `thermalStatus` field parsed out of a
-    # record - that is transporting evidence to a reader. What must not exist
-    # is either policy taking the LIVE reading, which is the only way a gate
-    # could come to depend on the device's current thermal state.
+    # Neither policy may take a LIVE thermal reading. They receive numbers as
+    # parameters and EarlyRootEnv does the reading, which is what keeps the
+    # decision host-testable and keeps a binder call out of a pure class.
     for name, src in (("EarlyRootPolicy", code_only(dfr_source("EarlyRootPolicy.java"))),
                       ("EarlyBootProbePolicy", probe_policy_src_for_gate_check)):
         for token in ("PowerManager", "currentThermalStatus",
-                      "getCurrentThermalStatus", "THERMAL_STATUS"):
+                      "getCurrentThermalStatus", "getThermalHeadroom"):
             if token in src:
-                fail("%s takes a live thermal reading (%s); a thermal state is "
-                     "recorded evidence and must never reach a gate"
-                     % (name, token))
-    # EarlyRootPolicy gates the chain, so it must not carry the value at all -
-    # not even as a parsed field it could later be tempted to compare.
-    if "thermal" in code_only(dfr_source("EarlyRootPolicy.java")).lower():
-        fail("EarlyRootPolicy names a thermal value; the gate that authorises "
-             "the chain must not have one to consult")
+                fail("%s takes a live thermal reading (%s); the policies receive "
+                     "numbers and EarlyRootEnv does the reading" % (name, token))
+    # And the path that authorises THE CHAIN must not consult thermal at all.
+    #
+    # This replaces a blunter guard that forbade EarlyRootPolicy from naming any
+    # thermal value. That premise expired when the owner asked for an
+    # arming-time gate: there is now one legitimate thermal decision, and it
+    # decides whether to ARM. The property worth keeping is narrower and
+    # stronger - a dispatched callback proves the restriction was not in force,
+    # so thermal inside the chain gate could only withhold a run the platform
+    # already permitted.
+    policy_full = code_only(dfr_source("EarlyRootPolicy.java"))
+    for fn in ("public static Decision evaluate(",
+               "public static Decision evaluateBeforeReadiness(",
+               "public static Decision evaluateArmBinding("):
+        at = policy_full.find(fn)
+        if at < 0:
+            fail("EarlyRootPolicy no longer declares %s; the chain's gate has "
+                 "moved and this guard cannot speak for it" % fn.split("(")[0])
+            continue
+        end = policy_full.find("\n    }", at)
+        if "hermal" in policy_full[at:end if end > 0 else len(policy_full)]:
+            fail("%s consults a thermal value; the gate that authorises the "
+                 "chain must not, because a dispatched callback already proves "
+                 "the restriction was not in force" % fn.split("(")[0])
+
     # The probe's stop record gained keys, and its parser demands the key set
     # EXACTLY. Required keys would make every record an older build wrote parse
     # as malformed - good evidence refused because the reader got newer, which
