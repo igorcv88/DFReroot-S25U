@@ -2389,11 +2389,21 @@ wait=<outcome> first_state=<…> first_at_ms=<…> ready_at_ms=<…> waited_ms=<
 - `waited_ms=0` → readiness was already true at 10.4 s, which would mean the
   13985 ms fork in `cea5208c` was late rather than typical. Worth two more
   boots before believing.
-- `wait=…WAIT_EXPIRED` → readiness never arrived in 17 s. The arming is spent,
-  but `native_started=0` means the boot is not (R1), so Auto Root still runs.
+- `wait=…WAIT_EXPIRED` → readiness never arrived in 17 s. **This and only this
+  one is a statement about the boot.** The arming is spent, but
+  `native_started=0` means the boot is not (R1), so Auto Root still runs.
 - `wait=…WAIT_NOT_PERMITTED` → **a defect in this repository, not the boot.**
   It means the dispatch ran on the main looper and the wait degraded to one
   sweep. Fix the caller's threading.
+- `wait=…WAIT_CLOCK_UNAVAILABLE` → `EarlyRootEnv.monotonicNow()` threw and
+  returned -1, so the deadline was never evaluated. Says **nothing** about
+  whether readiness was coming; `ready_at_ms=-1` is the corroborating tell.
+  Look for the clock failure, not at boot timing. (Codex caught this being
+  reported as an expiry on PR #74 — three causes were sharing one value, which
+  is §3.7's "a primary lookup being unavailable vs the lookup as a whole
+  failing".)
+- `wait=…WAIT_INTERRUPTED` → something interrupted the waiting thread
+  mid-sleep. Also says nothing about readiness. Find what interrupted it.
 
 Also read `sweeps=`. The sweep is not cheap — it is three AMS reflective
 lookups plus a full `/proc` walk reading every `cmdline`, which finds nothing

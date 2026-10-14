@@ -1733,13 +1733,27 @@ public class EarlyRootPolicyTest {
         // An unreadable clock makes the deadline unevaluable, and a wait whose
         // deadline cannot be evaluated is unbounded - the operation
         // AGENTS.md 3.6.1 forbids dressing up as a probe.
-        check(EarlyRootPolicy.WAIT_EXPIRED.equals(EarlyRootPolicy.readinessWait(
-                        EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, 0)),
-                "an unreadable clock expires the wait instead of polling "
-                        + "without a bound");
-        check(EarlyRootPolicy.WAIT_EXPIRED.equals(EarlyRootPolicy.readinessWait(
+        // An unreadable clock STOPS the wait - unbounded is the one thing it may
+        // not be - but it is not an expiry. monotonicNow() returns -1 when the
+        // read throws, so this is a reachable input, and 3.7's third row is
+        // exactly "a primary lookup being unavailable vs the lookup as a whole
+        // failing". Codex caught this on PR #74: reporting it as WAIT_EXPIRED
+        // told the operator the deadline had passed with readiness absent, a
+        // claim about the BOOT, when what failed was a clock read in this
+        // process.
+        check(EarlyRootPolicy.WAIT_CLOCK_UNAVAILABLE.equals(
+                        EarlyRootPolicy.readinessWait(
+                                EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, 0)),
+                "an unreadable clock stops the wait as CLOCK_UNAVAILABLE, not "
+                        + "as an expiry");
+        check(EarlyRootPolicy.WAIT_CLOCK_UNAVAILABLE.equals(
+                        EarlyRootPolicy.readinessWait(
+                                EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, -1)),
+                "a negative clock stops the wait as CLOCK_UNAVAILABLE");
+        check(!EarlyRootPolicy.WAIT_AGAIN.equals(EarlyRootPolicy.readinessWait(
                         EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, -1)),
-                "a negative clock expires the wait");
+                "an unreadable clock still STOPS the wait; the distinction is "
+                        + "in the record, never in whether it is bounded");
         // The wait cannot be the thing that permits. Whatever it answers, a
         // sweep that is not exactly READY still refuses at the gate (3.2: one
         // place decides).
@@ -1796,8 +1810,21 @@ public class EarlyRootPolicyTest {
         check(java.util.Set.of(EarlyRootPolicy.WAIT_AGAIN,
                         EarlyRootPolicy.WAIT_PROCEED,
                         EarlyRootPolicy.WAIT_EXPIRED,
-                        EarlyRootPolicy.WAIT_NOT_PERMITTED).size() == 4,
-                "the four wait outcomes are four distinct values");
+                        EarlyRootPolicy.WAIT_NOT_PERMITTED,
+                        EarlyRootPolicy.WAIT_CLOCK_UNAVAILABLE,
+                        EarlyRootPolicy.WAIT_INTERRUPTED).size() == 6,
+                "the six wait outcomes are six distinct values; every way the "
+                        + "wait can end has its own name (3.7)");
+        // The three non-expiry abort causes each send debugging somewhere
+        // different, so none of them may read as an expiry.
+        for (String notExpiry : new String[] {
+                EarlyRootPolicy.WAIT_NOT_PERMITTED,
+                EarlyRootPolicy.WAIT_CLOCK_UNAVAILABLE,
+                EarlyRootPolicy.WAIT_INTERRUPTED}) {
+            check(!EarlyRootPolicy.WAIT_EXPIRED.equals(notExpiry),
+                    "'" + notExpiry + "' is not an expiry; the handoff reads an "
+                            + "expiry as a slow boot and these are not that");
+        }
         // readinessWait itself never returns NOT_PERMITTED: it cannot see a
         // looper, and a pure function that guessed at one would be deciding
         // something it has no evidence for.
@@ -1806,11 +1833,16 @@ public class EarlyRootPolicyTest {
                 EarlyBootProbePolicy.NETWORKSTACK_NOT_READY, null, "junk"}) {
             for (long waitAt : new long[] {-1, 0, 1, 14_000,
                     EarlyRootPolicy.READINESS_WAIT_DEADLINE_MS, 90_000}) {
-                check(!EarlyRootPolicy.WAIT_NOT_PERMITTED.equals(
-                                EarlyRootPolicy.readinessWait(st, waitAt)),
+                String outcome = EarlyRootPolicy.readinessWait(st, waitAt);
+                check(!EarlyRootPolicy.WAIT_NOT_PERMITTED.equals(outcome),
                         "readinessWait never claims NOT_PERMITTED (state=" + st
                                 + " now=" + waitAt + "); only the caller can know "
                                 + "which thread it is on");
+                // Same reason, and the one Codex's P2 was about: a pure
+                // function cannot observe an interrupt either.
+                check(!EarlyRootPolicy.WAIT_INTERRUPTED.equals(outcome),
+                        "readinessWait never claims INTERRUPTED (state=" + st
+                                + " now=" + waitAt + ")");
             }
         }
         check(EarlyRootPolicy.formatReadinessWait(

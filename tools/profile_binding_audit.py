@@ -2802,6 +2802,24 @@ def audit():
     if "nowMs <= 0L" not in policy_src:
         fail("readinessWait no longer stops on an unreadable clock; a wait "
              "whose deadline cannot be evaluated is unbounded")
+    # And the three non-expiry abort causes keep their own names. Codex's P2 on
+    # PR #74: an unreadable clock reported as WAIT_EXPIRED tells the operator
+    # the deadline passed with readiness absent - a claim about the BOOT - when
+    # a clock read failed in this process. AGENTS.md 3.7 names this pair
+    # exactly: a primary lookup being unavailable vs the lookup as a whole
+    # failing. The handoff sends the two readings to different places.
+    if "return WAIT_CLOCK_UNAVAILABLE;" not in policy_src:
+        fail("an unreadable clock no longer has its own wait outcome; reported "
+             "as an expiry it manufactures evidence about the boot out of a "
+             "clock failure in this process (3.7)")
+    if "WAIT_INTERRUPTED" not in dispatch_src:
+        fail("the interrupted wait no longer has its own outcome; something "
+             "asking this thread to stop says nothing about whether readiness "
+             "was coming, and the handoff reads an expiry as a slow boot")
+    if "waitOutcome = EarlyRootPolicy.WAIT_EXPIRED" in dispatch_src:
+        fail("the dispatch assigns WAIT_EXPIRED itself; only readinessWait may "
+             "conclude the deadline passed, and a caller that does it is the "
+             "collapse Codex caught on PR #74")
 
     # (4) The loop can be reclaimed mid-wait. This is now the one place the
     #     dispatch can spend seconds, so the scheduler taking the execution

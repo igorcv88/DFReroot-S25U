@@ -350,7 +350,14 @@ object DfrEarlyRootDispatch {
                  * flag so nothing downstream swallows it.
                  */
                 Thread.currentThread().interrupt()
-                waitOutcome = EarlyRootPolicy.WAIT_EXPIRED
+                /*
+                 * Its own outcome, not an expiry. Something asked this thread
+                 * to stop, which says nothing about whether readiness was
+                 * coming - and the handoff sends an expiry to "the boot was
+                 * slow" while this belongs at "find what interrupted us"
+                 * (3.7).
+                 */
+                waitOutcome = EarlyRootPolicy.WAIT_INTERRUPTED
                 break
             }
             readiness = StageHop.probeReadiness(context)

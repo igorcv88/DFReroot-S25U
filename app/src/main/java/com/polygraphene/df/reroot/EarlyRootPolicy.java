@@ -217,6 +217,37 @@ public final class EarlyRootPolicy {
     /** Stop polling without readiness. The gate refuses on its own evidence. */
     public static final String WAIT_EXPIRED = "EARLY_ROOT_READINESS_WAIT_EXPIRED";
     /**
+     * The clock could not be read, so the deadline was never evaluated.
+     *
+     * Its own value because {@code EarlyRootEnv.monotonicNow()} really does
+     * return -1 when the read throws, and AGENTS.md 3.7 names this exact pair:
+     * "a primary lookup being unavailable vs the lookup as a whole failing".
+     * Reporting it as {@link #WAIT_EXPIRED} told the operator the deadline had
+     * passed with readiness still absent - a statement about the BOOT - when
+     * what happened was a clock failure in this process. The handoff sends the
+     * two readings to different places, so collapsing them manufactures false
+     * evidence rather than merely losing detail.
+     *
+     * It stops the wait exactly as an expiry does. The distinction is in the
+     * record, not in the control flow: a wait whose deadline cannot be
+     * evaluated is unbounded and must still stop (3.6.1).
+     */
+    public static final String WAIT_CLOCK_UNAVAILABLE =
+            "EARLY_ROOT_READINESS_WAIT_CLOCK_UNAVAILABLE";
+    /**
+     * The waiting thread was interrupted mid-sleep.
+     *
+     * Also not an expiry. Something asked this thread to stop, which says
+     * nothing about whether readiness was coming, and the fix is in whatever
+     * interrupted us rather than in the window or the boot.
+     *
+     * Never returned by {@link #readinessWait} - a pure function cannot
+     * observe an interrupt. The caller sets it, which is why it is here as a
+     * value and not as a branch.
+     */
+    public static final String WAIT_INTERRUPTED =
+            "EARLY_ROOT_READINESS_WAIT_INTERRUPTED";
+    /**
      * The wait was not run because this thread may not be blocked.
      *
      * Its own value because it is a defect in OUR threading, not a fact about
@@ -244,9 +275,11 @@ public final class EarlyRootPolicy {
      *     Stopping hands it to {@link #evaluate}, which refuses it.</li>
      * <li>An unreadable clock ({@code nowMs <= 0}, which is what
      *     {@code EarlyRootEnv.monotonicNow()} yields when the read throws)
-     *     stops the wait. An unbounded wait is exactly the operation
-     *     AGENTS.md 3.6.1 forbids dressing up as a probe, and a wait whose
-     *     deadline cannot be evaluated is unbounded.</li>
+     *     stops the wait, as {@link #WAIT_CLOCK_UNAVAILABLE} and NOT as an
+     *     expiry. An unbounded wait is exactly the operation AGENTS.md 3.6.1
+     *     forbids dressing up as a probe, and a wait whose deadline cannot be
+     *     evaluated is unbounded - but "the clock failed" and "the deadline
+     *     passed" are different facts with different fixes (3.7).</li>
      * <li>Reaching the deadline stops the wait with {@link #WAIT_EXPIRED},
      *     NOT with a verdict. Whether an expired wait refuses is
      *     {@link #evaluate}'s to say, and it does - there is no second place
@@ -265,7 +298,7 @@ public final class EarlyRootPolicy {
             return WAIT_EXPIRED;
         }
         if (nowMs <= 0L) {
-            return WAIT_EXPIRED;
+            return WAIT_CLOCK_UNAVAILABLE;
         }
         if (nowMs >= READINESS_WAIT_DEADLINE_MS) {
             return WAIT_EXPIRED;
