@@ -7,6 +7,7 @@ import android.content.Context
 import android.os.Build
 import android.os.PersistableBundle
 import android.os.SystemClock
+import android.util.Log
 import java.security.SecureRandom
 
 /**
@@ -26,6 +27,8 @@ import java.security.SecureRandom
  * not a default to ship ahead of it.
  */
 object DfrEarlyRoot {
+    private const val TAG = "DFReroot"
+
     val JOB_ID: Int = EarlyRootPolicy.EXPECTED_JOB_ID
     val NAMESPACE: String = EarlyRootPolicy.EXPECTED_NAMESPACE
 
@@ -99,6 +102,76 @@ object DfrEarlyRoot {
                 " ended in a kernel panic inside kernelsu.ko (list_del" +
                 " corruption in its manager discovery); see docs/EARLY_ROOT.md." +
                 " The manual run and Auto Root after a full boot are unaffected."
+        }
+        /*
+         * And refused while the device is too hot to be dispatched punctually.
+         *
+         * UNLIKE the two checks above, this one is NOT a cheap mirror of a gate
+         * that also runs at the callback, and that difference is deliberate.
+         * The authority here is the scheduler's own behaviour:
+         * ThermalStatusRestriction restricts a PRIORITY_DEFAULT job outright
+         * from MODERATE (2) up, so arming a hot device arms a callback the
+         * scheduler will veto - and the cost of discovering that is a whole
+         * reboot. Boot `f4b7cac2` waited 81.5 s at status 2 and was dispatched
+         * 22 ms after it fell to 1; boot `2e7d56e5` was punctual at status 1.
+         *
+         * There is deliberately NO matching check at the callback. If the
+         * scheduler dispatched us, the restriction was not in force - so a
+         * check there could only withhold a run the platform had already
+         * permitted, which is the wrong direction for a gate whose whole
+         * purpose is to save a reboot.
+         *
+         * Placed with the other read-only refusals and BEFORE
+         * recordPendingIncident, so a refusal leaves nothing behind: no job, no
+         * rewritten arm record, no archived cycle, no incident write. The
+         * readings are carried into the record on the success path, which is
+         * the "before the reboot" half of the pairing - and the only way the
+         * 0.85 headroom limit ever stops being a guess.
+         */
+        val thermalStatus = EarlyRootEnv.thermalStatusValue(context)
+        val thermalHeadroom = EarlyRootEnv.thermalHeadroom(context)
+        val thermal = EarlyRootPolicy.evaluateArmingThermal(thermalStatus, thermalHeadroom)
+        Log.i(TAG, "[DFR][EARLY_ROOT] ARMING_THERMAL=${thermal.code}" +
+            " status=${EarlyRootPolicy.formatThermalStatus(thermalStatus)}" +
+            " headroom=${EarlyRootPolicy.formatHeadroom(thermalHeadroom)}")
+        if (!thermal.allow) {
+            /*
+             * The refusal has to say what happened to any EARLIER arming, and
+             * this is not a nicety.
+             *
+             * The gate returns before the job is inspected and before any
+             * record is touched - which is what makes "this attempt changed
+             * nothing" true. But a reader takes "NOT ARMED" to mean the DEVICE
+             * is not armed, and if the owner armed while cool, waited, and
+             * pressed Arm again once it had heated, the earlier job and arm
+             * record are still there and will be consumed by the next reboot.
+             * The dialog would then say "do not reboot" over an armed device:
+             * the owner's own complaint inverted, and the more dangerous
+             * direction. Codex caught it on PR #70.
+             *
+             * It REPORTS and does not cancel. Destroying a valid arming as a
+             * side effect of a read-only check would make the sentence above
+             * false and would throw away an arming the owner deliberately made;
+             * `disarm()` exists for when they decide to drop it, as an action
+             * they take rather than one a refusal takes for them.
+             *
+             * armState() is reused verbatim because it already distinguishes
+             * live, spent, expired, foreign, malformed and unreadable - six
+             * states this message must not collapse into "armed" (AGENTS.md 3.7).
+             */
+            val prior = armState(context)
+            val priorLine = if (prior.startsWith(EarlyRootPolicy.ARM_NO_RECORD)) {
+                "PREVIOUS ARMING: none - this device is not armed."
+            } else {
+                "PREVIOUS ARMING IS STILL ACTIVE and this refusal did NOT cancel" +
+                    " it; the next full reboot can still consume it. Use Disarm" +
+                    " to drop it.\n$prior"
+            }
+            return "[x] EARLY_ROOT_NOT_ARMED: ${thermal.code}\n${thermal.reason}\n" +
+                "status=${EarlyRootPolicy.formatThermalStatus(thermalStatus)}" +
+                " headroom=${EarlyRootPolicy.formatHeadroom(thermalHeadroom)}\n" +
+                "This attempt scheduled nothing and changed no record.\n" +
+                priorLine
         }
         /*
          * And refused while a previous boot's early run is unaccounted for.
@@ -241,7 +314,7 @@ object DfrEarlyRoot {
             bootId, JOB_ID, namespaceForRuntime(), MINIMUM_LATENCY_MS, result,
             AutoRootStore.versionCode(), AutoRootStore.versionName(),
             KsudStage.pinnedKsudSha256(), AutoRootStore.deviceFingerprint(),
-            elapsed, wallclock, generation
+            elapsed, wallclock, generation, thermalStatus, thermalHeadroom
         )
         val failure = EarlyRootStore.writeArm(record)
         if (failure != null) {
@@ -250,7 +323,9 @@ object DfrEarlyRoot {
         }
         return "[*] EARLY_ROOT_ARMED job_id=$JOB_ID namespace=${namespaceForRuntime()} " +
             "schedule_result=$result persisted=1 generation=$generation " +
-            "min_latency_ms=$MINIMUM_LATENCY_MS; " +
+            "min_latency_ms=$MINIMUM_LATENCY_MS " +
+            "thermal_status=${EarlyRootPolicy.formatThermalStatus(thermalStatus)} " +
+            "thermal_headroom=${EarlyRootPolicy.formatHeadroom(thermalHeadroom)}; " +
             "start the FULL reboot within ${REBOOT_WITHIN_MS / 1000}s. The chain will " +
             "run inside the boot animation; a hard reboot is the recovery boundary."
     }
@@ -423,7 +498,10 @@ object DfrEarlyRoot {
      */
     fun armState(context: Context?): String {
         val record = EarlyRootStore.readArm()
-            ?: return "EARLY_ROOT_NOT_ARMED"
+            // The constant, not the literal: the thermal refusal tests this
+            // prefix to decide whether to warn about a surviving arming, and
+            // two spellings of it would drift into a silent wrong answer.
+            ?: return EarlyRootPolicy.ARM_NO_RECORD
         if (record == AutoRootPolicy.RECORD_UNREADABLE) return "EARLY_ROOT_ARM_UNKNOWN"
         val arm = EarlyRootPolicy.parseArm(record)
             ?: return "EARLY_ROOT_ARM_MALFORMED"
@@ -556,6 +634,62 @@ object DfrEarlyRoot {
          */
         return "last_step=${step.step} elapsed_ms=${step.elapsedMs} " +
             "${step.bootCompleted} steps=$steps detail=${step.detail}"
+    }
+
+    /**
+     * Undo an arming: cancel the job we own and remove the arm record.
+     *
+     * The one caller is the rollback after a confirmed arming whose automatic
+     * reboot was refused. The owner's decision for that case is that nothing
+     * stays pending - a cancelled job beside a live arm record, or the reverse,
+     * is worse than either, because the UI would report one state and the
+     * scheduler hold another.
+     *
+     * BOTH halves are attempted even if the first fails, and the line names
+     * each outcome separately. A rollback that stops at the first error leaves
+     * exactly the half-state it exists to prevent, and "I cancelled the job"
+     * and "I removed the authorisation" are different facts (AGENTS.md 3.7).
+     *
+     * The job is only cancelled when it is OURS: the uid is shared with every
+     * system component, and cancelling another client's job id would be a
+     * defect of its own. That is the same ownership check the arming makes.
+     */
+    fun disarm(context: Context): String {
+        val base = try {
+            context.getSystemService(JobScheduler::class.java)
+        } catch (t: Throwable) {
+            null
+        }
+        val jobOutcome = if (base == null) {
+            "job=UNKNOWN (JobScheduler unavailable)"
+        } else {
+            val scheduler =
+                if (Build.VERSION.SDK_INT >= 34) base.forNamespace(NAMESPACE) else base
+            val component = ComponentName(context, DfrEarlyRootJobService::class.java)
+            try {
+                cancelOwned(scheduler, component)
+                val still = try {
+                    scheduler.getPendingJob(JOB_ID)
+                } catch (_: Throwable) {
+                    null
+                }
+                if (still != null && still.service == component) {
+                    "job=STILL_PENDING"
+                } else {
+                    "job=CANCELLED"
+                }
+            } catch (t: Throwable) {
+                "job=UNKNOWN ($t)"
+            }
+        }
+        val recordFailure = EarlyRootStore.deleteArm()
+        val recordOutcome =
+            if (recordFailure == null) "arm_record=REMOVED"
+            else "arm_record=STILL_PRESENT ($recordFailure)"
+        val clean = jobOutcome == "job=CANCELLED" && recordFailure == null
+        val prefix = if (clean) "[*] EARLY_ROOT_DISARMED" else "[x] EARLY_ROOT_DISARM_INCOMPLETE"
+        Log.i(TAG, "[DFR][EARLY_ROOT] DISARM $jobOutcome $recordOutcome")
+        return "$prefix $jobOutcome $recordOutcome"
     }
 
     private fun cancelOwned(scheduler: JobScheduler, component: ComponentName) {

@@ -91,21 +91,13 @@
         android:textSize="11sp"
         android:textColor="@color/textSecondary" />
 
-    <Button
-        android:id="@+id/btnArmEarlyBootProbe"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:text="@string/arm_early_boot_probe" />
-
-    <TextView
-        android:id="@+id/earlyBootProbeState"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/early_boot_probe_not_armed"
-        android:textSize="11sp"
-        android:textColor="@color/textSecondary" />
-
+    <!--
+      One arm button. The probe used to have its own, and is now a checkbox in
+      the arming dialog: the owner's live question is whether the probe costs
+      the dispatching job any time, which arming with and without answers, and
+      two buttons were the UI they asked to simplify. Its state is still
+      reported in the row below the one button.
+    -->
     <Button
         android:id="@+id/btnArmEarlyRoot"
         android:layout_width="match_parent"

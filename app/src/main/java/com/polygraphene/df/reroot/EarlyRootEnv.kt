@@ -177,6 +177,47 @@ object EarlyRootEnv {
         }
     }
 
+    /**
+     * Thermal headroom, normalised so the throttling threshold is 1.0, or NaN.
+     *
+     * NaN is what the platform itself returns when it has too little data or is
+     * called more than once a second, and it is propagated unchanged: "not
+     * measured" must never arrive at a gate looking like a cool device.
+     *
+     * Read at ARMING time, where there is no boot animation to race and a
+     * binder call costs nothing anyone is counting.
+     */
+    fun thermalHeadroom(context: Context?): Float {
+        if (context == null) return Float.NaN
+        return try {
+            val pm = context.getSystemService(PowerManager::class.java)
+                ?: return Float.NaN
+            pm.getThermalHeadroom(0)
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] thermal headroom unreadable: $t")
+            Float.NaN
+        }
+    }
+
+    /**
+     * The thermal status as an int, or [EarlyRootPolicy.THERMAL_STATUS_UNAVAILABLE].
+     *
+     * Separate from [thermalStatus], which returns the string a trace line
+     * carries. A gate needs the number and a record needs the token, and
+     * parsing one out of the other is how UNKNOWN eventually gets read as zero.
+     */
+    fun thermalStatusValue(context: Context?): Int {
+        if (context == null) return EarlyRootPolicy.THERMAL_STATUS_UNAVAILABLE
+        return try {
+            val pm = context.getSystemService(PowerManager::class.java)
+                ?: return EarlyRootPolicy.THERMAL_STATUS_UNAVAILABLE
+            pm.currentThermalStatus
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] thermal status unreadable: $t")
+            EarlyRootPolicy.THERMAL_STATUS_UNAVAILABLE
+        }
+    }
+
     private fun value(raw: String?): String =
         raw?.replace('\n', ' ')?.replace('\r', ' ')?.takeIf { it.isNotEmpty() }
             ?: EarlyBootProbePolicy.UNKNOWN

@@ -22,6 +22,32 @@
     <string name="auto_root_armed">Enabled: one attempt per full boot, never after a soft reboot.</string>
     <string name="arm_early_boot_probe">Arm Early Boot Probe</string>
     <string name="early_boot_probe_not_armed">EARLY_JOB_NOT_ARMED. After arming, start one FULL reboot within 10 seconds.</string>
+    <!--
+      The arming outcome is a MODAL, not only a log line.
+      `[*] EARLY_ROOT_ARMED` and `[x] EARLY_ROOT_NOT_ARMED` differ by a few
+      characters in a pane that scrolls, so a refusal was being read as a
+      success and a reboot spent on nothing. Both outcomes get a dialog, and
+      the two titles are deliberately nothing alike.
+    -->
+    <!-- The confirmation dialog: one button arms AND reboots, so it has to say so. -->
+    <string name="early_root_confirm_title">Arm Early Boot Root?</string>
+    <string name="early_root_confirm_body">This arms ONE early root attempt for the next full boot. The chain runs inside the boot animation, before BOOT_COMPLETED.\n\nConfirming REBOOTS THE PHONE IMMEDIATELY. That is deliberate: the arming is only valid for %1$d seconds, and reaching the system reboot menu by hand often takes longer than that on a device that has just slowed down again.\n\nA hard reboot is the recovery boundary if the chain fails.</string>
+    <string name="early_root_confirm_probe">Also arm the Early Boot Probe (observation only)</string>
+    <string name="early_root_confirm_soft_reboot">Soft reboot automatically in the same boot</string>
+    <string name="early_root_confirm_soft_reboot_note">Not available yet — the soft reboot is not part of the early chain.</string>
+    <string name="early_root_confirm_reboot_now">Reboot now</string>
+    <string name="early_root_confirm_cancel">Cancel</string>
+    <!-- Too hot to arm: OK only, with how long cooling takes. -->
+    <string name="early_root_too_hot_title">NOT ARMED — device too hot</string>
+    <string name="early_root_cooldown_hint">Leave the screen off and try again in about %1$d minutes. The reading above is the fact; the estimate comes from one observation of this device cooling ~3 °C per minute with the screen off.</string>
+    <!-- Armed, but the automatic reboot was refused: the arming is rolled back. -->
+    <string name="early_root_reboot_failed_title">NOT ARMED — automatic reboot refused</string>
+    <string name="early_root_reboot_failed_body">The arming was rolled back, so nothing is pending and the next reboot will not run the chain.\n\nThe automatic reboot was refused by the platform:</string>
+    <string name="early_root_arm_ok_title">Armed — reboot now</string>
+    <string name="early_root_arm_refused_title">NOT ARMED — do not reboot</string>
+    <string name="early_root_arm_unknown_title">NOT ARMED — outcome unrecognised</string>
+    <string name="early_root_arm_unknown_body">This build returned an arming line it cannot account for, so it is reporting NOT ARMED rather than guessing. Nothing was scheduled that this app can confirm. The full line is in the log below.</string>
+    <string name="early_root_arm_close">Close</string>
     <string name="arm_early_root">Arm Early Integrated Root (one boot)</string>
     <string name="early_root_not_armed">EARLY_ROOT_NOT_ARMED. Arms ONE early root attempt for the next full boot: the chain runs inside the boot animation, before BOOT_COMPLETED. Needs a verified manual run on this build. A hard reboot is the recovery boundary.</string>
     <string name="notif_channel_name">Root verdict</string>

@@ -254,6 +254,54 @@ object EarlyRootStore {
     fun writeArm(record: String): String? = synchronized(lock) { atomicWrite(ARM_PATH, record) }
 
     /**
+     * Remove the arm record, so the device reads as not armed.
+     *
+     * The one caller is the rollback after a confirmed arming whose automatic
+     * reboot was refused: the owner's decision is that nothing stays pending in
+     * that case, and a cancelled job beside a live arm record would be the
+     * worst of both - the UI would say ARMED and no job would exist to honour
+     * it.
+     *
+     * An already-absent record is SUCCESS, not a failure: the postcondition
+     * being asked for is "not armed", and a file that was never there already
+     * satisfies it. Anything else refuses, loudly, because a rollback that
+     * silently leaves the record behind is how a stale authorisation outlives
+     * the job it authorised.
+     *
+     * The parent is fsynced for the same reason every write here is: the
+     * rollback is immediately followed by the owner rebooting manually, and an
+     * unlink that has not reached the disk did not happen.
+     */
+    fun deleteArm(): String? = synchronized(lock) {
+        val target = File(ARM_PATH)
+        try {
+            /*
+             * Os.unlink, and ENOENT is the success case - never File.exists().
+             *
+             * exists() answers a boolean to a question with three answers: it
+             * returns false for ANY failed stat, EACCES and EIO included. Here
+             * that would report "already gone" for a record that is present and
+             * unreachable, which is the rollback claiming to have removed an
+             * authorisation that is still on disk. Unlinking and reading the
+             * errno keeps absent and unreadable apart (same rule as read()).
+             */
+            try {
+                Os.unlink(ARM_PATH)
+            } catch (e: ErrnoException) {
+                if (e.errno == OsConstants.ENOENT) {
+                    // Already not armed, which is the postcondition asked for.
+                    return@synchronized null
+                }
+                throw e
+            }
+            fsyncParent(target)
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] cannot remove $ARM_PATH", t)
+            "${t.javaClass.simpleName}: ${t.message}"
+        }
+    }
+
+    /**
      * Move a previous arming cycle's records aside before a new one is written.
      *
      * Same rule [EarlyBootProbeStore.archivePreviousCycle] documents: the
