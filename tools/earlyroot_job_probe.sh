@@ -7,19 +7,27 @@
 # instrumentation inside DFReroot can see it (docs/HANDOFF.md). The scheduler's
 # own state is the only place the answer can be.
 #
-# RESOLVED on 2026-10-13, by this script's own first run: it is (a),
+# HALF-RESOLVED on 2026-10-13, by this script's own first run: it is (a),
 # ready-and-deferred. The dump showed `Unsatisfied constraints:` EMPTY, with
 # TIMING_DELAY satisfied at ~16.5 s and DEADLINE at ~26.7 s, and both jobs were
-# dispatched at 701.7 s. So the wait is not in the constraint layer at all.
+# dispatched at 701.7 s. So the wait is not in the constraint layer - and
+# dropping the minimum latency, the obvious fix, would have changed nothing.
 #
-# What the source says that state means: isReadyToBeExecutedLocked() checks
-# constraints first and THEN `if (checkIfRestricted(job) != null) return false`.
-# A JobRestriction is not a constraint - it is a separate veto - so "every
-# constraint satisfied" and "will not be dispatched" are compatible, and the
-# dump prints the veto on its own lines (`Restricted due to:` and the
-# `!restricted=` term of `Ready:`). This revision captures those; the first one
-# did not, which is why the first capture narrowed the question without closing
-# it.
+# WHAT THAT DOES NOT ESTABLISH, and an earlier revision of this header claimed
+# it did: WHICH post-constraint term held the job. From the source,
+# isReadyToBeExecutedLocked() evaluates the constraints and then five further
+# terms in order - jobReady (job.isReady() is itself more than the constraint
+# columns), jobExists/userStarted/!backingUp, `checkIfRestricted(job) != null`,
+# jobPending||jobActive, and isComponentUsable(job) - and a job that passes all
+# of them still waits on JobConcurrencyManager for a slot. A JobRestriction is
+# one of those, not the only one, and the OLAF timing correlation is a
+# correlation. Naming it as the located mechanism would be the fifth causal
+# claim in this investigation stated ahead of its evidence.
+#
+# So the open question is now narrow and the dump answers it directly: the
+# per-job `Ready: <bool> (job=... !restricted=... !pending=... !active=... )`
+# line decomposes the terms, and `Restricted due to:` names a restriction when
+# there is one. This revision captures both; the first did not.
 #
 # The original fork, kept for the record:
 # Two hypotheses remained after force-batching was refuted from AOSP source
@@ -55,7 +63,8 @@
 PKG=com.polygraphene.df.reroot
 JOB=1145459282
 PROBE_JOB=1145459269          # the observation-only probe, for comparison
-NS=dfr-early-root
+NS=dfr-early-root                            # DfrEarlyRoot's dispatching path
+PROBE_NS=dfr-early-boot-probe                # EarlyBootProbePolicy.EXPECTED_NAMESPACE
 DURATION=${1:-600}
 INTERVAL=${2:-5}
 OUT=/sdcard/Download/dfr_job_probe_$(date +%Y%m%d_%H%M%S).txt
@@ -117,42 +126,82 @@ while [ "$(cut -d. -f1 /proc/uptime)" -lt "$END" ]; do
     say "########## sample $N  uptime_s=$(cut -d' ' -f1 /proc/uptime)  $(date -u +%H:%M:%S) ##########"
     DUMP=$("$DUMPSYS" jobscheduler 2>&1)
     say "[dumpsys exit_status=$?]"
-    for J in "$JOB" "$PROBE_JOB"; do
-        say "--- job $J: the whole per-job block ---"
-        # The WHOLE block, not a keyword filter. The first revision grepped for
-        # a list of words and dropped parts of the per-job section - the owner's
-        # 2026-10-13 capture says so - and the lines that decide this question
-        # are not in that list.
-        echo "$DUMP" | grep -A 80 "/$J:" >> "$OUT" 2>&1
-        say "--- job $J: THE two deciding lines ---"
-        # Why these two, from AOSP source:
+    # Each job carries its OWN namespace. The namespace is part of a
+    # JobScheduler job's identity, so passing the dispatching job's namespace
+    # for the probe's id asks about a job that does not exist - it would have
+    # recorded a confident answer about nothing. EarlyBootProbePolicy's
+    # EXPECTED_NAMESPACE is `dfr-early-boot-probe`; the dispatching path's is
+    # `dfr-early-root`.
+    for SPEC in "$JOB $NS" "$PROBE_JOB $PROBE_NS"; do
+        # shellcheck disable=SC2086
+        set -- $SPEC
+        J=$1
+        JNS=$2
+        say "--- job $J (ns=$JNS): the whole per-job block ---"
+        # The WHOLE block, delimited at its own boundaries. Two defects, in
+        # opposite directions, both of which could put another job's answer
+        # under this job's heading:
         #
-        #   isReadyToBeExecutedLocked() evaluates constraints FIRST and then
-        #   `if (checkIfRestricted(job) != null) return false;`. A JobRestriction
-        #   is NOT a constraint: it is a separate veto layer. So a job can print
-        #   "Unsatisfied constraints:" EMPTY and still not run - which is exactly
-        #   the state captured on 2026-10-13, where both jobs sat READY from
-        #   ~26.7 s and were dispatched at 701.7 s.
+        #   - the first revision grepped the block for a list of keywords and
+        #     dropped parts of it - the owner's 2026-10-13 capture says so -
+        #     and the lines that decide this question were not in that list;
+        #   - `grep -A 80` then reads a FIXED 80 lines, which on a system uid
+        #     with many registered jobs runs past this job's block and into the
+        #     next one's, while a longer block puts the wanted line beyond the
+        #     limit. Either way the attribution is wrong, and a wrong
+        #     attribution here selects the wrong scheduling fix.
         #
-        #   The dump prints, per job, `Restricted due to: <reasons>.` or
-        #   `... none.`, and `Ready: <bool> (job=... !restricted=<bool> ...)`.
-        #   `!restricted=false` is the confirmation; `Restricted due to:` names
-        #   which restriction. Neither appears in `cmd jobscheduler
-        #   get-job-state`, which is why the earlier "PERSISTED READY" reading
-        #   could not settle it.
-        echo "$DUMP" | grep -A 80 "/$J:" | grep -E 'Restricted due to:|^ *Ready: ' >> "$OUT" 2>&1
+        # So the block is cut at the next job header instead of at a line count.
+        # `job_block` is used for both the raw copy and the narrowed lines, so
+        # the two can never disagree about which block they came from.
+        job_block() { echo "$DUMP" | awk -v id="/$1:" '
+            index($0, id) && /JOB #/ { inb = 1; print; next }
+            inb && /JOB #/          { exit }
+            inb                      { print }
+        '; }
+        BLOCK=$(job_block "$J")
+        if [ -z "$BLOCK" ]; then
+            say "[no block for job $J in this dump - not registered, or the header shape changed]"
+        else
+            echo "$BLOCK" >> "$OUT" 2>&1
+        fi
+        say "--- job $J: THE deciding lines ---"
+        # Why these, from AOSP source. isReadyToBeExecutedLocked() evaluates
+        # the constraints and then, in order, FIVE further terms - any one of
+        # which returns false with every constraint satisfied:
+        #
+        #   jobReady  = job.isReady() || evaluateControllerStatesLocked(job)
+        #   jobExists / userStarted / !backingUp
+        #   checkIfRestricted(job) != null          <- a JobRestriction veto
+        #   jobPending || jobActive
+        #   isComponentUsable(job)                  <- package+service viable
+        #
+        # and a job that passes all of them still waits on
+        # JobConcurrencyManager for a slot. So "Unsatisfied constraints: empty
+        # and not dispatched" does NOT identify the restriction layer by
+        # itself - it only says the wait is past the constraints. The dump's
+        # `Ready:` line is what decomposes it, term by term, and
+        # `Restricted due to:` is what names a restriction when there is one.
+        # `cmd jobscheduler get-job-state` prints neither, which is why the
+        # earlier "PERSISTED READY" reading narrowed the question without
+        # closing it.
+        echo "$BLOCK" | grep -E 'Restricted due to:|^ *Ready: ' >> "$OUT" 2>&1
         say "--- job $J: get-job-state (coarser, kept for continuity) ---"
-        "$CMD" jobscheduler get-job-state -n "$NS" "$PKG" "$J" >> "$OUT" 2>&1
+        "$CMD" jobscheduler get-job-state -n "$JNS" "$PKG" "$J" >> "$OUT" 2>&1
     done
-    # The two restriction sources that can produce the veto above. AOSP ships
-    # exactly one JobRestriction - ThermalStatusRestriction - and at
-    # THERMAL_STATUS_MODERATE (2) it restricts a PRIORITY_DEFAULT job outright,
-    # while at LIGHT (1) it restricts only MIN and LOW. This job prints
-    # `Priority: 300 [DEFAULT]`, so the thermal reading is decisive, not
+    # The restriction sources, for the case where `Restricted due to:` names
+    # one. AOSP ships exactly one JobRestriction - ThermalStatusRestriction -
+    # and at THERMAL_STATUS_MODERATE (2) it restricts a PRIORITY_DEFAULT job
+    # outright, while at LIGHT (1) it restricts only MIN and LOW. This job
+    # prints `Priority: 300 [DEFAULT]`, so the thermal reading is decisive, not
     # background. Samsung adds its own (`restrictJobsByOlaf` / Freecess), whose
-    # state this dump also prints.
+    # state this dump also prints. Capturing these is NOT the same as having
+    # established that a restriction is what held the job: that is what the
+    # per-job lines above are for.
     say "--- restriction sources ---"
     echo "$DUMP" | grep -iE 'thermal|olaf|freecess|restrict' >> "$OUT" 2>&1
+    # Concurrency is one of the alternative mechanisms, not colour: a job that
+    # passes every term of isReadyToBeExecutedLocked() still waits here.
     say "--- concurrency: is anything else occupying the slots ---"
     echo "$DUMP" | grep -iE 'Max job counts|Running jobs|mNumRunning|active jobs' >> "$OUT" 2>&1
     say ""

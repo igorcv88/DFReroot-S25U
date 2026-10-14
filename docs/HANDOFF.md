@@ -25,9 +25,10 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
-> **The scheduler fork is CLOSED, 2026-10-13/14: the wait is a `JobRestriction`
-> veto, not a constraint. Everything below this block predates it, including the
-> two places that still describe the fork as open.**
+> **The scheduler fork is HALF-CLOSED, 2026-10-13/14: the wait is past the
+> constraint layer, and which post-constraint term holds the job is NOT yet
+> established. Everything below this block predates it, including the two places
+> that still describe the fork as open.**
 >
 > `tools/earlyroot_job_probe.sh` ran from `rish` against `2.0.26-dzif` while the
 > wait was in progress. For the dispatching job it read `Required constraints:
@@ -43,21 +44,27 @@ acceptance criteria for the next signed build. If this file disagrees with
 > and **dropping the minimum latency would have changed nothing** - which was the
 > obvious fix and is the wrong one.
 >
-> **Where the wait actually is, from AOSP source:**
-> `isReadyToBeExecutedLocked()` evaluates the constraints and *then*
-> `if (checkIfRestricted(job) != null) return false;`. A `JobRestriction` is not
-> a constraint; it is a separate veto layer, so "every required constraint
-> satisfied" and "will not be dispatched" are not in conflict - together they are
-> that layer's signature.
+> **What it does NOT establish, and an earlier revision of this block claimed it
+> did: WHICH term.** `isReadyToBeExecutedLocked()` evaluates the constraints and
+> then five further terms in order - `jobReady` (`job.isReady()`, itself more
+> than the constraint columns the dump lists),
+> `jobExists`/`userStarted`/`!backingUp`,
+> `checkIfRestricted(job) != null`, `jobPending || jobActive`, and
+> `isComponentUsable(job)` - and a job passing all five still waits on
+> `JobConcurrencyManager` for a slot. A `JobRestriction` is **one** of those.
+> Naming it as the located mechanism was the fifth causal claim in this
+> investigation stated ahead of its evidence; Codex caught it on PR #66.
 >
-> **Two source-grounded candidates, with different fixes.** Samsung
-> OLAF/Freecess (`restrictJobsByOlaf` is not in AOSP, and its
-> `restrict=true → restrict=false reason=timeout` transition 1.5 s before
-> dispatch is the shape of the whole 675 s wait); and AOSP
-> `ThermalStatusRestriction`, the only restriction AOSP ships, which at
-> `THERMAL_STATUS_MODERATE` restricts a `PRIORITY_DEFAULT` job outright while at
-> `LIGHT` it restricts only `MIN`/`LOW` - this job is `PRIORITY_DEFAULT` and
-> thermal status `1` was already seen in an earlier capture.
+> **Three live possibilities, none excluded by the capture.** A
+> `JobRestriction` - Samsung OLAF/Freecess, whose
+> `restrict=true → restrict=false reason=timeout` 1.5 s before dispatch is a
+> *correlation*, or AOSP `ThermalStatusRestriction`, which at `MODERATE`
+> restricts a `PRIORITY_DEFAULT` job outright (this job is `PRIORITY_DEFAULT`,
+> and thermal status `1` was already seen). **Concurrency**: both jobs were
+> released in a *wave of other jobs*, at least as consistent with slots freeing
+> as with a restriction lifting. **`isComponentUsable`**: the service is hosted
+> inside `system_server` (`android:process="system"`), and nobody has read what
+> the package manager said about it in that window.
 >
 > **The read that distinguishes them, and why the last one could not.**
 > `dumpsys jobscheduler` prints `Restricted due to: …` and
@@ -74,11 +81,12 @@ acceptance criteria for the next signed build. If this file disagrees with
 > unreadable record must not print like an absent one (AGENTS.md 3.7).
 >
 > **No scheduling change is justified yet, and that is the operative
-> instruction.** The two candidates imply opposite work - one that JobScheduler
-> cannot be relied on for this on DZIF at all, the other that the job must be
-> expressed as expedited or user-initiated to clear the thermal threshold - and
-> one dump taken *during* the wait tells them apart. Run the probe on the next
-> late boot before touching the strategy.
+> instruction.** The candidates imply divergent work - OLAF would mean
+> JobScheduler cannot carry this on DZIF at all; thermal would mean expressing
+> the job as expedited or user-initiated; concurrency would mean neither, and
+> would put the priority and the slot accounting in play instead. One dump taken
+> *during* the wait, carrying the `Ready:` decomposition, separates them. Run the
+> probe on the next late boot before touching the strategy.
 
 > **Boot 1's primary evidence is read, 2026-10-13 — and it says root lands
 > AFTER the screen. Everything below predates it.**
@@ -181,7 +189,8 @@ acceptance criteria for the next signed build. If this file disagrees with
 > which is the designed behaviour (§9), not a defect. And the job's punctuality
 > is not settled by one punctual boot - 299 s, 334.4 s and 521.7 s happened with
 > the same JobInfo. The ready-vs-not-ready fork described below is **closed**
-> (see the top block: it is ready-and-deferred, a `JobRestriction` veto), and
+> (see the top block: it is ready-and-deferred; *which* post-constraint term
+> defers it is still open), and
 > `tools/earlyroot_job_probe.sh` is still the read for the next **late** boot -
 > now for *which* restriction.
 >
@@ -221,7 +230,8 @@ acceptance criteria for the next signed build. If this file disagrees with
 > dropping the minimum latency is only correct under the second hypothesis, and
 > it is the obvious wrong move under the first.
 > **Resolved 2026-10-13 as the first: ready-and-deferred.** It ran, and
-> `Unsatisfied constraints:` came back empty - see the top block.
+> `Unsatisfied constraints:` came back empty. Which post-constraint term holds
+> the job is a separate, still-open question - see the top block.
 >
 > **(3) The broadcast trigger cannot work on this firmware.** `sf_stop_bootanim`
 > 15:26:40.469, `LOCKED_BOOT_COMPLETED` 15:26:40.760 — the animation stops

@@ -3409,7 +3409,7 @@ the minimum latency, which is only correct under (b).
 timestamp is the first statement of `onStartJob`, so the 298.6 s elapsed before
 any of this app's code ran.
 
-#### RESOLVED as (a): the wait is not in the constraint layer
+#### HALF-RESOLVED as (a): the wait is past the constraint layer
 
 `tools/earlyroot_job_probe.sh`, run from `rish` on 2026-10-13 against
 `2.0.26-dzif`, took that sample while the wait was in progress. What it read,
@@ -3437,21 +3437,48 @@ Both the dispatching job and the observation-only probe were dispatched together
 at 701.7 s, during a wave of other jobs, 1.5 s after
 `restrictJobsByOlaf: restrict=false reason=timeout`.
 
-#### Where the veto lives, from AOSP source
+#### What that does NOT establish — five candidate terms, not one
 
-`JobSchedulerService.isReadyToBeExecutedLocked()` evaluates the constraints and
-**then**:
+An earlier revision of this section, and of the HANDOFF block that points at
+it, said the mechanism was **located**: a `JobRestriction` veto. That was the
+fifth causal claim in this investigation stated ahead of its evidence, and
+Codex caught it on PR #66.
+
+What the capture shows is that the wait is **past the constraints**. What holds
+a constraint-satisfied job is, from `isReadyToBeExecutedLocked()`, any of five
+further terms evaluated in this order:
 
 ```java
-if (checkIfRestricted(job) != null) return false;
+final boolean jobReady = job.isReady() || evaluateControllerStatesLocked(job);
+if (!jobReady) return false;                       // 1
+…
+if (!jobExists || !userStarted || backingUp) return false;   // 2
+if (checkIfRestricted(job) != null) return false;            // 3  a JobRestriction
+if (jobPending || jobActive) return false;                   // 4
+return isComponentUsable(job);                               // 5
 ```
 
-A `JobRestriction` is **not** a constraint. It is a second, independent veto
-layer, so "every required constraint satisfied" and "will not be dispatched" are
-not contradictory — they are precisely what a restriction looks like from the
-constraint columns. The captured state is that signature.
+and a job that passes **all five** still waits on `JobConcurrencyManager` for a
+slot. Three of those are live possibilities here and none is excluded by what
+was captured:
 
-Two source-grounded candidates remain, and they have different fixes:
+- **(3) a `JobRestriction`.** The OLAF transition 1.5 s before dispatch is a
+  *correlation*, which is what made it attractive and what disqualifies it as
+  proof.
+- **(4) concurrency / pending-queue.** Both jobs were released in a **wave of
+  other jobs**, which is at least as consistent with slots freeing up as with a
+  restriction lifting.
+- **(5) `isComponentUsable`.** The service is hosted inside `system_server`
+  (`android:process="system"`), an unusual arrangement for a scheduled job, and
+  nothing here has read what the package manager says about it in that window.
+
+Note also that `job.isReady()` in term 1 is **not** the same thing as the
+`Unsatisfied constraints:` listing the dump prints — which is exactly why the
+`Ready:` line, which decomposes the terms, is the read that matters and the
+constraint columns alone are not.
+
+Two source-grounded candidates exist **for term 3 specifically**, and they have
+different fixes:
 
 - **Samsung OLAF / Freecess.** `restrictJobsByOlaf` is not in AOSP; the
   `restrict=true` → `restrict=false reason=timeout` transition observed 1.5 s
@@ -3469,6 +3496,8 @@ Two source-grounded candidates remain, and they have different fixes:
 
 #### What the next capture needs, and why the first one could not give it
 
+The distinguishing read is no longer "is it ready or not" but **which term**:
+
 `dumpsys jobscheduler` prints the deciding fields **per job**:
 
 ```
@@ -3483,20 +3512,29 @@ lines; its second run read **zero** samples and died with `dumpsys: not found`,
 because the environment inherited through `su -c` need not carry `/system/bin`.
 Both are defects of the instrument, not readings of the device:
 
-- the per-job block is now captured whole (`grep -A 80`) **and** then narrowed
-  to those two lines, so a future keyword list cannot silently exclude the
-  answer;
+- the per-job block is now captured whole **and cut at the next job header**,
+  then narrowed to those two lines, so neither a keyword list nor a line count
+  can misattribute them. `grep -A 80` was wrong in both directions: on a system
+  uid with many registered jobs it runs past the target's block into the next
+  one's, while a longer block puts the wanted line beyond the limit.
+  Demonstrated on a synthetic dump, where the old form emitted **three**
+  `Restricted due to:` lines under one job's heading — the second of them
+  naming OLAF, i.e. the exact wrong attribution that would have selected the
+  wrong fix;
 - `dumpsys` and `cmd` are resolved by absolute path, the `PATH` is exported, and
   a missing binary is a `FATAL` exit rather than a quiet run of nothing;
 - the per-boot records report their own read status, because `rish` could not
   read some of `/data/system` on that boot and an unreadable record must not
   print like an absent one (AGENTS.md 3.7).
 
-**No scheduling change is justified yet.** The two candidates above have
-different fixes — one would mean DFReroot cannot rely on JobScheduler on this
-firmware at all, the other would mean the job must be expressed as expedited or
-user-initiated to clear the thermal threshold — and a dump taken *during* the
-wait distinguishes them. Changing the strategy before that read is the
+**No scheduling change is justified yet**, and the reason is now stronger than
+before: it is not that two candidate *restrictions* are unresolved, it is that
+the restriction layer has not been shown to be the layer at all. The candidate
+fixes diverge completely — OLAF would mean DFReroot cannot rely on JobScheduler
+for this on DZIF; thermal would mean the job must be expressed as expedited or
+user-initiated; concurrency would mean neither, and would make the priority
+and the slot accounting the thing to change. A dump taken *during* the wait,
+carrying the `Ready:` decomposition, separates them. Changing the strategy before that read is the
 trial-and-error this investigation has already paid for four times.
 
 #### The trigger ordering on DZIF, and the correction it forces
