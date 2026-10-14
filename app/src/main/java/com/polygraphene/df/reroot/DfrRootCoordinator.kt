@@ -13,6 +13,8 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import java.io.File
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The one execution path: ksud staging, the hop into network_stack, the
@@ -459,22 +461,40 @@ object DfrRootCoordinator {
             try {
                 /*
                  * The reporter is also the only clock inside the transaction.
-                 *
-                 * Each callback is timestamped into an in-memory list and
-                 * nothing else: no I/O, no formatting beyond a label, and a
-                 * hard cap, because this runs on a binder thread inside the
-                 * interval being measured. A chatty native run must not be
-                 * able to grow this without bound either.
+                 * Each callback is timestamped and nothing else: no I/O, no
+                 * formatting beyond a short label, and a hard cap, because all
+                 * of it runs inside the interval being measured.
                  */
                 val profileStart = EarlyRootEnv.monotonicNow()
-                val marks = ArrayList<String>(NATIVE_PROFILE_MAX_MARKS)
+                /*
+                 * Concurrent, not ArrayList, and the reason is the threading of
+                 * this transaction rather than taste.
+                 *
+                 * `reporter` is a Binder we hand to the remote process, so its
+                 * callbacks are dispatched on OUR binder thread pool while this
+                 * thread sits blocked inside transact(5). The native side
+                 * reports sequentially, but nothing says the pool uses one
+                 * thread for all of them, and `transact` returning establishes
+                 * no happens-before with those writes. An ArrayList here is a
+                 * race on both counts: a corrupted list, and a timeline the
+                 * reader may not see in full.
+                 *
+                 * A queue plus an atomic count keeps the add lock-free, which
+                 * matters because every one of these runs inside the interval
+                 * being measured.
+                 */
+                val marks = ConcurrentLinkedQueue<String>()
+                val markCount = AtomicInteger(0)
                 val reporter = object : Binder() {
                     override fun onTransact(
                         code: Int, data: Parcel, reply: Parcel?, flags: Int
                     ): Boolean {
                         try {
                             val line = data.readString() ?: ""
-                            if (marks.size < NATIVE_PROFILE_MAX_MARKS) {
+                            // getAndIncrement, not size-then-add: two callbacks
+                            // on different pool threads must not both pass the
+                            // cap check and overshoot it.
+                            if (markCount.getAndIncrement() < NATIVE_PROFILE_MAX_MARKS) {
                                 marks.add(
                                     "${EarlyRootEnv.monotonicNow() - profileStart}" +
                                         ":${profileLabel(line)}"
@@ -495,11 +515,17 @@ object DfrRootCoordinator {
                     // After the transaction, so it cannot lengthen it. One call,
                     // one line, whatever the host does with it.
                     try {
+                        // `reported` is every callback the native side made;
+                        // `marks` is what the cap let us keep. Recording both is
+                        // what makes a truncated timeline say so instead of
+                        // reading as a short one.
+                        val reported = markCount.get()
+                        val kept = marks.toList()
                         host.nativeProfile(
                             "total_ms=${EarlyRootEnv.monotonicNow() - profileStart}" +
-                                " marks=${marks.size}" +
-                                (if (marks.size >= NATIVE_PROFILE_MAX_MARKS) " CAPPED" else "") +
-                                " " + marks.joinToString(" ")
+                                " reported=$reported kept=${kept.size}" +
+                                (if (reported > kept.size) " CAPPED" else "") +
+                                " " + kept.joinToString(" ")
                         )
                     } catch (t: Throwable) {
                         Log.e(TAG, "native profile emit failed", t)

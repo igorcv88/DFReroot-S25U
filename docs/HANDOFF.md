@@ -78,9 +78,12 @@ acceptance criteria for the next signed build. If this file disagrees with
 > callback timestamped in memory, emitted as ONE line after the transaction
 > returns. One emit and it is after transaction 5 (inside the callback it would
 > add I/O to every progress line, on a binder thread, inside the measured
-> interval); the accumulator is capped and says `CAPPED` when truncated; no gate
-> may read it. Three audit guards, each mutation-checked. `EarlyRootPolicyTest`
-> 238/238.
+> interval); the accumulator is capped AND concurrent - the callbacks arrive on
+> binder threads while `transact(5)` blocks the caller, so a plain `ArrayList`
+> races on visibility and structure and a size-then-add cap check lets two pool
+> threads past it - and the line carries `reported=` beside `kept=` so a
+> truncated timeline says so; no gate may read it. Five audit guards, each
+> mutation-checked. `EarlyRootPolicyTest` 238/238.
 >
 > **Second thermal data point, in the predicted direction.** Punctual callback
 > with `Thermal Status: 1`, which is what the predicate predicts for a

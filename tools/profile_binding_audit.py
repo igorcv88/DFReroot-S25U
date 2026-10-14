@@ -2518,6 +2518,19 @@ def audit():
         fail("the native profile accumulator is no longer capped; a chatty "
              "reporter path would grow it without bound inside the measured "
              "interval")
+    # (2b) and it is written from BINDER THREADS while this thread is blocked
+    #      inside transact(5), then read after it returns. transact returning
+    #      establishes no happens-before with those writes, and nothing says the
+    #      pool uses one thread for all of them, so a plain ArrayList races on
+    #      both visibility and structure.
+    if "ConcurrentLinkedQueue" not in coord_src or "AtomicInteger" not in coord_src:
+        fail("the native profile accumulator is not concurrent; the reporter's "
+             "callbacks run on binder threads while transact(5) blocks this "
+             "one, so a plain list races on both visibility and structure")
+    if "marks.size <" in coord_src:
+        fail("the native profile checks its cap with size-then-add; two "
+             "callbacks on different pool threads can both pass it. The count "
+             "has to be claimed atomically")
     # (3) no gate reads it. It is evidence about timing, never permission.
     for name, src in (("EarlyRootPolicy", code_only(dfr_source("EarlyRootPolicy.java"))),
                       ("EarlyBootProbePolicy", probe_policy_src_for_gate_check)):

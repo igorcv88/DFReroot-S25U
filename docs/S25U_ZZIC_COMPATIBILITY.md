@@ -3588,10 +3588,14 @@ line, once, after the transaction returns**. Three properties, each guarded in
 - **one emit, after transaction 5.** Inside the reporter callback it would add
   I/O to every native progress line, on a binder thread, inside the interval
   being measured. Instrumentation that lengthens what it measures is worthless;
-- **the accumulator is capped** (`NATIVE_PROFILE_MAX_MARKS`), because a chatty
-  path would otherwise grow a list on that binder thread without bound, and the
-  emitted line says `CAPPED` so a truncated timeline is never read as a short
-  one;
+- **the accumulator is capped and concurrent.** Capped because a chatty path
+  would otherwise grow a list on that binder thread without bound, and the line
+  carries `reported=` beside `kept=` plus `CAPPED`, so a truncated timeline says
+  so instead of reading as a short one. Concurrent because the reporter's
+  callbacks are dispatched on *binder threads* while this thread is blocked
+  inside `transact(5)`, and `transact` returning establishes no happens-before
+  with those writes - a plain `ArrayList` races on both visibility and
+  structure, and a size-then-add cap check lets two pool threads both pass it;
 - **no gate reads it.** It is a timing measurement, never permission, and
   neither policy may name it.
 
