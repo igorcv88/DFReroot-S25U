@@ -59,8 +59,12 @@ acceptance criteria for the next signed build. If this file disagrees with
 > `JobRestriction` - Samsung OLAF/Freecess, whose
 > `restrict=true → restrict=false reason=timeout` 1.5 s before dispatch is a
 > *correlation*, or AOSP `ThermalStatusRestriction`, which at `MODERATE`
-> restricts a `PRIORITY_DEFAULT` job outright (this job is `PRIORITY_DEFAULT`,
-> and thermal status `1` was already seen). **Concurrency**: both jobs were
+> restricts a `PRIORITY_DEFAULT` job outright - but **only from `MODERATE` (2)
+> upward**: at `LIGHT` (1) the predicate restricts only `MIN` and `LOW`, so the
+> status `1` seen in an earlier capture argues *against* this candidate rather
+> than for it. That makes the thermal number decisive both ways, and it has to
+> be read **during** the wait: the earlier `1` was not sampled in the 675 s
+> window, so it refutes nothing yet. **Concurrency**: both jobs were
 > released in a *wave of other jobs*, at least as consistent with slots freeing
 > as with a restriction lifting. **`isComponentUsable`**: the service is hosted
 > inside `system_server` (`android:process="system"`), and nobody has read what

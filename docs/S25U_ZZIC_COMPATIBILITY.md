@@ -3491,8 +3491,19 @@ different fixes:
   `PRIORITY_MIN` and `PRIORITY_LOW`; at `MODERATE` a `PRIORITY_DEFAULT` job
   that is neither user-initiated, expedited nor `PRIORITY_HIGH` falls through to
   `return true` — restricted outright. This job prints `Priority: 300
-  [DEFAULT]`, and thermal status `1` was already observed in an earlier capture,
-  so thermal is a decisive reading here, not background colour.
+  [DEFAULT]`.
+
+  **The thermal reading already in hand argues against this candidate, and the
+  asymmetry is the useful part.** Status `1` (`LIGHT`) was observed in an
+  earlier capture, and at `LIGHT` the predicate restricts only `PRIORITY_MIN`
+  and `PRIORITY_LOW` — a `PRIORITY_DEFAULT` job is **not** restricted there.
+  So thermal can only be the mechanism from `MODERATE` (2) upward. That makes
+  the thermal number decisive in **both** directions: a `1` during the wait
+  refutes this candidate outright, while a `2` or higher makes it the leading
+  one. It is also why the status must be read *during* the wait rather than
+  carried over from another capture — the earlier `1` was not sampled in the
+  675 s window, so it does not yet refute anything. The owner's review of
+  PR #66 makes the same point.
 
 #### What the next capture needs, and why the first one could not give it
 
