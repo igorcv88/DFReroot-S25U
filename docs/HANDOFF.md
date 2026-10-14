@@ -25,6 +25,97 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
+> **The scheduler fork is HALF-CLOSED, 2026-10-13/14: the wait is past the
+> constraint layer, and which post-constraint term holds the job is NOT yet
+> established. Everything below this block predates it, including the two places
+> that still describe the fork as open.**
+>
+> `tools/earlyroot_job_probe.sh` ran from `rish` against `2.0.26-dzif` while the
+> wait was in progress. For the dispatching job it read `Required constraints:
+> TIMING_DELAY DEADLINE FLEXIBILITY`, `TIMING_DELAY` satisfied at ≈16.5 s,
+> `DEADLINE` at ≈26.7 s, `readyDeadlineSatisfied: true`, bucket `EXEMPTED`,
+> `Priority: 300 [DEFAULT]` - and **`Unsatisfied constraints:` EMPTY** - with the
+> callback not entered until **≈701.7 s**. Both the dispatching job and the
+> observation-only probe were released together at 701.7 s during a job wave,
+> 1.5 s after `restrictJobsByOlaf: restrict=false reason=timeout`.
+>
+> **Hypothesis (b) is refuted on the device's own accounting.** The restored
+> earliest-run time was not in the future, no delay alarm was being waited on,
+> and **dropping the minimum latency would have changed nothing** - which was the
+> obvious fix and is the wrong one.
+>
+> **What it does NOT establish, and an earlier revision of this block claimed it
+> did: WHICH term.** `isReadyToBeExecutedLocked()` evaluates the constraints and
+> then five further terms in order - `jobReady` (`job.isReady()`, itself more
+> than the constraint columns the dump lists),
+> `jobExists`/`userStarted`/`!backingUp`,
+> `checkIfRestricted(job) != null`, `jobPending || jobActive`, and
+> `isComponentUsable(job)` - and a job passing all five still waits on
+> `JobConcurrencyManager` for a slot. A `JobRestriction` is **one** of those.
+> Naming it as the located mechanism was the fifth causal claim in this
+> investigation stated ahead of its evidence; Codex caught it on PR #66.
+>
+> **Three live possibilities, none excluded by the capture.** A
+> `JobRestriction` - Samsung OLAF/Freecess, whose
+> `restrict=true → restrict=false reason=timeout` 1.5 s before dispatch is a
+> *correlation*, or AOSP `ThermalStatusRestriction`, which at `MODERATE`
+> restricts a `PRIORITY_DEFAULT` job outright - but **only from `MODERATE` (2)
+> upward**: at `LIGHT` (1) the predicate restricts only `MIN` and `LOW`, so the
+> status `1` seen in an earlier capture argues *against* this candidate rather
+> than for it. That makes the thermal number decisive both ways, and it has to
+> be read **during** the wait: the earlier `1` was not sampled in the 675 s
+> window, so it refutes nothing yet. **Concurrency**: both jobs were
+> released in a *wave of other jobs*, at least as consistent with slots freeing
+> as with a restriction lifting. **`isComponentUsable`**: the service is hosted
+> inside `system_server` (`android:process="system"`), and nobody has read what
+> the package manager said about it in that window.
+>
+> **The read that distinguishes them, and why the last one could not.**
+> `dumpsys jobscheduler` prints `Restricted due to: …` and
+> `Ready: … !restricted=<bool> …` per job; `cmd jobscheduler get-job-state`
+> prints neither, which is why the earlier `PERSISTED READY` reading narrowed
+> the question without closing it. The probe's first revision filtered the
+> per-job block by keyword and dropped those lines, and its second run read
+> **zero** samples and died with `dumpsys: not found` because the environment
+> inherited through `su -c` need not carry `/system/bin`. Both were defects of
+> the instrument, and so were the next two.
+>
+> **The extractor has now been wrong three times, in three different ways, and
+> every one of them would have cost the measurement.** `grep -A 80` read a
+> fixed line count: on a uid with many registered jobs it ran past the target
+> into the next job's block - a fixture shows it emitting three
+> `Restricted due to:` lines under one heading, the second naming **OLAF**,
+> which is precisely the wrong attribution - while a longer block put the wanted
+> line past the limit. Its replacement required `JOB #` in the header, and
+> `JobStatus.printUniqueId` prints `#` **only for a job with no namespace**
+> (`<namespace>:<uid>/<id>` otherwise), so it matched neither of ours: **zero
+> lines against the real capture**, as the owner confirmed on PR #66. That one
+> shipped, and it passed a test whose fixture I had invented from memory instead
+> of taking from the device's own output - a verification that proved the
+> opposite of what the device does.
+>
+> So the extractor now has a host test, in `run_tests.sh`:
+> `tools/tests/test_job_probe_extractor.sh` reads the awk program **out of the
+> shipped script** rather than a copy, carries **both** real header shapes, and
+> is mutation-checked against all three defects (require `#` → 7 of 8 checks
+> fail; drop the stop at the next header → 6 of 8 fail).
+>
+> The current revision also queries each job under **its own namespace**
+> (`dfr-early-root` vs `dfr-early-boot-probe`; the namespace is part of a job's
+> identity, so the probe was being asked about where it does not exist),
+> resolves `dumpsys`/`cmd` by absolute path with a `FATAL` exit if either is
+> missing, and makes each `/data/system` record report its own read status,
+> because `rish` could not read some of them and an unreadable record must not
+> print like an absent one (AGENTS.md 3.7).
+>
+> **No scheduling change is justified yet, and that is the operative
+> instruction.** The candidates imply divergent work - OLAF would mean
+> JobScheduler cannot carry this on DZIF at all; thermal would mean expressing
+> the job as expedited or user-initiated; concurrency would mean neither, and
+> would put the priority and the slot accounting in play instead. One dump taken
+> *during* the wait, carrying the `Ready:` decomposition, separates them. Run the
+> probe on the next late boot before touching the strategy.
+
 > **Boot 1's primary evidence is read, 2026-10-13 — and it says root lands
 > AFTER the screen. Everything below predates it.**
 >
@@ -78,9 +169,16 @@ acceptance criteria for the next signed build. If this file disagrees with
 > `bootchecker.rc` is now in the record and confirms
 > `on property:init.svc.zygote=restarting → setprop dev.platform_bootcomplete 0`.
 >
-> **Procedure correction:** `/proc/reset_summary` and `/proc/reset_history`
-> **do not exist on DZIF**. The DropBox `SYSTEM_LAST_KMSG_*` entries and
-> `extra_info` are the sources that do.
+> **Procedure correction, itself corrected:** an earlier revision of this block
+> said `/proc/reset_summary` and `/proc/reset_history` **do not exist on DZIF**.
+> That overreached from one boot and the dossier's own 2026-10-12 record refutes
+> it - `/proc/reset_summary` answered `UPLOAD CAUSE = 0xc8000000 = KERNEL PANIC`
+> on this device. They come and go; on 2026-10-13 both answered ENOENT as uid 0
+> in a boot with no panic. **An absent node is a reading, not proof of a clean
+> boot.** The sources observed in *both* states, and therefore the ones to read
+> first and always, are the DropBox `SYSTEM_LAST_KMSG_*` entries and
+> `extra_info` - which reads *empty* with no panic record, a successful read of
+> nothing. AGENTS.md 3.6.1 carries the rule.
 
 > **First run reporting COMPLETE, 2026-10-13 — and the evidence packet for it
 > does not exist yet. Everything below predates it.**
@@ -118,8 +216,11 @@ acceptance criteria for the next signed build. If this file disagrees with
 > **Two things this run does not touch.** The modules were not initialised,
 > which is the designed behaviour (§9), not a defect. And the job's punctuality
 > is not settled by one punctual boot - 299 s, 334.4 s and 521.7 s happened with
-> the same JobInfo, the ready-vs-not-ready fork below is untouched, and
-> `tools/earlyroot_job_probe.sh` is the read for the next **late** boot.
+> the same JobInfo. The ready-vs-not-ready fork described below is **closed**
+> (see the top block: it is ready-and-deferred; *which* post-constraint term
+> defers it is still open), and
+> `tools/earlyroot_job_probe.sh` is still the read for the next **late** boot -
+> now for *which* restriction.
 >
 > **Worth more than it looks:** that collector also reads `dev.bootcomplete` /
 > `dev.platform_bootcomplete` from a boot where nothing tore userspace down.
@@ -156,6 +257,9 @@ acceptance criteria for the next signed build. If this file disagrees with
 > ADB, output in `/sdcard/Download/`. Run it before changing the scheduling;
 > dropping the minimum latency is only correct under the second hypothesis, and
 > it is the obvious wrong move under the first.
+> **Resolved 2026-10-13 as the first: ready-and-deferred.** It ran, and
+> `Unsatisfied constraints:` came back empty. Which post-constraint term holds
+> the job is a separate, still-open question - see the top block.
 >
 > **(3) The broadcast trigger cannot work on this firmware.** `sf_stop_bootanim`
 > 15:26:40.469, `LOCKED_BOOT_COMPLETED` 15:26:40.760 — the animation stops

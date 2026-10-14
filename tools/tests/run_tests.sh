@@ -26,6 +26,13 @@ sh tools/tests/test_su_core.sh
 # typo in one costs a second on any host instead of a whole signed NDK build.
 sh tools/tests/exp_syntax_check.sh
 
+# The job probe's per-job block extractor. It has been wrong twice - a fixed
+# line count that bled into the next job, then a header matcher that required
+# `#` and so excluded every NAMESPACED job, i.e. both of ours. Fixtures carry
+# both real header shapes, because the second defect passed a test whose
+# fixture was invented from memory.
+sh tools/tests/test_job_probe_extractor.sh
+
 # Gate G rule tests: the modversion coverage requirement, on synthetic .ko files.
 # Pure host Python - no kernel, no NDK, no device.
 python3 tools/tests/test_ko_audit.py
