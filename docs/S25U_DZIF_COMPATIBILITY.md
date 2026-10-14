@@ -120,11 +120,30 @@ Both images are `avbtool 1.4.0`, both require libavb 1.0, and both chain
 
 The geometry being identical is unsurprising: `/vendor` inherits the same
 `15/AP3A.240905.015.A2` base on both builds, so the partition is the same size
-with the same layout. **The root digest differing is the load-bearing fact.** It
-proves the DZIF `/vendor` image is not bit-identical to ZZIC's, which means no
-`/vendor`-derived pin can be carried over - not the hashtree fields, and above
-all not `vendor_target_sha256`. Before this, that was an assumption the record
-politely called "UNKNOWN"; it is now a measurement.
+with the same layout.
+
+**This section drew the wrong conclusion from the digests, and the correction is
+the point of keeping it.** It said the differing root digest "proves the DZIF
+`/vendor` image is not bit-identical to ZZIC's", and therefore that no
+`/vendor`-derived pin could carry over. That inference is invalid: an AVB
+hashtree root digest is computed over the image data **together with the salt**,
+and the salts differ. Two builds with byte-identical `/vendor` data and fresh
+salts produce different root digests, so the difference is fully accounted for
+by the salt and establishes nothing about the data.
+
+The device then settled it in the other direction. The root-side read recorded
+in `evidence/dzif/README.md` returns
+`308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049` for
+`/vendor/lib64/libstagefrighthw.so` - the same digest ZZIC pins - at the same
+51,632 bytes and the same `u:object_r:vendor_file:s0`. Identical geometry, an
+identical file and a fresh salt are what a re-signed, substantially unchanged
+`/vendor` looks like.
+
+So the durable rule is weaker than the one written here, and is about method
+rather than about bytes: **no `/vendor`-derived value may be *assumed* to carry
+over; each must be re-read.** Each was, and this one happens to be unchanged -
+which is a measurement either way, and that is the whole difference between it
+and the assumption the record previously called "UNKNOWN".
 
 It cuts the other way too, and that is the useful half: `AGENTS.md` §3.3 makes
 the vendor ELF's identity rest on the AVB chain precisely because the file
