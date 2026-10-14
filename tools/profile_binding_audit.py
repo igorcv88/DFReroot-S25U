@@ -2471,6 +2471,18 @@ def audit():
             fail("%s sets the stop flag before the stop reason; the worker can "
                  "then observe the stop and write UNKNOWN for a reason the "
                  "platform did supply" % name)
+    # The reason is passed BY NAME, and that is a correctness requirement, not
+    # style. `stopReason` sits before the trailing `abandoned` lambda in
+    # gateAndDispatch's parameter list, so a caller that passed its lambda
+    # positionally would bind it to the wrong parameter. Trailing-lambda syntax
+    # (DfrBootReceiver's `) { false }`) binds to the LAST parameter and takes
+    # the default, which is correct; the job service's extra argument has to be
+    # named for the same reason.
+    if "stopReason = {" not in early_root_job_src:
+        fail("DfrEarlyRootJobService no longer passes stopReason by name; it "
+             "sits before the trailing abandoned lambda, so a positional "
+             "argument binds to the wrong parameter")
+
     # Both records carry both diagnostics - checked on the RECORD, not on the
     # file. An earlier version of this guard searched the whole source, and a
     # mutation that stripped the trace detail still passed because the same
