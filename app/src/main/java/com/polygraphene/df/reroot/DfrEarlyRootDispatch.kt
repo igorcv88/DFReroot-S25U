@@ -275,11 +275,99 @@ object DfrEarlyRootDispatch {
             return false
         }
         /*
-         * The readiness sweep: the four components the hop actually uses. This is
-         * the expensive part of the dispatch and the reason a cancelled run must
-         * not simply run to completion.
+         * The readiness TRIGGER: sweep the four components the hop actually
+         * uses, and keep sweeping until they are there or the window closes.
+         *
+         * This used to be one sweep at whatever instant the clock handed us,
+         * and boot `cea5208c` measured the cost: the hop's target process was
+         * bound at 14011 ms (`am_proc_bound`, i.e. `attachApplication`, so the
+         * moment its IApplicationThread exists at all) and the callback arrived
+         * at 15354 ms. 1343 ms went to a timer waiting for something that had
+         * already happened. The floor the timer was approximating is
+         * STRUCTURAL - `boot_progress_ams_ready` was 13312 ms and AMS starts no
+         * app process before it - so no constant here can beat ~13.4 s, and a
+         * fixed latency has to be conservative against a variance measured
+         * exactly once. See EarlyRootPolicy.readinessWait.
+         *
+         * The loop has no judgement of its own. Every decision is
+         * `readinessWait`, which is pure and host-tested, and it can only
+         * answer "sweep again" or "stop" - the verdict stays with
+         * `EarlyRootPolicy.evaluate` below, unchanged, which still refuses
+         * anything that is not exactly NETWORKSTACK_READY. A wait that could
+         * promote a PARTIAL sweep into a pass would be the absence-as-
+         * permission this repository exists to prevent (AGENTS.md 2); a wait
+         * that only delays the same gate cannot.
+         *
+         * `abandoned` is checked on every iteration, not once at the end: this
+         * is now the one place the dispatch can spend seconds, so a scheduler
+         * that reclaims the execution mid-wait must not find us still sweeping
+         * AMS during boot.
          */
-        val readiness = StageHop.probeReadiness(context)
+        /*
+         * Whether this thread may be blocked at all, decided before the first
+         * sweep rather than discovered at the first sleep.
+         *
+         * Both triggers run this sequence on a worker of their own today - the
+         * job service builds a Runnable, and DfrBootReceiver starts a thread
+         * precisely so a trace write never happens on its looper. The wait is
+         * what makes that load-bearing rather than tidy: this code is hosted
+         * INSIDE system_server, so seconds of Thread.sleep on the main looper
+         * would block the framework that is still booting, and a Watchdog kill
+         * of system_server is not a refusal - it is 3.6.1's "worst outcome is
+         * worse than the thing it is diagnosing", on the one process whose
+         * death takes the boot with it.
+         *
+         * A text guard in the audit cannot hold this: the caller is two files
+         * away and the regression is a refactor, not an edit here. So the wait
+         * refuses to be the thing that blocks. On the main looper it degrades
+         * to exactly one sweep - the behaviour that shipped before this change
+         * - and the gate judges that sweep as it always did. Losing the wait
+         * costs a measured 1343 ms; blocking system_server's looper costs the
+         * boot.
+         */
+        val mayBlock = try {
+            android.os.Looper.getMainLooper()?.thread !== Thread.currentThread()
+        } catch (t: Throwable) {
+            // An unreadable looper is not permission to block.
+            false
+        }
+        val waitFirstAt = EarlyRootEnv.monotonicNow()
+        var readiness = StageHop.probeReadiness(context)
+        val waitFirstState = readiness.state
+        var sweeps = 1
+        var waitOutcome = EarlyRootPolicy.readinessWait(readiness.state, waitFirstAt)
+        while (mayBlock && EarlyRootPolicy.WAIT_AGAIN == waitOutcome) {
+            if (abandoned("readiness_wait")) {
+                abandon(bootId, context, "readiness_wait", stopReason(), stopThermal())
+                return false
+            }
+            try {
+                Thread.sleep(EarlyRootPolicy.READINESS_WAIT_POLL_MS)
+            } catch (t: InterruptedException) {
+                /*
+                 * An interrupt is not a reason to proceed. Stop the wait, let
+                 * the gate judge whatever the last sweep said, and restore the
+                 * flag so nothing downstream swallows it.
+                 */
+                Thread.currentThread().interrupt()
+                waitOutcome = EarlyRootPolicy.WAIT_EXPIRED
+                break
+            }
+            readiness = StageHop.probeReadiness(context)
+            sweeps++
+            waitOutcome = EarlyRootPolicy.readinessWait(
+                readiness.state, EarlyRootEnv.monotonicNow())
+        }
+        if (!mayBlock && EarlyRootPolicy.WAIT_AGAIN == waitOutcome) {
+            /*
+             * Separate value, not a silent reuse of WAIT_EXPIRED: "the window
+             * was open and we were not allowed to wait in it" and "we waited
+             * and readiness never came" have different fixes, and only the
+             * first is a defect in our own threading (3.7).
+             */
+            waitOutcome = EarlyRootPolicy.WAIT_NOT_PERMITTED
+        }
+        val waitReadyAt = EarlyRootEnv.monotonicNow()
         if (abandoned("after_readiness")) {
             abandon(bootId, context, "after_readiness", stopReason(), stopThermal())
             return false
@@ -291,7 +379,17 @@ object DfrEarlyRootDispatch {
                 EarlyRootEnv.monotonicNow())
         )
         if (!decision.allow) {
-            refuse(bootId, context, EarlyRootEnv.monotonicNow(), decision)
+            /*
+             * The wait measurement travels with THIS refusal, not only with the
+             * pass. An expired wait is the case the owner most needs to read:
+             * "readiness never arrived in 17 s" and "readiness arrived and
+             * something else refused" send the next physical run to different
+             * places, and the refusal trace is the only record that outlives
+             * this firmware's log buffer (3.7).
+             */
+            refuse(bootId, context, EarlyRootEnv.monotonicNow(), decision,
+                EarlyRootPolicy.formatReadinessWait(
+                    waitFirstState, waitFirstAt, waitReadyAt, sweeps, waitOutcome))
             return false
         }
         val readyFailure = EarlyRootStore.trace(
@@ -299,7 +397,19 @@ object DfrEarlyRootDispatch {
             EarlyRootEnv.bootState(context),
             "proc=${readiness.networkStackProc} pr=${readiness.amsProcessRecord} " +
                 "thread=${readiness.applicationThread} " +
-                "schedule_receiver_12=${readiness.scheduleReceiver12}"
+                "schedule_receiver_12=${readiness.scheduleReceiver12} " +
+                /*
+                 * The wait, on the step that already refuses when its write
+                 * fails. It gets no step of its own because it refuses nothing
+                 * - `evaluate` above is what refuses - and a step per
+                 * diagnostic is one more fsync on the critical path of the
+                 * thing being measured. The FIELDS stay separate (3.7): the
+                 * instant readiness flipped is the structural floor this path
+                 * has been guessing at, and the next physical run reads it
+                 * here.
+                 */
+                EarlyRootPolicy.formatReadinessWait(
+                    waitFirstState, waitFirstAt, waitReadyAt, sweeps, waitOutcome)
         )
         if (readyFailure != null) {
             Log.e(TAG, "[DFR][EARLY_ROOT] REFUSED readiness trace unavailable:" +
@@ -460,11 +570,13 @@ object DfrEarlyRootDispatch {
      * trigger the owner has just spent a full reboot on this.
      */
     private fun refuse(bootId: String, context: Context, elapsedMs: Long,
-                       decision: EarlyRootPolicy.Decision) {
-        Log.i(TAG, "[DFR][EARLY_ROOT] REFUSED ${decision.code}: ${decision.reason}")
+                       decision: EarlyRootPolicy.Decision, extra: String = "") {
+        Log.i(TAG, "[DFR][EARLY_ROOT] REFUSED ${decision.code}: ${decision.reason}" +
+            if (extra.isEmpty()) "" else " $extra")
         val failure = EarlyRootStore.trace(
             bootId, EarlyRootPolicy.STEP_REFUSED, elapsedMs,
-            EarlyRootEnv.bootState(context), "${decision.code}: ${decision.reason}"
+            EarlyRootEnv.bootState(context), "${decision.code}: ${decision.reason}" +
+                if (extra.isEmpty()) "" else " $extra"
         )
         if (failure != null) {
             Log.e(TAG, "[DFR][EARLY_ROOT] refusal trace lost: $failure")

@@ -2747,6 +2747,142 @@ def audit():
              "callback proves the restriction was not in force, so a check "
              "there can only withhold a run that was going to work")
 
+    # --- the readiness TRIGGER (2026-10-14) ------------------------------
+    # The clock stopped choosing the moment. Boot cea5208c measured what that
+    # cost: the hop's target process was bound at 14011 ms (am_proc_bound, i.e.
+    # attachApplication) and the callback arrived at 15354 ms, so 1343 ms went
+    # to setMinimumLatency waiting for something already present. The floor is
+    # structural - boot_progress_ams_ready was 13312 ms and AMS starts no app
+    # process before it - so the wait, not the constant, has to find it.
+    #
+    # Five properties. Each one is the difference between a bounded probe and
+    # the unbounded operation AGENTS.md 3.6.1 forbids wearing a probe's name.
+    dispatch_src = code_only(dfr_source("DfrEarlyRootDispatch.kt"))
+    policy_src = code_only(dfr_source("EarlyRootPolicy.java"))
+
+    # (1) The loop exists and every decision in it is the PURE function. Kotlin
+    #     cannot be unit-tested here (AGENTS.md 5), so a loop carrying its own
+    #     judgement would be judgement nothing tests.
+    if "EarlyRootPolicy.readinessWait(" not in dispatch_src:
+        fail("the dispatch no longer consults EarlyRootPolicy.readinessWait; "
+             "readiness is back to being sampled once at whatever instant the "
+             "clock handed us, which cost 1343 ms in boot cea5208c")
+    if "EarlyRootPolicy.WAIT_AGAIN ==" not in dispatch_src:
+        fail("the readiness loop no longer continues on the policy's WAIT_AGAIN; "
+             "a loop condition written in Kotlin is a decision no host test "
+             "can reach")
+
+    # (2) The wait CANNOT permit. evaluate() stays the sole authority, and the
+    #     loop must not acquire a path that proceeds on anything but the gate.
+    #     A wait that promoted a PARTIAL sweep would be absence-as-permission
+    #     (AGENTS.md 2) - the one thing this repository exists to prevent.
+    if "EarlyRootPolicy.evaluate(" not in dispatch_src:
+        fail("the dispatch no longer runs EarlyRootPolicy.evaluate after the "
+             "readiness wait; the wait would then be the thing that permits")
+    wait_at = dispatch_src.find("EarlyRootPolicy.readinessWait(")
+    eval_at = dispatch_src.find("EarlyRootPolicy.evaluate(")
+    if wait_at >= 0 and eval_at >= 0 and wait_at > eval_at:
+        fail("the readiness wait runs after EarlyRootPolicy.evaluate; the gate "
+             "would then judge a sweep taken before the wait could improve it")
+    if "NETWORKSTACK_READY" in dispatch_src:
+        fail("the dispatch names NETWORKSTACK_READY itself; readiness is "
+             "compared in exactly one place (AGENTS.md 3.2) and a second "
+             "comparison in Kotlin is one no host test can falsify")
+
+    # (3) The wait is BOUNDED, by an ABSOLUTE elapsed bound rather than a
+    #     duration. A duration from a variable callback instant bounds the one
+    #     quantity this path races - the animation - differently every boot.
+    if "READINESS_WAIT_DEADLINE_MS" not in policy_src:
+        fail("the readiness wait lost its deadline; an unbounded wait inside "
+             "system_server during boot is an operation, not a probe (3.6.1)")
+    if "nowMs >= READINESS_WAIT_DEADLINE_MS" not in policy_src:
+        fail("readinessWait no longer compares the clock against the deadline "
+             "as an absolute elapsed bound; a duration measured from the "
+             "callback gives a different cutoff in every boot")
+    if "nowMs <= 0L" not in policy_src:
+        fail("readinessWait no longer stops on an unreadable clock; a wait "
+             "whose deadline cannot be evaluated is unbounded")
+
+    # (4) The loop can be reclaimed mid-wait. This is now the one place the
+    #     dispatch can spend seconds, so the scheduler taking the execution
+    #     back must not find us still polling.
+    if 'abandoned("readiness_wait")' not in dispatch_src:
+        fail("the readiness loop does not check `abandoned` on each iteration; "
+             "the dispatch can now spend seconds there and a reclaimed "
+             "execution would keep sweeping AMS during boot")
+
+    # (5) The measurement survives BOTH outcomes. "readiness never arrived" and
+    #     "readiness arrived and something else refused" send the next physical
+    #     run to different places (3.7), and the refusal trace is the only
+    #     record that outlives this firmware's log buffer.
+    if "formatReadinessWait(" not in policy_src:
+        fail("the wait measurement is gone; the instant readiness flips is the "
+             "structural floor this path has been guessing at")
+    if dispatch_src.count("EarlyRootPolicy.formatReadinessWait(") < 2:
+        fail("the wait measurement is recorded on fewer than both paths; an "
+             "expired wait is the case the owner most needs to read and it "
+             "refuses before the readiness step is ever written")
+
+    # (6) The wait refuses to be the thing that blocks. This code is hosted in
+    #     system_server, so seconds of Thread.sleep on the main looper would
+    #     block the framework that is still booting and a Watchdog kill takes
+    #     the boot with it - 3.6.1 on the one process whose death is not a
+    #     refusal. Both triggers use a worker today; the guard is here because
+    #     the regression is a refactor two files away, not an edit in the loop.
+    if "Looper.getMainLooper()" not in dispatch_src:
+        fail("the readiness wait no longer checks whether this thread may be "
+             "blocked; a caller refactored onto the main looper would sleep "
+             "seconds inside system_server during boot")
+    if "while (mayBlock &&" not in dispatch_src:
+        fail("the readiness loop no longer requires permission to block; the "
+             "main-looper check is computed and then ignored, which is worse "
+             "than not having it")
+    if "WAIT_NOT_PERMITTED" not in dispatch_src or (
+            "WAIT_NOT_PERMITTED" not in policy_src):
+        fail("a wait that was not permitted to run reports as something else; "
+             "'we never looked again' is a defect in our threading and "
+             "'readiness never came' is a fact about the boot (3.7)")
+    if "Thread.sleep" in dispatch_src and "mayBlock" not in dispatch_src[
+            :dispatch_src.find("Thread.sleep")]:
+        fail("Thread.sleep is reachable in the dispatch without the "
+             "may-this-thread-block decision preceding it")
+
+    # The floor must stay below the structural AMS floor, or the clock is back
+    # to choosing the moment. Asserted here and not in EarlyRootPolicyTest
+    # because it is a Kotlin constant and a Java host test cannot read it.
+    early_root_latency = re.search(
+        r"const val MINIMUM_LATENCY_MS = ([0-9_]+)L",
+        code_only(dfr_source("DfrEarlyRoot.kt")))
+    if not early_root_latency:
+        fail("DfrEarlyRoot.MINIMUM_LATENCY_MS is unreadable; the dispatch floor "
+             "is what keeps the readiness wait able to find the hop")
+    else:
+        floor = int(early_root_latency.group(1).replace("_", ""))
+        if floor >= 13312:
+            fail("the dispatch floor is %d ms, at or past "
+                 "boot_progress_ams_ready (13312 ms in cea5208c); AMS starts no "
+                 "app process before that, so the clock and not the wait is "
+                 "again choosing the moment" % floor)
+    # And the probe's own floor is NOT dragged along with it. It is a measuring
+    # instrument with four boots of samples taken against a 15 s floor;
+    # re-basing it silently invalidates every comparison those samples exist
+    # for, and the probe does not race the animation anyway (AGENTS.md 3.11:
+    # each trigger's policy is its own).
+    probe_latency = re.search(
+        r"const val MINIMUM_LATENCY_MS = ([0-9_]+)L",
+        code_only(dfr_source("DfrEarlyBootProbe.kt")))
+    if not probe_latency:
+        fail("DfrEarlyBootProbe.MINIMUM_LATENCY_MS is unreadable")
+    elif int(probe_latency.group(1).replace("_", "")) != 15000:
+        fail("the probe's floor moved off 15 s; it is an instrument with four "
+             "boots of samples taken against that floor, and re-basing it "
+             "makes the next comparison measure something else")
+    # The probe must not acquire the wait either: a sweep loop on its looper
+    # would move the quantity it measures, which is the defect 3.11 names.
+    if "readinessWait" in code_only(dfr_source("DfrEarlyBootJobService.kt")):
+        fail("the observation-only probe service references the readiness "
+             "wait; a wait on that looper moves the quantity it measures")
+
     # --- the native profile ---------------------------------------------
     # The measurement of the 5767 ms that boot 2e7d56e5 could not account for.
     # Four properties, and each one is the difference between a measurement and

@@ -1689,6 +1689,145 @@ public class EarlyRootPolicyTest {
                 "a tab inside the profile detail is sanitised, not left to "
                         + "break the line");
 
+        // --- the readiness trigger (2026-10-14) -----------------------------
+        //
+        // The wait replaced a clock, so its negative cases are the whole
+        // safety argument: it must be unable to grant anything, and unable to
+        // run unbounded.
+        check(EarlyRootPolicy.WAIT_PROCEED.equals(EarlyRootPolicy.readinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_READY, 1)),
+                "readiness READY stops the wait at once, however early");
+        check(EarlyRootPolicy.WAIT_PROCEED.equals(EarlyRootPolicy.readinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_READY,
+                        EarlyRootPolicy.READINESS_WAIT_DEADLINE_MS + 5_000)),
+                "readiness READY past the deadline still stops the wait; "
+                        + "whether a late pass may RUN is evaluate's call");
+        check(EarlyRootPolicy.WAIT_AGAIN.equals(EarlyRootPolicy.readinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, 14_000)),
+                "a PARTIAL sweep inside the window sweeps again");
+        check(EarlyRootPolicy.WAIT_AGAIN.equals(EarlyRootPolicy.readinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_NOT_READY, 10_500)),
+                "a NOT_READY sweep inside the window sweeps again");
+        // The deadline is a bound, so it must hold at the boundary and not one
+        // millisecond past it.
+        check(EarlyRootPolicy.WAIT_AGAIN.equals(EarlyRootPolicy.readinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_PARTIAL,
+                        EarlyRootPolicy.READINESS_WAIT_DEADLINE_MS - 1)),
+                "one millisecond before the deadline still sweeps");
+        check(EarlyRootPolicy.WAIT_EXPIRED.equals(EarlyRootPolicy.readinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_PARTIAL,
+                        EarlyRootPolicy.READINESS_WAIT_DEADLINE_MS)),
+                "the deadline itself expires the wait");
+        // An unobtainable sweep is not something to poll about. Stopping hands
+        // it to evaluate, which refuses it.
+        check(EarlyRootPolicy.WAIT_EXPIRED.equals(
+                        EarlyRootPolicy.readinessWait(null, 11_000)),
+                "a null readiness state expires the wait rather than polling a "
+                        + "reader that cannot answer");
+        check(EarlyRootPolicy.WAIT_EXPIRED.equals(
+                        EarlyRootPolicy.readinessWait("NETWORKSTACK_MAYBE", 11_000)),
+                "an unrecognised readiness state expires the wait");
+        check(EarlyRootPolicy.WAIT_EXPIRED.equals(
+                        EarlyRootPolicy.readinessWait("", 11_000)),
+                "an empty readiness state expires the wait");
+        // An unreadable clock makes the deadline unevaluable, and a wait whose
+        // deadline cannot be evaluated is unbounded - the operation
+        // AGENTS.md 3.6.1 forbids dressing up as a probe.
+        check(EarlyRootPolicy.WAIT_EXPIRED.equals(EarlyRootPolicy.readinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, 0)),
+                "an unreadable clock expires the wait instead of polling "
+                        + "without a bound");
+        check(EarlyRootPolicy.WAIT_EXPIRED.equals(EarlyRootPolicy.readinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, -1)),
+                "a negative clock expires the wait");
+        // The wait cannot be the thing that permits. Whatever it answers, a
+        // sweep that is not exactly READY still refuses at the gate (3.2: one
+        // place decides).
+        check(EarlyRootPolicy.WAIT_AGAIN.equals(EarlyRootPolicy.readinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, 12_000)),
+                "the wait says 'again' for PARTIAL...");
+        EarlyRootPolicy.Inputs waitIn = ready();
+        waitIn.readinessState = EarlyBootProbePolicy.NETWORKSTACK_PARTIAL;
+        refused(waitIn, EarlyRootPolicy.READINESS_REFUSED,
+                "...and the gate still refuses that PARTIAL, so the wait "
+                        + "promotes nothing");
+        // The bound is below the measured animation, not derived from the
+        // two-minute callback window - reusing that would turn the wait into a
+        // two-minute poll of AMS during boot.
+        check(EarlyRootPolicy.READINESS_WAIT_DEADLINE_MS
+                        < EarlyRootPolicy.EARLY_WINDOW_MS,
+                "the readiness deadline is far inside the early window");
+        check(EarlyRootPolicy.READINESS_WAIT_DEADLINE_MS <= 17_745L,
+                "the readiness deadline does not outlast the measured boot "
+                        + "animation (wm_boot_animation_done=17745 in cea5208c)");
+        check(EarlyRootPolicy.READINESS_WAIT_POLL_MS > 0L
+                        && EarlyRootPolicy.READINESS_WAIT_POLL_MS
+                                < EarlyRootPolicy.READINESS_WAIT_DEADLINE_MS,
+                "the poll interval is positive and smaller than the deadline");
+        // The measurement the next physical run reads.
+        String waitDetail = EarlyRootPolicy.formatReadinessWait(
+                EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, 10_354, 14_070, 19,
+                EarlyRootPolicy.WAIT_PROCEED);
+        check(waitDetail.contains("waited_ms=3716")
+                        && waitDetail.contains("ready_at_ms=14070")
+                        && waitDetail.contains("sweeps=19"),
+                "the wait detail carries the flip instant, the time waited and "
+                        + "the sweep count as separate fields (3.7)");
+        check(EarlyRootPolicy.formatReadinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_READY, 14_200, 14_200, 1,
+                        EarlyRootPolicy.WAIT_PROCEED).contains("waited_ms=0"),
+                "a sweep that was ready on the first look reads waited_ms=0, "
+                        + "which is how 'the timer was already late' is told "
+                        + "apart from 'the wait earned it'");
+        // A clock that went backwards must not render as a negative wait, which
+        // would read as evidence of something impossible.
+        check(EarlyRootPolicy.formatReadinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, 14_000, 13_000, 2,
+                        EarlyRootPolicy.WAIT_EXPIRED).contains("waited_ms=0"),
+                "a backwards clock clamps the wait to zero rather than "
+                        + "reporting a negative duration");
+        // The four wait outcomes are four values. WAIT_NOT_PERMITTED in
+        // particular must never read as an expiry: one says the boot was slow,
+        // the other says our own threading regressed, and only the second is
+        // a bug in this repository (3.7).
+        check(!EarlyRootPolicy.WAIT_NOT_PERMITTED.equals(
+                        EarlyRootPolicy.WAIT_EXPIRED),
+                "'not permitted to wait' is not 'the wait expired'");
+        check(java.util.Set.of(EarlyRootPolicy.WAIT_AGAIN,
+                        EarlyRootPolicy.WAIT_PROCEED,
+                        EarlyRootPolicy.WAIT_EXPIRED,
+                        EarlyRootPolicy.WAIT_NOT_PERMITTED).size() == 4,
+                "the four wait outcomes are four distinct values");
+        // readinessWait itself never returns NOT_PERMITTED: it cannot see a
+        // looper, and a pure function that guessed at one would be deciding
+        // something it has no evidence for.
+        for (String st : new String[] {EarlyBootProbePolicy.NETWORKSTACK_READY,
+                EarlyBootProbePolicy.NETWORKSTACK_PARTIAL,
+                EarlyBootProbePolicy.NETWORKSTACK_NOT_READY, null, "junk"}) {
+            for (long waitAt : new long[] {-1, 0, 1, 14_000,
+                    EarlyRootPolicy.READINESS_WAIT_DEADLINE_MS, 90_000}) {
+                check(!EarlyRootPolicy.WAIT_NOT_PERMITTED.equals(
+                                EarlyRootPolicy.readinessWait(st, waitAt)),
+                        "readinessWait never claims NOT_PERMITTED (state=" + st
+                                + " now=" + waitAt + "); only the caller can know "
+                                + "which thread it is on");
+            }
+        }
+        check(EarlyRootPolicy.formatReadinessWait(
+                        EarlyBootProbePolicy.NETWORKSTACK_PARTIAL, 10_100, 10_105, 1,
+                        EarlyRootPolicy.WAIT_NOT_PERMITTED)
+                        .contains("wait=" + EarlyRootPolicy.WAIT_NOT_PERMITTED),
+                "a wait that was not permitted says so in the trace, so a lost "
+                        + "1343 ms is attributable instead of looking like a "
+                        + "slow boot");
+
+        // The detail rides an existing step, so it has to survive that step's
+        // own line format.
+        check(EarlyRootPolicy.parseTraceLine(EarlyRootPolicy.formatTraceStep(
+                        EarlyRootPolicy.STEP_READINESS_PASS, "boot-x", 14_070,
+                        "sys_boot_completed=0", "proc=PASS " + waitDetail)) != null,
+                "the wait detail parses inside the readiness step's line");
+
         System.out.println("EarlyRootPolicyTest: " + pass + "/" + (pass + fail)
                 + " passed");
         if (fail != 0) System.exit(1);
