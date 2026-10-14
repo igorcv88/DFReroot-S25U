@@ -46,6 +46,25 @@ class DfrEarlyRootJobService : JobService() {
      */
     private class RunToken(val jobId: Int) {
         val stopped = AtomicBoolean(false)
+
+        /**
+         * Why the scheduler took this execution back, as `params.stopReason`
+         * names it - or UNKNOWN while nothing has stopped us.
+         *
+         * Without this the abandonment record said only THAT the scheduler
+         * stopped us. On 2026-10-13, boot `f4b7cac2`, that cost the analysis:
+         * the callback arrived at 81.5 s and was stopped 4 ms later, and the
+         * record could not say whether that was the same device-state pressure
+         * that had held the job (ThermalStatusRestriction declares
+         * `STOP_REASON_DEVICE_STATE`), a constraint, a preemption or a timeout.
+         * Those have different fixes, so collapsing them is 3.7's failure.
+         *
+         * Written on the main looper in onStopJob, read on the worker. A plain
+         * @Volatile is enough: one writer, one transition, and a reader that
+         * only ever needs the value that accompanies `stopped`.
+         */
+        @Volatile
+        var stopReason: String = EarlyBootProbePolicy.UNKNOWN
     }
 
     @Volatile
@@ -96,12 +115,32 @@ class DfrEarlyRootJobService : JobService() {
      * shape that must not exist.
      */
     override fun onStopJob(params: JobParameters): Boolean {
+        /*
+         * The reason is read BEFORE the flag is set, and defensively.
+         *
+         * Before, because once `stopped` is true the worker may reach its next
+         * boundary and write the abandonment record immediately - a reason set
+         * afterwards can lose the race and be recorded as UNKNOWN.
+         *
+         * Defensively, because the stop flag is what keeps a dead execution
+         * from calling jobFinished, and that must not depend on a diagnostic.
+         * getStopReason is API 31 and minSdk is 32, so no version guard is
+         * needed; the catch is for the platform, not the API level.
+         */
+        val reason = try {
+            params.stopReason.toString()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] stopReason unreadable: $t")
+            EarlyBootProbePolicy.UNKNOWN
+        }
         val token = activeRun
         if (token != null && token.jobId == params.jobId) {
+            token.stopReason = reason
             token.stopped.set(true)
         }
-        Log.i(TAG, "[DFR][EARLY_ROOT] onStopJob job_id=${params.jobId}; the worker " +
-            "stops at its next boundary and will not call jobFinished")
+        Log.i(TAG, "[DFR][EARLY_ROOT] onStopJob job_id=${params.jobId} " +
+            "stop_reason=$reason; the worker stops at its next boundary and " +
+            "will not call jobFinished")
         return false
     }
 
@@ -146,6 +185,9 @@ class DfrEarlyRootJobService : JobService() {
             token.jobId,
             callbackNamespace,
             callbackGeneration,
+            // Evidence only, and read lazily: the dispatch asks for it after
+            // `abandoned` has already said the execution was reclaimed.
+            stopReason = { token.stopReason },
         ) { _ ->
             /*
              * The scheduler has taken this execution back. The dispatch asks at

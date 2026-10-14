@@ -3505,6 +3505,112 @@ different fixes:
   675 s window, so it does not yet refute anything. The owner's review of
   PR #66 makes the same point.
 
+#### Boot `f4b7cac2`, 2026-10-13: the thermal candidate, verified in logcat
+
+The owner collected a full logcat plus the per-boot records for a boot where
+the dispatching job was called back at **81.499 s**. Every timestamp below was
+re-read from that archive, and the two clocks were anchored independently:
+`boot_progress_start: 6739` at 23:43:10.230 and `boot_progress_system_run:
+8243` at 23:43:11.734 both put boot-zero at **23:43:03.491**, and DFReroot's own
+`BOOT_COMPLETED_OBSERVED elapsed_ms=109290` at 23:44:52.716 puts it at
+23:43:03.426 — a 65 ms spread, which is the gap between taking a reading and
+writing it.
+
+`ThermalStatusRestriction` logs **exactly three** transitions in that boot:
+
+| wallclock | event |
+|---|---|
+| 23:43:20.535 | `ThermalStatus changed to 2` (MODERATE) |
+| 23:44:24.847 | `thermal_changed: [SKIN,3,39.900002,1,2]` — 39.9 °C |
+| 23:44:24.848 | `ThermalStatus changed to 1` (LIGHT) |
+| 23:44:24.870 | job wakelock, `*job*r/@dfr-early-root@…DfrEarlyRootJobService` |
+| 23:44:24.875 | job wakelock, `*job*r/@dfr-early-boot-probe@…DfrEarlyBootJobService` |
+| 23:44:24.93–24.99 | `EARLY_ROOT_JOB_ENTERED` elapsed 81499, by both anchors |
+| 23:44:59.808 | `ThermalStatus changed to 2` |
+
+So the dispatch follows the release by **22 ms** on the scheduler's own clock and
+by 77–142 ms on ours, and the two DFReroot jobs are released inside the same
+~50 ms sweep as a dozen other jobs (Google `SyncManager`, AppWidget
+`ReportWidgetEventsJob`). That sweep is what one restriction lifting looks like.
+
+**The two alternatives were checked in the same archive, not assumed away:**
+
+- **OLAF is excluded for this boot, and more strongly than correlation.** The
+  only `restrictJobsByOlaf` transition in the window is
+  `restrict=true, uid=-1, reason=Anim_Unlock` at **23:44:39.867** — 15 s *after*
+  the dispatch, in the **restricting** direction, triggered by the owner
+  unlocking the device at 23:44:37. OLAF did not release these jobs.
+- **Concurrency is weakened.** Slot starvation clears as slots free, which
+  staggers dispatch; what the log shows is a burst inside 50 ms, immediately
+  after a restriction-state change. Not excluded, but it is no longer the
+  equal-footing candidate it was.
+
+And the mechanism matches the predicate exactly: `isJobRestricted` restricts a
+`PRIORITY_DEFAULT` job outright from `MODERATE` (2) upward and only
+`MIN`/`PRIORITY_LOW` at `LIGHT` (1); this job prints `Priority: 300 [DEFAULT]`.
+
+**What this does NOT settle, and must not be collapsed into it.** The waits in
+the earlier boots were **299 s, 334.4 s, 521.7 s and ~675 s** — three to eight
+times this one. Nothing here explains those, and one reading actively argues
+against carrying this verdict over: the ~675 s capture recorded thermal status
+**1**, at which the predicate does **not** restrict a `PRIORITY_DEFAULT` job. So
+either the status was 2 for most of that wait and the sample landed outside it,
+or that boot had a different cause. **High confidence for this boot, no
+conclusion for the long ones**, and a single explanation for both magnitudes is
+not yet evidenced.
+
+#### A second, separate failure: the execution was reclaimed 4 ms in
+
+The same boot holds a failure that is not the delay, and the two must not be
+read as one:
+
+```text
+EARLY_ROOT_JOB_ENTERED   f4b7cac2…  81499
+EARLY_ROOT_REFUSED       f4b7cac2…  81503   the scheduler stopped this execution at before_gate
+```
+
+and for the probe, `state=EARLY_JOB_CALLBACK_STOPPED`,
+`stopped_at=before_arm_read`, `callback_elapsed_ms=81500`. The journal is absent
+and the cycle reads `EARLY_ROOT_CYCLE_BOUND` / `claim_elapsed_ms=-1`, so nothing
+was claimed and no native transaction was issued — the fail-closed path worked.
+
+**Four milliseconds after entry, `onStopJob` fired on both jobs.** The records
+could say *where* that happened and not *why*, and the candidates have different
+fixes: `ThermalStatusRestriction` declares `STOP_REASON_DEVICE_STATE`, while a
+constraint, a preemption and a timeout each point elsewhere. Collapsing them is
+3.7's failure, and `params.stopReason` is the API that names it — which the code
+was not reading.
+
+Note what does *not* follow: thermal returned to 2 only at 23:44:59.808, 35 s
+later, so the obvious guess does not fit the 4 ms. The device was also in
+`DOZE_SUSPEND` across the dispatch (from 23:44:15.612 until a `KEY` wake at
+23:44:37.750). **No cause is assigned here.** That is the point of the
+instrumentation below rather than a gap in it.
+
+#### What is now recorded, and why none of it can gate anything
+
+`params.stopReason` is read in **both** `onStopJob` implementations, before the
+stop flag is set — once the flag is true the worker may reach its next boundary
+and write the record, so a reason assigned afterwards can lose that race and be
+recorded as UNKNOWN. The thermal status is read on the worker, after the stop
+check, never before the callback's first timestamp: it is a binder call and this
+app runs on `system_server`'s main looper.
+
+Both are **evidence and never inputs**. `tools/profile_binding_audit.py` fails
+if either policy takes a live thermal reading, and `EarlyRootPolicy` — the gate
+that authorises the chain — may not name a thermal value at all, so there is
+nothing for a future edit to compare against. An unobtainable reading is
+UNKNOWN; a diagnostic whose failure can change an outcome is not a diagnostic
+(AGENTS.md 3.6.1).
+
+The probe's stop record gained two keys and its parser demands the key set
+**exactly**, so the new fields are **optional at parse time**. A required
+`stop_reason` would make every record written by an earlier build parse as
+malformed — refusing good evidence because the reader got newer, which is
+3.6.1's rule in its original form: required to **act**, never to **parse**.
+`tools/tests/EarlyBootProbePolicyTest.java` asserts both halves, and the audit
+fails if either key is moved into the required set.
+
 #### What the next capture needs, and why the first one could not give it
 
 The distinguishing read is no longer "is it ready or not" but **which term**:

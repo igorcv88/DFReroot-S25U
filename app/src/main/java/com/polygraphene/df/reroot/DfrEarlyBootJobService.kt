@@ -41,6 +41,18 @@ class DfrEarlyBootJobService : JobService() {
      */
     private class RunToken(val jobId: Int) {
         val stopped = AtomicBoolean(false)
+
+        /**
+         * `params.stopReason` for this execution, UNKNOWN until something stops
+         * it. The probe records it for the same reason the dispatching path
+         * does: on 2026-10-13 both jobs were stopped within a millisecond of
+         * each other and neither record could say by what, and the candidates
+         * (device state, a constraint, a preemption, a timeout) have different
+         * fixes. Set before `stopped`, so the worker cannot read the flag and
+         * miss the reason.
+         */
+        @Volatile
+        var stopReason: String = EarlyBootProbePolicy.UNKNOWN
     }
 
     @Volatile
@@ -108,12 +120,23 @@ class DfrEarlyBootJobService : JobService() {
      * is no longer running. false: never rescheduled.
      */
     override fun onStopJob(params: JobParameters): Boolean {
+        // Read before the flag is set and behind a catch: the flag is what
+        // keeps a reclaimed execution from calling jobFinished, and that must
+        // never depend on a diagnostic succeeding.
+        val reason = try {
+            params.stopReason.toString()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_JOB] stopReason unreadable: $t")
+            EarlyBootProbePolicy.UNKNOWN
+        }
         val token = activeRun
         if (token != null && token.jobId == params.jobId) {
+            token.stopReason = reason
             token.stopped.set(true)
         }
-        Log.i(TAG, "[DFR][EARLY_JOB] onStopJob job_id=${params.jobId}; " +
-            "the worker stops at its next boundary and will not call jobFinished")
+        Log.i(TAG, "[DFR][EARLY_JOB] onStopJob job_id=${params.jobId} " +
+            "stop_reason=$reason; the worker stops at its next boundary and " +
+            "will not call jobFinished")
         return false
     }
 
@@ -358,14 +381,24 @@ class DfrEarlyBootJobService : JobService() {
         boundary: String,
     ): Boolean {
         if (!token.stopped.get()) return false
+        // After the stop check, never before it: this is a binder call, and a
+        // probe that was not stopped must not pay for a diagnostic it will not
+        // record.
+        val thermal = EarlyRootEnv.thermalStatus(applicationContext)
         Log.i(TAG, "[DFR][EARLY_JOB] CALLBACK_ABANDONED boundary=$boundary " +
+            "stop_reason=${token.stopReason} thermal_status=$thermal " +
             "job_id=${token.jobId} boot_id=${value(firedBootId)}")
         val failure = EarlyBootProbeStore.writeCallbackEntered(
             "state=${EarlyBootProbePolicy.CALLBACK_STOPPED}\n" +
                 "fired_boot_id=${value(firedBootId)}\n" +
                 "job_id=${token.jobId}\n" +
                 "stopped_at=$boundary\n" +
-                "callback_elapsed_ms=${knownLong(callbackElapsedMs)}\n"
+                "callback_elapsed_ms=${knownLong(callbackElapsedMs)}\n" +
+                // Optional at parse time on purpose: a record written by a build
+                // without these fields must still read as a complete stop
+                // record (EarlyBootProbePolicy.CALLBACK_STOPPED_OPTIONAL_KEYS).
+                "stop_reason=${token.stopReason}\n" +
+                "thermal_status=$thermal\n"
         )
         if (failure != null) {
             Log.e(TAG, "[DFR][EARLY_JOB] CALLBACK_STOP_BREADCRUMB=FAIL $failure")

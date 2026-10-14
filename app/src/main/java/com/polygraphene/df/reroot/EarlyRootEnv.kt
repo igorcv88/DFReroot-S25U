@@ -1,6 +1,7 @@
 package com.polygraphene.df.reroot
 
 import android.content.Context
+import android.os.PowerManager
 import android.os.SystemClock
 import android.os.UserManager
 import android.util.Log
@@ -137,6 +138,44 @@ object EarlyRootEnv {
         "sys_boot_completed=${systemProperty("sys.boot_completed")}" +
             " bootanim_exit=${systemProperty("service.bootanim.exit")}" +
             " user_unlocked=${userUnlocked(context)}"
+
+    /**
+     * The device's thermal throttling status, as `PowerManager` reports it.
+     *
+     * Why this is here at all, and why it is EVIDENCE and never an input.
+     *
+     * On 2026-10-13, boot `f4b7cac2`, the early job was called back at 81.5 s
+     * instead of ~16 s. The logcat of that boot holds exactly three
+     * `ThermalStatusRestriction` transitions - to 2 at 23:43:20.535, to 1 at
+     * 23:44:24.848, back to 2 at 23:44:59.808 - and the scheduler released the
+     * dispatching job 22 ms after the middle one, in the same 50 ms sweep as
+     * dozens of other jobs. `ThermalStatusRestriction.isJobRestricted` restricts
+     * a `PRIORITY_DEFAULT` job outright from `THERMAL_STATUS_MODERATE` (2)
+     * upward, and only `MIN`/`LOW` at `LIGHT` (1); this job prints
+     * `Priority: 300 [DEFAULT]`. So the reading decides in BOTH directions and
+     * recording it is what makes the next late boot interpretable instead of
+     * re-argued.
+     *
+     * It is recorded, never gated on. A thermal state is not evidence about
+     * whether the chain may run - the policy's own gates answer that - and a
+     * reading that cannot be obtained must cost nothing, so every failure maps
+     * to UNKNOWN rather than to a refusal or to a number.
+     *
+     * Not on the critical path: this is a binder call, and this app runs on
+     * system_server's main looper. Callers read it on the worker, after the
+     * breadcrumb, never before the callback's first timestamp.
+     */
+    fun thermalStatus(context: Context?): String {
+        if (context == null) return EarlyBootProbePolicy.UNKNOWN
+        return try {
+            val pm = context.getSystemService(PowerManager::class.java)
+                ?: return EarlyBootProbePolicy.UNKNOWN
+            pm.currentThermalStatus.toString()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] thermal status unreadable: $t")
+            EarlyBootProbePolicy.UNKNOWN
+        }
+    }
 
     private fun value(raw: String?): String =
         raw?.replace('\n', ' ')?.replace('\r', ' ')?.takeIf { it.isNotEmpty() }

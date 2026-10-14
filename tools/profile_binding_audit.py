@@ -2441,6 +2441,109 @@ def audit():
             fail("%s assembles the early-root policy inputs itself instead of using "
                  "the one builder; a field left unset there is a gate fed nothing"
                  % name)
+    # --- the stop diagnostics -------------------------------------------
+    probe_policy_src_for_gate_check = code_only(
+        dfr_source("EarlyBootProbePolicy.java"))
+    # Kotlin that needs an Android runtime cannot be unit-tested here
+    # (AGENTS.md §5), so the shape is asserted instead.
+    #
+    # Why this exists: on 2026-10-13, boot f4b7cac2, both jobs were dispatched
+    # 22 ms after ThermalStatusRestriction fell from MODERATE to LIGHT, and
+    # both were stopped ~4 ms after entry. The records could say WHERE the stop
+    # happened and not WHY, and the candidates - device state, a constraint, a
+    # preemption, a timeout - have different fixes, so one value for all of
+    # them is 3.7's collapse. `params.stopReason` is the API that names it.
+    for name, src in (("DfrEarlyRootJobService", early_root_job_src),
+                      ("DfrEarlyBootJobService", code_only(early_job_src))):
+        if "params.stopReason" not in src:
+            fail("%s.onStopJob does not read params.stopReason; the abandonment "
+                 "record then says the scheduler stopped us and not which "
+                 "pressure did it, and those have different fixes" % name)
+        # The ORDER is the whole guarantee. Once `stopped` is true the worker
+        # may reach its next boundary and write the record immediately, so a
+        # reason assigned afterwards can lose the race and record UNKNOWN.
+        reason_at = src.find("token.stopReason = reason")
+        flag_at = src.find("token.stopped.set(true)")
+        if reason_at < 0 or flag_at < 0:
+            fail("%s no longer carries the stop reason onto the run token; the "
+                 "worker cannot record what it was never handed" % name)
+        elif reason_at > flag_at:
+            fail("%s sets the stop flag before the stop reason; the worker can "
+                 "then observe the stop and write UNKNOWN for a reason the "
+                 "platform did supply" % name)
+    # Both records carry both diagnostics - checked on the RECORD, not on the
+    # file. An earlier version of this guard searched the whole source, and a
+    # mutation that stripped the trace detail still passed because the same
+    # tokens survived in a neighbouring log line. A log line is gone before
+    # anyone reads it on this firmware; the persisted record is the evidence.
+    abandon_at = early_root_dispatch_src.find("private fun abandon(")
+    if abandon_at < 0:
+        fail("DfrEarlyRootDispatch no longer has an abandon() writer; a "
+             "reclaimed execution would leave no record of why")
+    else:
+        # From the trace step to the end of that call: the record's own text.
+        body = early_root_dispatch_src[abandon_at:]
+        step_at = body.find("EarlyRootPolicy.STEP_REFUSED")
+        record = body[step_at:body.find("\n    }", step_at)] if step_at >= 0 else ""
+        for key in ("stop_reason=", "thermal_status="):
+            if key not in record:
+                fail("the early-root abandonment RECORD does not carry %s; the "
+                     "boundary alone does not say why the scheduler stopped us, "
+                     "and a log line does not survive to be read" % key)
+    # code_only, so a comment mentioning the key cannot satisfy the guard, and
+    # sliced to the end of the writer call rather than to the first ")" - the
+    # record's own lines contain calls, so the first bracket closes one of them.
+    early_job_code = code_only(early_job_src)
+    stop_rec_at = early_job_code.find("EarlyBootProbePolicy.CALLBACK_STOPPED}")
+    if stop_rec_at < 0:
+        fail("the probe no longer writes a CALLBACK_STOPPED record")
+    else:
+        end = early_job_code.find("\n        )", stop_rec_at)
+        stop_rec = early_job_code[stop_rec_at:end if end > 0 else len(early_job_code)]
+        for key in ("stop_reason=", "thermal_status="):
+            if key not in stop_rec:
+                fail("the probe's stop RECORD does not carry %s, so the two "
+                     "jobs' stops stop being comparable" % key)
+    # And neither is ever an input. A thermal reading is evidence about the
+    # device, not about whether this chain may run, and a diagnostic that can
+    # change an outcome is not a diagnostic (AGENTS.md 3.6.1).
+    #
+    # The guard targets the MECHANISM, not the word. EarlyBootProbePolicy's
+    # Callback legitimately carries a `thermalStatus` field parsed out of a
+    # record - that is transporting evidence to a reader. What must not exist
+    # is either policy taking the LIVE reading, which is the only way a gate
+    # could come to depend on the device's current thermal state.
+    for name, src in (("EarlyRootPolicy", code_only(dfr_source("EarlyRootPolicy.java"))),
+                      ("EarlyBootProbePolicy", probe_policy_src_for_gate_check)):
+        for token in ("PowerManager", "currentThermalStatus",
+                      "getCurrentThermalStatus", "THERMAL_STATUS"):
+            if token in src:
+                fail("%s takes a live thermal reading (%s); a thermal state is "
+                     "recorded evidence and must never reach a gate"
+                     % (name, token))
+    # EarlyRootPolicy gates the chain, so it must not carry the value at all -
+    # not even as a parsed field it could later be tempted to compare.
+    if "thermal" in code_only(dfr_source("EarlyRootPolicy.java")).lower():
+        fail("EarlyRootPolicy names a thermal value; the gate that authorises "
+             "the chain must not have one to consult")
+    # The probe's stop record gained keys, and its parser demands the key set
+    # EXACTLY. Required keys would make every record an older build wrote parse
+    # as malformed - good evidence refused because the reader got newer, which
+    # is 3.6.1's rule in its original form: required to ACT, never to PARSE.
+    probe_policy_src = code_only(dfr_source("EarlyBootProbePolicy.java"))
+    if "CALLBACK_STOPPED_OPTIONAL_KEYS" not in probe_policy_src:
+        fail("EarlyBootProbePolicy no longer separates the optional stop "
+             "diagnostics; a required stop_reason refuses every record written "
+             "before the field existed")
+    for key in ("stop_reason", "thermal_status"):
+        if key not in probe_policy_src:
+            fail("EarlyBootProbePolicy does not name %r, so the writer and the "
+                 "parser have drifted" % key)
+        if '"%s"' % key in probe_policy_src.split(
+                "CALLBACK_STOPPED_KEYS = Set.of(")[-1].split(")")[0]:
+            fail("EarlyBootProbePolicy made %r a REQUIRED stop-record key; that "
+                 "refuses every record written before the field existed" % key)
+
     for name, src in (("DfrEarlyRootJobService", early_root_job_src),
                       ("DfrBootReceiver", receiver_code)):
         if "DfrEarlyRootDispatch.gateAndDispatch(" not in src:
