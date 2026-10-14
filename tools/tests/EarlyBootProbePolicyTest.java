@@ -313,6 +313,28 @@ public class EarlyBootProbePolicyTest {
                 "a duplicated optional key still refuses");
         expect(EarlyBootProbePolicy.parseCallback(stopped + "stop_reason=\n") == null,
                 "an optional key with no value still refuses");
+        // The value DOMAIN, not just the key. The writers emit either UNKNOWN or
+        // a non-negative platform integer, so anything else is a record nobody
+        // here wrote - and displaying an invented value as durable evidence
+        // would corrupt the one experiment these fields decide. Same rule
+        // parseOptionalLong already applies to a numeric -1.
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped + "stop_reason=garbage\n") == null,
+                "a non-numeric stop reason refuses the record");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped + "thermal_status=HOT\n") == null,
+                "a non-numeric thermal status refuses the record");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped + "stop_reason=-1\n") == null,
+                "a negative stop reason refuses: no writer here produces one");
+        expect(EarlyBootProbePolicy.parseCallback(
+                        stopped + "thermal_status=0\n") != null,
+                "zero is a real platform value and must be accepted");
+        EarlyBootProbePolicy.Callback literal = EarlyBootProbePolicy.parseCallback(
+                stopped + "stop_reason=" + EarlyBootProbePolicy.UNKNOWN + "\n");
+        expect(literal != null
+                        && EarlyBootProbePolicy.UNKNOWN.equals(literal.stopReason),
+                "the literal UNKNOWN token is accepted, as the writer emits it");
         // The optional set must not leak into the OTHER record shape: an
         // ENTERED breadcrumb is not a stop and has no reason to report.
         expect(EarlyBootProbePolicy.parseCallback(entered + "stop_reason=4\n") == null,

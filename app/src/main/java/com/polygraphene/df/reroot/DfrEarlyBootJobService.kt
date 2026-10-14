@@ -53,6 +53,17 @@ class DfrEarlyBootJobService : JobService() {
          */
         @Volatile
         var stopReason: String = EarlyBootProbePolicy.UNKNOWN
+
+        /**
+         * Thermal status as of the STOP, not as of the boundary that noticed
+         * it. Same defect and same fix as the dispatching path: this probe's
+         * worker spends most of its runtime inside the readiness sweep, so a
+         * reading taken at `abandonIfStopped` can be an unbounded time after
+         * the scheduler reclaimed the execution - two instants in one record
+         * (AGENTS.md 3.7). Codex caught it on PR #68.
+         */
+        @Volatile
+        var stopThermal: String = EarlyBootProbePolicy.UNKNOWN
     }
 
     @Volatile
@@ -129,14 +140,22 @@ class DfrEarlyBootJobService : JobService() {
             Log.e(TAG, "[DFR][EARLY_JOB] stopReason unreadable: $t")
             EarlyBootProbePolicy.UNKNOWN
         }
+        // On the main looper, deliberately: by now the scheduler has already
+        // reclaimed this execution, so nothing here races the early window,
+        // and the alternative is a reading from a later instant than the
+        // reason it is filed beside.
+        val thermal = EarlyRootEnv.thermalStatus(applicationContext)
         val token = activeRun
         if (token != null && token.jobId == params.jobId) {
+            // Both before the flag: once it is set the worker may write the
+            // record at its next boundary.
             token.stopReason = reason
+            token.stopThermal = thermal
             token.stopped.set(true)
         }
         Log.i(TAG, "[DFR][EARLY_JOB] onStopJob job_id=${params.jobId} " +
-            "stop_reason=$reason; the worker stops at its next boundary and " +
-            "will not call jobFinished")
+            "stop_reason=$reason thermal_status=$thermal; the worker stops at " +
+            "its next boundary and will not call jobFinished")
         return false
     }
 
@@ -381,10 +400,11 @@ class DfrEarlyBootJobService : JobService() {
         boundary: String,
     ): Boolean {
         if (!token.stopped.get()) return false
-        // After the stop check, never before it: this is a binder call, and a
-        // probe that was not stopped must not pay for a diagnostic it will not
-        // record.
-        val thermal = EarlyRootEnv.thermalStatus(applicationContext)
+        // Read when the stop HAPPENED, in onStopJob, and only carried here.
+        // This boundary can be an unbounded time later - most of this worker's
+        // runtime is the readiness sweep - so reading it here would file a
+        // thermal state from one instant against a reason from another.
+        val thermal = token.stopThermal
         Log.i(TAG, "[DFR][EARLY_JOB] CALLBACK_ABANDONED boundary=$boundary " +
             "stop_reason=${token.stopReason} thermal_status=$thermal " +
             "job_id=${token.jobId} boot_id=${value(firedBootId)}")

@@ -316,10 +316,14 @@ public final class EarlyBootProbePolicy {
                     || !STOP_BOUNDARIES.contains(boundary)) return null;
             // Absent is UNKNOWN, not a defect: a record from a build that did
             // not write these fields is still a complete stop record.
+            String stopReason = optionalPlatformInt(stopped.get("stop_reason"));
+            String thermal = optionalPlatformInt(stopped.get("thermal_status"));
+            // Absent is UNKNOWN, not a defect: a record from a build that did
+            // not write these fields is still a complete stop record. A value
+            // outside the domain is a different fact and refuses.
+            if (stopReason == null || thermal == null) return null;
             return new Callback(CALLBACK_STOPPED, stopped.get("fired_boot_id"),
-                    jobId, callbackElapsed, boundary,
-                    optional(stopped.get("stop_reason")),
-                    optional(stopped.get("thermal_status")));
+                    jobId, callbackElapsed, boundary, stopReason, thermal);
         }
         return null;
     }
@@ -517,9 +521,37 @@ public final class EarlyBootProbePolicy {
      * key=value lines, every key in {@code keys} present exactly once and no key
      * outside it. Returns null on any deviation.
      */
-    /** A missing optional diagnostic reads UNKNOWN; it is never a refusal. */
-    private static String optional(String raw) {
-        return (raw == null || raw.trim().isEmpty()) ? UNKNOWN : raw;
+    /**
+     * An optional diagnostic's value domain.
+     *
+     * ABSENT reads UNKNOWN - that is the backward-compatibility half, and the
+     * only reason these keys are optional at all: a record written by a build
+     * that did not have the field is complete.
+     *
+     * PRESENT BUT OUTSIDE THE DOMAIN REFUSES THE WHOLE RECORD. The writers emit
+     * either the literal token or a non-negative platform integer
+     * (`JobParameters.getStopReason()`, `PowerManager.getCurrentThermalStatus()`),
+     * so `stop_reason=garbage` or `thermal_status=HOT` is a record nobody in
+     * this codebase wrote - a corrupted or externally edited file - and
+     * accepting it would display invented values as durable evidence in the one
+     * experiment they exist to decide. This is exactly the rule
+     * {@link #parseOptionalLong} already applies to a numeric `-1`, and Codex
+     * caught that these two fields were not holding to it (PR #68).
+     *
+     * Returns null for a value this parser cannot account for; the caller
+     * refuses the record.
+     */
+    private static String optionalPlatformInt(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return UNKNOWN;
+        if (UNKNOWN.equals(raw)) return UNKNOWN;
+        try {
+            // A negative is not a second spelling of UNKNOWN: both platform
+            // getters return a non-negative constant, so a negative is a value
+            // no writer here produced.
+            return Integer.parseInt(raw) < 0 ? null : raw;
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static Map<String, String> strictFields(String record, Set<String> keys) {

@@ -2463,6 +2463,7 @@ def audit():
         # may reach its next boundary and write the record immediately, so a
         # reason assigned afterwards can lose the race and record UNKNOWN.
         reason_at = src.find("token.stopReason = reason")
+        thermal_at = src.find("token.stopThermal = thermal")
         flag_at = src.find("token.stopped.set(true)")
         if reason_at < 0 or flag_at < 0:
             fail("%s no longer carries the stop reason onto the run token; the "
@@ -2471,6 +2472,25 @@ def audit():
             fail("%s sets the stop flag before the stop reason; the worker can "
                  "then observe the stop and write UNKNOWN for a reason the "
                  "platform did supply" % name)
+        # The thermal status is captured AT THE STOP, in onStopJob, and only
+        # carried to the boundary. The worker reaches a boundary an unbounded
+        # time later - `after_readiness` is on the far side of the readiness
+        # sweep - so a reading taken there files a thermal state from one
+        # instant against a reason from another, and a transition inside that
+        # gap is the event the field exists to catch (AGENTS.md 3.7).
+        if thermal_at < 0:
+            fail("%s does not capture the thermal status onto the run token in "
+                 "onStopJob; a reading taken at the boundary describes a later "
+                 "instant than the stop reason beside it" % name)
+        elif thermal_at > flag_at:
+            fail("%s sets the stop flag before the thermal capture; the worker "
+                 "can observe the stop and record UNKNOWN for a reading that "
+                 "was available" % name)
+        stop_cb = src.find("override fun onStopJob")
+        if stop_cb < 0 or not (stop_cb < reason_at and stop_cb < thermal_at):
+            fail("%s captures the stop diagnostics outside onStopJob; only that "
+                 "callback runs at the instant the scheduler reclaimed the "
+                 "execution" % name)
     # The reason is passed BY NAME, and that is a correctness requirement, not
     # style. `stopReason` sits before the trailing `abandoned` lambda in
     # gateAndDispatch's parameter list, so a caller that passed its lambda
@@ -2482,6 +2502,22 @@ def audit():
         fail("DfrEarlyRootJobService no longer passes stopReason by name; it "
              "sits before the trailing abandoned lambda, so a positional "
              "argument binds to the wrong parameter")
+
+    # And the boundary writers must not take a live reading of their own. This
+    # is the P2 Codex caught on PR #68: the first version read the thermal
+    # status inside abandon()/abandonIfStopped(), which can be seconds after
+    # the stop.
+    for name, src in (("DfrEarlyRootDispatch", early_root_dispatch_src),
+                      ("DfrEarlyBootJobService", code_only(early_job_src))):
+        boundary = src[src.find("private fun abandon"):] if "private fun abandon" in src else ""
+        if "EarlyRootEnv.thermalStatus(" in boundary:
+            fail("%s reads the thermal status at the abandonment boundary; it "
+                 "must be captured in onStopJob and only carried here, or the "
+                 "record pairs two different instants" % name)
+    if "stopThermal = {" not in early_root_job_src:
+        fail("DfrEarlyRootJobService no longer hands the captured thermal "
+             "status to the dispatch by name; positionally it would bind to "
+             "the wrong parameter")
 
     # Both records carry both diagnostics - checked on the RECORD, not on the
     # file. An earlier version of this guard searched the whole source, and a

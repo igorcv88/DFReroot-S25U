@@ -65,6 +65,22 @@ class DfrEarlyRootJobService : JobService() {
          */
         @Volatile
         var stopReason: String = EarlyBootProbePolicy.UNKNOWN
+
+        /**
+         * The thermal status as it was WHEN THE STOP HAPPENED, not when the
+         * worker noticed.
+         *
+         * It has to be captured here, beside the reason, because the worker can
+         * be anywhere - `before_gate` is immediate, but `after_readiness` is on
+         * the far side of StageHop's reflection sweep. Reading it at the
+         * boundary therefore pairs a stop reason from one instant with a
+         * thermal state from a later one, and a thermal transition inside that
+         * gap is exactly the event this field exists to catch. Two readings
+         * pasted into one record are not one observation (AGENTS.md 3.7).
+         * Codex caught this on PR #68.
+         */
+        @Volatile
+        var stopThermal: String = EarlyBootProbePolicy.UNKNOWN
     }
 
     @Volatile
@@ -133,14 +149,32 @@ class DfrEarlyRootJobService : JobService() {
             Log.e(TAG, "[DFR][EARLY_ROOT] stopReason unreadable: $t")
             EarlyBootProbePolicy.UNKNOWN
         }
+        /*
+         * A deliberate exception to "no binder call on system_server's main
+         * looper", and the reasoning is the whole justification:
+         *
+         *  - the rule exists to protect the EARLY WINDOW. By the time this
+         *    callback runs the scheduler has already reclaimed the execution,
+         *    so this dispatch is dead and nothing here is racing the boot
+         *    animation;
+         *  - this path runs only when a stop happens, and it already logs;
+         *  - the alternative is a mispaired reading, which makes the field
+         *    unreliable precisely in the case it was added for.
+         *
+         * One call, behind the same catch as the reason, before the flag.
+         */
+        val thermal = EarlyRootEnv.thermalStatus(applicationContext)
         val token = activeRun
         if (token != null && token.jobId == params.jobId) {
+            // Both before the flag: once it is true the worker may reach its
+            // next boundary and write the record immediately.
             token.stopReason = reason
+            token.stopThermal = thermal
             token.stopped.set(true)
         }
         Log.i(TAG, "[DFR][EARLY_ROOT] onStopJob job_id=${params.jobId} " +
-            "stop_reason=$reason; the worker stops at its next boundary and " +
-            "will not call jobFinished")
+            "stop_reason=$reason thermal_status=$thermal; the worker stops at " +
+            "its next boundary and will not call jobFinished")
         return false
     }
 
@@ -188,6 +222,7 @@ class DfrEarlyRootJobService : JobService() {
             // Evidence only, and read lazily: the dispatch asks for it after
             // `abandoned` has already said the execution was reclaimed.
             stopReason = { token.stopReason },
+            stopThermal = { token.stopThermal },
         ) { _ ->
             /*
              * The scheduler has taken this execution back. The dispatch asks at
