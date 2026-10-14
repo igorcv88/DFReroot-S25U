@@ -1510,6 +1510,78 @@ public class EarlyRootPolicyTest {
                         + " probe, so arming a probe can never reach transaction 5");
 
         System.out.println("");
+        // --- the arming-time thermal gate -----------------------------------
+        // The owner's point: the restriction is what holds the job, a reboot
+        // raises the temperature, so refusing the ARMING costs a sentence where
+        // discovering it at the callback costs a whole boot.
+        check(!EarlyRootPolicy.evaluateArmingThermal(2, Float.NaN).allow,
+                "MODERATE (2) refuses: the scheduler restricts a PRIORITY_DEFAULT "
+                        + "job outright from there up");
+        check(EarlyRootPolicy.THERMAL_RESTRICTED.equals(
+                        EarlyRootPolicy.evaluateArmingThermal(3, Float.NaN).code),
+                "above MODERATE refuses with the same code");
+        check(EarlyRootPolicy.evaluateArmingThermal(1, 0.5f).allow,
+                "LIGHT (1) with margin allows: at LIGHT only MIN/LOW are restricted");
+        check(EarlyRootPolicy.evaluateArmingThermal(0, 0.1f).allow,
+                "NONE (0) allows");
+        // The margin the owner asked for: below the blocking line, because the
+        // reboot itself heats the device.
+        check(!EarlyRootPolicy.evaluateArmingThermal(1, 0.85f).allow,
+                "at the headroom limit refuses: a reboot restarts every process "
+                        + "and there is no margin left");
+        check(EarlyRootPolicy.THERMAL_NO_MARGIN.equals(
+                        EarlyRootPolicy.evaluateArmingThermal(1, 0.9f).code),
+                "past the limit refuses for lack of margin, not as RESTRICTED");
+        check(EarlyRootPolicy.evaluateArmingThermal(1, 0.8499f).allow,
+                "just under the limit still allows");
+        // THE ASYMMETRY. This gate protects a reboot, not the device, so an
+        // unobtainable reading must not withhold the capability - that would be
+        // a diagnostic whose failure is worse than what it diagnoses (3.6.1).
+        // Every gate that protects the device still runs at the callback.
+        EarlyRootPolicy.Decision blind = EarlyRootPolicy.evaluateArmingThermal(
+                EarlyRootPolicy.THERMAL_STATUS_UNAVAILABLE, Float.NaN);
+        check(blind.allow, "an unreadable thermal state ALLOWS the arming");
+        check(EarlyRootPolicy.THERMAL_UNREADABLE.equals(blind.code),
+                "and says so, so nobody reads it back as a measured pass");
+        // NaN must never behave like a low reading.
+        check(EarlyRootPolicy.evaluateArmingThermal(1, Float.NaN).allow,
+                "a readable status with NaN headroom is judged on the status alone");
+        check(!EarlyRootPolicy.evaluateArmingThermal(2, Float.NaN).allow,
+                "NaN headroom does not rescue a MODERATE status");
+        check(EarlyRootPolicy.THERMAL_OK.equals(
+                        EarlyRootPolicy.evaluateArmingThermal(1, Float.NaN).code),
+                "a status-only pass is OK, not UNREADABLE: one reading is a "
+                        + "measurement");
+        // The record's own formatting: a failed reading is the token, never a
+        // number a reader could mistake for cool.
+        check(EarlyBootProbePolicy.UNKNOWN.equals(EarlyRootPolicy.formatThermalStatus(
+                        EarlyRootPolicy.THERMAL_STATUS_UNAVAILABLE)),
+                "an unavailable status formats as UNKNOWN, not -1");
+        check(EarlyBootProbePolicy.UNKNOWN.equals(
+                        EarlyRootPolicy.formatHeadroom(Float.NaN)),
+                "NaN headroom formats as UNKNOWN, not 0");
+        check("1".equals(EarlyRootPolicy.formatThermalStatus(1)),
+                "a real status formats as its number");
+        // And the arm record stays parsable both ways, so an app upgrade still
+        // yields a precise BUILD_MISMATCH instead of a bare NOT_ARMED.
+        String withThermal = EarlyRootPolicy.formatArm(ARMED_BOOT,
+                EarlyRootPolicy.EXPECTED_JOB_ID, NS, 15_000L, 1, CODE, NAME, KSUD, FP, 300_000L, 1759000000000L,
+                "deadbeef", 1, 0.42f);
+        check(EarlyRootPolicy.parseArm(withThermal) != null,
+                "an arm record carrying the thermal reading parses");
+        check(withThermal.contains("armed_thermal_status=1")
+                        && withThermal.contains("armed_thermal_headroom=0.42"),
+                "the before-the-reboot reading is in the durable record");
+        check(EarlyRootPolicy.parseArm(EarlyRootPolicy.formatArm(ARMED_BOOT,
+                        EarlyRootPolicy.EXPECTED_JOB_ID,
+                        NS, 15_000L, 1, CODE, NAME, KSUD, FP, 300_000L,
+                        1759000000000L, "deadbeef")) != null,
+                "a record from a build WITHOUT the thermal fields still parses");
+        check(EarlyRootPolicy.parseArm(withThermal + "armed_thermal_status=2\n") == null,
+                "a duplicated optional key still refuses");
+        check(EarlyRootPolicy.parseArm(withThermal + "surprise=1\n") == null,
+                "an unknown key still refuses");
+
         // --- the profile retention window -----------------------------------
         // THE rule that was wrong. A single leading cap spent itself inside the
         // three gate_target calls (51 REPORT sites each, all before runAll's

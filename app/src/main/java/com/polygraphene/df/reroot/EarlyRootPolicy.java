@@ -2,7 +2,6 @@ package com.polygraphene.df.reroot;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -482,11 +481,138 @@ public final class EarlyRootPolicy {
      */
     public static final int MAX_TRACE_STEPS = 64;
 
+    /*
+     * --- arming-time thermal gate -------------------------------------------
+     *
+     * Why there is one at all. ThermalStatusRestriction restricts a
+     * PRIORITY_DEFAULT job OUTRIGHT from THERMAL_STATUS_MODERATE (2) upward and
+     * only MIN/LOW at LIGHT (1). Boot `f4b7cac2` was held 81.5 s with the status
+     * at 2 and dispatched 22 ms after it fell to 1; boot `2e7d56e5` was punctual
+     * at 14.4 s with the status at 1. Arming while the device is already at 2 is
+     * arming a job the scheduler will veto, and the cost of finding that out is
+     * a whole reboot.
+     *
+     * So this refuses the ARMING, early, where a refusal costs the owner a
+     * sentence instead of a boot. It is a gate in the safe direction: it can
+     * only ever withhold an arming, never permit one, and every gate that
+     * protects the DEVICE still runs at callback time, unchanged.
+     *
+     * THE ASYMMETRY IS DELIBERATE, and it is the opposite of this file's usual
+     * direction. An unobtainable reading ALLOWS, recorded as UNKNOWN. That is
+     * because of what this gate is for: it protects the owner's time, not the
+     * device, and a diagnostic that can permanently withhold a capability when
+     * it cannot read itself is the failure AGENTS.md 3.6.1 exists to name - a
+     * probe whose worst outcome is worse than the thing it diagnoses. Refusing
+     * here would mean a PowerManager that answers nothing blocks Early Root for
+     * good, to save a reboot that might well have worked.
+     */
+    public static final String THERMAL_OK = "EARLY_ROOT_THERMAL_OK";
+    public static final String THERMAL_RESTRICTED = "EARLY_ROOT_THERMAL_RESTRICTED";
+    public static final String THERMAL_NO_MARGIN = "EARLY_ROOT_THERMAL_NO_MARGIN";
+    public static final String THERMAL_UNREADABLE = "EARLY_ROOT_THERMAL_UNREADABLE";
+
+    /** PowerManager.THERMAL_STATUS_MODERATE, named here so the policy stays pure. */
+    public static final int THERMAL_STATUS_MODERATE = 2;
+
+    /**
+     * The headroom above which an arming is refused for lack of margin.
+     *
+     * The status alone is quantised, so it cannot express "close to the line".
+     * `getThermalHeadroom` can: it is normalised so that the throttling
+     * threshold is 1.0, and THIS DEVICE publishes its own mapping -
+     * `Temperature headroom thresholds: [NaN, 0.8333333, 0.9, 1.0, ...]`, i.e.
+     * LIGHT at 0.833 and **MODERATE at 0.9**.
+     *
+     * 0.85 sits roughly mid-band inside LIGHT, leaving margin for the thing the
+     * owner pointed out: a reboot restarts every process on the device, so the
+     * temperature at the callback is higher than the temperature at arming.
+     *
+     * IT IS A CHOICE, NOT A MEASUREMENT. Nobody has measured how much a reboot
+     * raises headroom on this firmware - which is exactly why the reading is
+     * also written into the arm record, so the before/after pairing this
+     * threshold should be derived from starts accumulating instead of being
+     * argued about.
+     */
+    public static final float ARMING_HEADROOM_MAX = 0.85f;
+
+    /** A reading that could not be taken, in the arm record and in a verdict. */
+    public static final int THERMAL_STATUS_UNAVAILABLE = -1;
+
+    /**
+     * May an arming proceed, given what could be read about the device's heat?
+     *
+     * {@code status} is PowerManager.getCurrentThermalStatus(), or
+     * {@link #THERMAL_STATUS_UNAVAILABLE}. {@code headroom} is
+     * getThermalHeadroom(0), or NaN - which is what that API returns when it
+     * has too little data or is called more than once a second, so NaN is
+     * "not measured" and never a low reading.
+     */
+    public static Decision evaluateArmingThermal(int status, float headroom) {
+        if (status >= THERMAL_STATUS_MODERATE) {
+            return new Decision(false, THERMAL_RESTRICTED,
+                    "the device is at thermal status " + status
+                            + "; at MODERATE (2) or above the scheduler restricts a"
+                            + " PRIORITY_DEFAULT job outright, so this arming would"
+                            + " spend a reboot on a callback that cannot run."
+                            + " Let the phone cool for a few minutes and arm again");
+        }
+        // NaN fails every comparison, so this is only reached by a real reading.
+        if (headroom >= ARMING_HEADROOM_MAX) {
+            return new Decision(false, THERMAL_NO_MARGIN,
+                    "thermal headroom is " + headroom + ", at or past the "
+                            + ARMING_HEADROOM_MAX + " arming limit (this device puts"
+                            + " MODERATE at 0.9). A reboot restarts every process and"
+                            + " raises it further, so there is no margin left for the"
+                            + " early window. Let the phone cool for a few minutes");
+        }
+        if (status == THERMAL_STATUS_UNAVAILABLE && Float.isNaN(headroom)) {
+            // Allowed, and said out loud. See the asymmetry note above: this
+            // gate protects a reboot, not the device, so an unreadable
+            // diagnostic must not be able to withhold the capability.
+            return new Decision(true, THERMAL_UNREADABLE,
+                    "the device's thermal state could not be read; arming anyway,"
+                            + " because this check exists to save a reboot and not to"
+                            + " authorise one - every gate that protects the device"
+                            + " still runs at the callback");
+        }
+        return new Decision(true, THERMAL_OK,
+                "thermal status " + formatThermalStatus(status)
+                        + " headroom " + formatHeadroom(headroom));
+    }
+
+    /** UNKNOWN for an unavailable reading, the number otherwise. */
+    public static String formatThermalStatus(int status) {
+        return status == THERMAL_STATUS_UNAVAILABLE
+                ? EarlyBootProbePolicy.UNKNOWN : Integer.toString(status);
+    }
+
+    /** UNKNOWN for NaN, the value otherwise. NaN is not a low reading. */
+    public static String formatHeadroom(float headroom) {
+        return Float.isNaN(headroom)
+                ? EarlyBootProbePolicy.UNKNOWN : Float.toString(headroom);
+    }
+
     private static final Set<String> ARM_KEYS = Set.of(
             "state", "armed_boot_id", "job_id", "namespace", "minimum_latency_ms",
             "schedule_result", "version_code", "version_name", "ksud_sha256",
             "device_fingerprint", "armed_elapsed_ms", "armed_wallclock_ms",
             "generation");
+
+    /**
+     * Arm-record keys a record MAY carry, whose absence is not a deviation.
+     *
+     * The thermal reading taken at arming time is the "before the reboot" half
+     * of the pairing the owner asked for, and the records written by builds
+     * before it existed must still parse. {@link #parse} demands the key set
+     * exactly - deliberately, for the REQUIRED fields: a record with no
+     * generation cannot be told from a stale one, and that refusal is the
+     * point. An optional diagnostic is a different case, and making it required
+     * would turn a precise EARLY_ROOT_BUILD_MISMATCH after an app upgrade into
+     * a bare EARLY_ROOT_NOT_ARMED. Required to ACT, never to PARSE
+     * (AGENTS.md 3.6.1).
+     */
+    private static final Set<String> ARM_OPTIONAL_KEYS = Set.of(
+            "armed_thermal_status", "armed_thermal_headroom");
 
     private static final Set<String> JOURNAL_KEYS = Set.of(
             "boot_id", "phase", "attempts", "native_started");
@@ -1278,6 +1404,20 @@ public final class EarlyRootPolicy {
      * one that crashed - cannot be read as a subset of itself.
      */
     private static Map<String, String> parse(String record, Set<String> keys) {
+        return parse(record, keys, Set.of());
+    }
+
+    /**
+     * As above, plus keys that MAY be present. Everything else is unchanged and
+     * deliberately unforgiving: an unknown key, a duplicate, a valueless line
+     * and a missing required key all still refuse.
+     *
+     * The optional half exists so a diagnostic field can be added without
+     * invalidating records written before it - without which an app upgrade
+     * turns a precise BUILD_MISMATCH into a bare NOT_ARMED.
+     */
+    private static Map<String, String> parse(String record, Set<String> required,
+                                             Set<String> optional) {
         if (blank(record)) return null;
         Map<String, String> out = new HashMap<>();
         for (String raw : record.split("\n", -1)) {
@@ -1286,18 +1426,36 @@ public final class EarlyRootPolicy {
             int sep = line.indexOf('=');
             if (sep <= 0 || sep == line.length() - 1) return null;
             String key = line.substring(0, sep);
-            if (!keys.contains(key)) return null;
+            if (!required.contains(key) && !optional.contains(key)) return null;
             if (out.putIfAbsent(key, line.substring(sep + 1)) != null) return null;
         }
-        if (!new LinkedHashSet<>(out.keySet()).equals(keys)) return null;
+        if (!out.keySet().containsAll(required)) return null;
         return out;
+    }
+
+    /**
+     * The arm record without a thermal reading.
+     *
+     * Kept so every existing caller and test compiles unchanged, and because it
+     * is the honest shape for a writer that has no reading to offer: it emits
+     * UNKNOWN for both, which is what the parser already tolerates.
+     */
+    public static String formatArm(String bootId, int jobId, String namespace,
+                                   long minimumLatencyMs, int scheduleResult,
+                                   int versionCode, String versionName, String ksudSha256,
+                                   String deviceFingerprint, long elapsedMs,
+                                   long wallclockMs, String generation) {
+        return formatArm(bootId, jobId, namespace, minimumLatencyMs, scheduleResult,
+                versionCode, versionName, ksudSha256, deviceFingerprint, elapsedMs,
+                wallclockMs, generation, THERMAL_STATUS_UNAVAILABLE, Float.NaN);
     }
 
     public static String formatArm(String bootId, int jobId, String namespace,
                                    long minimumLatencyMs, int scheduleResult,
                                    int versionCode, String versionName, String ksudSha256,
                                    String deviceFingerprint, long elapsedMs,
-                                   long wallclockMs, String generation) {
+                                   long wallclockMs, String generation,
+                                   int thermalStatus, float thermalHeadroom) {
         return "state=" + STATE_ARMED + "\n"
                 + "armed_boot_id=" + bootId + "\n"
                 + "job_id=" + jobId + "\n"
@@ -1310,13 +1468,24 @@ public final class EarlyRootPolicy {
                 + "device_fingerprint=" + deviceFingerprint + "\n"
                 + "armed_elapsed_ms=" + elapsedMs + "\n"
                 + "armed_wallclock_ms=" + wallclockMs + "\n"
-                + "generation=" + generation + "\n";
+                + "generation=" + generation + "\n"
+                /*
+                 * The "before the reboot" half of the pairing. Written last and
+                 * read as optional, so a record from a build without these
+                 * fields still parses and still yields a precise
+                 * BUILD_MISMATCH rather than a bare NOT_ARMED.
+                 *
+                 * UNKNOWN rather than a number when the reading failed: a
+                 * missing measurement must not read as a cool device.
+                 */
+                + "armed_thermal_status=" + formatThermalStatus(thermalStatus) + "\n"
+                + "armed_thermal_headroom=" + formatHeadroom(thermalHeadroom) + "\n";
     }
 
     /** null means malformed, unreadable, incomplete, or never actually scheduled. */
     public static Arm parseArm(String record) {
         if (AutoRootPolicy.RECORD_UNREADABLE.equals(record)) return null;
-        Map<String, String> values = parse(record, ARM_KEYS);
+        Map<String, String> values = parse(record, ARM_KEYS, ARM_OPTIONAL_KEYS);
         if (values == null) return null;
         if (!STATE_ARMED.equals(values.get("state"))) return null;
         if (blank(values.get("armed_boot_id")) || blank(values.get("namespace"))) return null;

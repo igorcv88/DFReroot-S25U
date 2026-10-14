@@ -101,6 +101,43 @@ object DfrEarlyRoot {
                 " The manual run and Auto Root after a full boot are unaffected."
         }
         /*
+         * And refused while the device is too hot to be dispatched punctually.
+         *
+         * UNLIKE the two checks above, this one is NOT a cheap mirror of a gate
+         * that also runs at the callback, and that difference is deliberate.
+         * The authority here is the scheduler's own behaviour:
+         * ThermalStatusRestriction restricts a PRIORITY_DEFAULT job outright
+         * from MODERATE (2) up, so arming a hot device arms a callback the
+         * scheduler will veto - and the cost of discovering that is a whole
+         * reboot. Boot `f4b7cac2` waited 81.5 s at status 2 and was dispatched
+         * 22 ms after it fell to 1; boot `2e7d56e5` was punctual at status 1.
+         *
+         * There is deliberately NO matching check at the callback. If the
+         * scheduler dispatched us, the restriction was not in force - so a
+         * check there could only withhold a run the platform had already
+         * permitted, which is the wrong direction for a gate whose whole
+         * purpose is to save a reboot.
+         *
+         * Placed with the other read-only refusals and BEFORE
+         * recordPendingIncident, so a refusal leaves nothing behind: no job, no
+         * rewritten arm record, no archived cycle, no incident write. The
+         * readings are carried into the record on the success path, which is
+         * the "before the reboot" half of the pairing - and the only way the
+         * 0.85 headroom limit ever stops being a guess.
+         */
+        val thermalStatus = EarlyRootEnv.thermalStatusValue(context)
+        val thermalHeadroom = EarlyRootEnv.thermalHeadroom(context)
+        val thermal = EarlyRootPolicy.evaluateArmingThermal(thermalStatus, thermalHeadroom)
+        Log.i(TAG, "[DFR][EARLY_ROOT] ARMING_THERMAL=${thermal.code}" +
+            " status=${EarlyRootPolicy.formatThermalStatus(thermalStatus)}" +
+            " headroom=${EarlyRootPolicy.formatHeadroom(thermalHeadroom)}")
+        if (!thermal.allow) {
+            return "[x] EARLY_ROOT_NOT_ARMED: ${thermal.code}\n${thermal.reason}\n" +
+                "status=${EarlyRootPolicy.formatThermalStatus(thermalStatus)}" +
+                " headroom=${EarlyRootPolicy.formatHeadroom(thermalHeadroom)}" +
+                " (nothing was scheduled and no record was changed)"
+        }
+        /*
          * And refused while a previous boot's early run is unaccounted for.
          *
          * This is the only place the detection can happen, which is why it is
@@ -241,7 +278,7 @@ object DfrEarlyRoot {
             bootId, JOB_ID, namespaceForRuntime(), MINIMUM_LATENCY_MS, result,
             AutoRootStore.versionCode(), AutoRootStore.versionName(),
             KsudStage.pinnedKsudSha256(), AutoRootStore.deviceFingerprint(),
-            elapsed, wallclock, generation
+            elapsed, wallclock, generation, thermalStatus, thermalHeadroom
         )
         val failure = EarlyRootStore.writeArm(record)
         if (failure != null) {
@@ -250,7 +287,9 @@ object DfrEarlyRoot {
         }
         return "[*] EARLY_ROOT_ARMED job_id=$JOB_ID namespace=${namespaceForRuntime()} " +
             "schedule_result=$result persisted=1 generation=$generation " +
-            "min_latency_ms=$MINIMUM_LATENCY_MS; " +
+            "min_latency_ms=$MINIMUM_LATENCY_MS " +
+            "thermal_status=${EarlyRootPolicy.formatThermalStatus(thermalStatus)} " +
+            "thermal_headroom=${EarlyRootPolicy.formatHeadroom(thermalHeadroom)}; " +
             "start the FULL reboot within ${REBOOT_WITHIN_MS / 1000}s. The chain will " +
             "run inside the boot animation; a hard reboot is the recovery boundary."
     }

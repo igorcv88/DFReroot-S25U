@@ -2491,6 +2491,67 @@ def audit():
             fail("%s captures the stop diagnostics outside onStopJob; only that "
                  "callback runs at the instant the scheduler reclaimed the "
                  "execution" % name)
+    # --- the arming-time thermal gate -----------------------------------
+    # The owner's ask: do not spend a reboot on a callback the scheduler will
+    # veto. ThermalStatusRestriction restricts PRIORITY_DEFAULT outright from
+    # MODERATE up, so the arming is where that is cheap to refuse.
+    early_root_src = code_only(dfr_source("DfrEarlyRoot.kt"))
+    if "EarlyRootPolicy.evaluateArmingThermal(" not in early_root_src:
+        fail("DfrEarlyRoot no longer consults the arming thermal gate; the owner "
+             "spends a whole reboot discovering what one read answers")
+    # It has to come BEFORE the first durable write, or a refusal leaves a
+    # rewritten record behind and the message that says otherwise is false.
+    gate_at = early_root_src.find("EarlyRootPolicy.evaluateArmingThermal(")
+    incident_at = early_root_src.find("recordPendingIncident(")
+    sched_at = early_root_src.find("scheduler.schedule(")
+    if incident_at >= 0 and gate_at > incident_at:
+        fail("the arming thermal gate runs after recordPendingIncident; a "
+             "refusal would then leave a durable write behind, and the refusal "
+             "message says nothing was changed")
+    if sched_at >= 0 and gate_at > sched_at:
+        fail("the arming thermal gate runs after the job is scheduled; the "
+             "point is to refuse before anything exists")
+    # And the readings reach the record, which is the before-the-reboot half of
+    # the pairing the threshold has to be derived from.
+    for key in ("armed_thermal_status", "armed_thermal_headroom"):
+        if key not in code_only(dfr_source("EarlyRootPolicy.java")):
+            fail("the arm record no longer carries %r; without it the 0.85 "
+                 "headroom limit can never stop being a guess" % key)
+    # Pinned on the CALL SHAPE, not on a constant's name: an earlier version of
+    # this guard searched for "ARM_OPTIONAL_KEYS" and a mutation that merely
+    # renamed the constant still satisfied it by substring.
+    if "parse(record, ARM_KEYS, ARM_OPTIONAL_KEYS)" not in code_only(
+            dfr_source("EarlyRootPolicy.java")):
+        fail("parseArm no longer reads the thermal fields as OPTIONAL; a record "
+             "written before they existed would read as malformed, turning a "
+             "precise BUILD_MISMATCH after an app upgrade into a bare "
+             "NOT_ARMED")
+    # THE ASYMMETRY, pinned in both directions because it is the one place this
+    # file deliberately allows on missing evidence. This gate protects a reboot,
+    # not the device; a diagnostic that cannot read itself must not withhold a
+    # capability (3.6.1), and every gate that protects the device still runs at
+    # the callback. A future edit in EITHER direction should have to say so.
+    policy_src = code_only(dfr_source("EarlyRootPolicy.java"))
+    if "THERMAL_UNREADABLE" not in policy_src:
+        fail("the unreadable thermal verdict is gone; an unobtainable reading "
+             "must be recorded as such, never folded into a pass")
+    # Pinned on the exact return, because the function also returns
+    # `new Decision(true, THERMAL_OK, ...)` - so looking for "new Decision(true"
+    # anywhere in the body passes whatever the unreadable branch does. An
+    # earlier version of this guard made that mistake and caught nothing.
+    if "new Decision(true, THERMAL_UNREADABLE" not in policy_src:
+        fail("evaluateArmingThermal no longer ALLOWS on an unreadable reading; "
+             "that turns a failed diagnostic into a permanent refusal of the "
+             "capability, which is the 3.6.1 failure this gate must not become "
+             "- it protects a reboot, not the device")
+    # There must be NO matching check at the callback: if the scheduler
+    # dispatched us the restriction was not in force, so a check there could
+    # only withhold a run the platform already permitted.
+    if "evaluateArmingThermal" in code_only(dfr_source("DfrEarlyRootDispatch.kt")):
+        fail("the dispatch consults the arming thermal gate; a dispatched "
+             "callback proves the restriction was not in force, so a check "
+             "there can only withhold a run that was going to work")
+
     # --- the native profile ---------------------------------------------
     # The measurement of the 5767 ms that boot 2e7d56e5 could not account for.
     # Four properties, and each one is the difference between a measurement and
@@ -2624,28 +2685,40 @@ def audit():
             if key not in stop_rec:
                 fail("the probe's stop RECORD does not carry %s, so the two "
                      "jobs' stops stop being comparable" % key)
-    # And neither is ever an input. A thermal reading is evidence about the
-    # device, not about whether this chain may run, and a diagnostic that can
-    # change an outcome is not a diagnostic (AGENTS.md 3.6.1).
-    #
-    # The guard targets the MECHANISM, not the word. EarlyBootProbePolicy's
-    # Callback legitimately carries a `thermalStatus` field parsed out of a
-    # record - that is transporting evidence to a reader. What must not exist
-    # is either policy taking the LIVE reading, which is the only way a gate
-    # could come to depend on the device's current thermal state.
+    # Neither policy may take a LIVE thermal reading. They receive numbers as
+    # parameters and EarlyRootEnv does the reading, which is what keeps the
+    # decision host-testable and keeps a binder call out of a pure class.
     for name, src in (("EarlyRootPolicy", code_only(dfr_source("EarlyRootPolicy.java"))),
                       ("EarlyBootProbePolicy", probe_policy_src_for_gate_check)):
         for token in ("PowerManager", "currentThermalStatus",
-                      "getCurrentThermalStatus", "THERMAL_STATUS"):
+                      "getCurrentThermalStatus", "getThermalHeadroom"):
             if token in src:
-                fail("%s takes a live thermal reading (%s); a thermal state is "
-                     "recorded evidence and must never reach a gate"
-                     % (name, token))
-    # EarlyRootPolicy gates the chain, so it must not carry the value at all -
-    # not even as a parsed field it could later be tempted to compare.
-    if "thermal" in code_only(dfr_source("EarlyRootPolicy.java")).lower():
-        fail("EarlyRootPolicy names a thermal value; the gate that authorises "
-             "the chain must not have one to consult")
+                fail("%s takes a live thermal reading (%s); the policies receive "
+                     "numbers and EarlyRootEnv does the reading" % (name, token))
+    # And the path that authorises THE CHAIN must not consult thermal at all.
+    #
+    # This replaces a blunter guard that forbade EarlyRootPolicy from naming any
+    # thermal value. That premise expired when the owner asked for an
+    # arming-time gate: there is now one legitimate thermal decision, and it
+    # decides whether to ARM. The property worth keeping is narrower and
+    # stronger - a dispatched callback proves the restriction was not in force,
+    # so thermal inside the chain gate could only withhold a run the platform
+    # already permitted.
+    policy_full = code_only(dfr_source("EarlyRootPolicy.java"))
+    for fn in ("public static Decision evaluate(",
+               "public static Decision evaluateBeforeReadiness(",
+               "public static Decision evaluateArmBinding("):
+        at = policy_full.find(fn)
+        if at < 0:
+            fail("EarlyRootPolicy no longer declares %s; the chain's gate has "
+                 "moved and this guard cannot speak for it" % fn.split("(")[0])
+            continue
+        end = policy_full.find("\n    }", at)
+        if "hermal" in policy_full[at:end if end > 0 else len(policy_full)]:
+            fail("%s consults a thermal value; the gate that authorises the "
+                 "chain must not, because a dispatched callback already proves "
+                 "the restriction was not in force" % fn.split("(")[0])
+
     # The probe's stop record gained keys, and its parser demands the key set
     # EXACTLY. Required keys would make every record an older build wrote parse
     # as malformed - good evidence refused because the reader got newer, which
