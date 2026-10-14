@@ -25,6 +25,61 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
+> **The scheduler fork is CLOSED, 2026-10-13/14: the wait is a `JobRestriction`
+> veto, not a constraint. Everything below this block predates it, including the
+> two places that still describe the fork as open.**
+>
+> `tools/earlyroot_job_probe.sh` ran from `rish` against `2.0.26-dzif` while the
+> wait was in progress. For the dispatching job it read `Required constraints:
+> TIMING_DELAY DEADLINE FLEXIBILITY`, `TIMING_DELAY` satisfied at ≈16.5 s,
+> `DEADLINE` at ≈26.7 s, `readyDeadlineSatisfied: true`, bucket `EXEMPTED`,
+> `Priority: 300 [DEFAULT]` - and **`Unsatisfied constraints:` EMPTY** - with the
+> callback not entered until **≈701.7 s**. Both the dispatching job and the
+> observation-only probe were released together at 701.7 s during a job wave,
+> 1.5 s after `restrictJobsByOlaf: restrict=false reason=timeout`.
+>
+> **Hypothesis (b) is refuted on the device's own accounting.** The restored
+> earliest-run time was not in the future, no delay alarm was being waited on,
+> and **dropping the minimum latency would have changed nothing** - which was the
+> obvious fix and is the wrong one.
+>
+> **Where the wait actually is, from AOSP source:**
+> `isReadyToBeExecutedLocked()` evaluates the constraints and *then*
+> `if (checkIfRestricted(job) != null) return false;`. A `JobRestriction` is not
+> a constraint; it is a separate veto layer, so "every required constraint
+> satisfied" and "will not be dispatched" are not in conflict - together they are
+> that layer's signature.
+>
+> **Two source-grounded candidates, with different fixes.** Samsung
+> OLAF/Freecess (`restrictJobsByOlaf` is not in AOSP, and its
+> `restrict=true → restrict=false reason=timeout` transition 1.5 s before
+> dispatch is the shape of the whole 675 s wait); and AOSP
+> `ThermalStatusRestriction`, the only restriction AOSP ships, which at
+> `THERMAL_STATUS_MODERATE` restricts a `PRIORITY_DEFAULT` job outright while at
+> `LIGHT` it restricts only `MIN`/`LOW` - this job is `PRIORITY_DEFAULT` and
+> thermal status `1` was already seen in an earlier capture.
+>
+> **The read that distinguishes them, and why the last one could not.**
+> `dumpsys jobscheduler` prints `Restricted due to: …` and
+> `Ready: … !restricted=<bool> …` per job; `cmd jobscheduler get-job-state`
+> prints neither, which is why the earlier `PERSISTED READY` reading narrowed
+> the question without closing it. The probe's first revision filtered the
+> per-job block by keyword and dropped those lines, and its second run read
+> **zero** samples and died with `dumpsys: not found` because the environment
+> inherited through `su -c` need not carry `/system/bin`. Both were defects of
+> the instrument. The current revision captures the per-job block whole and then
+> narrows to those two lines, resolves `dumpsys`/`cmd` by absolute path with a
+> `FATAL` exit if either is missing, and makes each `/data/system` record report
+> its own read status, because `rish` could not read some of them and an
+> unreadable record must not print like an absent one (AGENTS.md 3.7).
+>
+> **No scheduling change is justified yet, and that is the operative
+> instruction.** The two candidates imply opposite work - one that JobScheduler
+> cannot be relied on for this on DZIF at all, the other that the job must be
+> expressed as expedited or user-initiated to clear the thermal threshold - and
+> one dump taken *during* the wait tells them apart. Run the probe on the next
+> late boot before touching the strategy.
+
 > **Boot 1's primary evidence is read, 2026-10-13 — and it says root lands
 > AFTER the screen. Everything below predates it.**
 >
@@ -78,9 +133,16 @@ acceptance criteria for the next signed build. If this file disagrees with
 > `bootchecker.rc` is now in the record and confirms
 > `on property:init.svc.zygote=restarting → setprop dev.platform_bootcomplete 0`.
 >
-> **Procedure correction:** `/proc/reset_summary` and `/proc/reset_history`
-> **do not exist on DZIF**. The DropBox `SYSTEM_LAST_KMSG_*` entries and
-> `extra_info` are the sources that do.
+> **Procedure correction, itself corrected:** an earlier revision of this block
+> said `/proc/reset_summary` and `/proc/reset_history` **do not exist on DZIF**.
+> That overreached from one boot and the dossier's own 2026-10-12 record refutes
+> it - `/proc/reset_summary` answered `UPLOAD CAUSE = 0xc8000000 = KERNEL PANIC`
+> on this device. They come and go; on 2026-10-13 both answered ENOENT as uid 0
+> in a boot with no panic. **An absent node is a reading, not proof of a clean
+> boot.** The sources observed in *both* states, and therefore the ones to read
+> first and always, are the DropBox `SYSTEM_LAST_KMSG_*` entries and
+> `extra_info` - which reads *empty* with no panic record, a successful read of
+> nothing. AGENTS.md 3.6.1 carries the rule.
 
 > **First run reporting COMPLETE, 2026-10-13 — and the evidence packet for it
 > does not exist yet. Everything below predates it.**
@@ -118,8 +180,10 @@ acceptance criteria for the next signed build. If this file disagrees with
 > **Two things this run does not touch.** The modules were not initialised,
 > which is the designed behaviour (§9), not a defect. And the job's punctuality
 > is not settled by one punctual boot - 299 s, 334.4 s and 521.7 s happened with
-> the same JobInfo, the ready-vs-not-ready fork below is untouched, and
-> `tools/earlyroot_job_probe.sh` is the read for the next **late** boot.
+> the same JobInfo. The ready-vs-not-ready fork described below is **closed**
+> (see the top block: it is ready-and-deferred, a `JobRestriction` veto), and
+> `tools/earlyroot_job_probe.sh` is still the read for the next **late** boot -
+> now for *which* restriction.
 >
 > **Worth more than it looks:** that collector also reads `dev.bootcomplete` /
 > `dev.platform_bootcomplete` from a boot where nothing tore userspace down.
@@ -156,6 +220,8 @@ acceptance criteria for the next signed build. If this file disagrees with
 > ADB, output in `/sdcard/Download/`. Run it before changing the scheduling;
 > dropping the minimum latency is only correct under the second hypothesis, and
 > it is the obvious wrong move under the first.
+> **Resolved 2026-10-13 as the first: ready-and-deferred.** It ran, and
+> `Unsatisfied constraints:` came back empty - see the top block.
 >
 > **(3) The broadcast trigger cannot work on this firmware.** `sf_stop_bootanim`
 > 15:26:40.469, `LOCKED_BOOT_COMPLETED` 15:26:40.760 — the animation stops
