@@ -2602,6 +2602,41 @@ def audit():
              "written before they existed would read as malformed, turning a "
              "precise BUILD_MISMATCH after an app upgrade into a bare "
              "NOT_ARMED")
+    # A thermal refusal must REPORT any surviving arming.
+    #
+    # The gate returns before the job is inspected and before any record is
+    # touched, which is what makes "this attempt changed nothing" true - but a
+    # reader takes NOT ARMED to mean the DEVICE is not armed. Arm while cool,
+    # wait, press Arm once it has heated, and the earlier job and arm record are
+    # still live: the dialog would say "do not reboot" over an armed device,
+    # which is the owner's own complaint inverted and the more dangerous
+    # direction. Codex caught it on PR #70.
+    thermal_refusal_at = early_root_src.find("if (!thermal.allow)")
+    if thermal_refusal_at < 0:
+        fail("the arming thermal refusal branch is gone; this guard cannot "
+             "speak for what it reports")
+    else:
+        branch_end = early_root_src.find("\n        }", thermal_refusal_at)
+        branch = early_root_src[thermal_refusal_at:
+                                branch_end if branch_end > 0 else len(early_root_src)]
+        if "armState(" not in branch:
+            fail("the arming thermal refusal does not report the prior arming "
+                 "state; it would say NOT ARMED over a device that is still "
+                 "armed and will consume the next reboot")
+        if "ARM_NO_RECORD" not in branch:
+            fail("the arming thermal refusal does not distinguish 'no previous "
+                 "arming' from one that survived; collapsing those is what "
+                 "makes the message a lie in one of the two cases")
+        # And it must not CANCEL as a side effect: that would make its own
+        # "changed no record" sentence false and would throw away an arming the
+        # owner deliberately made. disarm() is an action they take.
+        for forbidden in ("disarm(", "cancelOwned(", "deleteArm("):
+            if forbidden in branch:
+                fail("the arming thermal refusal calls %s; a read-only check "
+                     "must not destroy a valid arming as a side effect, and it "
+                     "claims in the same message that it changed nothing"
+                     % forbidden)
+
     # THE ASYMMETRY, pinned in both directions because it is the one place this
     # file deliberately allows on missing evidence. This gate protects a reboot,
     # not the device; a diagnostic that cannot read itself must not withhold a

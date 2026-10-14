@@ -135,10 +135,43 @@ object DfrEarlyRoot {
             " status=${EarlyRootPolicy.formatThermalStatus(thermalStatus)}" +
             " headroom=${EarlyRootPolicy.formatHeadroom(thermalHeadroom)}")
         if (!thermal.allow) {
+            /*
+             * The refusal has to say what happened to any EARLIER arming, and
+             * this is not a nicety.
+             *
+             * The gate returns before the job is inspected and before any
+             * record is touched - which is what makes "this attempt changed
+             * nothing" true. But a reader takes "NOT ARMED" to mean the DEVICE
+             * is not armed, and if the owner armed while cool, waited, and
+             * pressed Arm again once it had heated, the earlier job and arm
+             * record are still there and will be consumed by the next reboot.
+             * The dialog would then say "do not reboot" over an armed device:
+             * the owner's own complaint inverted, and the more dangerous
+             * direction. Codex caught it on PR #70.
+             *
+             * It REPORTS and does not cancel. Destroying a valid arming as a
+             * side effect of a read-only check would make the sentence above
+             * false and would throw away an arming the owner deliberately made;
+             * `disarm()` exists for when they decide to drop it, as an action
+             * they take rather than one a refusal takes for them.
+             *
+             * armState() is reused verbatim because it already distinguishes
+             * live, spent, expired, foreign, malformed and unreadable - six
+             * states this message must not collapse into "armed" (AGENTS.md 3.7).
+             */
+            val prior = armState(context)
+            val priorLine = if (prior.startsWith(EarlyRootPolicy.ARM_NO_RECORD)) {
+                "PREVIOUS ARMING: none - this device is not armed."
+            } else {
+                "PREVIOUS ARMING IS STILL ACTIVE and this refusal did NOT cancel" +
+                    " it; the next full reboot can still consume it. Use Disarm" +
+                    " to drop it.\n$prior"
+            }
             return "[x] EARLY_ROOT_NOT_ARMED: ${thermal.code}\n${thermal.reason}\n" +
                 "status=${EarlyRootPolicy.formatThermalStatus(thermalStatus)}" +
-                " headroom=${EarlyRootPolicy.formatHeadroom(thermalHeadroom)}" +
-                " (nothing was scheduled and no record was changed)"
+                " headroom=${EarlyRootPolicy.formatHeadroom(thermalHeadroom)}\n" +
+                "This attempt scheduled nothing and changed no record.\n" +
+                priorLine
         }
         /*
          * And refused while a previous boot's early run is unaccounted for.
@@ -465,7 +498,10 @@ object DfrEarlyRoot {
      */
     fun armState(context: Context?): String {
         val record = EarlyRootStore.readArm()
-            ?: return "EARLY_ROOT_NOT_ARMED"
+            // The constant, not the literal: the thermal refusal tests this
+            // prefix to decide whether to warn about a surviving arming, and
+            // two spellings of it would drift into a silent wrong answer.
+            ?: return EarlyRootPolicy.ARM_NO_RECORD
         if (record == AutoRootPolicy.RECORD_UNREADABLE) return "EARLY_ROOT_ARM_UNKNOWN"
         val arm = EarlyRootPolicy.parseArm(record)
             ?: return "EARLY_ROOT_ARM_MALFORMED"
