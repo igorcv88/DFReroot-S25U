@@ -11,6 +11,19 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!--
+      Declared for the automatic reboot the arming dialog performs, so the
+      arming is not lost to the ten seconds it takes to reach the system menu.
+
+      signature|privileged, and this app is not platform-signed - but
+      PowerManagerService enforces with enforceCallingOrSelfPermission, which
+      resolves against the UID, and android.uid.system (1000) holds REBOOT
+      through the framework's own `android` package. That is an argument from
+      how enforcement works, not an observation: the first physical press is
+      the measurement, and RebootRequest reports the exact exception so a
+      refusal names its own cause.
+    -->
+    <uses-permission android:name="android.permission.REBOOT" />
+    <!--
       The verdict notification is the only channel an unattended boot-time run has
       to a human: this firmware's default log buffer is 128 KiB per buffer and
       system_server saturates it in seconds, so the [DFR][*] trace of a boot run is

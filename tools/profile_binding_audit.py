@@ -2491,6 +2491,90 @@ def audit():
             fail("%s captures the stop diagnostics outside onStopJob; only that "
                  "callback runs at the instant the scheduler reclaimed the "
                  "execution" % name)
+    # --- the arm-and-reboot flow ----------------------------------------
+    # MainActivity and RebootRequest need an Android runtime, so the shape is
+    # asserted (AGENTS.md §5). The owner's reasons are the invariants.
+    main_flow = code_only(dfr_source("MainActivity.kt"))
+    reboot_src = code_only(dfr_source("RebootRequest.kt"))
+
+    # ONE arm button. The probe is a checkbox in the dialog now; two buttons
+    # were the UI the owner asked to simplify.
+    if "btnArmEarlyBootProbe" in main_flow:
+        fail("MainActivity still wires a separate Early Boot Probe button; the "
+             "owner asked for one arm button with the probe as a dialog option")
+    # ...but the probe's state is still reported, or the comparison the
+    # checkbox exists for becomes unreadable.
+    if "DfrEarlyBootProbe.armState(" not in main_flow:
+        fail("the probe's arm state is no longer reported anywhere; it is still "
+             "a separate persisted job and the checkbox exists to compare "
+             "arming with and without it")
+
+    # The thermal state is read BEFORE the confirmation, so nobody confirms a
+    # reboot that will not happen.
+    confirm_at = main_flow.find("showArmConfirm(")
+    precheck_at = main_flow.find("EarlyRootPolicy.evaluateArmingThermal(")
+    if confirm_at < 0 or precheck_at < 0 or precheck_at > confirm_at:
+        fail("MainActivity does not pre-check the thermal state before the arm "
+             "confirmation; the owner would confirm a reboot the scheduler was "
+             "going to veto")
+
+    # THE CENTRAL INVARIANT of this flow: reaching the line after the reboot
+    # request means the reboot did NOT happen, and the owner's decision is that
+    # nothing stays pending. An arming left live there hands them the
+    # ten-second race they asked to be rid of, without saying the clock started.
+    arm_then = main_flow.find("private fun armThenReboot(")
+    if arm_then < 0:
+        fail("the arm-and-reboot flow is gone; the arming would again depend on "
+             "reaching the system menu inside REBOOT_WITHIN_MS")
+    else:
+        end = main_flow.find("\n    }", arm_then)
+        body = main_flow[arm_then:end if end > 0 else len(main_flow)]
+        req_at = body.find("RebootRequest.requestReboot(")
+        dis_at = body.find("DfrEarlyRoot.disarm(")
+        if req_at < 0:
+            fail("armThenReboot does not request the reboot; the whole point is "
+                 "not to depend on the owner reaching the menu in time")
+        elif dis_at < 0 or dis_at < req_at:
+            fail("armThenReboot does not roll the arming back AFTER the reboot "
+                 "request returns; returning from it means the reboot did not "
+                 "happen, and leaving the arming live is the ten-second race "
+                 "the owner asked to remove - silently")
+        if "early_root_reboot_failed_title" not in body:
+            fail("armThenReboot does not report the refused reboot in a dialog; "
+                 "a log line is what let a failed arming read as a success")
+        # A root refusal must not reboot. The probe is observational and must
+        # never be the reason a root arming is skipped or kept.
+        if "ARM_OUTCOME_ARMED" not in body:
+            fail("armThenReboot does not check that the root arming actually "
+                 "succeeded before rebooting; it would reboot on a refusal")
+
+    # RebootRequest must treat a NORMAL RETURN as failure. A successful reboot
+    # takes the process with it, so a return means the call did nothing - and
+    # reporting that as success is exactly the dialog that lies.
+    if "returned without rebooting" not in reboot_src:
+        fail("RebootRequest no longer treats a normal return from pm.reboot as "
+             "a failure; a successful reboot never returns, so a return that "
+             "reads as success leaves the owner staring at a dialog that "
+             "claimed to reboot")
+    # And it must name the exception, because the first physical press is the
+    # measurement of whether the uid-level REBOOT argument holds at all.
+    if "javaClass.simpleName" not in reboot_src:
+        fail("RebootRequest does not name the exception class on failure; that "
+             "is the measurement that says whether Shizuku is the next rung")
+    # The manifest has to declare the permission it attempts to use.
+    with open(os.path.join(ROOT, "app", "src", "main", "AndroidManifest.xml"),
+              encoding="utf-8") as f:
+        manifest_raw = f.read()
+    if "android.permission.REBOOT" not in manifest_raw:
+        fail("the manifest does not declare android.permission.REBOOT while "
+             "RebootRequest attempts it")
+    # The excluded rung stays excluded: RootTransport is gated by 3.6.1 because
+    # its first privileged step panicked this kernel.
+    if "RootTransport" in reboot_src:
+        fail("RebootRequest reaches for RootTransport; that transport is gated "
+             "by AGENTS.md 3.6.1 because its first privileged step panicked "
+             "this kernel, and a convenience reboot must not drag that in")
+
     # --- unresolved references in the Kotlin we cannot compile ----------
     #
     # This host has no Kotlin compiler, so every Kotlin change here is verified
