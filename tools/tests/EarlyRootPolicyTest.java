@@ -1510,6 +1510,33 @@ public class EarlyRootPolicyTest {
                         + " probe, so arming a probe can never reach transaction 5");
 
         System.out.println("");
+        // --- the native profile step ----------------------------------------
+        // Evidence, not a boundary. It has to be in the CLOSED vocabulary or
+        // parseTraceLine drops the line, and the measurement is lost for the
+        // exact reason it was added: nothing anywhere recorded where the
+        // 5767 ms of boot 2e7d56e5 went.
+        String profileLine = EarlyRootPolicy.formatTraceStep(
+                EarlyRootPolicy.STEP_NATIVE_PROFILE, "boot-x", 20574,
+                "sys_boot_completed=0",
+                "total_ms=5767 marks=12 0:patch_#3 501:*_trying_to_trigger_(0)..");
+        check(EarlyRootPolicy.parseTraceLine(profileLine) != null,
+                "EARLY_ROOT_NATIVE_PROFILE is in the closed step vocabulary");
+        check(EarlyRootPolicy.traceHasStep(profileLine,
+                        EarlyRootPolicy.STEP_NATIVE_PROFILE),
+                "the profile step reads back as present");
+        // Separate facts, separate values: "the transaction returned" and
+        // "here is where its time went" must not be the same line (3.7).
+        check(!EarlyRootPolicy.traceHasStep(profileLine,
+                        EarlyRootPolicy.STEP_NATIVE_RETURNED),
+                "the profile step is not the returned step");
+        // A profile whose detail carries a tab would break the field count, so
+        // the writer's sanitiser has to hold for this step like any other.
+        check(EarlyRootPolicy.parseTraceLine(EarlyRootPolicy.formatTraceStep(
+                        EarlyRootPolicy.STEP_NATIVE_PROFILE, "boot-x", 1,
+                        "s=0", "total_ms=1\tmarks=0")) != null,
+                "a tab inside the profile detail is sanitised, not left to "
+                        + "break the line");
+
         System.out.println("EarlyRootPolicyTest: " + pass + "/" + (pass + fail)
                 + " passed");
         if (fail != 0) System.exit(1);

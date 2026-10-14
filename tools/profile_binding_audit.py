@@ -2491,6 +2491,46 @@ def audit():
             fail("%s captures the stop diagnostics outside onStopJob; only that "
                  "callback runs at the instant the scheduler reclaimed the "
                  "execution" % name)
+    # --- the native profile ---------------------------------------------
+    # The measurement of the 5767 ms that boot 2e7d56e5 could not account for.
+    # Three properties, and each one is the difference between a measurement
+    # and a thing that changes what it measures.
+    coord_src = code_only(dfr_source("DfrRootCoordinator.kt"))
+    # (1) ONE emit, and it is AFTER the transaction. Inside the reporter
+    #     callback it would add I/O to every native progress line, on a binder
+    #     thread, inside the interval being measured.
+    tx_at = coord_src.find("c.transact(5,")
+    emit_at = coord_src.find("host.nativeProfile(")
+    if emit_at < 0:
+        fail("DfrRootCoordinator no longer emits the native profile; the "
+             "transaction's internal timeline exists nowhere else - its "
+             "reporter strings go to a UI log an early boot does not have")
+    elif tx_at < 0 or emit_at < tx_at:
+        fail("DfrRootCoordinator emits the native profile before transaction 5 "
+             "returns; instrumentation that lengthens the interval it measures "
+             "is worthless")
+    if coord_src.count("host.nativeProfile(") != 1:
+        fail("DfrRootCoordinator emits the native profile more than once; one "
+             "line, after the fact, is the whole contract")
+    # (2) the accumulator is capped, or a chatty native path grows a list on a
+    #     binder thread without bound and the one line stops being one line.
+    if "NATIVE_PROFILE_MAX_MARKS" not in coord_src:
+        fail("the native profile accumulator is no longer capped; a chatty "
+             "reporter path would grow it without bound inside the measured "
+             "interval")
+    # (3) no gate reads it. It is evidence about timing, never permission.
+    for name, src in (("EarlyRootPolicy", code_only(dfr_source("EarlyRootPolicy.java"))),
+                      ("EarlyBootProbePolicy", probe_policy_src_for_gate_check)):
+        if "nativeProfile" in src or "NATIVE_PROFILE_MAX" in src:
+            fail("%s reads the native profile; it is a timing measurement and "
+                 "must never reach a gate" % name)
+    # And the step must be in the closed vocabulary, or the writer refuses the
+    # append and the measurement is silently lost.
+    if "STEP_NATIVE_PROFILE" not in code_only(dfr_source("EarlyRootPolicy.java")):
+        fail("EARLY_ROOT_NATIVE_PROFILE is not declared; parseTraceLine drops "
+             "any step outside the closed set, so the profile would be written "
+             "and then unreadable")
+
     # The reason is passed BY NAME, and that is a correctness requirement, not
     # style. `stopReason` sits before the trailing `abandoned` lambda in
     # gateAndDispatch's parameter list, so a caller that passed its lambda

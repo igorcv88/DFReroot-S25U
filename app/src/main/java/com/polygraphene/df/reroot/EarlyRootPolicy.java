@@ -402,6 +402,23 @@ public final class EarlyRootPolicy {
             "EARLY_ROOT_REMOTE_PREFLIGHT_PASS";
     public static final String STEP_BEFORE_NATIVE = "EARLY_ROOT_BEFORE_NATIVE";
     public static final String STEP_NATIVE_RETURNED = "EARLY_ROOT_NATIVE_RETURNED";
+    /**
+     * Where the native chain's time went, as one line.
+     *
+     * A separate step from {@link #STEP_NATIVE_RETURNED} because they are
+     * different facts (AGENTS.md 3.7): that one says the transaction came back
+     * clean, this one says how the interval was spent. On 2026-10-14, boot
+     * `2e7d56e5`, the first complete early run measured that interval at
+     * **5767 ms of 7659** - three quarters of the whole gap between the gate
+     * and verified root - and nothing anywhere recorded its internal timeline.
+     * The native side already reports progress strings through the transaction
+     * 5 reporter, but those go to the UI log, which in an early-boot run does
+     * not exist, so they were being discarded.
+     *
+     * This is evidence only. It is written AFTER the transaction has returned,
+     * so it cannot delay it, and no gate reads it.
+     */
+    public static final String STEP_NATIVE_PROFILE = "EARLY_ROOT_NATIVE_PROFILE";
     public static final String STEP_POST_ROOT_COMPLETE = "EARLY_ROOT_POST_ROOT_COMPLETE";
     public static final String STEP_SELINUX_ENFORCING = "EARLY_ROOT_SELINUX_ENFORCING";
     /** The run ended without the verdict above. Carries the coordinator's reason. */
@@ -449,7 +466,8 @@ public final class EarlyRootPolicy {
             STEP_SERVICE_ENTERED, STEP_PREFLIGHT_PASS, STEP_COORDINATOR_ENTERED,
             STEP_KSUD_STAGING, STEP_STAGEHOP_SENDING, STEP_STAGEHOP_SENT,
             STEP_CONTROLLER_RECEIVED, STEP_REMOTE_PREFLIGHT_PASS,
-            STEP_BEFORE_NATIVE, STEP_NATIVE_RETURNED, STEP_POST_ROOT_COMPLETE,
+            STEP_BEFORE_NATIVE, STEP_NATIVE_RETURNED, STEP_NATIVE_PROFILE,
+            STEP_POST_ROOT_COMPLETE,
             STEP_SELINUX_ENFORCING, STEP_FAILED, STEP_REFUSED,
             STEP_LOCKED_BOOT_OBSERVED, STEP_BOOT_COMPLETED_OBSERVED);
 

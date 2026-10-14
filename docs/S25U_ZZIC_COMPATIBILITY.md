@@ -3505,6 +3505,119 @@ different fixes:
   675 s window, so it does not yet refute anything. The owner's review of
   PR #66 makes the same point.
 
+#### Boot `2e7d56e5`, 2026-10-14, `2.0.28-dzif`: the first COMPLETE early run — and the goal is still missed by 5.1 s
+
+The chain ran end to end from the persisted job, inside the animation, and
+verified root. Journal `phase=COMPLETE` / `attempts=1` / `native_started=1`;
+cycle `CLAIMED`; eighteen trace steps in one `boot_id`.
+
+| elapsed | Δ | step |
+|---|---|---|
+| 14421 | | `JOB_ENTERED` — `bootanim_exit=0` |
+| 14560 | +139 | `READINESS_PASS` |
+| 14564 | +4 | `CLAIMED` |
+| 14807 | +243 | `BEFORE_NATIVE` — transaction 5, **`bootanim_exit=0`** |
+| 16993 | +2186 | `LOCKED_BOOT_OBSERVED` — **`bootanim_exit=1`** |
+| 20574 | +3581 | `NATIVE_RETURNED` |
+| 22080 | +1506 | `POST_ROOT_COMPLETE`, `ksu=32601` |
+| 22082 | +2 | `SELINUX_ENFORCING live_selinux=1` |
+| 43353 | +21271 | `BOOT_COMPLETED_OBSERVED` |
+
+**The budget, and it has moved:**
+
+| segment | this boot | previous | change |
+|---|---|---|---|
+| gate → transaction 5 | **386 ms** | 546 ms | −160 |
+| native chain | **5767 ms** | 5924 ms | −157 |
+| post-root wait | **1506 ms** | 3108 ms | **−1602** |
+| total, gate → verified | **7659 ms** | 9578 ms | −1919 |
+
+The animation flag was still 0 at `BEFORE_NATIVE` (14807) and already 1 by
+16993, so the animation had **at most 2186 ms** left at the point of no return
+while the chain needed **7273 ms** from there. **Deficit 5087 ms.** Root was
+verified roughly 5.1 s after the firmware asked the animation to leave.
+
+So the goal is not met, and the two segments that were reducible without
+touching the native chain have now largely been reduced: together they gave
+back 1.76 s, which is a third of what is missing. **75% of the remaining gap is
+the native chain**, and the scheduling side is close to exhausted — this
+callback arrived at 14.421 s, against 14.6–17.0 s on the punctual boots, so
+~14.4 s looks like the floor for a persisted job on this firmware (JobStore
+restore plus the first evaluation), while the animation leaves around 17 s.
+A ~2.6 s window cannot hold a 7.7 s chain; the chain has to change, or the
+trigger has to stop being a persisted job.
+
+#### Where the 5767 ms is, from source — and why nothing measured it
+
+`runAll`'s trigger loop, `app/src/main/jni/exp.c`:
+
+```c
+for (int i = 0; i < 8; i++) {
+    usleep(500000);                 /* 500 ms, unconditional */
+    REPORTLN("* trying to trigger (%d)..", i);
+    createOrphanProcess();
+    usleep(500000);                 /* 500 ms, unconditional */
+    mark = has_mutex(); mark1 = has_mark(1); ...
+```
+
+Each iteration costs **≥1000 ms of blind sleep before any marker is read**, up
+to eight iterations — up to 8000 ms of pure waiting in a 5767 ms measurement.
+The second `usleep` is a wait for an asynchronous event (stage 1/2 creating
+`/dev/dfm*`), which is the textbook case for a bounded poll rather than a fixed
+sleep; the first spaces the attempts.
+
+**This is arithmetic consistent with the measurement, not a measurement.** If
+the chain succeeded on the fifth attempt that is 5000 ms of sleep, which fits
+5767 ms almost exactly — but *which* iteration succeeded is not recorded
+anywhere, so the decomposition is still a hypothesis. **No change to the loop
+is justified until it is measured**, and the reason it never was is concrete:
+the native side already reports `* trying to trigger (N)..` and every patch
+step through the transaction 5 reporter, but those strings go to `Host.log`,
+i.e. the UI log — which an early-boot run has no UI for, and which this
+firmware's buffer drops long before anyone reads it. Confirmed against this
+boot's own logcat, which covers 10:37:54–10:40:31 and therefore the whole
+native window, and contains **zero** reporter lines.
+
+#### `EARLY_ROOT_NATIVE_PROFILE`: the measurement, with the cost it is allowed
+
+The reporter is the only clock inside the transaction, so each callback is
+timestamped into an in-memory list and the whole timeline is written as **one
+line, once, after the transaction returns**. Three properties, each guarded in
+`tools/profile_binding_audit.py` and each mutation-checked:
+
+- **one emit, after transaction 5.** Inside the reporter callback it would add
+  I/O to every native progress line, on a binder thread, inside the interval
+  being measured. Instrumentation that lengthens what it measures is worthless;
+- **the accumulator is capped** (`NATIVE_PROFILE_MAX_MARKS`), because a chatty
+  path would otherwise grow a list on that binder thread without bound, and the
+  emitted line says `CAPPED` so a truncated timeline is never read as a short
+  one;
+- **no gate reads it.** It is a timing measurement, never permission, and
+  neither policy may name it.
+
+It is a step of its own rather than extra detail on `NATIVE_RETURNED` because
+"the transaction came back clean" and "here is where its time went" are
+different facts (3.7). The trace write's return value is ignored at this one
+site, deliberately: it arrives after the point of no return, so a failed write
+is a lost measurement and must not refuse a run that already succeeded.
+
+#### A second thermal data point, in the predicted direction — and the reason it is marginal
+
+This boot's callback was punctual (14.421 s) and `dumpsys thermalservice`
+reports `Thermal Status: 1`. At `LIGHT` the predicate does not restrict a
+`PRIORITY_DEFAULT` job, so a punctual callback is what the thermal hypothesis
+predicts. One boot, and the status was read at collection time rather than
+during the wait, so it corroborates rather than proves.
+
+**What the same dump adds, and it explains the bimodality directly:** the SKIN
+sensor's `mHotThrottlingThresholds` are `[38.0, 40.0, 42.0, 45.0, 47.0, 60.0,
+90.0]`, and the device read **39.5 °C (HAL) / 40.0 °C (cached), both
+`mStatus=1`** — with AP at 50.4 °C and PA at 50.3 °C. The first two steps are
+**two degrees apart** and this device idles between them. That is why the
+callback is sometimes punctual and sometimes held for minutes with no change in
+the `JobInfo`: a fraction of a degree moves the restriction. It is not random,
+and it is not something the app can influence.
+
 #### Boot `f4b7cac2`, 2026-10-13: the thermal candidate, verified in logcat
 
 The owner collected a full logcat plus the per-boot records for a boot where

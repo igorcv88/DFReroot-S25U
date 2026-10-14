@@ -65,6 +65,36 @@ object DfrRootCoordinator {
      */
     const val POST_ROOT_TIMEOUT_MS = 120_000L
 
+    /**
+     * Hard cap on the native profile's marks.
+     *
+     * The native chain's reporter is chatty on some paths (per-SA progress
+     * dots, per-artefact hash lines), and this list lives on a binder thread
+     * inside the very interval it measures. A cap bounds both the memory and
+     * the one line's length; the emitted line says CAPPED when it is hit, so a
+     * truncated timeline is never mistaken for a short one.
+     *
+     * 96 is above the step count the chain actually reports on the success
+     * path - the eight-iteration trigger loop reports twice per iteration -
+     * so the normal run is complete rather than truncated.
+     */
+    const val NATIVE_PROFILE_MAX_MARKS = 96
+
+    /**
+     * A reporter line reduced to something a timeline can carry.
+     *
+     * The profile's value is WHEN, not what: the messages are already in the
+     * code, so a short stable prefix is enough to find the matching REPORTLN.
+     * Keeping it short is what lets the whole timeline be one line in a record
+     * that must stay readable, and stripping whitespace/tabs keeps it from
+     * breaking the trace's own field separator.
+     */
+    fun profileLabel(line: String): String {
+        val collapsed = line.trim().replace(Regex("[\\s\\t]+"), "_")
+        if (collapsed.isEmpty()) return "-"
+        return if (collapsed.length <= 28) collapsed else collapsed.substring(0, 28)
+    }
+
     const val BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
     const val SELINUX_ENFORCE_PATH = "/sys/fs/selinux/enforce"
 
@@ -88,6 +118,26 @@ object DfrRootCoordinator {
     interface Host {
         fun log(line: String)
         fun phase(phase: Phase)
+
+        /**
+         * Where the native chain's time went, as ONE line, once, after
+         * transaction 5 has returned.
+         *
+         * Why this exists: on 2026-10-14, boot `2e7d56e5`, the first complete
+         * early run spent 5767 ms of its 7659 ms inside this transaction -
+         * three quarters of the gap between the gate and verified root - and
+         * no record anywhere said how. The native side already reports its
+         * progress through the transaction 5 reporter, but those strings go to
+         * [log], which an early-boot run has no UI to display, so they were
+         * discarded.
+         *
+         * One line, after the fact, from timestamps held in memory. Not a step
+         * per boundary and not an fsync per callback: the point is to measure
+         * the interval, and instrumentation that lengthens what it measures is
+         * worthless. The default is empty, so a host that keeps no durable
+         * record is unaffected.
+         */
+        fun nativeProfile(profile: String) {}
 
         /**
          * Last call before the hop into network_stack.
@@ -407,12 +457,30 @@ object DfrRootCoordinator {
             val p = Parcel.obtain()
             val r = Parcel.obtain()
             try {
+                /*
+                 * The reporter is also the only clock inside the transaction.
+                 *
+                 * Each callback is timestamped into an in-memory list and
+                 * nothing else: no I/O, no formatting beyond a label, and a
+                 * hard cap, because this runs on a binder thread inside the
+                 * interval being measured. A chatty native run must not be
+                 * able to grow this without bound either.
+                 */
+                val profileStart = EarlyRootEnv.monotonicNow()
+                val marks = ArrayList<String>(NATIVE_PROFILE_MAX_MARKS)
                 val reporter = object : Binder() {
                     override fun onTransact(
                         code: Int, data: Parcel, reply: Parcel?, flags: Int
                     ): Boolean {
                         try {
-                            host.log(data.readString() ?: "")
+                            val line = data.readString() ?: ""
+                            if (marks.size < NATIVE_PROFILE_MAX_MARKS) {
+                                marks.add(
+                                    "${EarlyRootEnv.monotonicNow() - profileStart}" +
+                                        ":${profileLabel(line)}"
+                                )
+                            }
+                            host.log(line)
                         } catch (t: Throwable) {
                             Log.e(TAG, "reporter recv failed", t)
                         }
@@ -424,6 +492,18 @@ object DfrRootCoordinator {
                 if (c.transact(5, p, r, 0)) {
                     runResult = r.readInt()
                     host.log("\nrunAll done res=$runResult\n")
+                    // After the transaction, so it cannot lengthen it. One call,
+                    // one line, whatever the host does with it.
+                    try {
+                        host.nativeProfile(
+                            "total_ms=${EarlyRootEnv.monotonicNow() - profileStart}" +
+                                " marks=${marks.size}" +
+                                (if (marks.size >= NATIVE_PROFILE_MAX_MARKS) " CAPPED" else "") +
+                                " " + marks.joinToString(" ")
+                        )
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "native profile emit failed", t)
+                    }
                     if (runResult == 0) {
                         host.log("[DFR][POST_ROOT] WAIT_POST_ROOT: native bootstrap complete;" +
                             " final success is still pending\n")
