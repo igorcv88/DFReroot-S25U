@@ -129,13 +129,76 @@ jobs:
           packages: >-
             platforms;android-36
             build-tools;36.0.0
-            ndk;27.0.12077973
             cmake;3.22.1
+
+      # The NDK is installed separately, and retried, because it is the one
+      # package whose download can fail this way. On 2026-10-14 a release run
+      # died here:
+      #
+      #   Warning: An error occurred while preparing SDK package
+      #   NDK (Side by side) 27.0.12077973: Error on ZipFile unknown archive.
+      #   Error: The process '.../sdkmanager' failed with exit code 1
+      #
+      # `unknown archive` is sdkmanager reporting that what it downloaded is not
+      # a valid zip - a truncated transfer or an error page in place of the
+      # payload. At ~1 GB the NDK is several times the size of the other three
+      # packages combined, so it is where a partial transfer actually lands, and
+      # one bad byte range takes the whole run with it: this step precedes the
+      # offline gates and the signed build, so nothing at all gets produced.
+      #
+      # Three attempts, with the partial state cleared between them, because a
+      # retry that re-reads the same corrupt cached zip is not a retry. The
+      # install is left to `sdkmanager` directly rather than to the action,
+      # which exposes no retry and fails the job on the first attempt.
+      #
+      # This is a transport fix only. The version stays pinned to the toolchain
+      # AGENTS.md §6 records as known-good; a run that cannot obtain THAT NDK
+      # fails, and does not fall back to the runner's preinstalled one.
+      - name: Install the pinned NDK
+        run: |
+          set -eu
+          NDK_VER=27.0.12077973
+          NDK_DIR="$ANDROID_SDK_ROOT/ndk/$NDK_VER"
+          SDKMANAGER="$(command -v sdkmanager || echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager")"
+          test -x "$SDKMANAGER" || { echo "sdkmanager not found"; exit 1; }
+
+          attempt=1
+          while :; do
+            echo "::group::NDK $NDK_VER install attempt $attempt"
+            if yes | "$SDKMANAGER" --install "ndk;$NDK_VER"; then
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+            if [ "$attempt" -ge 3 ]; then
+              echo "NDK $NDK_VER could not be installed in $attempt attempts"
+              exit 1
+            fi
+            # Clear what a failed attempt leaves behind. Without this the next
+            # attempt can re-read the same corrupt archive and fail identically,
+            # which is the failure mode this step exists to break.
+            rm -rf "$NDK_DIR" \
+                   "$ANDROID_SDK_ROOT/.temp" \
+                   "$ANDROID_SDK_ROOT/.downloadIntermediates" \
+                   "$HOME/.android/cache" || true
+            attempt=$((attempt + 1))
+            sleep $((attempt * 10))
+          done
 
       - name: Export NDK location
         run: |
           NDK="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
-          test -d "$NDK" || { echo "NDK missing at $NDK"; exit 1; }
+          # `test -d` was too weak for the failure that just happened: a
+          # half-unpacked archive can leave the directory in place with no
+          # toolchain in it, and the build would then fail later, further from
+          # the cause. Check the binary the build actually invokes, and the
+          # source.properties sdkmanager writes only on a completed install.
+          CLANG="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          for f in "$NDK/source.properties" "$CLANG"; do
+            test -e "$f" || { echo "NDK incomplete: missing $f"; exit 1; }
+          done
+          test -x "$CLANG" || { echo "NDK incomplete: $CLANG not executable"; exit 1; }
+          "$CLANG" --version | head -1
           echo "ANDROID_NDK=$NDK"      >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
