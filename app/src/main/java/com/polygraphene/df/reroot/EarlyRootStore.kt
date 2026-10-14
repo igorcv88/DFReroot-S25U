@@ -269,24 +269,24 @@ object EarlyRootStore {
      * the job it authorised.
      *
      * The parent is fsynced for the same reason every write here is: the
-     * rollback is immediately followed by the owner rebooting manually, and an
-     * unlink that has not reached the disk did not happen.
+     * rollback is immediately followed by the owner rebooting manually, and a
+     * removal that has not reached the disk did not happen.
      */
     fun deleteArm(): String? = synchronized(lock) {
         val target = File(ARM_PATH)
         try {
             /*
-             * Os.unlink, and ENOENT is the success case - never File.exists().
+             * Os.remove (public Android API), and ENOENT is success - never File.exists().
              *
              * exists() answers a boolean to a question with three answers: it
              * returns false for ANY failed stat, EACCES and EIO included. Here
              * that would report "already gone" for a record that is present and
              * unreachable, which is the rollback claiming to have removed an
-             * authorisation that is still on disk. Unlinking and reading the
+             * authorisation that is still on disk. Removing and inspecting the
              * errno keeps absent and unreadable apart (same rule as read()).
              */
             try {
-                Os.unlink(ARM_PATH)
+                Os.remove(ARM_PATH)
             } catch (e: ErrnoException) {
                 if (e.errno == OsConstants.ENOENT) {
                     // Already not armed, which is the postcondition asked for.
