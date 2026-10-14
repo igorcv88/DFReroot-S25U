@@ -238,6 +238,27 @@ class DfrEarlyRootService : Service() {
                 if (step != null) trace(bootId, step, "phase=$phase")
             }
 
+            /**
+             * The native chain's internal timeline, in the durable record.
+             *
+             * It goes here and not into the log because an early-boot run has
+             * no UI and this firmware's log buffer is gone long before anyone
+             * reads it - the whole reason the 5767 ms of boot `2e7d56e5` had no
+             * timeline at all. The trace's return value is deliberately only
+             * logged, never acted on: this arrives after the transaction has
+             * returned and after the point of no return, so a failed write is a
+             * lost measurement and must not be turned into a refusal of a run
+             * that already succeeded.
+             */
+            override fun nativeProfile(profile: String) {
+                // The one trace helper, which already logs a lost write. Its
+                // return value is deliberately ignored here and nowhere else in
+                // this file: this arrives after the transaction returned and
+                // after the point of no return, so a failed write is a lost
+                // measurement and must not refuse a run that already succeeded.
+                trace(bootId, EarlyRootPolicy.STEP_NATIVE_PROFILE, profile)
+            }
+
             override fun beforeHop(): Boolean {
                 /*
                  * The hop's pre-record, before the hop.

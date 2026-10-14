@@ -1510,6 +1510,71 @@ public class EarlyRootPolicyTest {
                         + " probe, so arming a probe can never reach transaction 5");
 
         System.out.println("");
+        // --- the profile retention window -----------------------------------
+        // THE rule that was wrong. A single leading cap spent itself inside the
+        // three gate_target calls (51 REPORT sites each, all before runAll's
+        // trigger loop), so every successful run came back truncated without a
+        // single `* trying to trigger (N)..` line - the only part the
+        // measurement exists for.
+        java.util.List<String> few = java.util.Arrays.asList("1:a", "2:b", "3:c");
+        check("1:a 2:b 3:c".equals(EarlyRootPolicy.profileWindow(few, 2, 2)),
+                "a timeline that fits the window is kept whole, with no gap marker");
+        java.util.List<String> many = new java.util.ArrayList<>();
+        for (int i = 0; i < 100; i++) many.add(i + ":m" + i);
+        String win = EarlyRootPolicy.profileWindow(many, 3, 4);
+        check(win.startsWith("0:m0 1:m1 2:m2 "), "the head is kept, in order");
+        check(win.endsWith(" 96:m96 97:m97 98:m98 99:m99"),
+                "THE TAIL IS KEPT: the trigger loop reports last, so a leading "
+                        + "cap is what loses it");
+        check(win.contains("...dropped=93..."),
+                "the gap is stated with its count, never implied");
+        check(!win.contains("50:m50"), "the middle is actually dropped");
+        // Boundary: exactly head+tail keeps everything and adds no marker.
+        check(!EarlyRootPolicy.profileWindow(many.subList(0, 7), 3, 4)
+                        .contains("dropped"),
+                "exactly head+tail is not truncated");
+        check(EarlyRootPolicy.profileWindow(many.subList(0, 8), 3, 4)
+                        .contains("...dropped=1..."),
+                "one past head+tail drops exactly one");
+        // A diagnostic must never be able to fail a run, so degenerate bounds
+        // return something rather than throwing.
+        check(EarlyRootPolicy.profileWindow(many, 0, 2).startsWith("...dropped=98..."),
+                "a zero head keeps nothing from that end rather than throwing");
+        check(EarlyRootPolicy.profileWindow(many, -5, -5).startsWith("...dropped=100..."),
+                "negative bounds are clamped, not thrown");
+        check("".equals(EarlyRootPolicy.profileWindow(
+                        java.util.Collections.emptyList(), 3, 4)),
+                "an empty timeline is empty, not a gap marker");
+        check("".equals(EarlyRootPolicy.profileWindow(null, 3, 4)),
+                "a null timeline does not throw inside a diagnostic");
+
+        // --- the native profile step ----------------------------------------
+        // Evidence, not a boundary. It has to be in the CLOSED vocabulary or
+        // parseTraceLine drops the line, and the measurement is lost for the
+        // exact reason it was added: nothing anywhere recorded where the
+        // 5767 ms of boot 2e7d56e5 went.
+        String profileLine = EarlyRootPolicy.formatTraceStep(
+                EarlyRootPolicy.STEP_NATIVE_PROFILE, "boot-x", 20574,
+                "sys_boot_completed=0",
+                "total_ms=5767 marks=12 0:patch_#3 501:*_trying_to_trigger_(0)..");
+        check(EarlyRootPolicy.parseTraceLine(profileLine) != null,
+                "EARLY_ROOT_NATIVE_PROFILE is in the closed step vocabulary");
+        check(EarlyRootPolicy.traceHasStep(profileLine,
+                        EarlyRootPolicy.STEP_NATIVE_PROFILE),
+                "the profile step reads back as present");
+        // Separate facts, separate values: "the transaction returned" and
+        // "here is where its time went" must not be the same line (3.7).
+        check(!EarlyRootPolicy.traceHasStep(profileLine,
+                        EarlyRootPolicy.STEP_NATIVE_RETURNED),
+                "the profile step is not the returned step");
+        // A profile whose detail carries a tab would break the field count, so
+        // the writer's sanitiser has to hold for this step like any other.
+        check(EarlyRootPolicy.parseTraceLine(EarlyRootPolicy.formatTraceStep(
+                        EarlyRootPolicy.STEP_NATIVE_PROFILE, "boot-x", 1,
+                        "s=0", "total_ms=1\tmarks=0")) != null,
+                "a tab inside the profile detail is sanitised, not left to "
+                        + "break the line");
+
         System.out.println("EarlyRootPolicyTest: " + pass + "/" + (pass + fail)
                 + " passed");
         if (fail != 0) System.exit(1);

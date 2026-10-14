@@ -13,6 +13,8 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import java.io.File
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The one execution path: ksud staging, the hop into network_stack, the
@@ -65,6 +67,60 @@ object DfrRootCoordinator {
      */
     const val POST_ROOT_TIMEOUT_MS = 120_000L
 
+    /**
+     * How many of the native profile's marks are kept, at each end.
+     *
+     * A single leading cap was WRONG, and wrong in the way that wastes the
+     * physical run it exists to serve: `gate_target` alone holds 51 REPORT
+     * sites and is called three times - once per owning stage - all of it
+     * before `runAll`'s trigger loop reports anything. A 96-entry leading cap
+     * is therefore spent inside the third gate, and every successful run would
+     * come back CAPPED without one `* trying to trigger (N)..` line in it.
+     * Codex caught this on PR #69.
+     *
+     * So both ends are kept and the middle is dropped with the count said out
+     * loud. The head carries what the three gates and the patches cost; the
+     * tail carries the trigger loop, which is the question. A gap that is
+     * stated is evidence; a gap that is silent is the 3.7 failure this whole
+     * file is built against.
+     */
+    const val NATIVE_PROFILE_HEAD_MARKS = 24
+    const val NATIVE_PROFILE_TAIL_MARKS = 56
+
+    /**
+     * How long the profile may wait for the reporter to go quiet, and how long
+     * quiet has to be.
+     *
+     * `DirtyFrag.report()` sends each callback with `IBinder.FLAG_ONEWAY`, so
+     * the remote native thread does NOT wait for our `onTransact` to run.
+     * Callbacks can therefore still be in flight when transaction 5 returns,
+     * and reading the accumulator right then yields a partial timeline that
+     * looks complete - worse than no timeline, because nothing marks it short.
+     *
+     * The wait is bounded and it is taken AFTER the post-root wait, off the
+     * critical path, so on the success path it finds everything long settled
+     * and costs nothing. The emitted line carries `settle_ms` and says
+     * SETTLE_TIMEOUT when the deadline won, because "quiet" and "gave up
+     * waiting for quiet" are different facts.
+     */
+    const val NATIVE_PROFILE_QUIET_MS = 30L
+    const val NATIVE_PROFILE_SETTLE_MAX_MS = 250L
+
+    /**
+     * A reporter line reduced to something a timeline can carry.
+     *
+     * The profile's value is WHEN, not what: the messages are already in the
+     * code, so a short stable prefix is enough to find the matching REPORTLN.
+     * Keeping it short is what lets the whole timeline be one line in a record
+     * that must stay readable, and stripping whitespace/tabs keeps it from
+     * breaking the trace's own field separator.
+     */
+    fun profileLabel(line: String): String {
+        val collapsed = line.trim().replace(Regex("[\\s\\t]+"), "_")
+        if (collapsed.isEmpty()) return "-"
+        return if (collapsed.length <= 28) collapsed else collapsed.substring(0, 28)
+    }
+
     const val BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
     const val SELINUX_ENFORCE_PATH = "/sys/fs/selinux/enforce"
 
@@ -88,6 +144,26 @@ object DfrRootCoordinator {
     interface Host {
         fun log(line: String)
         fun phase(phase: Phase)
+
+        /**
+         * Where the native chain's time went, as ONE line, once, after
+         * transaction 5 has returned.
+         *
+         * Why this exists: on 2026-10-14, boot `2e7d56e5`, the first complete
+         * early run spent 5767 ms of its 7659 ms inside this transaction -
+         * three quarters of the gap between the gate and verified root - and
+         * no record anywhere said how. The native side already reports its
+         * progress through the transaction 5 reporter, but those strings go to
+         * [log], which an early-boot run has no UI to display, so they were
+         * discarded.
+         *
+         * One line, after the fact, from timestamps held in memory. Not a step
+         * per boundary and not an fsync per callback: the point is to measure
+         * the interval, and instrumentation that lengthens what it measures is
+         * worthless. The default is empty, so a host that keeps no durable
+         * record is unaffected.
+         */
+        fun nativeProfile(profile: String) {}
 
         /**
          * Last call before the hop into network_stack.
@@ -273,6 +349,22 @@ object DfrRootCoordinator {
         var postRootComplete = false
         var nativeStarted = false
         var reason = "run did not reach a verdict"
+        /*
+         * Native profile state, run-scoped because the EMIT happens after the
+         * post-root wait rather than inside the transaction.
+         *
+         * `DirtyFrag.report()` sends each callback with IBinder.FLAG_ONEWAY, so
+         * the remote native thread does not wait for our onTransact to run and
+         * callbacks can still be in flight when transaction 5 returns. Reading
+         * the accumulator right then yields a partial timeline that LOOKS
+         * complete, which is worse than none. Emitting after the wait costs
+         * nothing on the success path - by then the callbacks are long settled -
+         * and keeps the measurement off the interval it measures.
+         */
+        val profileMarks = ConcurrentLinkedQueue<String>()
+        val profileCount = AtomicInteger(0)
+        var profileStart = 0L
+        var nativeMs = -1L
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 try {
@@ -407,12 +499,38 @@ object DfrRootCoordinator {
             val p = Parcel.obtain()
             val r = Parcel.obtain()
             try {
+                /*
+                 * The reporter is also the only clock inside the transaction.
+                 * Each callback is timestamped and nothing else: no I/O, no
+                 * formatting beyond a short label, and a hard cap, because all
+                 * of it runs inside the interval being measured.
+                 */
+                profileStart = EarlyRootEnv.monotonicNow()
+                /*
+                 * The accumulator is concurrent and run-scoped (declared above)
+                 * for two independent reasons. The callbacks arrive on OUR
+                 * binder thread pool while this thread is blocked inside
+                 * transact(5), and `transact` returning establishes no
+                 * happens-before with those writes - so a plain ArrayList races
+                 * on both visibility and structure. And because the callbacks
+                 * are FLAG_ONEWAY, the emit has to happen later than this block.
+                 */
                 val reporter = object : Binder() {
                     override fun onTransact(
                         code: Int, data: Parcel, reply: Parcel?, flags: Int
                     ): Boolean {
                         try {
-                            host.log(data.readString() ?: "")
+                            val line = data.readString() ?: ""
+                            // Every mark is kept here and the WINDOW is applied
+                            // at emit time. A leading cap would spend itself in
+                            // the gates and lose the trigger loop, which is the
+                            // only part anyone is waiting to see.
+                            profileCount.incrementAndGet()
+                            profileMarks.add(
+                                "${EarlyRootEnv.monotonicNow() - profileStart}" +
+                                    ":${profileLabel(line)}"
+                            )
+                            host.log(line)
                         } catch (t: Throwable) {
                             Log.e(TAG, "reporter recv failed", t)
                         }
@@ -424,6 +542,7 @@ object DfrRootCoordinator {
                 if (c.transact(5, p, r, 0)) {
                     runResult = r.readInt()
                     host.log("\nrunAll done res=$runResult\n")
+                    nativeMs = EarlyRootEnv.monotonicNow() - profileStart
                     if (runResult == 0) {
                         host.log("[DFR][POST_ROOT] WAIT_POST_ROOT: native bootstrap complete;" +
                             " final success is still pending\n")
@@ -469,6 +588,62 @@ object DfrRootCoordinator {
          * enforcing state back, and evidence in one run must not contradict
          * itself.
          */
+        /*
+         * The native profile, once, here - after the post-root wait and before
+         * the verdict.
+         *
+         * Here and not inside the transaction for two reasons that point the
+         * same way. The reporter is FLAG_ONEWAY, so callbacks can still be
+         * arriving when transaction 5 returns and reading the accumulator there
+         * yields a partial timeline that looks complete. And a wait taken there
+         * would sit on the critical path, lengthening the very interval being
+         * measured. By this point the success path has already spent its
+         * post-root wait, so the settle below finds everything quiet and costs
+         * nothing; on a native failure there was no wait, and a bounded 250 ms
+         * on a run that already failed is affordable.
+         */
+        if (nativeStarted) {
+            try {
+                val settleStart = EarlyRootEnv.monotonicNow()
+                var seen = profileCount.get()
+                var quietSince = settleStart
+                var timedOut = false
+                while (true) {
+                    val now = EarlyRootEnv.monotonicNow()
+                    val count = profileCount.get()
+                    if (count != seen) {
+                        seen = count
+                        quietSince = now
+                    } else if (now - quietSince >= NATIVE_PROFILE_QUIET_MS) {
+                        break
+                    }
+                    if (now - settleStart >= NATIVE_PROFILE_SETTLE_MAX_MS) {
+                        timedOut = true
+                        break
+                    }
+                    try {
+                        Thread.sleep(5L)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        timedOut = true
+                        break
+                    }
+                }
+                val settleMs = EarlyRootEnv.monotonicNow() - settleStart
+                val all = profileMarks.toList()
+                host.nativeProfile(
+                    "native_ms=$nativeMs reported=${profileCount.get()}" +
+                        " kept=${all.size} settle_ms=$settleMs" +
+                        (if (timedOut) " SETTLE_TIMEOUT" else "") +
+                        " " + EarlyRootPolicy.profileWindow(all,
+                            NATIVE_PROFILE_HEAD_MARKS, NATIVE_PROFILE_TAIL_MARKS)
+                )
+            } catch (t: Throwable) {
+                // A lost measurement, never a lost run.
+                Log.e(TAG, "native profile emit failed", t)
+            }
+        }
+
         val liveSelinux = readLiveSelinux()
         val success = runResult == 0 && postRootComplete && liveSelinux == 1
         if (runResult == 0 && postRootComplete && liveSelinux != 1) {

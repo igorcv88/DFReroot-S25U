@@ -2491,6 +2491,78 @@ def audit():
             fail("%s captures the stop diagnostics outside onStopJob; only that "
                  "callback runs at the instant the scheduler reclaimed the "
                  "execution" % name)
+    # --- the native profile ---------------------------------------------
+    # The measurement of the 5767 ms that boot 2e7d56e5 could not account for.
+    # Four properties, and each one is the difference between a measurement and
+    # a thing that changes or misreports what it measures.
+    coord_src = code_only(dfr_source("DfrRootCoordinator.kt"))
+    # (1) ONE emit, and it is AFTER the post-root wait, not inside the
+    #     transaction. DirtyFrag.report() uses IBinder.FLAG_ONEWAY, so the
+    #     remote does not wait for our onTransact and callbacks can still be in
+    #     flight when transaction 5 returns - reading the accumulator there
+    #     yields a partial timeline that LOOKS complete. A wait taken there
+    #     would also sit on the critical path, lengthening the measured
+    #     interval. Codex caught both on PR #69.
+    if coord_src.count("host.nativeProfile(") != 1:
+        fail("DfrRootCoordinator does not emit the native profile exactly once; "
+             "one line, after the fact, is the whole contract")
+    emit_at = coord_src.find("host.nativeProfile(")
+    wait_at = coord_src.find("awaitPostRootComplete(")
+    tx_at = coord_src.find("c.transact(5,")
+    if emit_at < 0:
+        fail("DfrRootCoordinator no longer emits the native profile; the "
+             "transaction's internal timeline exists nowhere else - its "
+             "reporter strings go to a UI log an early boot does not have")
+    elif tx_at < 0 or emit_at < tx_at:
+        fail("DfrRootCoordinator emits the native profile before transaction 5; "
+             "instrumentation that lengthens the interval it measures is "
+             "worthless")
+    elif wait_at < 0 or emit_at < wait_at:
+        fail("DfrRootCoordinator emits the native profile before the post-root "
+             "wait; the reporter is FLAG_ONEWAY, so callbacks can still be "
+             "arriving and the timeline would be partial without saying so")
+    # (2) the settle is BOUNDED and it reports itself. An unbounded wait on a
+    #     one-way stream never returns; a silent one makes "quiet" and "gave up
+    #     waiting for quiet" the same line (3.7).
+    for token in ("NATIVE_PROFILE_SETTLE_MAX_MS", "NATIVE_PROFILE_QUIET_MS",
+                  "settle_ms=", "SETTLE_TIMEOUT"):
+        if token not in coord_src:
+            fail("the native profile's settle is missing %s; an unbounded wait "
+                 "on a one-way stream never returns, and a silent one cannot "
+                 "say whether it reached quiet or gave up" % token)
+    # (3) the accumulator is written from BINDER THREADS while this thread is
+    #     blocked inside transact(5), then read after. transact returning
+    #     establishes no happens-before with those writes, and nothing says the
+    #     pool uses one thread for all of them.
+    if "ConcurrentLinkedQueue" not in coord_src or "AtomicInteger" not in coord_src:
+        fail("the native profile accumulator is not concurrent; the reporter's "
+             "callbacks run on binder threads while transact(5) blocks this "
+             "one, so a plain list races on both visibility and structure")
+    # (4) the retention keeps the TAIL. A leading cap spends itself inside the
+    #     three gate_target calls - 51 REPORT sites each, all before runAll's
+    #     trigger loop - so every successful run would come back truncated
+    #     without the one part the measurement exists for. The rule itself is in
+    #     Java and host-tested; this only pins that the Kotlin uses it.
+    if "EarlyRootPolicy.profileWindow(" not in coord_src:
+        fail("DfrRootCoordinator no longer applies the host-tested retention "
+             "window; a leading cap loses the trigger loop, which is the only "
+             "part of the timeline anyone is waiting to see")
+    if "NATIVE_PROFILE_TAIL_MARKS" not in coord_src:
+        fail("the native profile keeps no explicit tail; the trigger loop "
+             "reports last, so a head-only window drops the measurement")
+    # (5) no gate reads it. It is evidence about timing, never permission.
+    if "profileWindow" not in code_only(dfr_source("EarlyRootPolicy.java")):
+        fail("EarlyRootPolicy.profileWindow is gone; the retention rule has to "
+             "stay where the host suite can prove it, because a leading cap "
+             "passed every static check and would have wasted the physical run")
+    if "nativeProfile" in probe_policy_src_for_gate_check:
+        fail("EarlyBootProbePolicy reads the native profile; it is a timing "
+             "measurement and must never reach a gate")
+    if "STEP_NATIVE_PROFILE" not in code_only(dfr_source("EarlyRootPolicy.java")):
+        fail("EARLY_ROOT_NATIVE_PROFILE is not declared; parseTraceLine drops "
+             "any step outside the closed set, so the profile would be written "
+             "and then unreadable")
+
     # The reason is passed BY NAME, and that is a correctness requirement, not
     # style. `stopReason` sits before the trailing `abandoned` lambda in
     # gateAndDispatch's parameter list, so a caller that passed its lambda

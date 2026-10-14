@@ -25,6 +25,89 @@ acceptance criteria for the next signed build. If this file disagrees with
 > its incident record stays on disk. The earlier binary-import and empty-list
 > status below is historical. Early physical PASS remains unproven.
 
+> **FIRST COMPLETE EARLY RUN, 2026-10-14, `2.0.28-dzif`, boot `2e7d56e5` — the
+> chain works end to end inside the animation and STILL misses the goal by
+> 5.1 s. The bottleneck has moved into the native chain. Everything below
+> predates this.**
+>
+> The persisted job fired at **14.421 s** with `bootanim_exit=0`, readiness
+> PASS, claimed, dispatched, hop sent, remote preflight accepted, transaction 5
+> issued at **14.807 s still inside the animation**, and root verified:
+> `POST_ROOT_COMPLETE` at **22.080 s** with `ksu=32601`, `SELINUX_ENFORCING
+> live_selinux=1` at 22.082 s. Journal `phase=COMPLETE` / `attempts=1`, cycle
+> `CLAIMED`, eighteen steps in one `boot_id`.
+>
+> **The budget, measured:**
+>
+> | segment | now | before | change |
+> |---|---|---|---|
+> | gate → transaction 5 | **386 ms** | 546 | −160 |
+> | native chain | **5767 ms** | 5924 | −157 |
+> | post-root wait | **1506 ms** | 3108 | **−1602** |
+> | gate → verified | **7659 ms** | 9578 | −1919 |
+>
+> The flag was 0 at 14807 and 1 by 16993, so at most **2186 ms** of animation
+> remained at the point of no return against **7273 ms** still needed.
+> **Deficit 5087 ms.**
+>
+> **The two reducible segments have now largely been reduced** - together they
+> gave back 1.76 s, a third of what is missing - and **the scheduling side is
+> close to exhausted**: 14.421 s against 14.6–17.0 s on the other punctual
+> boots, so ~14.4 s is the floor for a persisted job here (JobStore restore plus
+> the first evaluation) while the animation leaves around 17 s. A ~2.6 s window
+> cannot hold a 7.7 s chain. **Either the chain gets much faster, or the trigger
+> stops being a persisted job.**
+>
+> **75% of the gap is the native chain, and source says where it probably is.**
+> `runAll`'s trigger loop in `exp.c` costs **≥1000 ms of unconditional
+> `usleep` per iteration before any marker is read**, up to eight iterations.
+> Succeeding on the fifth attempt would be 5000 ms of sleep, which fits 5767 ms
+> almost exactly. **That is arithmetic, not a measurement** - which iteration
+> succeeded is recorded nowhere - so no change to the loop is justified yet. The
+> second `usleep` is a wait for stage 1/2 to create `/dev/dfm*`, i.e. the
+> textbook case for a bounded poll rather than a fixed sleep; that is the
+> candidate fix, after the measurement.
+>
+> **Why it was never measured, concretely:** the native side already reports
+> `* trying to trigger (N)..` and every patch step through the transaction 5
+> reporter, but those strings go to `Host.log` - the UI log, which an early-boot
+> run has no UI for. Confirmed against this boot's logcat, which covers
+> 10:37:54–10:40:31 (the whole native window) and holds **zero** reporter lines.
+>
+> **So `EARLY_ROOT_NATIVE_PROFILE` now records that timeline**: every reporter
+> callback timestamped in memory, emitted as ONE line **after the post-root
+> wait**. Not after the transaction, which was wrong twice over and Codex caught
+> both on PR #69: `DirtyFrag.report()` is `IBinder.FLAG_ONEWAY`, so callbacks
+> can still be in flight when transaction 5 returns and the timeline would be
+> partial while looking complete; and waiting for quiet there would sit on the
+> critical path. After the wait it costs nothing on the success path, with a
+> bounded 250 ms settle for the native-failure path.
+>
+> **And the retention keeps the TAIL.** A leading cap would have wasted the run:
+> `gate_target` holds 51 REPORT sites and runs three times, all before the
+> trigger loop, so 96 entries are spent in the third gate and no
+> `* trying to trigger (N)..` line survives. Both ends kept, `...dropped=N...`
+> between, and the rule is in `EarlyRootPolicy.profileWindow` **in Java,
+> host-tested** - because a leading cap passed every static check. The
+> accumulator is concurrent (binder threads vs. a blocked caller), the settle is
+> bounded and says `settle_ms=`/`SETTLE_TIMEOUT`, and no gate may read any of
+> it. Nine audit guards, each mutation-checked. `EarlyRootPolicyTest` 249/249.
+>
+> **Second thermal data point, in the predicted direction.** Punctual callback
+> with `Thermal Status: 1`, which is what the predicate predicts for a
+> `PRIORITY_DEFAULT` job at LIGHT. One boot, read at collection time not during
+> a wait. **And the same dump explains the bimodality**: SKIN
+> `mHotThrottlingThresholds` are `[38.0, 40.0, 42.0, …]` and the device read
+> **39.5–40.0 °C**, i.e. it idles *between the first two steps, two degrees
+> apart*. A fraction of a degree moves the restriction. Not random, and not
+> something the app can influence.
+>
+> **Next, in order.** (1) One more early boot on the build carrying the profile,
+> to decompose the 5767 ms and settle which iteration succeeds. (2) Only then,
+> the trigger-loop poll. (3) The 5.1 s deficit is not closable by scheduling
+> alone, so whether the goal needs a different trigger than a persisted job is
+> now an open architectural question, not a tuning one.
+
 > **Thermal is the leading cause for ONE boot, verified in logcat — and a
 > SECOND, separate failure appeared. 2026-10-13/14. Everything below predates
 > this.**
