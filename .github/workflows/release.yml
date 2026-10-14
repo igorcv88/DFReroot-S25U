@@ -159,8 +159,25 @@ jobs:
           set -eu
           NDK_VER=27.0.12077973
           NDK_DIR="$ANDROID_SDK_ROOT/ndk/$NDK_VER"
-          SDKMANAGER="$(command -v sdkmanager || echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager")"
-          test -x "$SDKMANAGER" || { echo "sdkmanager not found"; exit 1; }
+          # Resolve sdkmanager rather than assume where it lives. The run that
+          # failed used `cmdline-tools/16.0/bin/sdkmanager`, so a fallback that
+          # only knows `latest` would turn a PATH miss into "not found" on a
+          # runner that has the binary. Try PATH, then `latest`, then any
+          # versioned cmdline-tools, newest first.
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            for c in "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+                     $(ls -d "$ANDROID_SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -rV) \
+                     "$ANDROID_SDK_ROOT/tools/bin/sdkmanager"; do
+              [ -x "$c" ] && { SDKMANAGER="$c"; break; }
+            done
+          fi
+          test -n "${SDKMANAGER:-}" && test -x "$SDKMANAGER" || {
+            echo "sdkmanager not found under $ANDROID_SDK_ROOT or on PATH"
+            ls -la "$ANDROID_SDK_ROOT/cmdline-tools" 2>/dev/null || true
+            exit 1
+          }
+          echo "using $SDKMANAGER"
 
           attempt=1
           while :; do
