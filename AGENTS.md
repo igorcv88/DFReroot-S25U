@@ -529,12 +529,20 @@ full reboot with a staged rollback, so the gate stays and
 **And what is measured is the LATE dispatch only.** Both samples were dispatched
 into a fully settled boot (uptime 147 s and 81 s at the pre-read) with both
 `bootchecker` services already `stopped`. Nothing here speaks for a dispatch
-early in the boot — and that watchdog **is** live there: a `bootchecker` process
-logged at ktime ~20946 and again at ~67331 in one boot, the same pid across the
-27 s mark, cycling on a 60 s sleep. So a teardown chained onto the early-root
-path would fire `restart bootchecker` at a live watchdog, which is not the
-operation either sample covers. What the firmware then does is unread, and this
-section's own history says not to guess it.
+early in the boot.
+
+A log reading adds one fact and settles nothing beyond it: a process of the
+`bootchecker` binary (pid 2585) logged at ktime ~20946 and again at ~67331 in one
+boot, the same pid across the 27 s mark, cycling on a 60 s sleep. **Which init
+service owns that pid is unidentified**, and the rc action names `bootchecker`
+while the `dev.bootcomplete=1` rule starts `bootchecker-bootc`, so what a
+`restart bootchecker` at ~27 s would meet is still unread. A draft of this
+paragraph said it would meet a live watchdog; that was an inference from an
+unmapped pid, and worse, live-versus-stopped was never shown to be the variable
+that separates the one failing dispatch from the clean ones — all three were late
+dispatches with the services settled. Two layers of inference in the section
+that exists to forbid exactly that. The direct read of the two `init.svc.*`
+properties early in a boot is owed, not retired.
 
 The durable rules:
 

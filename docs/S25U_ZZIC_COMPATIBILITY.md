@@ -4519,12 +4519,13 @@ Treating this measurement as permission for the chained form would be the
 absence-as-permission error (§2) one level up: evidence about the late dispatch
 reused as evidence about the early one.
 
-### The early-dispatch question, answered from a log already in hand: `bootchecker` IS alive at ~27 s
+### The early-dispatch question, only partly answered: a `bootchecker` process exists at ~27 s, service unidentified
 
 The scope limit above named one unread fact and said it cost a `getprop` early in
-an ordinary boot. It cost nothing: the answer was already in the `logcat` of boot
-`20261015_000846`, the same capture §79's timeline came from. Four lines, the
-entire `bootchecker` output of that boot:
+an ordinary boot. An earlier version of this section claimed the `logcat` of boot
+`20261015_000846` had answered it for free and retired the measurement. It had
+not, and the measurement is reinstated below. What the log does carry is four
+lines - the entire `bootchecker` output of that boot:
 
 ```text
 00:07:56.555 I/main::sub_command( 6848): bootchecker starts with --writebootc mode! (bootchecker)
@@ -4541,34 +4542,47 @@ emitted when the value is computed — a sub-second assumption for a line that
 prints what it just read, and the conclusion below survives an error of several
 seconds either way.
 
-**What is read, and it is enough.** A `bootchecker` process, **pid 2585**, logged
+**What is read.** A `bootchecker` process, **pid 2585**, logged
 at 00:07:56.855 → ktime ≈ **20946**, and again at 00:08:43.240 → ktime ≈
 **67331**. One pid at both ends, so that process existed continuously across
 ktime 27000. **A `bootchecker` process is alive at ~27 s.** `Slept for 60
 seconds` also says it is cycling rather than winding down.
 
-**What is inferred and labelled as such:** that pid 2585 is the `bootchecker`
-service (`class late_start`) and pid 6848 the `bootchecker-bootc` instance the
-`on property:dev.bootcomplete=1` rule starts. pid 6848 ran `--writebootc`, which
-is that rule's job, and 2585 is the lower, earlier pid doing `boot_status` work.
-Nothing read says which service each pid belongs to. It does not matter for the
-question: whichever it is, a process of that binary is running at 27 s.
+**What is NOT resolved, and an earlier version of this section built on it
+anyway.** Which init service owns pid 2585 is unknown. That is not a detail: the
+rc action is `on property:init.svc.zygote=restarting -> restart bootchecker`,
+which names the `bootchecker` service, while the `dev.bootcomplete=1` rule starts
+`bootchecker-bootc`. If pid 2585 is the latter, the former may already have
+stopped by 27 s and nothing above says otherwise.
 
-**Consequence, and it is the reason this row existed.** The two 2026-10-15
-samples dispatched at uptime 147 s and 81 s with both services reading
-`stopped`. A teardown chained onto the early-root path fires near 27 s, where
-this log shows the binary **running**, so `bootchecker.rc`'s
-`on property:init.svc.zygote=restarting → restart bootchecker` would land on a
-live watchdog rather than a stopped service. That is a materially different
-operation from the one those two samples cover, and the one with two
-unexplained rollbacks behind it.
+The suggestive reading is that pid 6848 - which ran `--writebootc`, the
+`dev.bootcomplete=1` rule's job, and appeared at exactly that rule's instant - is
+`bootchecker-bootc`, leaving 2585 (lower pid, earlier, doing `boot_status` work)
+as the `class late_start` `bootchecker`. **That is an inference and this capture
+cannot promote it:** init's own service lines are absent from this logcat. The
+whole 5 MB dump holds one `init`-tagged line and none naming bootchecker, so the
+file that would answer "which service" is not this one.
 
-So the early-dispatch case is **not** covered by the non-reproduction above, and
-this is now read rather than assumed. It is not a refusal of the chained form —
-it is its price, stated. What is still unread is what the firmware does when
-that restart lands inside the live window, and §3.6.1 governs whether finding
-out is a probe or an operation: the worst outcome is an unplanned full reboot
-with a staged rollback, so it is an operation.
+**So the conclusion is withdrawn.** An earlier version of this section said
+`restart bootchecker` "would land on a live watchdog rather than a stopped
+service", and retired the direct measurement on that basis. It does not follow
+from a pid whose service is unidentified. The `getprop` of
+`init.svc.bootchecker` / `init.svc.bootchecker-bootc` early in an ordinary boot
+is **still owed**, and retiring it here was the error.
+
+**And a second error, which the review did not name.** Even granting the
+mapping, live-versus-stopped has never been shown to be the variable that
+distinguishes a failing dispatch from a clean one. The 2026-10-01 rollback was a
+**late** dispatch; so were both 2026-10-15 clean runs; in all three the services
+were settled. "Stopped" is therefore common to the failure and to the successes
+alike. "The early window is riskier because the watchdog is live there" was a
+causal story laid on top of an unresolved mapping - two layers of inference
+presented as one reading, in a section whose own subject is that error.
+
+**What stands, and it is narrow:** a process of the `bootchecker` binary existed
+across ktime 27000 and was cycling on a 60 s sleep rather than winding down.
+Everything about which service that is, and about what a restart at that instant
+would meet, remains unread.
 
 **The boot this was read from is the relevant one.** `20261015_000846` is an
 early-root boot — the exact shape a chained dispatch would run in — not a
