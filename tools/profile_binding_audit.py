@@ -2747,6 +2747,78 @@ def audit():
              "callback proves the restriction was not in force, so a check "
              "there can only withhold a run that was going to work")
 
+    # --- the timeline collector's entry metric ---------------------------
+    # Guarded here because the defect was a DELETION, not wrong logic, and a
+    # deletion is invisible to a test that supplies the deleted value itself.
+    # On PR #78 a line-range replacement moved the budget to /proc and removed
+    # every assignment to TRACE_DISPATCH while leaving the `-v tracedisp=`
+    # pass in place, so the entry-to-AMS measurement - the number that PR
+    # existed to produce - read NOT COMPUTABLE on every boot. The awk had been
+    # tested with `-v tracedisp=17847` fed in by hand: an input the script
+    # does not produce. Fourth time in this family (see the -b all and
+    # -v threadtime comments in the collector itself).
+    collector = os.path.join(ROOT, "tools", "earlyroot_collect_timeline.sh")
+    if os.path.exists(collector):
+        with open(collector, "r", encoding="utf-8") as fh:
+            coll = fh.read()
+        assigns = re.search(r"(?m)^[ \t]*TRACE_DISPATCH=", coll)
+        if "tracedisp=" in coll and not assigns:
+            fail("earlyroot_collect_timeline.sh passes tracedisp= to awk with no "
+                 "assignment to TRACE_DISPATCH anywhere: the entry metric reads "
+                 "NOT COMPUTABLE on every boot (PR #78)")
+        # Codex review on PR #78 found both of the next two guards defeatable
+        # by a COMMENT. Each searched the whole file for a token, and each
+        # token also appears in the prose above the code it guards: the two
+        # entry-step names at lines 216-217 and in the awk filter, `NF-1` in
+        # the field-layout comment. So the executable line could change to the
+        # wrong value and the audit would still pass on the comment's copy.
+        #
+        # Same defect family as the XX_TRACE_DISPATCH= substring that passed an
+        # earlier mutation test in this file: a guard that matches text
+        # anywhere is not a guard on the text that runs. Both now match the
+        # shape that EXECUTES.
+        #
+        # The mapping is validated arm by arm rather than by token presence,
+        # because the failure Codex described is a mapping error - the `*)` arm
+        # selecting the job step - in which both tokens are still present and
+        # only broadcast-claimed boots read NOT COMPUTABLE.
+        case_m = re.search(
+            r"(?s)case\s+\"\$\{TRACE_CLAIM_TRIGGER:-\}\"\s+in(.*?)\besac\b", coll)
+        if "tracedisp=" in coll and case_m is None:
+            fail("earlyroot_collect_timeline.sh passes tracedisp= to awk but no "
+                 "`case \"${TRACE_CLAIM_TRIGGER:-}\" in` block selects the entry "
+                 "step; the two triggers write different step names "
+                 "(AGENTS.md 3.11) and the metric is empty on whichever is not "
+                 "named")
+        if case_m is not None:
+            arms = case_m.group(1)
+            for pattern, why in (
+                (r"(?m)^\s*job\)\s*TRACE_ENTRY_STEP=EARLY_ROOT_JOB_ENTERED\s*;;",
+                 "the `job)` arm must select EARLY_ROOT_JOB_ENTERED"),
+                (r"(?m)^\s*\*\)\s*TRACE_ENTRY_STEP=EARLY_ROOT_TRIGGER_ENTERED\s*;;",
+                 "the `*)` arm must select EARLY_ROOT_TRIGGER_ENTERED"),
+                (r'(?m)^\s*""\)\s*TRACE_ENTRY_STEP=\s*;;',
+                 'the `""` arm must select NOTHING, so a boot with no claim '
+                 'reports <no claim recorded> rather than a wrong step'),
+            ):
+                if not re.search(pattern, arms):
+                    fail("earlyroot_collect_timeline.sh entry-step mapping is "
+                         "wrong: %s. A mapping error leaves both names present "
+                         "in the file, so only the arm itself can be checked "
+                         "(Codex, PR #78)" % why)
+
+        # Full-line comments only: stripping a trailing # from shell is unsafe
+        # (it can sit inside a string), and the comment that defeated this
+        # guard was a whole line. The regex then matches the AWK ASSIGNMENT,
+        # not the token, so `k = $NF` fails here whatever the prose says.
+        coll_code = re.sub(r"(?m)^[ \t]*#.*$", "", coll)
+        if ("enhanced_boot_stat" in coll
+                and not re.search(r"\bk\s*=\s*\$\(NF-1\)", coll_code)):
+            fail("the collector parses /proc/enhanced_boot_stat without "
+                 "`k = $(NF-1)`: a milestone line carries time/ktime/delta "
+                 "while a `Took Nms by` line carries only time/ktime, so $NF "
+                 "reads the delta on one shape and the ktime on the other")
+
     # --- the readiness TRIGGER (2026-10-14) ------------------------------
     # The clock stopped choosing the moment. Boot cea5208c measured what that
     # cost: the hop's target process was bound at 14011 ms (am_proc_bound, i.e.
