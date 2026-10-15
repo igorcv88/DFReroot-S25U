@@ -4442,15 +4442,26 @@ readings are wrong and the conclusion does not follow:
 
 - **User 150 is a secondary user** — Secure Folder on this firmware, not the
   primary user. `User150Unlock` is not the device becoming usable and gates no
-  lock screen. The primary user's CE unlock is `UM.onBeforeUnlockUser-0` at
-  25999, and whether that followed a credential entry or happened
-  automatically is not readable from this file either.
-- **`RecentsActivity.onCreate` is activity creation, not a drawn frame.** And
-  the four entries now in the table — `onCreate` 33805, `onResume` 34218,
-  `onPause` 34485, `onStop` 34631 — are a create-and-tear-down burst inside
-  826 ms, which is the shape of a pre-warm, not of a launcher a user is looking
-  at. Nothing here says a frame was presented or that anything was
-  interactive.
+  lock screen.
+  The nearest primary-user entry is `UM.onBeforeUnlockUser-0` **done** at
+  25999, and it is named that way deliberately: it is the completion of that
+  callback, **not** the instant CE storage unlocked. `finishUserUnlocking`
+  verifies CE storage is already unlocked *before* invoking the callback and
+  advances the user state only afterwards, so the two are different events and
+  this file holds one of them. An earlier version of this bullet called 25999
+  "the primary user's CE unlock", which is §3.7's collapse — and it would have
+  handed a future deadline the wrong instant. Whether the unlock followed a
+  credential entry is also not readable here.
+- **`RecentsActivity.onCreate` is activity creation, not a drawn frame.** The
+  four entries now in the table — `onCreate` 33805, `onResume` 34218, `onPause`
+  34485, `onStop` 34631 — record that the activity traversed those lifecycle
+  states inside 826 ms, and that is **all** they record. A draft of this bullet
+  called the burst "a pre-warm, not a launcher a user is looking at"; that is
+  the withdrawn "launcher drawn" claim inverted, and it contradicts the very
+  next sentence. A frame could have been presented in the interval after
+  `onResume`; nothing here says it was, and nothing here says it was not.
+  The sequence stays unclassified until a first-frame or window-visibility
+  marker exists.
 - **This file contains no keyguard or first-draw milestone at all.** So the
   instant the lock screen appears — the thing the owner actually perceives — is
   not in this evidence, in either direction.
@@ -4491,21 +4502,34 @@ its postcondition, and the 2026-10-01 record above is a physical FAIL of that
 operation from a converged boot with the cause still unmeasured. Whether modules
 can be made active without that restart is the open question, not an assumption.
 
-### The animation's last 3.4 s are not ours to move
+### The animation's last 3.4 s: what happens in them, not what consumes them
 
 `system_server` reaches `Loop forever` at 16991 — it has started everything it
-is going to start — and the animation runs for a further **3367 ms**. What
-occupies that span is telephony registration (`CS Registered` 18230, `GPRS
-Attached` 18278, `SIM onAllRecordsLoaded` 18875) and SystemUI's first draw after
-`StartSystemUI` 16963. Nothing in it belongs to this project, and the three
-telephony milestones are a modem's answer, not a schedulable task.
+is going to start — and the animation runs for a further **3367 ms**. The
+milestones that fall inside that span are telephony registration (`CS
+Registered` 18230, `GPRS Attached` 18278, `SIM onAllRecordsLoaded` 18875) and
+`StartSystemUI` 16963, which precedes it.
 
-Two consequences, both load-bearing for anyone re-opening the window question:
+**"Fall inside" is the whole claim.** A draft said those events were "what
+occupies that span", and the same correction applies here as to the bullet
+below: this file carries selected timestamps, not occupancy, so it cannot say
+what consumed the 3367 ms or that nothing else did. What does hold without an
+occupancy argument is narrower and is the part that matters: the three telephony
+milestones are a modem's answer rather than a task this project schedules, and
+`Loop forever` says `system_server` has no remaining service starts of its own.
 
-- **Our entry at 17847 is already inside the segment nothing else is using.**
-  The 856 ms from `Loop forever` to our entry is scheduler and callback
-  overhead, and the remaining 2511 ms of animation is being spent by the modem
-  and SystemUI, not by a queue we are behind in.
+Two consequences for anyone re-opening the window question:
+
+- **Our entry at 17847 falls 856 ms after `Loop forever`, and 2511 ms before
+  the animation ends.** Those are the two measured intervals and the bullet
+  stops there. A draft attributed them — the 856 ms to "scheduler and callback
+  overhead", the 2511 ms to "the modem and SystemUI, not a queue we are behind
+  in". `/proc/enhanced_boot_stat` carries selected event timestamps and no
+  scheduler or occupancy data, so it cannot say what consumed either span, nor
+  that this chain was not queued behind other work. Attributing them needs a
+  scheduler trace. That matters precisely because the next bullet is
+  load-bearing for optimisation: an attribution nobody measured is the wrong
+  thing to optimise against.
 - **Shortening the pre-AMS boot would not help.** The largest single cost before
   `ams_ready` is `StartPackageManagerService` at 3702 ms of a 4237 ms
   `startBootstrapServices`, and PMS readiness is a prerequisite of AMS, which is
