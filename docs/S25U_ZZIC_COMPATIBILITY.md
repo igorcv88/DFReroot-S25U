@@ -4367,3 +4367,131 @@ animation and a floor near 13.4 s, the post-dispatch chain has to fall from
 8971 ms to about 4345 ms — a 52% cut. The reducible items are the LKM write
 (3487), the trigger loop (2050, of which 1000 is `usleep`), the post-root wait
 (2038) and the app-side 628.
+
+## 2026-10-15 — the boot-health handshake DOES reconverge after a soft reboot, and the 2026-10-01 mechanism is refuted
+
+The question this document has carried since 2026-10-01 —
+
+```text
+does anything on this firmware set dev.bootcomplete=1 again after an emulated
+soft reboot, and does dev.platform_bootcomplete come back?
+```
+
+— is answered. **Yes, both.** Owner capture, `dfr_sr_20261015_154058`, read
+through root in Termux. Two samples, from two different boots.
+
+### Sample 1 — boot `73415ff4-7276-4275-bcf5-0104e8b3f491`, measured live
+
+Dispatch at 15:31:11 (`claimed_at_ms=1792089071409`, `phase=CLAIMED`),
+pre-read at uptime 147034 ms.
+
+| field | value |
+|---|---|
+| `pre_verdict` | `BOOT_HEALTH_CONVERGED` |
+| `pre_pid` / `pre_proc_starttime` | 2929 / 4839 |
+| `exec_outcome` | `RETURNED` |
+| `post_first_verdict` | `BOOT_HEALTH_CONVERGED` |
+| `post_platform_bootcomplete_seen` | **1** |
+| `post_dev_bootcomplete_seen` | **1** |
+| `post_converged_seen` | 1 |
+| `post_crash_recovery_seen` | **0** |
+| `post_observations` / `post_settled` | 2 / 1 |
+| `post_window_opened_ms` → `post_read_start_ms` | 202123 → 502225 |
+| `post_pid` / `post_proc_starttime` | **31184 / 15318** |
+
+**The two halves were written by different processes** — pid 2929 with
+`starttime` 4839 before, pid 31184 with `starttime` 15318 after. That is
+§3.6.2's second durable rule satisfied by observation rather than by design
+intent: the post half came from the *restarted* framework, which is the only
+observer this app can have, since `stop` kills the process that asked.
+
+### The restart happened, and the kernel did not reboot
+
+Three independent readings, all from the same capture:
+
+- **DropBox gained `SYSTEM_RESTART@1792089124834`** (15:32:04, 53 s after the
+  claim) and **no new `SYSTEM_LAST_KMSG_*` of any suffix.** The only kmsg entry
+  is `SYSTEM_LAST_KMSG_0_20261015_153008_RP@1792089008433`, which predates the
+  dispatch by 63 s — it belongs to the boot this test ran in. A framework
+  restart record, no boot record.
+- **The pre and post halves carry the same `boot_id`**, nine minutes apart. A
+  firmware reboot would have changed it.
+- `/sys/class/sec/sec_hw_param/extra_info` read **empty**, which on this
+  firmware is the successful no-panic reading (§3.6.1), not a failed one.
+
+### Live state at +9 minutes (15:40:56)
+
+```text
+sys.boot_completed=1   dev.bootcomplete=1   dev.platform_bootcomplete=1
+init.svc.bootchecker=stopped       init.svc.bootchecker-bootc=stopped
+persist.sys.rescue_level=0         dev.attempting_reboot=(empty)
+```
+
+`dumpsys rollback` gained **no** entry: the three snapshots differ only in two
+rendered timestamps, 187 ms apart, which is `dumpsys`' own derivation and not an
+event.
+
+One counter did move, and it is recorded because this document previously
+worried about it: **`sys.rescue_boot_count` 1 → 2.** `persist.sys.rescue_level`
+stayed 0, so nothing escalated; RescueParty counts the framework restart as a
+boot. Expected, not a defect, and not evidence of a problem.
+
+### Sample 2 — boot `9f2826d1-3b81-4f57-a2d9-330e54e94532`, from the "before" snapshot
+
+The pre-dispatch read of 15:30:48 was expected to show nothing interesting. It
+in fact held a **complete** `POST_EXEC` record from the *previous* boot's soft
+reboot: `exec_outcome=RETURNED`, `post_first_verdict=BOOT_HEALTH_CONVERGED`,
+`post_platform_bootcomplete_seen=1`, `post_dev_bootcomplete_seen=1`,
+`post_crash_recovery_seen=0`, `post_observations=2`, `post_settled=1`, settled
+at uptime 449280 ms, pre-read at 81249 ms. Pre pid 3023 / `starttime` 799, post
+pid 22764 / `starttime` 8853 — different processes again.
+
+So the reconvergence is **n=2 across two boots**, not a single observation.
+
+### What this refutes, and what it does not clear
+
+The mechanism this document proposed for the 2026-10-01 rollback was: a
+`dev.bootcomplete` that stays at 1 never re-fires the restoring rule, so
+`dev.platform_bootcomplete` stays 0, so `bootchecker` times out. **That chain is
+broken at its third link.** The flag comes back, in both samples, with
+`bootchecker` ending `stopped`.
+
+Which leaves the failure without a cause. And this capture adds a second
+occurrence that was not in this record: `dumpsys rollback` holds
+
+```text
+2026-10-01T14:03:19.497576: Rolling back all available. Reason: NATIVE_CRASH
+2026-10-01T14:03:19.500609: Rolling back bootchecker_timeout. Reason: NATIVE_CRASH
+2026-10-01T14:03:19.513751: Rolling back bootchecker_timeout. Reason: NATIVE_CRASH
+2026-10-12T12:34:22.228774: Rolling back all available. Reason: NATIVE_CRASH
+2026-10-12T12:34:22.229112: Rolling back bootchecker_timeout. Reason: NATIVE_CRASH
+```
+
+**The 2026-10-12 pair is unattributed.** That date is recorded here for the
+throne_tracker kernel panics, but those are timestamped 16:46:51 and 22:30:12 —
+both *after* 12:34:22, so the rollback is not their consequence. What produced
+it is not established by this capture, and it must not be assumed to be the same
+event as 2026-10-01 merely because it names the same rollback.
+
+So the position after this measurement is **two unexplained firmware reboots and
+two clean runs of the same operation from the same converged pre-state.** That
+is a non-deterministic failure with no established cause, which is a worse thing
+to automate than an understood one. Answering the question moved the uncertainty
+from the mechanism to the cause; it did not make the operation routine. The
+`BOOT_HEALTH_CONVERGED` gate stays, and `BOOT_HEALTH_UNKNOWN` still refuses.
+
+### The scope limit, stated because the next proposal lands outside it
+
+Both samples are **late** dispatches. Pre-read uptimes were 147 s and 81 s, and
+in both the handshake had fully converged and **both `bootchecker` services read
+`stopped` before the teardown**. Nothing measured here speaks for a dispatch
+early in the boot, while that watchdog may still be live.
+
+That matters because the standing proposal is to chain the soft reboot onto the
+early-root path, which would fire it at roughly 27 s — 6 s after `bootcomplete`
+(20647 ms on the boot recorded above), in a window where `bootchecker` is
+`class late_start oneshot` and may not yet have stopped. Whether it has is
+**not read**, in either direction, and is not inferable from these two samples.
+Treating this measurement as permission for the chained form would be the
+absence-as-permission error (§2) one level up: evidence about the late dispatch
+reused as evidence about the early one.

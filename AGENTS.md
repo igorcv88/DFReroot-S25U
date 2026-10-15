@@ -490,16 +490,38 @@ restarting its own boot watchdog, and the rule that restores that flag is keyed
 on `dev.bootcomplete=1`. So a restart the framework survives can still leave the
 firmware believing the boot never completed.
 
-**What is observed there, and what is not.** The two init rules are read out of
-the device's own `bootchecker.rc`. Whether anything sets `dev.bootcomplete=1`
-again after a soft reboot — and therefore whether that rule runs again — has
-never been read on this firmware. An earlier version of this section called the
-rule "edge triggered" and concluded it "could not re-fire while the property
-stayed 1". That is a claim about init's property-change dispatch that nobody
-verified: init queues a matching action when a property is *set*, and whether a
-value-preserving set re-queues it was never read out of the source. This is the
-fourth causal claim in this investigation to be stated ahead of its evidence, so
-it is now stated as the question it is.
+**MEASURED on 2026-10-15, and the proposed mechanism is refuted.** This section
+used to carry the question "does anything set `dev.bootcomplete=1` again after a
+soft reboot, and does `dev.platform_bootcomplete` come back?" — stated as a
+question because an earlier draft had answered it from init's dispatch semantics
+without reading them, the fourth causal claim here stated ahead of its evidence.
+
+It has now been read, twice, in two different boots. **Both flags come back.**
+`post_platform_bootcomplete_seen=1` and `post_dev_bootcomplete_seen=1`,
+`BOOT_HEALTH_CONVERGED`, settled across two post-restart observations, with the
+post half written by a different pid than the pre half — the restarted
+framework, as the second durable rule below requires. No reboot followed, in
+either boot. `docs/S25U_ZZIC_COMPATIBILITY.md` holds the capture.
+
+So the chain this section proposed — `dev.bootcomplete` stays 1, the restoring
+rule never re-fires, `dev.platform_bootcomplete` stays 0, `bootchecker` times
+out — **is broken at its third link and is not the mechanism.** Which leaves the
+2026-10-01 rollback, and a second `bootchecker_timeout` rollback on 2026-10-12,
+**with no established cause**: the same operation, from the same converged
+pre-state, reconverged cleanly on 2026-10-15.
+
+Read that as it reads, and not as a clearance. An unexplained,
+non-deterministic firmware reboot is a worse thing to automate than a
+understood one, so answering this question did not make the operation routine —
+it moved the uncertainty from the mechanism to the cause. §3.6.1 still governs:
+worst outcome is a full reboot with a staged rollback, so the gate stays and
+`BOOT_HEALTH_UNKNOWN` still refuses.
+
+**And what is measured is the LATE dispatch only.** Both samples were dispatched
+into a fully settled boot (uptime 147 s and 81 s at the pre-read) with both
+`bootchecker` services already `stopped`. Nothing here speaks for a dispatch
+early in the boot, while that watchdog may still be live — which is exactly
+where a teardown chained onto the early-root path would land.
 
 The durable rules:
 
