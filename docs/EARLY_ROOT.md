@@ -613,10 +613,15 @@ That is a deliberate boundary, not an oversight, and the reason is attribution:
   boundary would create.** Both 2026-10-15 samples were dispatched into a
   settled boot — pre-read uptimes 147 s and 81 s, with `init.svc.bootchecker`
   and `init.svc.bootchecker-bootc` already `stopped` before the teardown. A
-  teardown chained onto the early-root path fires near 27 s, where
-  `bootchecker` is `class late_start oneshot` and may not have stopped yet.
-  Whether it has is not read in either direction, and reusing the late-dispatch
-  samples for it would be AGENTS.md 2's absence-as-permission one level up;
+  teardown chained onto the early-root path fires near 27 s, and **that has now
+  been read: `bootchecker` is still ALIVE there.** A process of that binary
+  (pid 2585) logged at ktime ~20946 and again at ~67331 in boot
+  `20261015_000846` - one pid across 27000, cycling on a 60 s sleep. So
+  `bootchecker.rc`'s `restart bootchecker` would land on a live watchdog rather
+  than a stopped service, which is a materially different operation from the two
+  late samples and the one with two unexplained rollbacks behind it. What the
+  firmware does with that restart is the part still unread, and 3.6.1 makes
+  finding out an operation rather than a probe;
 - stacking a userspace teardown on top of an early root that has never passed
   once would make the next failure impossible to attribute to either half. Run 1
   and run 2 failed for unrelated reasons; a third failure with two unproven

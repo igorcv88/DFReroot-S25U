@@ -529,8 +529,12 @@ full reboot with a staged rollback, so the gate stays and
 **And what is measured is the LATE dispatch only.** Both samples were dispatched
 into a fully settled boot (uptime 147 s and 81 s at the pre-read) with both
 `bootchecker` services already `stopped`. Nothing here speaks for a dispatch
-early in the boot, while that watchdog may still be live — which is exactly
-where a teardown chained onto the early-root path would land.
+early in the boot — and that watchdog **is** live there: a `bootchecker` process
+logged at ktime ~20946 and again at ~67331 in one boot, the same pid across the
+27 s mark, cycling on a 60 s sleep. So a teardown chained onto the early-root
+path would fire `restart bootchecker` at a live watchdog, which is not the
+operation either sample covers. What the firmware then does is unread, and this
+section's own history says not to guess it.
 
 The durable rules:
 

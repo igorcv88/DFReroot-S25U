@@ -4518,3 +4518,58 @@ early-root path, which would fire it at roughly 27 s — 6 s after `bootcomplete
 Treating this measurement as permission for the chained form would be the
 absence-as-permission error (§2) one level up: evidence about the late dispatch
 reused as evidence about the early one.
+
+### The early-dispatch question, answered from a log already in hand: `bootchecker` IS alive at ~27 s
+
+The scope limit above named one unread fact and said it cost a `getprop` early in
+an ordinary boot. It cost nothing: the answer was already in the `logcat` of boot
+`20261015_000846`, the same capture §79's timeline came from. Four lines, the
+entire `bootchecker` output of that boot:
+
+```text
+00:07:56.555 I/main::sub_command( 6848): bootchecker starts with --writebootc mode! (bootchecker)
+00:07:56.556 I/main::sub_command( 6848): !@ Bootcompleted time is 26760 (bootchecker)
+00:07:56.855 I/main::boot_status ( 2585): spawn_debore_update() boot_completed (bootchecker)
+00:08:43.240 I/main::boot_status ( 2585): Slept for 60 seconds (bootchecker)
+```
+
+**The anchor.** The second line prints `26760`, which is exactly the `time`
+column of `!@Boot_EBS_F: bootcomplete 26760 20647 288` in that boot's
+`/proc/enhanced_boot_stat`. So that wall clock instant, 00:07:56.556, is
+ktime 20647, which puts ktime 0 at 00:07:35.909. The anchor assumes the line is
+emitted when the value is computed — a sub-second assumption for a line that
+prints what it just read, and the conclusion below survives an error of several
+seconds either way.
+
+**What is read, and it is enough.** A `bootchecker` process, **pid 2585**, logged
+at 00:07:56.855 → ktime ≈ **20946**, and again at 00:08:43.240 → ktime ≈
+**67331**. One pid at both ends, so that process existed continuously across
+ktime 27000. **A `bootchecker` process is alive at ~27 s.** `Slept for 60
+seconds` also says it is cycling rather than winding down.
+
+**What is inferred and labelled as such:** that pid 2585 is the `bootchecker`
+service (`class late_start`) and pid 6848 the `bootchecker-bootc` instance the
+`on property:dev.bootcomplete=1` rule starts. pid 6848 ran `--writebootc`, which
+is that rule's job, and 2585 is the lower, earlier pid doing `boot_status` work.
+Nothing read says which service each pid belongs to. It does not matter for the
+question: whichever it is, a process of that binary is running at 27 s.
+
+**Consequence, and it is the reason this row existed.** The two 2026-10-15
+samples dispatched at uptime 147 s and 81 s with both services reading
+`stopped`. A teardown chained onto the early-root path fires near 27 s, where
+this log shows the binary **running**, so `bootchecker.rc`'s
+`on property:init.svc.zygote=restarting → restart bootchecker` would land on a
+live watchdog rather than a stopped service. That is a materially different
+operation from the one those two samples cover, and the one with two
+unexplained rollbacks behind it.
+
+So the early-dispatch case is **not** covered by the non-reproduction above, and
+this is now read rather than assumed. It is not a refusal of the chained form —
+it is its price, stated. What is still unread is what the firmware does when
+that restart lands inside the live window, and §3.6.1 governs whether finding
+out is a probe or an operation: the worst outcome is an unplanned full reboot
+with a staged rollback, so it is an operation.
+
+**The boot this was read from is the relevant one.** `20261015_000846` is an
+early-root boot — the exact shape a chained dispatch would run in — not a
+synthetic or idle boot.
