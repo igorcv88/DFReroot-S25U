@@ -328,13 +328,14 @@ class MainActivity : Activity() {
         )
         view.findViewById<TextView>(R.id.armConfirmThermal).text = reading
         val probeBox = view.findViewById<CheckBox>(R.id.armConfirmProbe)
+        val softRebootBox = view.findViewById<CheckBox>(R.id.armConfirmSoftReboot)
         try {
             AlertDialog.Builder(this)
                 .setTitle(R.string.early_root_confirm_title)
                 .setView(view)
                 .setNegativeButton(R.string.early_root_confirm_cancel, null)
                 .setPositiveButton(R.string.early_root_confirm_reboot_now) { _, _ ->
-                    armThenReboot(probeBox.isChecked)
+                    armThenReboot(probeBox.isChecked, softRebootBox.isChecked)
                 }
                 .show()
         } catch (t: Throwable) {
@@ -357,9 +358,9 @@ class MainActivity : Activity() {
      * it armed would hand them the ten-second race they asked to be rid of,
      * without telling them the clock had started.
      */
-    private fun armThenReboot(alsoArmProbe: Boolean) {
+    private fun armThenReboot(alsoArmProbe: Boolean, alsoSoftReboot: Boolean) {
         runBg {
-            val line = DfrEarlyRoot.arm(applicationContext)
+            val line = DfrEarlyRoot.arm(applicationContext, alsoSoftReboot)
             append(line)
             if (EarlyRootPolicy.armOutcome(line) != EarlyRootPolicy.ARM_OUTCOME_ARMED) {
                 runOnUiThread {

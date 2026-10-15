@@ -58,6 +58,14 @@ public class EarlyRootPolicyTest {
                 generation);
     }
 
+    /** The same arming with the owner's soft-reboot box ticked. */
+    private static String armSoft(boolean softReboot) {
+        return EarlyRootPolicy.formatArm(ARMED_BOOT, EarlyRootPolicy.EXPECTED_JOB_ID,
+                NS, 15_000L, 1, CODE, NAME, KSUD, FP, 300_000L, 1759000000000L,
+                GEN, EarlyRootPolicy.THERMAL_STATUS_UNAVAILABLE, Float.NaN,
+                softReboot);
+    }
+
     /** Every element satisfied; each test below spoils exactly one. */
     private static EarlyRootPolicy.Inputs ready() {
         EarlyRootPolicy.Inputs in = new EarlyRootPolicy.Inputs();
@@ -1859,6 +1867,70 @@ public class EarlyRootPolicyTest {
                         EarlyRootPolicy.STEP_READINESS_PASS, "boot-x", 14_070,
                         "sys_boot_completed=0", "proc=PASS " + waitDetail)) != null,
                 "the wait detail parses inside the readiness step's line");
+
+        // ---- the chained soft reboot (2026-10-15) ------------------------
+        // The owner's decision is "after post-root, whatever moment it is". So
+        // the ONLY things this may read are the tick, the boot and the run's
+        // own verdict - and each refusal is its own value (3.7).
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_DISPATCH.equals(
+                        EarlyRootPolicy.chainSoftReboot(armSoft(true), ARMED_BOOT, true)),
+                "box ticked + same boot + root succeeded dispatches the soft reboot");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NOT_REQUESTED.equals(
+                        EarlyRootPolicy.chainSoftReboot(armSoft(false), ARMED_BOOT, true)),
+                "box not ticked is NOT_REQUESTED, which is not a failure");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NOT_REQUESTED.equals(
+                        EarlyRootPolicy.chainSoftReboot(arm(), ARMED_BOOT, true)),
+                "an arm record from a build with no such field reads as not "
+                        + "requested, so an older arming still roots and never "
+                        + "tears down userspace unasked");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_ROOT_INCOMPLETE.equals(
+                        EarlyRootPolicy.chainSoftReboot(armSoft(true), ARMED_BOOT, false)),
+                "a run that did not establish root cannot chain a soft reboot");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_ARM_UNREADABLE.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                AutoRootPolicy.RECORD_UNREADABLE, ARMED_BOOT, true)),
+                "an unreadable arm record refuses and says so, never passing");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NO_ARMING.equals(
+                        EarlyRootPolicy.chainSoftReboot(null, ARMED_BOOT, true)),
+                "no arm record is NO_ARMING");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NO_ARMING.equals(
+                        EarlyRootPolicy.chainSoftReboot("state=whatever\n", ARMED_BOOT, true)),
+                "a malformed arm record is NO_ARMING, not a dispatch");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_ARM_FOREIGN.equals(
+                        EarlyRootPolicy.chainSoftReboot(armSoft(true), "some-other-boot", true)),
+                "an arming from another boot is last boot's permission (3.8)");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_ARM_FOREIGN.equals(
+                        EarlyRootPolicy.chainSoftReboot(armSoft(true), "", true)),
+                "no current boot_id cannot place the authorisation, so it refuses");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_ARM_FOREIGN.equals(
+                        EarlyRootPolicy.chainSoftReboot(armSoft(true), null, true)),
+                "a null boot_id refuses rather than throwing");
+        // A garbled value is not evidence that nobody asked (2).
+        check(EarlyRootPolicy.parseArm(
+                        armSoft(true).replace("armed_soft_reboot=1",
+                                "armed_soft_reboot=yes")) == null,
+                "armed_soft_reboot=yes refuses the whole arm record rather than "
+                        + "reading as false or as true");
+        check(EarlyRootPolicy.parseArm(armSoft(true)) != null
+                        && EarlyRootPolicy.parseArm(armSoft(true)).softReboot,
+                "a ticked record round-trips through format/parse");
+        check(EarlyRootPolicy.parseArm(armSoft(false)) != null
+                        && !EarlyRootPolicy.parseArm(armSoft(false)).softReboot,
+                "an unticked record round-trips as false");
+        check(EarlyRootPolicy.parseArm(arm()) != null
+                        && !EarlyRootPolicy.parseArm(arm()).softReboot,
+                "the field is required to ACT, never to parse: the older "
+                        + "three-argument format still yields a valid arming");
+        // And it reads NO boot-phase signal at all - that is the owner's
+        // decision, so it is asserted rather than left to inspection.
+        for (boolean rooted : new boolean[] { true, false }) {
+            for (String armRec : new String[] { armSoft(true), armSoft(false), arm() }) {
+                String a = EarlyRootPolicy.chainSoftReboot(armRec, ARMED_BOOT, rooted);
+                String b = EarlyRootPolicy.chainSoftReboot(armRec, ARMED_BOOT, rooted);
+                check(a.equals(b), "chainSoftReboot is a function of its three "
+                        + "arguments only; nothing ambient may move it");
+            }
+        }
 
         System.out.println("EarlyRootPolicyTest: " + pass + "/" + (pass + fail)
                 + " passed");

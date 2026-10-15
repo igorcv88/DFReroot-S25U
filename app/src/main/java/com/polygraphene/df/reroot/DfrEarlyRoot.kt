@@ -91,7 +91,16 @@ object DfrEarlyRoot {
     const val OVERRIDE_DEADLINE_MS = 45_000L
 
     @Synchronized
-    fun arm(context: Context): String {
+    /**
+     * @param alsoSoftReboot the owner ticked "soft reboot automatically in the
+     *   same boot" in the arming dialog. It is recorded in the arm record and
+     *   spent with this arming, never kept as a standing switch: AGENTS.md 3.11
+     *   makes a persistent form of an early-window decision a promotion, not a
+     *   convenience, and this one authorises a userspace teardown on top of it.
+     *   Defaulted to false so every existing caller keeps its behaviour.
+     */
+    @JvmOverloads
+    fun arm(context: Context, alsoSoftReboot: Boolean = false): String {
         val bootId = DfrRootCoordinator.readBootId()
         if (bootId.isEmpty()) return "[x] EARLY_ROOT_NOT_ARMED: boot_id unavailable"
         /*
@@ -336,7 +345,8 @@ object DfrEarlyRoot {
             bootId, JOB_ID, namespaceForRuntime(), MINIMUM_LATENCY_MS, result,
             AutoRootStore.versionCode(), AutoRootStore.versionName(),
             KsudStage.pinnedKsudSha256(), AutoRootStore.deviceFingerprint(),
-            elapsed, wallclock, generation, thermalStatus, thermalHeadroom
+            elapsed, wallclock, generation, thermalStatus, thermalHeadroom,
+            alsoSoftReboot
         )
         val failure = EarlyRootStore.writeArm(record)
         if (failure != null) {

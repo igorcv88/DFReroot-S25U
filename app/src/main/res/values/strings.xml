@@ -34,7 +34,7 @@
     <string name="early_root_confirm_body">This arms ONE early root attempt for the next full boot. The chain runs inside the boot animation, before BOOT_COMPLETED.\n\nConfirming REBOOTS THE PHONE IMMEDIATELY. That is deliberate: the arming is only valid for %1$d seconds, and reaching the system reboot menu by hand often takes longer than that on a device that has just slowed down again.\n\nA hard reboot is the recovery boundary if the chain fails.</string>
     <string name="early_root_confirm_probe">Also arm the Early Boot Probe (observation only)</string>
     <string name="early_root_confirm_soft_reboot">Soft reboot automatically in the same boot</string>
-    <string name="early_root_confirm_soft_reboot_note">Not available yet — the soft reboot is not part of the early chain.</string>
+    <string name="early_root_confirm_soft_reboot_note">Runs right after root completes, at whatever moment that falls — you may see one brief restart, sometimes over the boot animation and sometimes just after the lock screen appears. Landing it inside the animation was measured and is not reachable on this firmware. It is still gated: it needs this boot\'s verified root, the pinned daemon and the firmware\'s own boot-health verdict, and it refuses rather than forcing. One attempt per boot.</string>
     <string name="early_root_confirm_reboot_now">Reboot now</string>
     <string name="early_root_confirm_cancel">Cancel</string>
     <!-- Too hot to arm: OK only, with how long cooling takes. -->

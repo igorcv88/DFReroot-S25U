@@ -2865,6 +2865,89 @@ def audit():
         fail("Thread.sleep is reachable in the dispatch without the "
              "may-this-thread-block decision preceding it")
 
+    # --- the chained soft reboot (2026-10-15, owner decision) -------------
+    # The owner asked for the soft reboot to run as soon as post-root finishes,
+    # at whatever moment that falls. Kotlin cannot be unit-tested here
+    # (AGENTS.md 5), and this path hands a boot to a userspace teardown that has
+    # two unexplained firmware reboots behind it, so each property that keeps it
+    # honest is asserted statically. Five, because the chain is one edit away
+    # from being either unguarded or silently dead.
+    service_src = code_only(dfr_source("DfrEarlyRootService.kt"))
+
+    # (1) The decision is the PURE function, not an `if` in the service. The
+    #     negatives live in EarlyRootPolicyTest; a condition inlined here would
+    #     be judgement nothing tests.
+    if "EarlyRootPolicy.chainSoftReboot(" not in service_src:
+        fail("DfrEarlyRootService no longer calls EarlyRootPolicy.chainSoftReboot; "
+             "the chained soft reboot's decision belongs in the pure, "
+             "host-tested unit and not in the service (AGENTS.md 5)")
+
+    # (2) It dispatches through the RECEIVER, never by reaching into the
+    #     soft-reboot sequence itself. That is 3.2 satisfied by construction:
+    #     DfrSoftRebootReceiver re-derives the post-root record, the per-boot
+    #     lock, the ksud digest, the transport_fix marker and the firmware
+    #     boot-health verdict, so this path cannot be the one that forgets a
+    #     gate. A direct call to SoftRebootPolicy or RootTransport from here
+    #     would be a second copy of that sequence.
+    if "DfrSoftRebootReceiver.ACTION_APPLY_MODULES" not in service_src:
+        fail("the early chain no longer hands the soft reboot to "
+             "DfrSoftRebootReceiver.ACTION_APPLY_MODULES; a second path into "
+             "the teardown is a second place a gate can be forgotten (3.2)")
+    for banned in ("SoftRebootPolicy.evaluate", "RootTransport.prepare",
+                   "SoftRebootHealth.recordPreExec"):
+        if banned in service_src:
+            fail("DfrEarlyRootService references %r; the chained soft reboot "
+                 "must go through the receiver that re-derives every gate, not "
+                 "re-implement any part of it (3.2)" % banned)
+
+    # (3) The trace precedes the dispatch, and is written on EVERY outcome.
+    #     3.11's rule, and the reason is specific: a boot that does not come
+    #     back has to say whether the box was ticked, whether the arming was
+    #     foreign, or whether the broadcast went out. A trace only on the
+    #     interesting path cannot tell "not asked for" from "died before
+    #     deciding".
+    if "EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT" not in service_src:
+        fail("the chained soft reboot no longer writes its own trace step; "
+             "every boundary that can refuse gets one (3.11)")
+    chain_fn = service_src[service_src.find("private fun chainSoftReboot"):]
+    if chain_fn:
+        chain_fn = chain_fn[:chain_fn.find("\n    private fun ", 1)] or chain_fn
+        trace_at = chain_fn.find("STEP_CHAIN_SOFT_REBOOT")
+        send_at = chain_fn.find("sendBroadcast")
+        if trace_at < 0 or send_at < 0 or trace_at > send_at:
+            fail("the chained soft reboot broadcasts before tracing, or does "
+                 "not trace at all; the record of having asked must exist "
+                 "before the asking (3.6.1, same rule as traceSoftReboot)")
+
+    # (4) It reads NO boot phase. This is the owner's decision of 2026-10-15,
+    #     stated as a property so a later "just check boot_completed first"
+    #     cannot land quietly: the goal of landing inside the animation was
+    #     measured and is not reachable, and a phase condition here would
+    #     silently restore the manual tap the chain exists to remove.
+    if chain_fn:
+        for phase_token in ("sys.boot_completed", "LOCKED_BOOT_COMPLETED",
+                            "isDeviceLocked", "isKeyguardLocked",
+                            "bootState("):
+            if phase_token in chain_fn:
+                fail("the chained soft reboot reads %r; the owner's decision is "
+                     "that it runs when post-root finishes at WHATEVER moment "
+                     "that is, so a boot-phase condition here is a change of "
+                     "that decision and not a hardening" % phase_token)
+
+    # (5) The authorisation is per-arming and spent with it, never a standing
+    #     switch (3.11). It rides the arm record as an OPTIONAL key so a build
+    #     that never wrote it still arms and still roots - required to act,
+    #     never to parse, the same shape as transport_fix in 3.6.1.
+    if '"armed_soft_reboot"' not in policy_src:
+        fail("EarlyRootPolicy no longer carries armed_soft_reboot; the "
+             "chained soft reboot's authorisation must ride the per-arming "
+             "record rather than a persistent preference (3.11)")
+    arm_optional = re.search(r"ARM_OPTIONAL_KEYS = Set\.of\(([^)]*)\)", policy_src)
+    if not arm_optional or "armed_soft_reboot" not in arm_optional.group(1):
+        fail("armed_soft_reboot is not in ARM_OPTIONAL_KEYS; making it required "
+             "would refuse every arm record written by a build without it, "
+             "which breaks arming on any device that has not rebuilt (3.6.1)")
+
     # The floor must stay below the structural AMS floor, or the clock is back
     # to choosing the moment. Asserted here and not in EarlyRootPolicyTest
     # because it is a Kotlin constant and a Java host test cannot read it.
@@ -3501,16 +3584,38 @@ def audit():
         if body.count("return false") < 2:
             fail("beforeNativeRun does not abort on a failed pre-record; the run "
                  "would proceed without the guarantee the record exists to give")
-    # The second half of the integrated-boot goal is deliberately NOT here. A
-    # teardown stacked on an unproven early root makes a failure impossible to
-    # attribute to either, and the soft reboot has its own gate, lock and
-    # boot-health record.
-    for forbidden in ("RootTransport", "DfrSoftRebootReceiver", "SoftRebootPolicy",
-                      "__NR_reboot", "APPLY_MODULES"):
+    # The second half of the integrated-boot goal USED to be forbidden here, and
+    # this guard forbade it by name. The owner decided otherwise on 2026-10-15,
+    # in the open: when post-root finishes, chain the soft reboot and accept
+    # whatever moment that is, because landing inside the boot animation was
+    # measured and is not reachable, and one visible blink beats unlocking,
+    # waiting and tapping by hand.
+    #
+    # So the guard is EXCHANGED, not deleted - the same discipline AGENTS.md
+    # 3.6.1 states for the reboot-syscall gate: whoever removes a guard replaces
+    # it with one that proves the new boundary, and never with nothing. What the
+    # old one bought was "no second path into the teardown"; that property is
+    # now bought by the five checks above (the decision is the pure function,
+    # the dispatch goes through the receiver that re-derives every gate, the
+    # trace precedes it, no boot phase is read, and the authorisation is
+    # per-arming). What stays banned is everything that would be a SECOND COPY
+    # of the teardown rather than a handoff to the one that exists.
+    #
+    # DfrSoftRebootReceiver and ACTION_APPLY_MODULES are therefore permitted in
+    # the service - that IS the handoff - and still banned in the dispatch,
+    # which runs before any root exists and has nothing to hand over.
+    for forbidden in ("RootTransport", "SoftRebootPolicy", "__NR_reboot"):
         if forbidden in early_root_service_src or forbidden in early_root_dispatch_src:
-            fail("the early-root service reaches the soft-reboot/module-lifecycle "
-                 "path (%r); that is a separate operation with its own gate and its "
-                 "own unanswered boot-health question" % forbidden)
+            fail("the early-root service or dispatch re-implements part of the "
+                 "soft-reboot path (%r) instead of handing off to "
+                 "DfrSoftRebootReceiver; a second copy of that sequence is a "
+                 "second place a gate can be forgotten (3.2)" % forbidden)
+    for forbidden in ("DfrSoftRebootReceiver", "APPLY_MODULES"):
+        if forbidden in early_root_dispatch_src:
+            fail("the early-root DISPATCH references %r; the dispatch runs "
+                 "before transaction 5 and before any root exists, so a "
+                 "teardown reachable from there could fire with nothing rooted "
+                 "and no post-root record to gate it" % forbidden)
     # ...and it does not OFFER it either. The soft reboot is a physical FAIL
     # twice with a cause nobody has measured; the early path has no evidence at
     # all. A notification action is one tap, mid-boot, and the owner has just

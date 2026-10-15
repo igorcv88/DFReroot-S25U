@@ -412,11 +412,79 @@ class DfrEarlyRootService : Service() {
         if (result.success) {
             Log.i(TAG, "[DFR][EARLY_ROOT] EARLY_ROOT_RESULT=SUCCESS boot_id=$bootId" +
                 " selinux=${result.liveSelinux} ${EarlyRootEnv.bootState(context)}")
+            chainSoftReboot(context, bootId, result.success)
         } else {
             Log.e(TAG, "[DFR][EARLY_ROOT] EARLY_ROOT_RESULT=FAIL boot_id=$bootId" +
                 " native=${result.nativeResult} post_root=${result.postRootComplete}" +
                 " selinux=${result.liveSelinux} phase=$phase" +
                 " native_started=${result.nativeStarted} reason=${result.reason}")
+        }
+    }
+
+    /**
+     * Hand this boot to the soft reboot, if the owner ticked the box when they
+     * armed it.
+     *
+     * The owner's decision of 2026-10-15, in their words: when post-root
+     * finishes, run the soft reboot and accept whatever moment that is. Landing
+     * inside the boot animation was attempted and is not reachable on this
+     * firmware; one visible blink beats unlocking, waiting for the framework to
+     * settle, opening a root manager and tapping by hand. So nothing here reads
+     * a boot phase - not `sys.boot_completed`, not the keyguard, not a clock.
+     *
+     * ## Why this is a broadcast and not a call
+     *
+     * [DfrSoftRebootReceiver] re-derives EVERY permission the teardown needs:
+     * the same-boot post-root record, the per-boot one-shot lock, the ksud
+     * digest, the `transport_fix` marker and the firmware's boot-health
+     * verdict. Sending it the same intent the notification action sends means
+     * there is exactly ONE soft-reboot sequence in this app, and this path
+     * cannot be the one that forgets a gate - AGENTS.md 3.2 satisfied by
+     * construction rather than by a second review.
+     *
+     * It is also why the dependency runs only this way. The receiver must never
+     * reference [DfrRootCoordinator] (`tools/profile_binding_audit.py` fails if
+     * it does), because a path from the teardown back into the exploit is the
+     * one shape that could turn a module re-apply into a second chain run.
+     * Pointing at the receiver from here adds no such path.
+     *
+     * "No timing check" is NOT "no gates": the owner asked for no condition on
+     * the moment, and 3.6 reserves removing a gate for an explicit decision of
+     * theirs. A refusal from the receiver therefore still refuses, and says so
+     * in its own trace.
+     */
+    private fun chainSoftReboot(context: Context, bootId: String, rootSucceeded: Boolean) {
+        val armRecord = try {
+            EarlyRootStore.readArm()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] soft-reboot chain cannot read the arming: $t")
+            AutoRootPolicy.RECORD_UNREADABLE
+        }
+        val verdict = EarlyRootPolicy.chainSoftReboot(armRecord, bootId, rootSucceeded)
+        /*
+         * Traced before the dispatch, not after, and for 3.6.1's reason: the
+         * broadcast hands this process's boot to an operation that tears
+         * userspace down, so the record of having asked has to exist before the
+         * asking. A trace that cannot be written is reported and the dispatch
+         * still proceeds ONLY because the receiver writes its own
+         * `traceSoftReboot` claim before any privileged step - losing this line
+         * loses the attribution, not the safety.
+         */
+        trace(bootId, EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT, verdict)
+        if (EarlyRootPolicy.CHAIN_SOFT_REBOOT_DISPATCH != verdict) {
+            Log.i(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_CHAIN=$verdict boot_id=$bootId")
+            return
+        }
+        try {
+            context.sendBroadcast(
+                Intent(context, DfrSoftRebootReceiver::class.java)
+                    .setAction(DfrSoftRebootReceiver.ACTION_APPLY_MODULES)
+                    .putExtra(RootNotifier.EXTRA_BOOT_ID, bootId)
+            )
+            Log.i(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_CHAIN=$verdict boot_id=$bootId" +
+                " (dispatched to DfrSoftRebootReceiver, which re-derives every gate)")
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_CHAIN broadcast failed: $t", t)
         }
     }
 

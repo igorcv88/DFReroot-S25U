@@ -46,7 +46,6 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:checked="false"
-            android:enabled="false"
             android:text="@string/early_root_confirm_soft_reboot" />
 
         <TextView
