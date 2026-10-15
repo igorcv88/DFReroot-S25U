@@ -490,7 +490,8 @@ restarting its own boot watchdog, and the rule that restores that flag is keyed
 on `dev.bootcomplete=1`. So a restart the framework survives can still leave the
 firmware believing the boot never completed.
 
-**MEASURED on 2026-10-15, and the proposed mechanism is refuted.** This section
+**MEASURED on 2026-10-15: the flags DO come back, which is evidence against the
+proposed mechanism and not a refutation of it.** This section
 used to carry the question "does anything set `dev.bootcomplete=1` again after a
 soft reboot, and does `dev.platform_bootcomplete` come back?" — stated as a
 question because an earlier draft had answered it from init's dispatch semantics
@@ -503,18 +504,26 @@ post half written by a different pid than the pre half — the restarted
 framework, as the second durable rule below requires. No reboot followed, in
 either boot. `docs/S25U_ZZIC_COMPATIBILITY.md` holds the capture.
 
-So the chain this section proposed — `dev.bootcomplete` stays 1, the restoring
-rule never re-fires, `dev.platform_bootcomplete` stays 0, `bootchecker` times
-out — **is broken at its third link and is not the mechanism.** Which leaves the
-2026-10-01 rollback, and a second `bootchecker_timeout` rollback on 2026-10-12,
-**with no established cause**: the same operation, from the same converged
-pre-state, reconverged cleanly on 2026-10-15.
+**And be exact about what that does to the hypothesis, because an earlier
+version of this paragraph was not.** It said the proposed chain —
+`dev.bootcomplete` stays 1, the restoring rule never re-fires,
+`dev.platform_bootcomplete` stays 0, `bootchecker` times out — was "broken at
+its third link and is not the mechanism". It is not. **Both samples are runs
+that did not fail.** Neither the 2026-10-01 nor the 2026-10-12 rollback has a
+post-restart property record, so nothing here says what
+`dev.platform_bootcomplete` did during a boot that went on to roll back. A
+non-deterministic failure is free to take the hypothesised branch only on the
+runs where it fails, and two clean runs cannot see that.
 
-Read that as it reads, and not as a clearance. An unexplained,
-non-deterministic firmware reboot is a worse thing to automate than a
-understood one, so answering this question did not make the operation routine —
-it moved the uncertainty from the mechanism to the cause. §3.6.1 still governs:
-worst outcome is a full reboot with a staged rollback, so the gate stays and
+So this is **evidence against the hypothesis and a non-reproduction**, which is
+what `docs/HANDOFF.md`'s own reading guide for this record already said to call
+it. What would actually refute it is one thing and only one thing: the flags
+captured during a run that then rolls back.
+
+Either way it is not a clearance. An unexplained, non-deterministic firmware
+reboot is a worse thing to automate than an understood one, so this measurement
+did not make the operation routine. §3.6.1 still governs: worst outcome is a
+full reboot with a staged rollback, so the gate stays and
 `BOOT_HEALTH_UNKNOWN` still refuses.
 
 **And what is measured is the LATE dispatch only.** Both samples were dispatched

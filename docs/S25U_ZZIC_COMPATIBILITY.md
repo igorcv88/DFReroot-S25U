@@ -2978,7 +2978,9 @@ What shipped:
 above is a physical FAIL twice, and AGENTS.md 3.6.2 states what is *observed*
 there and what is not: Samsung's `bootchecker.rc` zeroes
 `dev.platform_bootcomplete` on `init.svc.zygote=restarting`, and whether
-anything sets `dev.bootcomplete=1` again afterwards has never been read. The
+anything sets `dev.bootcomplete=1` again afterwards **was read on 2026-10-15 —
+both flags come back** (see the 2026-10-15 section below), which removed the
+leading hypothesis without supplying a cause and left the FAIL standing. The
 early-root path deliberately does **not** restart the framework, apply modules
 or touch the soft-reboot transport, so it does not enter that failure mode - but
 it does write to the page cache *while the same boot watchdog is still running*,
@@ -4368,7 +4370,7 @@ animation and a floor near 13.4 s, the post-dispatch chain has to fall from
 (3487), the trigger loop (2050, of which 1000 is `usleep`), the post-root wait
 (2038) and the app-side 628.
 
-## 2026-10-15 — the boot-health handshake DOES reconverge after a soft reboot, and the 2026-10-01 mechanism is refuted
+## 2026-10-15 — the boot-health handshake DOES reconverge after a soft reboot; the 2026-10-01 mechanism did not reproduce
 
 The question this document has carried since 2026-10-01 —
 
@@ -4448,13 +4450,34 @@ pid 22764 / `starttime` 8853 — different processes again.
 
 So the reconvergence is **n=2 across two boots**, not a single observation.
 
-### What this refutes, and what it does not clear
+### What this is evidence against — and why it is NOT a refutation
 
 The mechanism this document proposed for the 2026-10-01 rollback was: a
 `dev.bootcomplete` that stays at 1 never re-fires the restoring rule, so
-`dev.platform_bootcomplete` stays 0, so `bootchecker` times out. **That chain is
-broken at its third link.** The flag comes back, in both samples, with
-`bootchecker` ending `stopped`.
+`dev.platform_bootcomplete` stays 0, so `bootchecker` times out. The flag comes
+back in both samples, with `bootchecker` ending `stopped`.
+
+**That is evidence against the hypothesis. It is not a refutation, and an
+earlier version of this section called it one.** Both samples are runs that did
+*not* fail. Neither the 2026-10-01 nor the 2026-10-12 rollback has a
+post-restart property record, so nothing measured here says what
+`dev.platform_bootcomplete` did during a boot that went on to roll back — and a
+non-deterministic failure is free to take the hypothesised branch only on the
+runs where it fails. Two clean runs cannot see that branch by construction.
+
+`docs/HANDOFF.md`'s reading guide for this exact record already said so, in
+advance, for this exact outcome: "evidence against the handshake being the
+cause — not a refutation of the interaction… treat it as *did not reproduce in
+one window*." That guidance was written before the run and was right; writing
+"refuted" afterwards ignored it. The one observation that would refute the
+hypothesis is the flags captured **during a run that then rolls back**, and
+this capture is not that.
+
+What the window does add: the incident's rollback landed ~2 minutes after its
+dispatch, and here the record settled at `post_read_start_ms=502225` with live
+properties still converged at 15:40:56, 9m45s after the claim. So the
+non-reproduction covers more than the incident's own latency — which
+strengthens it as evidence and still does not convert it into a refutation.
 
 Which leaves the failure without a cause. And this capture adds a second
 occurrence that was not in this record: `dumpsys rollback` holds
