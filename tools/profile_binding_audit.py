@@ -2954,6 +2954,40 @@ def audit():
              "the chained soft reboot's decision belongs in the pure, "
              "host-tested unit and not in the service (AGENTS.md 5)")
 
+    # (0) EVERY component the early path reaches must be directBootAware, and
+    #     this check exists because its absence was the THIRD thing that
+    #     silently killed the chained soft reboot - after the arm-boot binding
+    #     and the unregistered trace step.
+    #
+    #     While the user is locked, PMS resolves only direct-boot-aware
+    #     components, so a sendBroadcast naming a non-aware receiver matches
+    #     nothing and is dropped WITH NO ERROR. The early chain runs pre-unlock
+    #     (`user_unlocked=0`, measured at the callback in three consecutive
+    #     boots), so the handoff went nowhere. Every other component on that
+    #     path already carried the attribute; the receiver did not, because
+    #     until this change it was only ever reached by a notification tap,
+    #     which happens after unlock.
+    #
+    #     Checked per component rather than as one grep, so the failure names
+    #     which one is missing it, and listed explicitly rather than derived
+    #     from the source: a component the early path stops reaching should drop
+    #     off this list by a deliberate edit, not by a regex no longer matching.
+    for component in (".DfrBootReceiver", ".DfrAutoRootService",
+                      ".DfrEarlyBootJobService", ".DfrEarlyRootJobService",
+                      ".DfrEarlyRootService", ".DfrSoftRebootReceiver"):
+        decl = re.search(
+            r'android:name="' + re.escape(component) + r'"((?:(?!/>|>)[\s\S])*)',
+            manifest)
+        if decl is None:
+            fail("AndroidManifest.xml does not declare %s; the early path "
+                 "reaches it, and an undeclared component receives nothing"
+                 % component)
+        elif 'android:directBootAware="true"' not in decl.group(1):
+            fail("%s is not android:directBootAware; the early chain runs with "
+                 "the user locked (user_unlocked=0, measured), and PMS resolves "
+                 "only direct-boot-aware components then - a broadcast or start "
+                 "naming it is dropped with no error" % component)
+
     # (1a) It feeds the decision the CYCLE, not only the arm record. The first
     #      version compared the current boot to the arm record's armed_boot_id
     #      and required equality - but ARM_SAME_BOOT refuses a run whose
