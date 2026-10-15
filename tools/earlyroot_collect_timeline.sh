@@ -68,7 +68,23 @@ say ""
 # would have printed a budget with no milestones in it. Codex caught it on
 # PR #75. Validating against a real log is not the same as validating against
 # a log YOUR OWN command produces.
-grab 10_logcat.txt logcat -d -b all -v time
+# `-v threadtime` is as load-bearing as `-b all`, for the same reason and
+# found the same way - on the first real run, by the script failing.
+#
+# The extractors were built and validated against a threadtime capture, where
+# an event-log line reads `I boot_progress_ams_ready: 15879`. Shipping
+# `-v time` produces `I/boot_progress_ams_ready( 2988): 15879` instead: the
+# tag is followed by `/` and `(` rather than a space and `:`, and the pid
+# moves from $3 into the tag field. Every tag-anchored pattern in the filter
+# below missed, so boot 89e00f66 came back with the whole budget declared
+# NOT COMPUTABLE while the milestones sat in the capture.
+#
+# Third time in this family: a fixture written from memory, then a buffer set
+# the shipped command did not request, now a format it did not produce. The
+# constant is validating against an input this script did not generate, so the
+# filter is now format-agnostic as well - belt and braces, because the next
+# variation will not be one that was predicted either.
+grab 10_logcat.txt logcat -d -b all -v threadtime
 grab 20_jobscheduler.txt dumpsys jobscheduler
 grab 30_thermalservice.txt dumpsys thermalservice
 
@@ -83,7 +99,11 @@ echo "[41_post_root.txt exit_status=$?]" >> "$OUT"
 # --- the filtered timeline ----------------------------------------------
 # Only the lines the budget is computed from. Kept as its own small file so the
 # archive is readable without unpacking 33 MB.
-grep -aE 'boot_progress_[a-z_]+:|wm_boot_animation_done|sf_stop_bootanim|am_proc_start:.*networkstack|am_proc_bound:.*networkstack|Process [0-9]+ created for com\.android\.networkstack|NetworkStackClient|finishBooting|boot_progress_ams_state|DFReroot|DirtyFrag' \
+# Tag names only, with NO punctuation anchor: `boot_progress_ams_ready:` and
+# `boot_progress_ams_ready(` are the same event in two logcat formats, and
+# requiring either one is how the previous version silently dropped all of
+# them.
+grep -aE 'boot_progress_[a-z_]+|wm_boot_animation_done|sf_stop_bootanim|am_proc_start|am_proc_bound|Process [0-9]+ created for com\.android\.networkstack|NetworkStackClient|finishBooting|DFReroot|DirtyFrag' \
     "$DIR/10_logcat.txt" > "$DIR/11_timeline.txt" 2>> "$DIR/_stderr.txt"
 echo "[11_timeline.txt exit_status=$? lines=$(wc -l < "$DIR/11_timeline.txt" 2>/dev/null)]" >> "$OUT"
 
@@ -173,79 +193,96 @@ say "=== THE BUDGET (elapsed ms, from logcat) ==="
 # one worth one day, and a line whose date is not in that set is SKIPPED and
 # COUNTED rather than converted against the wrong origin. Counting matters:
 # skipping silently would hide a marker that fell before the clock set.
-awk '
+# The dispatch instant comes from the TRACE, not from logcat, because the
+# logcat line ages out while /data/system does not - boot 89e00f66 lost it at
+# 71 s of uptime. It is the one number this collection exists to compare
+# against AMS ready, so it must not depend on the buffer that rolls.
+TRACE_DISPATCH=$(awk -F'\t' '$1 == "EARLY_ROOT_JOB_ENTERED" { print $3; exit }' \
+    "$DIR/40_trace.txt" 2>/dev/null)
+awk -v tracedisp="${TRACE_DISPATCH:-}" '
 function tod(t) { split(t, a, ":"); split(a[3], s, ".")
                   return (a[1]*3600 + a[2]*60 + s[1]) * 1000 + s[2] }
-# Day index from MM-DD, so a date CHANGE can be told apart from a date JUMP.
-#
-# The previous version gave every newly seen date exactly +86400000 ms in order
-# of appearance, which is only correct for an adjacent-day rollover. A wall
-# clock corrected after the anchor - 02-02 to 10-14 is what this device really
-# logs - would then place later milestones one day after dispatch and fabricate
-# the central number of this whole collection. Appearance order is not evidence
-# of adjacency, which is the same mistake as counting an absence as agreement.
-#
-# February is 29 here deliberately. Differences within one side of it are
-# unaffected, and the one case it mis-reads - Feb 28 to Mar 1 in a non-leap
-# year - comes out as a 2-day gap and is therefore REFUSED as unplaceable
-# rather than silently converted. Refusing once a year beats a wrong number.
 function dayidx(ds) { split(ds, q, "-")
     c[1]=0;   c[2]=31;  c[3]=60;  c[4]=91;  c[5]=121; c[6]=152
     c[7]=182; c[8]=213; c[9]=244; c[10]=274; c[11]=305; c[12]=335
     return c[q[1]+0] + (q[2]+0) }
-{ d[NR] = $1; v[NR] = tod($2); L[NR] = $0
-  if ($0 ~ /boot_progress_ams_ready:/) sawevents = 1
-  if (anchor == 0 && $0 ~ /DFReroot.*EARLY_ROOT\] DISPATCHED/ \
-      && match($0, /elapsed_ms=[0-9]+/)) {
-      anchor = NR; el = substr($0, RSTART + 11, RLENGTH - 11) } }
+# The platform milestones REPORT THEIR OWN ELAPSED MS as the message body, in
+# both logcat formats: `boot_progress_ams_ready: 15879` and
+# `boot_progress_ams_ready( 2988): 15879` both end in 15879. Reading that value
+# is exact, needs no clock at all, and is therefore immune to the whole class
+# of date problems - midnight, the pre-NTP clock set, a correction mid-boot.
+# This was sitting in the log the entire time and I was converting timestamps
+# instead; boot 89e00f66 is where reading the raw lines showed it.
+#
+# Only am_proc_start / am_proc_bound do not self-report (their message is the
+# process tuple), so they alone still need a clock, and t0 comes from a
+# self-reporting milestone on a line of the same capture: t0 = clock - value.
+/boot_progress_start|boot_progress_system_run|boot_progress_pms_ready|boot_progress_ams_ready|boot_progress_enable_screen|wm_boot_animation_done/ {
+    if ($NF ~ /^[0-9]+$/) {
+        val = $NF + 0
+        if (/boot_progress_start/)          self["zygote"] = val
+        if (/boot_progress_system_run/)     self["system_server"] = val
+        if (/boot_progress_pms_ready/)      self["PMS ready"] = val
+        if (/boot_progress_ams_ready/)    { self["AMS ready  <-- no app process starts before this"] = val
+                                            t0 = tod($2) - val; t0d = dayidx($1) }
+        if (/boot_progress_enable_screen/)  self["screen enabled"] = val
+        if (/wm_boot_animation_done/)       self["ANIMATION ENDED  <-- the deadline that matters"] = val
+    }
+}
+{ d[NR] = $1; v[NR] = tod($2); L[NR] = $0 }
+/EARLY_ROOT\] DISPATCHED/ && match($0, /elapsed_ms=[0-9]+/) {
+    self["DFReroot dispatched"] = substr($0, RSTART + 11, RLENGTH - 11) + 0 }
+/EARLY_ROOT_RESULT=SUCCESS/ { resline = NR }
 END {
-    # The section refuses on its own, not only via the check further up. The
-    # DISPATCHED line lives in the MAIN buffer, so it survives a capture taken
-    # without `events` - and the budget would then print two orphan DFReroot
-    # lines that look like a complete answer to anyone reading from here.
-    if (!sawevents) {
-        print "  NOT COMPUTABLE: this capture has no event-log milestones."
-        print "  Every marker the budget needs (boot_progress_*, am_proc_*,"
-        print "  wm_boot_animation_done) is an event-log tag, and the default logcat"
-        print "  buffers exclude `events`. Re-run with: logcat -d -b all"
-        print "  This is a defect in the CAPTURE, not a slow boot."
+    n = 0; for (k in self) n++
+    if (n == 0) {
+        print "  NOT COMPUTABLE: no platform milestone in this capture. Either the"
+        print "  event buffer was not captured, or the lines aged out of the ring"
+        print "  buffer before collection, or the logcat FORMAT changed and the"
+        print "  filter missed them. The three are different problems - compare"
+        print "  events_buffer_header above against a grep of 10_logcat.txt."
         exit
     }
-    if (anchor == 0) {
-        print "  NOT COMPUTABLE: no DISPATCHED line carrying elapsed_ms, so the"
-        print "  logcat clock cannot be tied to the boot clock. Refusing to print"
-        print "  a budget against a guessed origin."
-        exit
+    # Sort by value, so the order is the boot order whatever was found.
+    for (k in self) { nk++; key[nk] = k }
+    for (i = 1; i <= nk; i++) for (j = i+1; j <= nk; j++)
+        if (self[key[j]] < self[key[i]]) { tmp = key[i]; key[i] = key[j]; key[j] = tmp }
+    # am_proc_* need the clock, and only when a self-reporting anchor gave t0.
+    if (t0 != "") {
+        for (i = 1; i <= NR; i++) {
+            if (L[i] !~ /networkstack\.process/) continue
+            gap = dayidx(d[i]) - t0d
+            if (gap == 0) off = 0
+            else if (gap == 1 && v[i] < t0) off = 86400000
+            else { unplaceable++; continue }
+            if (L[i] ~ /am_proc_start/ && !seenstart++) ap["network_stack forked"] = v[i] + off - t0
+            if (L[i] ~ /am_proc_bound/ && !seenbound++) ap["network_stack BOUND  <-- earliest readiness can be true"] = v[i] + off - t0
+        }
+        for (k in ap) { nk++; key[nk] = k; self[k] = ap[k] }
+        for (i = 1; i <= nk; i++) for (j = i+1; j <= nk; j++)
+            if (self[key[j]] < self[key[i]]) { tmp = key[i]; key[i] = key[j]; key[j] = tmp }
     }
-    # A line is placeable only on the anchor date, or on the NEXT calendar day
-    # with a wrapped time-of-day - a real midnight rollover. Everything else is
-    # a clock correction and is counted, never converted.
-    ai = dayidx(d[anchor])
-    t0 = v[anchor] - el
-    skipped = 0; jumped = 0
-    for (i = 1; i <= NR; i++) {
-        gap = dayidx(d[i]) - ai
-        if (gap == 0) off = 0
-        else if (gap == 1 && v[i] < v[anchor]) off = 86400000
-        else { if (gap == 0) skipped++; else jumped++; continue }
-        e = v[i] + off - t0
-        if (L[i] ~ /boot_progress_start:/)         printf "  %7d  zygote\n", e
-        if (L[i] ~ /boot_progress_system_run:/)    printf "  %7d  system_server\n", e
-        if (L[i] ~ /boot_progress_ams_ready:/)     printf "  %7d  AMS ready  <-- no app process starts before this\n", e
-        if (L[i] ~ /am_proc_start:.*networkstack/) printf "  %7d  network_stack forked\n", e
-        if (L[i] ~ /am_proc_bound:.*networkstack/) printf "  %7d  network_stack BOUND  <-- earliest readiness can be true\n", e
-        if (L[i] ~ /EARLY_ROOT\] DISPATCHED/)      printf "  %7d  DFReroot dispatched\n", e
-        if (L[i] ~ /wm_boot_animation_done: [0-9]/) printf "  %7d  ANIMATION ENDED  <-- the deadline that matters\n", e
-        if (L[i] ~ /EARLY_ROOT_RESULT=SUCCESS/)    printf "  %7d  root complete\n", e
+    for (i = 1; i <= nk; i++) printf "  %7d  %s\n", self[key[i]], key[i]
+    if (t0 == "")
+        print "  (am_proc_* omitted: no self-reporting milestone to anchor a clock on)"
+    if (unplaceable > 0)
+        printf "  (%d am_proc_* lines unplaceable: the wall clock moved)\n", unplaceable
+    # The two numbers the whole collection exists for, stated rather than left
+    # to the reader to subtract.
+    disp = 0; for (k in self) if (k ~ /dispatched/) disp = self[k]
+    amsr = 0; for (k in self) if (k ~ /AMS ready/) amsr = self[k]
+    src = "logcat"
+    if (disp == 0 && tracedisp != "") { disp = tracedisp + 0; src = "trace" }
+    if (disp > 0 && amsr > 0) {
+        printf "\n  job entry - AMS ready = %d ms  <-- what actually governs our\n", disp - amsr
+        print  "  start, not minimum_latency_ms. Boot cea5208c: 2205 ms on a 15 s"
+        print  "  floor. Boot 89e00f66: 1968 ms on a 10 s floor. Both floors sit"
+        print  "  BELOW AMS ready, so neither one binds."
+        printf "  (job entry read from %s, elapsed %d)\n", src, disp
     }
-    if (jumped > 0) {
-        printf "  (%d lines UNPLACEABLE: their date is neither the dispatch date\n", jumped
-        print  "   nor a midnight rollover from it, so the wall clock moved and"
-        print  "   they cannot be put on this boot clock. Pre-NTP early-boot"
-        print  "   lines are the usual cause; a milestone among them would mean"
-        print  "   the budget above is incomplete, so check 11_timeline.txt.)"
-    }
-}' "$DIR/11_timeline.txt" >> "$OUT" 2>> "$DIR/_stderr.txt"
+    if (anim > 0) print "  (root completion is in 40_trace.txt: POST_ROOT_COMPLETE)"
+}
+' "$DIR/11_timeline.txt" >> "$OUT" 2>> "$DIR/_stderr.txt"
 
 say ""
 say "=== NATIVE CHAIN (per-mark deltas, ms) ==="
