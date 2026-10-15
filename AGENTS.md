@@ -539,10 +539,12 @@ while the `dev.bootcomplete=1` rule starts `bootchecker-bootc`, so what a
 `restart bootchecker` at ~27 s would meet is still unread. A draft of this
 paragraph said it would meet a live watchdog; that was an inference from an
 unmapped pid, and worse, live-versus-stopped was never shown to be the variable
-that separates the one failing dispatch from the clean ones — all three were late
-dispatches with the services settled. Two layers of inference in the section
-that exists to forbid exactly that. The direct read of the two `init.svc.*`
-properties early in a boot is owed, not retired.
+that separates the one failing dispatch from the clean ones — all three were
+**late** dispatches. A draft of this retraction then said "with the services
+settled", which is the same error again: only the two clean runs read those
+properties, and the 2026-10-01 record contains no reading of either, so the
+failed run's service state is unmeasured. The direct read of the two
+`init.svc.*` properties early in a boot is owed, not retired.
 
 The durable rules:
 

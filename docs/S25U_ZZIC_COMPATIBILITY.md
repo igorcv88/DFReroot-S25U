@@ -4742,12 +4742,22 @@ is **still owed**, and retiring it here was the error.
 
 **And a second error, which the review did not name.** Even granting the
 mapping, live-versus-stopped has never been shown to be the variable that
-distinguishes a failing dispatch from a clean one. The 2026-10-01 rollback was a
-**late** dispatch; so were both 2026-10-15 clean runs; in all three the services
-were settled. "Stopped" is therefore common to the failure and to the successes
-alike. "The early window is riskier because the watchdog is live there" was a
-causal story laid on top of an unresolved mapping - two layers of inference
-presented as one reading, in a section whose own subject is that error.
+distinguishes a failing dispatch from a clean one. All three dispatches were
+**late**: 2026-10-01 minutes after the UI returned, and the two 2026-10-15 runs
+at pre-read uptimes 147 s and 81 s. So "the early window is riskier because the
+watchdog is live there" was a causal story laid on top of an unresolved mapping
+- two layers of inference presented as one reading, in a section whose own
+subject is that error.
+
+**And the first retraction of it over-claimed in the other direction**, which a
+later review caught: it added "in all three the services were settled", making
+"stopped" common to the failure and the successes alike. Only the two
+2026-10-15 runs captured `init.svc.bootchecker` and `init.svc.bootchecker-bootc`
+at all. **The 2026-10-01 record contains no reading of either**, so the failed
+run's service state is unmeasured, and asserting it was the same absent-evidence
+inference the retraction existed to remove. Third time on this one theme that a
+correction introduced the next over-claim; the comparison now stops at "all
+three were late".
 
 **What stands, and it is narrow:** a process of the `bootchecker` binary existed
 across ktime 27000 and was cycling on a 60 s sleep rather than winding down.
