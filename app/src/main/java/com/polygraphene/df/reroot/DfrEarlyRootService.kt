@@ -412,13 +412,23 @@ class DfrEarlyRootService : Service() {
         if (result.success) {
             Log.i(TAG, "[DFR][EARLY_ROOT] EARLY_ROOT_RESULT=SUCCESS boot_id=$bootId" +
                 " selinux=${result.liveSelinux} ${EarlyRootEnv.bootState(context)}")
-            chainSoftReboot(context, bootId, result.success)
         } else {
             Log.e(TAG, "[DFR][EARLY_ROOT] EARLY_ROOT_RESULT=FAIL boot_id=$bootId" +
                 " native=${result.nativeResult} post_root=${result.postRootComplete}" +
                 " selinux=${result.liveSelinux} phase=$phase" +
                 " native_started=${result.nativeStarted} reason=${result.reason}")
         }
+        /*
+         * On BOTH paths, and dispatching only on DISPATCH.
+         *
+         * Calling it only under `result.success` made
+         * CHAIN_SOFT_REBOOT_ROOT_INCOMPLETE unreachable in production - modelled
+         * and tested but dead, so a failed run recorded nothing about why this
+         * boundary did not hand over. A dead branch reads as a check
+         * (AGENTS.md 5), and the step's own contract is that it is written on
+         * every outcome. Found by Codex review on PR #81.
+         */
+        chainSoftReboot(context, bootId, result.success)
     }
 
     /**
@@ -460,17 +470,32 @@ class DfrEarlyRootService : Service() {
             Log.e(TAG, "[DFR][EARLY_ROOT] soft-reboot chain cannot read the arming: $t")
             AutoRootPolicy.RECORD_UNREADABLE
         }
-        val verdict = EarlyRootPolicy.chainSoftReboot(armRecord, bootId, rootSucceeded)
+        val cycleRecord = try {
+            EarlyRootStore.readCycle()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] soft-reboot chain cannot read the cycle: $t")
+            AutoRootPolicy.RECORD_UNREADABLE
+        }
+        val verdict = EarlyRootPolicy.chainSoftReboot(
+            armRecord, cycleRecord, bootId, rootSucceeded)
         /*
-         * Traced before the dispatch, not after, and for 3.6.1's reason: the
-         * broadcast hands this process's boot to an operation that tears
-         * userspace down, so the record of having asked has to exist before the
-         * asking. A trace that cannot be written is reported and the dispatch
-         * still proceeds ONLY because the receiver writes its own
-         * `traceSoftReboot` claim before any privileged step - losing this line
-         * loses the attribution, not the safety.
+         * Traced before the dispatch, and A TRACE THAT CANNOT BE WRITTEN
+         * REFUSES THE STEP. That is 3.11 verbatim, and an earlier version of
+         * this function argued its way around it: it logged the failure and
+         * broadcast anyway, reasoning that the receiver's own `traceSoftReboot`
+         * claim covers the privileged steps. It does not cover this one. That
+         * record says what the TEARDOWN did; this one says whether this
+         * boundary authorised the handoff, and they are different questions in
+         * a boot that does not come back. Found by Codex review on PR #81.
          */
-        trace(bootId, EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT, verdict)
+        val traceFailure = trace(bootId, EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT, verdict)
+        if (traceFailure != null) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_CHAIN refused: the chain" +
+                " trace was not persisted ($traceFailure); a teardown with no" +
+                " pre-operation attribution is the absence-as-permission this" +
+                " record exists to prevent")
+            return
+        }
         if (EarlyRootPolicy.CHAIN_SOFT_REBOOT_DISPATCH != verdict) {
             Log.i(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_CHAIN=$verdict boot_id=$bootId")
             return

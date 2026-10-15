@@ -1897,9 +1897,21 @@ public final class EarlyRootPolicy {
     /** The arm record exists but could not be read. Never a pass. */
     public static final String CHAIN_SOFT_REBOOT_ARM_UNREADABLE =
             "EARLY_ROOT_CHAIN_SOFT_REBOOT_ARM_UNREADABLE";
-    /** The arming belongs to another boot: last boot's permission, not this one's. */
-    public static final String CHAIN_SOFT_REBOOT_ARM_FOREIGN =
-            "EARLY_ROOT_CHAIN_SOFT_REBOOT_ARM_FOREIGN";
+    /** No cycle record, or one this build cannot account for. */
+    public static final String CHAIN_SOFT_REBOOT_NO_CYCLE =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_NO_CYCLE";
+    /** The cycle record exists but could not be read. Never a pass. */
+    public static final String CHAIN_SOFT_REBOOT_CYCLE_UNREADABLE =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_CYCLE_UNREADABLE";
+    /** The live cycle descends from a different arming than the one read. */
+    public static final String CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_ARMING =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_ARMING";
+    /** The cycle is bound to another boot: not this run's authorisation (3.8). */
+    public static final String CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT";
+    /** The cycle was never claimed, so no run happened for this to follow. */
+    public static final String CHAIN_SOFT_REBOOT_CYCLE_UNCLAIMED =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_CYCLE_UNCLAIMED";
 
     /**
      * May the early chain hand this boot to the soft reboot?
@@ -1907,19 +1919,49 @@ public final class EarlyRootPolicy {
      * Pure, so the paths that only occur on hardware are reachable from a host
      * test (AGENTS.md 5). Every refusal is a distinct value.
      *
+     * <h2>Why the authorisation is read across TWO records</h2>
+     *
+     * The first version compared {@code currentBootId} to the arm record's
+     * {@code armed_boot_id} and required them to be EQUAL. That is backwards,
+     * and the gate below says why: {@link #ARM_SAME_BOOT} REFUSES an early run
+     * whose callback fired in the boot the job was armed in, because an arming
+     * takes effect only in a later kernel boot. So in every run that can reach
+     * post-root those two ids necessarily DIFFER, and the first version
+     * returned a foreign-arming refusal every time: the feature was dead on
+     * arrival. Its test passed only because the test fed the ARMED boot as the
+     * current boot - an input this code path cannot produce. Found by Codex
+     * review on PR #81, and it is the fifth time in this repository that a
+     * component was validated against an input its own caller never generates.
+     *
+     * The authorisation spans two records because the question spans two boots:
+     *
+     * <ul>
+     *   <li>the ARM record says WHAT the owner authorised - the tick - and was
+     *       written before the reboot, in the previous boot;</li>
+     *   <li>the CYCLE record says that authorisation is live HERE: it is
+     *       created in the run boot, names that boot, and carries the arming's
+     *       generation.</li>
+     * </ul>
+     *
+     * Binding through the generation is what makes this 3.5 rather than two
+     * loose facts: the tick is honoured only when the cycle this run claimed
+     * descends from the arming that carries it. A tick in a stale arm record
+     * beside a cycle from a different arming authorises nothing.
+     *
      * @param armRecord   the arm record as read, or null, or RECORD_UNREADABLE
+     * @param cycleRecord the cycle record as read, or null, or RECORD_UNREADABLE
      * @param currentBootId the boot this run happened in
      * @param rootSucceeded the coordinator's own verdict for this run
      */
-    public static String chainSoftReboot(String armRecord, String currentBootId,
-                                         boolean rootSucceeded) {
+    public static String chainSoftReboot(String armRecord, String cycleRecord,
+                                         String currentBootId, boolean rootSucceeded) {
         /*
-         * Root first, and before the record is even parsed. A soft reboot asks
-         * the RESIDENT KernelSU to re-run the module lifecycle; with no root
-         * established in this boot there is no resident KernelSU, and
-         * SoftRebootPolicy would refuse anyway. Checking it here keeps the
-         * reason readable instead of surfacing as a generic refusal two layers
-         * down.
+         * Root first, and before any record is parsed. A soft reboot asks the
+         * RESIDENT KernelSU to re-run the module lifecycle; with no root in this
+         * boot there is no resident KernelSU. Deciding it here keeps the reason
+         * readable - and the caller invokes this on failure too, so the trace
+         * says "refused because root was incomplete" instead of falling silent
+         * on the path where nothing is dispatched.
          */
         if (!rootSucceeded) return CHAIN_SOFT_REBOOT_ROOT_INCOMPLETE;
         if (AutoRootPolicy.RECORD_UNREADABLE.equals(armRecord)) {
@@ -1927,17 +1969,29 @@ public final class EarlyRootPolicy {
         }
         Arm arm = parseArm(armRecord);
         if (arm == null) return CHAIN_SOFT_REBOOT_NO_ARMING;
-        /*
-         * 3.8: the authorisation has to belong to THIS boot. An arm record
-         * names the boot it was written in, and the early path reboots
-         * immediately after arming, so the run's boot is the armed boot. A
-         * record from an earlier boot is a permission the owner gave for a
-         * reboot that already happened.
-         */
-        if (blank(currentBootId)) return CHAIN_SOFT_REBOOT_ARM_FOREIGN;
-        if (!currentBootId.trim().equals(arm.armedBootId)) {
-            return CHAIN_SOFT_REBOOT_ARM_FOREIGN;
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(cycleRecord)) {
+            return CHAIN_SOFT_REBOOT_CYCLE_UNREADABLE;
         }
+        Cycle cycle = parseCycle(cycleRecord);
+        if (cycle == null) return CHAIN_SOFT_REBOOT_NO_CYCLE;
+        if (!cycle.generation.equals(arm.generation)) {
+            return CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_ARMING;
+        }
+        /*
+         * 3.8, and the one comparison that actually places this authorisation in
+         * this boot: the cycle is written in the run boot and names it.
+         */
+        if (blank(currentBootId)) return CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT;
+        if (!currentBootId.trim().equals(cycle.runBootId)) {
+            return CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT;
+        }
+        /*
+         * A BOUND cycle means no trigger ever claimed it, so there was no early
+         * run for a soft reboot to follow. Reaching here with one means the
+         * caller's success verdict and the durable record disagree, and that is
+         * a refusal rather than something resolved in favour of acting (2).
+         */
+        if (!cycle.claimed()) return CHAIN_SOFT_REBOOT_CYCLE_UNCLAIMED;
         if (!arm.softReboot) return CHAIN_SOFT_REBOOT_NOT_REQUESTED;
         return CHAIN_SOFT_REBOOT_DISPATCH;
     }

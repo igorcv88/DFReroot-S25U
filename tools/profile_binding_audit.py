@@ -2954,6 +2954,45 @@ def audit():
              "the chained soft reboot's decision belongs in the pure, "
              "host-tested unit and not in the service (AGENTS.md 5)")
 
+    # (1a) It feeds the decision the CYCLE, not only the arm record. The first
+    #      version compared the current boot to the arm record's armed_boot_id
+    #      and required equality - but ARM_SAME_BOOT refuses a run whose
+    #      callback fired in the armed boot, so a real run's boots always
+    #      differ and the feature was dead on arrival while its own test
+    #      passed on an input production cannot produce. The cycle is the half
+    #      written in the RUN boot, so without it there is nothing to place the
+    #      authorisation in this boot.
+    if "EarlyRootStore.readCycle()" not in service_src:
+        fail("the chained soft reboot does not read the cycle record; the arm "
+             "record alone was written in the PREVIOUS boot, and binding to it "
+             "is what made this dead on arrival (Codex, PR #81)")
+    if "arm.armedBootId" in policy_src[policy_src.find("chainSoftReboot("):
+                                       policy_src.find("formatJournal(")]:
+        fail("chainSoftReboot compares the current boot to armed_boot_id again; "
+             "ARM_SAME_BOOT refuses exactly that equality, so this returns a "
+             "foreign refusal on every real run")
+
+    # (1b) The decision runs on BOTH the success and the failure path, or
+    #      CHAIN_SOFT_REBOOT_ROOT_INCOMPLETE is modelled, tested and dead, and
+    #      a failed run records nothing about why it did not hand over. A dead
+    #      branch reads as a check (AGENTS.md 5).
+    #      Checked by INDENTATION, not by a brace-matched region. The first
+    #      version of this guard used `if \(result\.success\)[^}]*\{[^}]*<call>`
+    #      and passed its own mutation: the success branch's log line contains
+    #      `${result.liveSelinux}`, so `[^}]*` stops at that template's closing
+    #      brace before reaching the call. Kotlin string templates make brace
+    #      counting unreliable here; the call's own indentation does not lie.
+    chain_call = "chainSoftReboot(context, bootId, result.success)"
+    if not re.search(r"(?m)^        " + re.escape(chain_call) + r"\s*$", service_src):
+        fail("the chained soft reboot is no longer invoked at the terminal "
+             "block's own level with the run's own verdict; calling it only "
+             "under result.success makes ROOT_INCOMPLETE unreachable in "
+             "production (Codex, PR #81)")
+    if re.search(r"(?m)^ {12,}chainSoftReboot\(", service_src):
+        fail("the chained soft reboot is invoked nested inside a branch; its "
+             "root-incomplete outcome and trace step are then dead, and the "
+             "step's contract is that it is written on EVERY outcome")
+
     # (2) It dispatches through the RECEIVER, never by reaching into the
     #     soft-reboot sequence itself. That is 3.2 satisfied by construction:
     #     DfrSoftRebootReceiver re-derives the post-root record, the per-boot
@@ -2990,6 +3029,22 @@ def audit():
             fail("the chained soft reboot broadcasts before tracing, or does "
                  "not trace at all; the record of having asked must exist "
                  "before the asking (3.6.1, same rule as traceSoftReboot)")
+        # (3a) And a trace that cannot be WRITTEN refuses the step - 3.11
+        #      verbatim. An earlier version logged the failure and broadcast
+        #      anyway, reasoning that the receiver's own traceSoftReboot covers
+        #      the privileged steps. It does not cover this one: that record
+        #      says what the teardown did, this one says whether this boundary
+        #      authorised the handoff, and in a boot that does not come back
+        #      they are different questions.
+        if not re.search(r"val\s+\w*[Ff]ailure\s*=\s*trace\(", chain_fn):
+            fail("the chained soft reboot discards trace()'s return; a trace "
+                 "that cannot be written must refuse the step it announces "
+                 "(3.11), not be logged and stepped over")
+        gate = re.search(r"if \(\w*[Ff]ailure != null\)\s*\{", chain_fn)
+        if not gate or gate.start() > send_at:
+            fail("the chained soft reboot does not return on a failed trace "
+                 "before broadcasting; a teardown with no pre-operation "
+                 "attribution is absence-as-permission (2)")
 
     # (4) It reads NO boot phase. This is the owner's decision of 2026-10-15,
     #     stated as a property so a later "just check boot_completed first"
