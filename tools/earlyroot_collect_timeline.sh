@@ -208,6 +208,39 @@ say "=== THE BUDGET (ktime ms, from /proc/enhanced_boot_stat) ==="
 # so ktime is $(NF-1). A `Took Nms by '...'` line has only <time> <ktime>, which
 # is why only !@Boot_EBS_ lines are parsed - taking $NF blindly would read the
 # delta on one shape and the ktime on the other.
+# The ENTRY instant comes from the TRACE, always, and never from logcat: ENTRY
+# and DISPATCH are different boundaries (~165 ms apart), and the logcat line
+# ages out while /data/system does not.
+#
+# WHICH entry step depends on which trigger claimed the run. The job writes
+# EARLY_ROOT_JOB_ENTERED; LOCKED_BOOT_COMPLETED writes
+# EARLY_ROOT_TRIGGER_ENTERED (AGENTS.md 3.11 keeps the names separate so a
+# reader can tell which trigger got there). Hardcoding the job's step leaves
+# this empty on any boot the broadcast won.
+#
+# This block was deleted once, by a line-range replacement that moved the
+# budget to /proc, and the deletion was invisible because the awk below was
+# tested with `-v tracedisp=17847` fed in by hand - an input this script does
+# not produce. Codex caught it on PR #78. Test the SHELL, not the awk.
+TRACE_CLAIM_TRIGGER=$(awk -F'\t' '$1 == "EARLY_ROOT_CLAIMED" {
+    if (match($5, /trigger=[^ ]+/)) print substr($5, RSTART + 8, RLENGTH - 8); exit }' \
+    "$DIR/40_trace.txt" 2>/dev/null)
+case "${TRACE_CLAIM_TRIGGER:-}" in
+    job)  TRACE_ENTRY_STEP=EARLY_ROOT_JOB_ENTERED ;;
+    "")   TRACE_ENTRY_STEP= ;;
+    *)    TRACE_ENTRY_STEP=EARLY_ROOT_TRIGGER_ENTERED ;;
+esac
+if [ -n "${TRACE_ENTRY_STEP:-}" ]; then
+    TRACE_DISPATCH=$(awk -F'\t' -v step="$TRACE_ENTRY_STEP" \
+        '$1 == step { print $3; exit }' "$DIR/40_trace.txt" 2>/dev/null)
+else
+    # No claim recorded, so no trigger owns the run. Take the earliest entry
+    # step present rather than guessing a trigger, and say so.
+    TRACE_DISPATCH=$(awk -F'\t' \
+        '$1 == "EARLY_ROOT_JOB_ENTERED" || $1 == "EARLY_ROOT_TRIGGER_ENTERED" \
+         { print $3; exit }' "$DIR/40_trace.txt" 2>/dev/null)
+fi
+say "entry step=${TRACE_ENTRY_STEP:-<no claim recorded>} claimed_trigger=${TRACE_CLAIM_TRIGGER:-<none>} entry_elapsed_ms=${TRACE_DISPATCH:-<none>}"
 awk -v tracedisp="${TRACE_DISPATCH:-}" '
 /^!@Boot_EBS_/ {
     k = $(NF-1) + 0

@@ -2747,6 +2747,37 @@ def audit():
              "callback proves the restriction was not in force, so a check "
              "there can only withhold a run that was going to work")
 
+    # --- the timeline collector's entry metric ---------------------------
+    # Guarded here because the defect was a DELETION, not wrong logic, and a
+    # deletion is invisible to a test that supplies the deleted value itself.
+    # On PR #78 a line-range replacement moved the budget to /proc and removed
+    # every assignment to TRACE_DISPATCH while leaving the `-v tracedisp=`
+    # pass in place, so the entry-to-AMS measurement - the number that PR
+    # existed to produce - read NOT COMPUTABLE on every boot. The awk had been
+    # tested with `-v tracedisp=17847` fed in by hand: an input the script
+    # does not produce. Fourth time in this family (see the -b all and
+    # -v threadtime comments in the collector itself).
+    collector = os.path.join(ROOT, "tools", "earlyroot_collect_timeline.sh")
+    if os.path.exists(collector):
+        with open(collector, "r", encoding="utf-8") as fh:
+            coll = fh.read()
+        assigns = re.search(r"(?m)^[ \t]*TRACE_DISPATCH=", coll)
+        if "tracedisp=" in coll and not assigns:
+            fail("earlyroot_collect_timeline.sh passes tracedisp= to awk with no "
+                 "assignment to TRACE_DISPATCH anywhere: the entry metric reads "
+                 "NOT COMPUTABLE on every boot (PR #78)")
+        for step in ("EARLY_ROOT_JOB_ENTERED", "EARLY_ROOT_TRIGGER_ENTERED"):
+            if "tracedisp=" in coll and step not in coll:
+                fail("earlyroot_collect_timeline.sh no longer names %s; the two "
+                     "triggers write different entry steps (AGENTS.md 3.11) and "
+                     "hardcoding one leaves the metric empty on boots the other "
+                     "won" % step)
+        if "enhanced_boot_stat" in coll and "NF-1" not in coll:
+            fail("the collector reads /proc/enhanced_boot_stat without the "
+                 "$(NF-1) ktime field: a milestone line carries time/ktime/delta "
+                 "while a `Took Nms by` line carries only time/ktime, so $NF "
+                 "reads the delta on one shape and the ktime on the other")
+
     # --- the readiness TRIGGER (2026-10-14) ------------------------------
     # The clock stopped choosing the moment. Boot cea5208c measured what that
     # cost: the hop's target process was bound at 14011 ms (am_proc_bound, i.e.
