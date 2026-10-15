@@ -4367,3 +4367,109 @@ animation and a floor near 13.4 s, the post-dispatch chain has to fall from
 8971 ms to about 4345 ms — a 52% cut. The reducible items are the LKM write
 (3487), the trigger loop (2050, of which 1000 is `usleep`), the post-root wait
 (2038) and the app-side 628.
+
+## Boot `20261015_000846` — the full `/proc/enhanced_boot_stat`, and what lies after the animation
+
+Second early-root boot, captured with the readiness-trigger build. The owner
+supplied the **complete** `/proc/enhanced_boot_stat`, not an excerpt, so this is
+the first record here that covers the boot *after* `wm_boot_animation_done` —
+the segment every previous reading stopped at because logcat was filtered to the
+milestones.
+
+All figures below are the file's `ktime` column (`$(NF-1)`); `time = ktime +
+6113` on this boot, the same offset as before, and the bootloader section
+accounts for it: bootloader start 3083, display +1024, load kernel +10, end
++1566 → **5684 ms of bootloader before ktime 0**. A user's perception clock
+starts there, so every ktime figure in this record understates perceived boot by
+~5.7 s.
+
+### The measured timeline
+
+| ktime ms | event | delta |
+|---|---|---|
+| 1393 | `FirstStageMain Init` | |
+| 2698 | `SecondStageMain Init` | |
+| 5290 | `mount_all /vendor/etc/fstab.qcom --late` finished | 838 ms spent |
+| 6475 | `bpfloader` finished | 359 ms spent |
+| **6507** | `starting service 'zygote'` | |
+| 8004 | `boot_progress_preload_end` | |
+| **8267** | `SYSTEM_SERVER_START` | |
+| 8902 | `boot_progress_pms_start` | |
+| **12574** | `boot_progress_pms_ready` | `StartPackageManagerService` 3702 ms |
+| 12835 | `startBootstrapServices` done | 4237 ms total |
+| 14913 | `PHASE_SYSTEM_SERVICES_READY` | |
+| **15884** | `boot_progress_ams_ready` | |
+| 15910 | `PHASE_ACTIVITY_MANAGER_READY` | |
+| 16318 | `start`/`end networkManagement` | |
+| 16593 | `MakeConnectivityServiceReady` done | 275 ms |
+| **16595** | `PHASE_THIRD_PARTY_APPS_CAN_START` | |
+| 16963 | `StartSystemUI` | |
+| 16983 | `startOtherServices` done | 4125 ms total |
+| 16991 | `Loop forever` — `system_server` has nothing left to start | |
+| **17847** | `EARLY_ROOT_JOB_ENTERED` (trace, same boot) | |
+| 18230 | `CS Registered` (telephony) | |
+| 18278 | `GPRS Attached` | |
+| 18875 | `SIM onAllRecordsLoaded` | |
+| **20358** | **`wm_boot_animation_done`** | |
+| 20647 | `bootcomplete` (the firmware/bootchecker handshake of §3.6.2) | |
+| 25999 | `UM.onBeforeUnlockUser-0` done | 1049 ms |
+| 31853 | `UM.onBeforeUnlockUser-150` done | 1079 ms |
+| **32209** | `User150Unlock` done | **4963 ms** |
+| **33805** | `RecentsActivity.onCreate`, displayId 0 | 13157 ms after bootcomplete |
+| 34218 | `RecentsActivity.onResume` | |
+
+### What this changes: the animation is not the last deadline, and the one after it is 13 s wider
+
+Everything in this record so far measured against `wm_boot_animation_done`,
+because that is where the second screen transition the owner objects to becomes
+visible. The full file shows what follows it, and the gap is large:
+
+- animation end → launcher drawn: **33805 − 20358 = 13447 ms**
+- animation end → user 150 unlocked: **32209 − 20358 = 11851 ms**
+
+So "inside the animation" and "before the user can interact" are not two
+phrasings of one deadline. They are **13.4 s apart on this firmware**, and the
+whole deficit this record has been tracking (6580 ms on boot `cea5208c`) fits
+inside that gap with room to spare.
+
+Applying boot `cea5208c`'s measured entry→`POST_ROOT_COMPLETE` length
+(24325 − 15354 = 8971 ms) to this boot's entry at 17847 puts root at **≈26818
+ms** — 5391 ms before user 150 finishes unlocking and 6987 ms before the
+launcher draws. **That is an estimate**, not a measurement: the chain length is
+transplanted from the other boot, and the two boots differ by 2.6 s in absolute
+terms. The number that would settle it is this boot's own
+`EARLY_ROOT_POST_ROOT_COMPLETE`, which the collector records; it is not
+transcribed here because the figure above is derived, and a derived number must
+not be filed as an observation (§2).
+
+This does not make the owner's original goal reachable. It makes a different,
+weaker goal reachable *without any of the reductions still on the table*, and it
+is the measurement the goal redefinition turns on. What it does **not** cover is
+module activation: a userspace restart after root repeats roughly the
+`ams_ready`→`animation_done` span (4474 ms here) plus the unlock, and §3.6.2
+governs its postcondition. Whether modules can be made active without that
+restart is unevidenced and is the next question, not an assumption.
+
+### The animation's last 3.4 s are not ours to move
+
+`system_server` reaches `Loop forever` at 16991 — it has started everything it
+is going to start — and the animation runs for a further **3367 ms**. What
+occupies that span is telephony registration (`CS Registered` 18230, `GPRS
+Attached` 18278, `SIM onAllRecordsLoaded` 18875) and SystemUI's first draw after
+`StartSystemUI` 16963. Nothing in it belongs to this project, and the three
+telephony milestones are a modem's answer, not a schedulable task.
+
+Two consequences, both load-bearing for anyone re-opening the window question:
+
+- **Our entry at 17847 is already inside the segment nothing else is using.**
+  The 856 ms from `Loop forever` to our entry is scheduler and callback
+  overhead, and the remaining 2511 ms of animation is being spent by the modem
+  and SystemUI, not by a queue we are behind in.
+- **Shortening the pre-AMS boot would not help.** The largest single cost before
+  `ams_ready` is `StartPackageManagerService` at 3702 ms of a 4237 ms
+  `startBootstrapServices`, and PMS readiness is a prerequisite of AMS, which is
+  a prerequisite of any app process (§ the closed section above). Moving it
+  earlier moves the animation's end earlier too — the 4474 ms window measured
+  from `ams_ready` is the stable quantity across all three boots (4433 / 4474 /
+  4474, 41 ms spread) while absolutes moved 2.6 s. The window travels with AMS;
+  it does not widen when the boot gets faster.
