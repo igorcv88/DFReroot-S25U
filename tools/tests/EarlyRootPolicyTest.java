@@ -1868,6 +1868,45 @@ public class EarlyRootPolicyTest {
                         "sys_boot_completed=0", "proc=PASS " + waitDetail)) != null,
                 "the wait detail parses inside the readiness step's line");
 
+        // ---- the trace vocabulary is CLOSED, so every declared step must
+        //      be in it ------------------------------------------------------
+        // EarlyRootStore.trace() refuses a step parseTraceLine() cannot
+        // account for ("unaccountable trace step"), and a caller that treats a
+        // trace failure as a refusal - which 3.11 requires - is then dead at
+        // that boundary. STEP_CHAIN_SOFT_REBOOT was declared and not
+        // registered, so the chained soft reboot could never dispatch: the
+        // gate added to satisfy 3.11 was the thing killing it. Found by Codex
+        // review on PR #81.
+        //
+        // Asserted REFLECTIVELY rather than one constant at a time, because
+        // the defect is structural: any future STEP_ constant someone declares
+        // without registering has exactly this failure, silently, at whatever
+        // boundary writes it.
+        int steps = 0;
+        for (java.lang.reflect.Field f : EarlyRootPolicy.class.getDeclaredFields()) {
+            if (!f.getName().startsWith("STEP_")) continue;
+            if (f.getType() != String.class) continue;
+            if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            String value;
+            try {
+                f.setAccessible(true);
+                value = (String) f.get(null);
+            } catch (ReflectiveOperationException e) {
+                check(false, "cannot read " + f.getName());
+                continue;
+            }
+            steps++;
+            check(EarlyRootPolicy.parseTraceLine(EarlyRootPolicy.formatTraceStep(
+                            value, "boot-x", 1_000L, "sys_boot_completed=0", "d")) != null,
+                    f.getName() + " (" + value + ") is declared but not in the "
+                            + "trace vocabulary; EarlyRootStore.trace() would "
+                            + "refuse it as unaccountable and any caller that "
+                            + "treats a trace failure as a refusal is dead at "
+                            + "that boundary");
+        }
+        check(steps >= 20, "the reflective step sweep found only " + steps
+                + " STEP_ constants; it is not actually covering the vocabulary");
+
         // ---- the chained soft reboot (2026-10-15) ------------------------
         // The owner's decision is "after post-root, whatever moment it is", so
         // the only things this may read are the tick, the two records that bind
