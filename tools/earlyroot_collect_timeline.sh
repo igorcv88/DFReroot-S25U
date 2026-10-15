@@ -97,10 +97,21 @@ EVB=$(grep -ac 'beginning of events' "$DIR/10_logcat.txt" 2>/dev/null)
 MARK=$(grep -ac 'boot_progress_ams_ready:' "$DIR/11_timeline.txt" 2>/dev/null)
 BND=$(grep -ac 'am_proc_bound:.*networkstack' "$DIR/11_timeline.txt" 2>/dev/null)
 say "events_buffer_header=$EVB boot_progress_ams_ready=$MARK am_proc_bound_networkstack=$BND"
-if [ "${MARK:-0}" -eq 0 ]; then
-    say "FATAL the event-log markers are ABSENT. The budget below is NOT a slow"
-    say "      boot and NOT a missing milestone - it is this capture missing the"
-    say "      events buffer. Re-run with: logcat -d -b all"
+# EVB and MARK answer DIFFERENT questions, and keying the verdict on MARK alone
+# was wrong. logcat's ring buffer rolls: a collection taken late on a busy
+# device can lose a 13 s milestone while still carrying the whole `events`
+# buffer. Blaming the capture command there sends the owner to re-run with a
+# flag that was already set, when the real instruction is "collect sooner".
+# Buffer absent is a defect in THIS SCRIPT; milestone absent is a fact about
+# WHEN the collection was taken (AGENTS.md 3.7).
+if [ "${EVB:-0}" -eq 0 ]; then
+    say "FATAL no 'beginning of events' header: this capture omitted the event"
+    say "      buffer entirely. Re-run with: logcat -d -b all"
+elif [ "${MARK:-0}" -eq 0 ]; then
+    say "WARNING the events buffer IS present but boot_progress_ams_ready is not"
+    say "        in it. The early boot lines have aged out of the ring buffer -"
+    say "        collect SOONER after the boot. This is not a missing flag and"
+    say "        not a slow boot."
 fi
 
 # --- THE ANSWER ----------------------------------------------------------
@@ -165,6 +176,23 @@ say "=== THE BUDGET (elapsed ms, from logcat) ==="
 awk '
 function tod(t) { split(t, a, ":"); split(a[3], s, ".")
                   return (a[1]*3600 + a[2]*60 + s[1]) * 1000 + s[2] }
+# Day index from MM-DD, so a date CHANGE can be told apart from a date JUMP.
+#
+# The previous version gave every newly seen date exactly +86400000 ms in order
+# of appearance, which is only correct for an adjacent-day rollover. A wall
+# clock corrected after the anchor - 02-02 to 10-14 is what this device really
+# logs - would then place later milestones one day after dispatch and fabricate
+# the central number of this whole collection. Appearance order is not evidence
+# of adjacency, which is the same mistake as counting an absence as agreement.
+#
+# February is 29 here deliberately. Differences within one side of it are
+# unaffected, and the one case it mis-reads - Feb 28 to Mar 1 in a non-leap
+# year - comes out as a 2-day gap and is therefore REFUSED as unplaceable
+# rather than silently converted. Refusing once a year beats a wrong number.
+function dayidx(ds) { split(ds, q, "-")
+    c[1]=0;   c[2]=31;  c[3]=60;  c[4]=91;  c[5]=121; c[6]=152
+    c[7]=182; c[8]=213; c[9]=244; c[10]=274; c[11]=305; c[12]=335
+    return c[q[1]+0] + (q[2]+0) }
 { d[NR] = $1; v[NR] = tod($2); L[NR] = $0
   if ($0 ~ /boot_progress_ams_ready:/) sawevents = 1
   if (anchor == 0 && $0 ~ /DFReroot.*EARLY_ROOT\] DISPATCHED/ \
@@ -189,15 +217,18 @@ END {
         print "  a budget against a guessed origin."
         exit
     }
-    # Distinct dates from the anchor forward; the anchor date is day 0.
-    nd = 0
-    for (i = anchor; i <= NR; i++)
-        if (!(d[i] in day)) { day[d[i]] = nd * 86400000; nd++ }
+    # A line is placeable only on the anchor date, or on the NEXT calendar day
+    # with a wrapped time-of-day - a real midnight rollover. Everything else is
+    # a clock correction and is counted, never converted.
+    ai = dayidx(d[anchor])
     t0 = v[anchor] - el
-    skipped = 0
+    skipped = 0; jumped = 0
     for (i = 1; i <= NR; i++) {
-        if (!(d[i] in day)) { skipped++; continue }
-        e = v[i] + day[d[i]] - t0
+        gap = dayidx(d[i]) - ai
+        if (gap == 0) off = 0
+        else if (gap == 1 && v[i] < v[anchor]) off = 86400000
+        else { if (gap == 0) skipped++; else jumped++; continue }
+        e = v[i] + off - t0
         if (L[i] ~ /boot_progress_start:/)         printf "  %7d  zygote\n", e
         if (L[i] ~ /boot_progress_system_run:/)    printf "  %7d  system_server\n", e
         if (L[i] ~ /boot_progress_ams_ready:/)     printf "  %7d  AMS ready  <-- no app process starts before this\n", e
@@ -207,8 +238,13 @@ END {
         if (L[i] ~ /wm_boot_animation_done: [0-9]/) printf "  %7d  ANIMATION ENDED  <-- the deadline that matters\n", e
         if (L[i] ~ /EARLY_ROOT_RESULT=SUCCESS/)    printf "  %7d  root complete\n", e
     }
-    if (skipped > 0)
-        printf "  (%d lines skipped: dated before the clock was set, so they\n   cannot be placed on this boot clock)\n", skipped
+    if (jumped > 0) {
+        printf "  (%d lines UNPLACEABLE: their date is neither the dispatch date\n", jumped
+        print  "   nor a midnight rollover from it, so the wall clock moved and"
+        print  "   they cannot be put on this boot clock. Pre-NTP early-boot"
+        print  "   lines are the usual cause; a milestone among them would mean"
+        print  "   the budget above is incomplete, so check 11_timeline.txt.)"
+    }
 }' "$DIR/11_timeline.txt" >> "$OUT" 2>> "$DIR/_stderr.txt"
 
 say ""
@@ -230,6 +266,16 @@ say "=== NATIVE CHAIN (per-mark deltas, ms) ==="
 awk '
 function tod(t) { split(t, a, ":"); split(a[3], s, ".")
                   return (a[1]*3600 + a[2]*60 + s[1]) * 1000 + s[2] }
+# Same conversion as the budget, for the reason this section exists: it is
+# where 3487 ms of LKM write and 2050 ms of trigger loop were found, so a mark
+# quietly dropped is a delay quietly hidden. The previous version skipped every
+# mark whose date differed from its run start, so a run crossing midnight
+# printed as complete while omitting everything after 00:00 - the worst
+# possible failure in the one section meant to show where time goes.
+function dayidx(ds) { split(ds, q, "-")
+    c[1]=0;   c[2]=31;  c[3]=60;  c[4]=91;  c[5]=121; c[6]=152
+    c[7]=182; c[8]=213; c[9]=244; c[10]=274; c[11]=305; c[12]=335
+    return c[q[1]+0] + (q[2]+0) }
 { d[NR] = $1; v[NR] = tod($2); L[NR] = $0
   msg = ""; for (i = 7; i <= NF; i++) msg = msg " " $i
   M[NR] = msg
@@ -254,15 +300,25 @@ END {
         lo = rstart[r]; hi = (r < runs ? rstart[r+1] - 1 : NR)
         inwin = (disp != "" && lo >= disp && (res == "" || lo <= res)) ? "INSIDE the early dispatch window" : "OUTSIDE the early dispatch window (not the early attempt)"
         printf "\n  --- run %d of %d: %s ---\n", r, runs, inwin
-        base = ""; p = ""
+        base = ""; p = ""; li = dayidx(d[lo]); dropped = 0
         for (i = lo; i <= hi; i++) {
             if (!isdf[i]) continue
-            if (d[i] != d[lo]) continue
-            m = v[i]; if (base == "") { base = m; p = m }
+            gap = dayidx(d[i]) - li
+            # A real midnight rollover is NORMALISED, not discarded. Any other
+            # date movement is a clock correction: the marks after it cannot be
+            # placed on this run, so the run is declared uncomputable rather
+            # than printed as if it had ended there.
+            if (gap == 0) off = 0
+            else if (gap == 1 && v[i] < v[lo]) off = 86400000
+            else { dropped++; continue }
+            m = v[i] + off
+            if (base == "") { base = m; p = m }
             delta = m - p; p = m
             if (delta >= 50 || M[i] ~ /patch|trigger|MARKER|BOOTSTRAP|PASS|ENTER/)
                 printf "  %7d %+6d %s\n", m - base, delta, substr(M[i], 1, 74)
         }
+        if (dropped > 0)
+            printf "  RUN INCOMPLETE: %d later marks could not be placed (the wall\n  clock moved mid-run). The deltas above end where that happened; do\n  not read this run as finished. Raw marks: 11_timeline.txt\n", dropped
     }
 }' "$DIR/11_timeline.txt" >> "$OUT" 2>> "$DIR/_stderr.txt"
 
