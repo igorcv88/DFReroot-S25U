@@ -116,6 +116,217 @@ public final class EarlyRootPolicy {
      */
     public static final long EARLY_WINDOW_MS = 120_000L;
 
+    /*
+     * --- the readiness TRIGGER ----------------------------------------------
+     *
+     * Why a wait exists at all, and why it cannot grant anything.
+     *
+     * Until 2026-10-14 this path chose its moment with a clock:
+     * {@code setMinimumLatency(15 s)} and one readiness sweep when the callback
+     * arrived. Boot `cea5208c` measured what that costs. The hop's target - the
+     * `com.android.networkstack.process` process - was forked at **13985 ms**
+     * (`am_proc_start`, as a bound-service of cellbroadcastservice) and bound at
+     * **14011 ms** (`am_proc_bound`, which is `attachApplication` and therefore
+     * the moment the `IApplicationThread` exists at all). The callback arrived
+     * at 15354 ms. We spent 1343 ms waiting on a timer for something that had
+     * already happened.
+     *
+     * That floor is STRUCTURAL, not a sample: `boot_progress_ams_ready` was
+     * 13312 ms, and AMS starts no app process before it. So no value of the
+     * latency can beat ~13.4 s, and a fixed latency has to be conservative
+     * against a variance nobody has measured - we hold exactly one sample of
+     * when that fork lands.
+     *
+     * A wait does not. The timer becomes a loose LOWER bound and the four
+     * readiness components become the actual trigger, which is the thing the
+     * clock was standing in for all along.
+     *
+     * The property that makes this safe, and the only reason it is allowed to
+     * exist: **this decision cannot permit anything.** It answers "keep
+     * polling, or stop" and nothing else. {@link #evaluate} remains the sole
+     * authority on whether the chain may run, is unchanged, and still refuses
+     * anything that is not exactly {@code NETWORKSTACK_READY}. A wait that
+     * could promote a PARTIAL sweep into a pass would be the absence-as-
+     * permission this repository exists to prevent (AGENTS.md 2); a wait that
+     * only delays the same gate cannot.
+     *
+     * It also makes a signal STRONGER rather than laxer, which is why it does
+     * not contradict the PARTIAL refusal in {@link #evaluate}. That refusal is
+     * justified there by "in this window an unresolvable component is
+     * indistinguishable from 'too early'". A BOUNDED wait is precisely what
+     * distinguishes them: resolvable before the deadline means it was too
+     * early, still unresolvable at the deadline means unresolvable. Two facts
+     * that used to arrive as one now arrive as two (3.7), and the second one
+     * still refuses.
+     */
+
+    /**
+     * Absolute elapsed-ms bound past which waiting for readiness is pointless.
+     *
+     * ABSOLUTE, never a duration from the dispatch. A duration measured from a
+     * variable callback instant gives a variable cutoff, so the one quantity
+     * this path races - the boot animation - would be bounded differently in
+     * every boot.
+     *
+     * 17 s because boot `cea5208c` ended its animation at 17745 ms
+     * (`wm_boot_animation_done`) and the chain after dispatch measured 8971 ms.
+     * Readiness arriving after 17 s therefore cannot produce a root inside any
+     * animation of that length, and a boot this path cannot win is a boot
+     * better left to Auto Root's trigger, which has a retry budget this
+     * one-shot callback does not.
+     *
+     * Deliberately NOT derived from {@link #EARLY_WINDOW_MS}. That bound is
+     * two minutes and exists to reject a callback the scheduler restored
+     * minutes late; reusing it here would turn "wait for readiness" into "poll
+     * /data/system for two minutes during boot".
+     */
+    public static final long READINESS_WAIT_DEADLINE_MS = 17_000L;
+
+    /**
+     * Interval between readiness sweeps while waiting.
+     *
+     * The sweep is NOT cheap, and an earlier version of this comment claimed it
+     * was "four reflective lookups into AMS". It is three reflective lookups
+     * plus {@code StageHop.networkStackProcVisible()}, which lists {@code /proc}
+     * and reads {@code cmdline} for every numeric entry - and early in boot it
+     * finds no match, so it walks the whole table every time. On this device
+     * that is several hundred procfs reads per sweep.
+     *
+     * 200 ms is therefore a deliberate trade, not a free choice. The prize is
+     * 1343 ms of a 6580 ms deficit, so coarse polling gives a large part of it
+     * straight back: at 500 ms the granularity loss alone could be a third of
+     * the gain. The cost is bounded by the deadline at roughly 35 sweeps, it
+     * runs on a worker thread rather than the main looper (see the may-block
+     * decision in DfrEarlyRootDispatch), and it is MEASURED rather than
+     * assumed - {@code sweeps=} rides the readiness trace precisely so the next
+     * physical boot says what it actually cost instead of this comment
+     * guessing.
+     *
+     * If that number turns out to hurt the boot it is competing with, the fix
+     * is a cheaper existence check, not a longer interval: this code runs INSIDE
+     * `system_server` during PMS/AMS startup, and instrumentation that moves
+     * the system it instruments is the defect the probe's own marker was
+     * restructured to avoid.
+     */
+    public static final long READINESS_WAIT_POLL_MS = 200L;
+
+    /** Keep polling: the window is open and readiness is not there yet. */
+    public static final String WAIT_AGAIN = "EARLY_ROOT_READINESS_WAIT_AGAIN";
+    /** Readiness is exactly NETWORKSTACK_READY. Stop polling and let the gate decide. */
+    public static final String WAIT_PROCEED = "EARLY_ROOT_READINESS_WAIT_PROCEED";
+    /** Stop polling without readiness. The gate refuses on its own evidence. */
+    public static final String WAIT_EXPIRED = "EARLY_ROOT_READINESS_WAIT_EXPIRED";
+    /**
+     * The clock could not be read, so the deadline was never evaluated.
+     *
+     * Its own value because {@code EarlyRootEnv.monotonicNow()} really does
+     * return -1 when the read throws, and AGENTS.md 3.7 names this exact pair:
+     * "a primary lookup being unavailable vs the lookup as a whole failing".
+     * Reporting it as {@link #WAIT_EXPIRED} told the operator the deadline had
+     * passed with readiness still absent - a statement about the BOOT - when
+     * what happened was a clock failure in this process. The handoff sends the
+     * two readings to different places, so collapsing them manufactures false
+     * evidence rather than merely losing detail.
+     *
+     * It stops the wait exactly as an expiry does. The distinction is in the
+     * record, not in the control flow: a wait whose deadline cannot be
+     * evaluated is unbounded and must still stop (3.6.1).
+     */
+    public static final String WAIT_CLOCK_UNAVAILABLE =
+            "EARLY_ROOT_READINESS_WAIT_CLOCK_UNAVAILABLE";
+    /**
+     * The waiting thread was interrupted mid-sleep.
+     *
+     * Also not an expiry. Something asked this thread to stop, which says
+     * nothing about whether readiness was coming, and the fix is in whatever
+     * interrupted us rather than in the window or the boot.
+     *
+     * Never returned by {@link #readinessWait} - a pure function cannot
+     * observe an interrupt. The caller sets it, which is why it is here as a
+     * value and not as a branch.
+     */
+    public static final String WAIT_INTERRUPTED =
+            "EARLY_ROOT_READINESS_WAIT_INTERRUPTED";
+    /**
+     * The wait was not run because this thread may not be blocked.
+     *
+     * Its own value because it is a defect in OUR threading, not a fact about
+     * the boot. An expired wait says readiness never arrived in 17 s; this says
+     * we never looked again, and the fix is in the caller rather than in the
+     * window. Collapsing them would hide a regression that costs the 1343 ms
+     * the wait exists to recover (3.7).
+     */
+    public static final String WAIT_NOT_PERMITTED =
+            "EARLY_ROOT_READINESS_WAIT_NOT_PERMITTED";
+
+    /**
+     * Whether to sweep readiness again, given the last sweep and the clock.
+     *
+     * Pure, so the loop around it has no judgement of its own - the Kotlin that
+     * polls cannot be unit-tested here (AGENTS.md 5), so everything that
+     * decides lives on this side of the boundary.
+     *
+     * The three non-obvious cases, each a refusal direction:
+     *
+     * <ul>
+     * <li>A {@code null} or unrecognised state stops the wait immediately. It
+     *     means the sweep itself could not answer, and polling a broken reader
+     *     until a deadline would burn the window to re-learn the same nothing.
+     *     Stopping hands it to {@link #evaluate}, which refuses it.</li>
+     * <li>An unreadable clock ({@code nowMs <= 0}, which is what
+     *     {@code EarlyRootEnv.monotonicNow()} yields when the read throws)
+     *     stops the wait, as {@link #WAIT_CLOCK_UNAVAILABLE} and NOT as an
+     *     expiry. An unbounded wait is exactly the operation AGENTS.md 3.6.1
+     *     forbids dressing up as a probe, and a wait whose deadline cannot be
+     *     evaluated is unbounded - but "the clock failed" and "the deadline
+     *     passed" are different facts with different fixes (3.7).</li>
+     * <li>Reaching the deadline stops the wait with {@link #WAIT_EXPIRED},
+     *     NOT with a verdict. Whether an expired wait refuses is
+     *     {@link #evaluate}'s to say, and it does - there is no second place
+     *     where readiness decides anything (3.2).</li>
+     * </ul>
+     */
+    public static String readinessWait(String state, long nowMs) {
+        if (EarlyBootProbePolicy.NETWORKSTACK_READY.equals(state)) {
+            return WAIT_PROCEED;
+        }
+        if (state == null) {
+            return WAIT_EXPIRED;
+        }
+        if (!EarlyBootProbePolicy.NETWORKSTACK_PARTIAL.equals(state)
+                && !EarlyBootProbePolicy.NETWORKSTACK_NOT_READY.equals(state)) {
+            return WAIT_EXPIRED;
+        }
+        if (nowMs <= 0L) {
+            return WAIT_CLOCK_UNAVAILABLE;
+        }
+        if (nowMs >= READINESS_WAIT_DEADLINE_MS) {
+            return WAIT_EXPIRED;
+        }
+        return WAIT_AGAIN;
+    }
+
+    /**
+     * The wait, rendered for the trace.
+     *
+     * Its own fields rather than a sentence, because what the next physical run
+     * has to answer is numeric: the instant readiness flipped is the structural
+     * floor this path has been guessing at, and `waited_ms=0` versus
+     * `waited_ms=1300` is the difference between "the timer was already late"
+     * and "the timer was early and the wait earned it".
+     */
+    public static String formatReadinessWait(String firstState, long firstAtMs,
+                                             long flippedAtMs, int sweeps,
+                                             String outcome) {
+        long waited = flippedAtMs - firstAtMs;
+        if (waited < 0L) {
+            waited = 0L;
+        }
+        return "wait=" + outcome + " first_state=" + firstState
+                + " first_at_ms=" + firstAtMs + " ready_at_ms=" + flippedAtMs
+                + " waited_ms=" + waited + " sweeps=" + sweeps;
+    }
+
     /**
      * The three answers to "has this boot been declared complete".
      *

@@ -11,6 +11,21 @@ import android.os.SystemClock
 object DfrEarlyBootProbe {
     val JOB_ID: Int = EarlyBootProbePolicy.EXPECTED_JOB_ID
     val NAMESPACE: String = EarlyBootProbePolicy.EXPECTED_NAMESPACE
+    /*
+     * Held at 15 s on purpose when the dispatching path dropped to 10 s.
+     *
+     * This is a measuring instrument with a history: four boots have been
+     * timed against `LOCKED_BOOT_COMPLETED` through this constant, and the
+     * quantity those samples describe is "when the scheduler calls back a job
+     * armed with a 15 s floor". Changing it would not improve the instrument,
+     * it would silently re-base it, and the next comparison would be against
+     * boots that measured something else.
+     *
+     * It also costs nothing to keep. The probe does not gate the chain and
+     * does not race the animation; the dispatching job has its own id,
+     * namespace and service (AGENTS.md 3.11), so the two latencies are
+     * independent by construction rather than by coincidence.
+     */
     const val MINIMUM_LATENCY_MS = 15_000L
     const val REBOOT_WITHIN_MS = 10_000L
 

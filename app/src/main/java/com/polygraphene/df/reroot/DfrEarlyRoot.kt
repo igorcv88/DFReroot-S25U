@@ -42,7 +42,29 @@ object DfrEarlyRoot {
      * down and rebooting is consumed from it - which is why the owner is told to
      * start the reboot promptly rather than why the number is 15.
      */
-    const val MINIMUM_LATENCY_MS = 15_000L
+    /*
+     * The LOWER bound only, and 15 s became 10 s on 2026-10-14 because the
+     * readiness wait took over the job this number used to do badly.
+     *
+     * Boot `cea5208c` measured it. The hop's target process was forked at
+     * 13985 ms and bound at 14011 ms; the callback arrived at 15354 ms, so
+     * 1343 ms went to this constant waiting for something that had already
+     * happened. The floor it was approximating is structural -
+     * `boot_progress_ams_ready` was 13312 ms and AMS starts no app process
+     * before that - so no value here can beat ~13.4 s, and a fixed latency
+     * has to be conservative against a variance measured exactly once.
+     *
+     * So this is no longer an estimate of when the hop becomes serviceable.
+     * It is a bound chosen to be comfortably BELOW any plausible floor, and
+     * `EarlyRootPolicy.readinessWait` finds the real instant by sweeping. The
+     * two must not be re-tuned together: lowering this further buys nothing
+     * (the wait already absorbs it) and only lengthens the stretch where our
+     * code polls inside `system_server` during PMS/AMS startup.
+     *
+     * Not symmetric with the probe's own constant, deliberately. See
+     * `DfrEarlyBootProbe.MINIMUM_LATENCY_MS`.
+     */
+    const val MINIMUM_LATENCY_MS = 10_000L
     const val REBOOT_WITHIN_MS = 10_000L
 
     /**

@@ -4216,3 +4216,154 @@ to it.** `traceHasStep`, the idempotent `BOOT_COMPLETED_OBSERVED`, the dispatch
 stand-down and the passive `LOCKED_BOOT_OBSERVED` observer are host-verified
 only; there is no NDK or Gradle in the environment they were written in. The
 next physical boot is the first time any of them runs.
+
+## Boot `cea5208c` — the first complete early root, and the measured boot order
+
+First early-root run that reached `POST_ROOT_COMPLETE` end to end:
+`EARLY_ROOT_RESULT=SUCCESS`, `ksu=32601`, `transport_fix=kdp-cred-1`,
+`phase=COMPLETE`, `attempts=1`, SELinux back to enforcing. The newest DropBox
+entry for the preceding reboot is `SYSTEM_LAST_KMSG_0_20261014_145652_RP` —
+`_RP`, an ordinary reboot, **not** `_KP` — so the pair the owner authorised on
+2026-10-13 (`ksud_sha256=3861dbd4…`, `2.0.31-dzif`) survived its first
+authorised EARLY load. `/proc/reset_summary` and `/proc/reset_history` answered
+ENOENT and `extra_info` read empty, which is the no-panic reading of those
+nodes, not a failed read.
+
+The arming thermal gate did its job: `armed_thermal_status=0`,
+`armed_thermal_headroom=0.6433`. At collection (53 s uptime) the device was
+already at status **2 / MODERATE** with SKIN 42.0 °C, so the boot itself heats
+this phone past the threshold — arming cold is what kept the callback out of
+`ThermalStatusRestriction`.
+
+### The boot order, measured (t0 = kernel boot, 14:56:09.566)
+
+| elapsed ms | event | source |
+|---|---|---|
+| 6678 | `boot_progress_start` — **zygote** (pid 1832) | logcat |
+| 7896 | `boot_progress_preload_end` | logcat |
+| 7955 | BootAnimation service started (pid 2874) | logcat |
+| 8184 | `boot_progress_system_run` — **system_server** (pid 3040) | logcat |
+| 8620 | `boot_progress_pms_start` | logcat |
+| 10552 | `boot_progress_pms_ready` | logcat |
+| 11270 | `NetworkStackClient: Network stack init` | logcat |
+| 11601 | `ConnectivityService starting up` | logcat |
+| **13312** | **`boot_progress_ams_ready`** | logcat |
+| **13985** | `am_proc_start [0,4319,1073,com.android.networkstack.process,bound-service,{…DefaultCellBroadcastService}]` | logcat |
+| 13999 | `Zygote: Process 4319 created for com.android.networkstack.process` | logcat |
+| **14011** | `am_proc_bound [0,4319,…]` (`attachApplication`) | logcat |
+| 14961 | `finishBooting` **deferred** — `mBootAnimationComplete is not ready` | logcat |
+| 14990 | `boot_progress_enable_screen` | logcat |
+| 15354 | `EARLY_ROOT_JOB_ENTERED` (minimum latency 15000 + 354) | trace |
+| 15982 | `EARLY_ROOT_BEFORE_NATIVE` | trace |
+| **17745** | `wm_boot_animation_done` (`sf_stop_bootanim` 17744) | logcat |
+| 17745 | `bootAnimationComplete` → `FinishBooting` → `finishBooting` **runs** | logcat |
+| 19003 | `LOCKED_BOOT_COMPLETED`, `sys_boot_completed=1` | trace |
+| 22287 | `EARLY_ROOT_NATIVE_RETURNED` | trace |
+| **24325** | `EARLY_ROOT_POST_ROOT_COMPLETE` | trace |
+| 43260 | `BOOT_COMPLETED` | trace |
+
+**Deficit against the animation: 24325 − 17745 = 6580 ms.**
+
+### Budget
+
+| segment | ms | % |
+|---|---|---|
+| boot → job entry (our `minimum_latency_ms`) | 15354 | 63.1 |
+| job entry → transaction 5 (app side) | 628 | 2.6 |
+| native chain | 6298 | 25.9 |
+| post-root wait (ksud late-load) | 2038 | 8.4 |
+| **total** | **24325** | |
+
+### The native chain, decomposed
+
+`profileWindow` dropped 69 marks, but the marks also reach logcat as
+`DirtyFrag: Report: …` from the `network_stack` pid, so differencing those
+timestamps recovers the whole run. **Correction to an earlier claim in this
+record: the reporter strings DO reach logcat.** The reason nothing had measured
+the native chain was that nobody had differenced the timestamps, not that the
+data was absent.
+
+| segment | ms | % of native |
+|---|---|---|
+| PREFLIGHT syscall probes | 52 | 0.8 |
+| gate A/B pass 1 (identity, crash_dump64 hash, AVB provenance, module binding) | 35 | 0.6 |
+| patch #1 — 832 B, crash_dump64 | 258 | 4.2 |
+| **patch #2 — 6592 B, the LKM** | **3487** | **56.3** |
+| gate pass 2 + libc hash | 18 | 0.3 |
+| patch #3 — 844 B, shellcode | 190 | 3.1 |
+| patch #4 — 4 B | 1 | — |
+| gate pass 3 + libc++ hash | 15 | 0.2 |
+| patch #5 — 348 B | 76 | 1.2 |
+| patch #6 — 4 B | 2 | — |
+| **trigger loop (2 iterations)** | **2050** | **33.1** |
+
+89% of the native chain is two items. Patch #2 wrote at 1.89 B/ms while
+patch #1 managed 3.2 and patch #3 managed 4.4 through the same mechanism; its
+slowest blocks (308 ms, 527 ms per 400 B) fall at elapsed 18141 and 18668 ms,
+**after** the animation ended and the home screen came up. Running later costs
+throughput, so part of the lateness is self-inflicted. The trigger loop is
+500 ms of `usleep` plus ~525 ms of work per iteration; iteration 0 failed
+(`df=0 helper=0`), iteration 1 succeeded.
+
+The post-root 2038 ms is ksud: `kernelsu.ko` load (485 ms) then sepolicy for
+`zygisksu`, `zygisk_lsposed`, `ViPER4Android-RE-AIDL` and the profiles — partly
+the owner's own module set, not the chain.
+
+### CLOSED: root cannot precede zygote, so the soft reboot is not removable
+
+Asked and answered, so that it is not re-attempted: **no.** The log refuses it
+three independent ways.
+
+1. `network_stack` **is a zygote fork** — `Zygote: Process 4319 created for
+   com.android.networkstack.process`. It cannot precede its own parent.
+2. Our code runs **inside** `system_server`, which is zygote's child. Direct
+   evidence in the probe record: `pid=3040 ppid=1832`. We cannot execute before
+   zygote even to ask a question.
+3. The JobScheduler that dispatches us is a `system_server` service, so the
+   dispatcher is a zygote descendant too.
+
+Every link — zygote 6678 → system_server 8184 → PMS 8620–10552 → AMS ready
+13312 → network_stack 13985 → our hop 15774 — is a prerequisite of the next and
+all of them are after zygote. Root before zygote needs an injection point that
+is not a zygote descendant (`init`, `vendor_init`, first-stage ramdisk, a
+`modprobe`'d module), which is a **first-stage** root. AGENTS.md §1 defines this
+project as the second stage, and being a system-UID app is the entire vector.
+
+Consequence: Zygisk/LSPosed need their hook present when zygote starts forking,
+and zygote started 8.7 s before root is even possible. **No value of
+`minimum_latency_ms` removes the soft reboot.** Restarting only zygote is the
+same operation, since `system_server` is its child.
+
+### The structural floor, and why the latency ladder was dropped
+
+`boot_progress_ams_ready` = 13312 ms, and AMS starts no app process before it.
+`network_stack` followed 673 ms later. So the dispatch floor is **structural**,
+not a sample, and the maximum a latency reduction could ever recover is
+15354 − 13985 = **1369 ms** of a 6580 ms deficit.
+
+An earlier reading of this boot concluded the window "opens earlier" because
+nothing held the job and `LOCKED_BOOT_COMPLETED` arrived at 19003 ms. That
+inferred permission to dispatch earlier from the **absence of an observed
+obstacle** without checking when the hop's target comes into existence — §2's
+error. A fixed latency of 8000 ms would have found no `network_stack` at all.
+
+This is why the change landed as a **readiness trigger** rather than a tuned
+constant: `setMinimumLatency` became a loose lower bound (10000, chosen below
+any plausible floor) and `EarlyRootPolicy.readinessWait` sweeps the four hop
+prerequisites until they resolve. `am_proc_bound` at 14011 ms is the earliest
+instant the third prerequisite can exist, so the wait should land there rather
+than at 14854 (the best safe fixed latency) — ~800 ms better, with no boot spent
+on calibration and the boot-to-boot variance absorbed instead of guessed at.
+
+**Not measured:** that all four prerequisites are true at 14011 ms. What is
+measured is the fork at 13999, the bind at 14011, and all four reading PASS at
+15506. "Readiness is satisfiable at ~14.0 s" is an inference from the AMS event's
+semantics. The wait is what will measure it — `waited_ms` and `ready_at_ms` in
+the `EARLY_ROOT_READINESS_PASS` detail are that measurement — which is the right
+way round: the change produces the number instead of depending on it.
+
+**Still open:** whether the fix fits the soft-reboot plan. Against a 17745 ms
+animation and a floor near 13.4 s, the post-dispatch chain has to fall from
+8971 ms to about 4345 ms — a 52% cut. The reducible items are the LKM write
+(3487), the trigger loop (2050, of which 1000 is `usleep`), the post-root wait
+(2038) and the app-side 628.

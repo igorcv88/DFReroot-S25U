@@ -2351,3 +2351,90 @@ Apply Modules (soft reboot) is not a reliable path for normal use on the current
 build. Applying modules through a **full reboot** recreates the kernel,
 userspace, `lmkd` and the whole socket topology instead of preserving one
 daemon's state across two generations of `system_server`.
+
+## Readiness trigger replaces the dispatch clock — 2026-10-14
+
+**What changed.** `setMinimumLatency` stopped choosing the moment the early
+chain starts. It is now a loose lower bound (`DfrEarlyRoot.MINIMUM_LATENCY_MS`
+15000 → 10000) and `EarlyRootPolicy.readinessWait` sweeps the four hop
+prerequisites every 200 ms until they resolve or an absolute 17000 ms deadline
+closes. The gate is untouched: `EarlyRootPolicy.evaluate` is still the sole
+authority and still refuses anything that is not exactly
+`NETWORKSTACK_READY`, so the wait can only delay, never permit.
+
+Full evidence, the measured boot order and the budget are in
+`docs/S25U_ZZIC_COMPATIBILITY.md` under "Boot `cea5208c`". The short version:
+the hop's target process was bound at 14011 ms and the callback arrived at
+15354 ms, and the floor is structural (`boot_progress_ams_ready` = 13312 ms),
+so a tuned constant could never recover more than 1369 ms and would be tuned
+against one sample.
+
+**Closed permanently:** root cannot precede zygote — `network_stack` is a
+zygote fork, our code is hosted in `system_server` (`ppid=1832`), and the
+dispatcher is a `system_server` service. The soft reboot is therefore not
+removable by scheduling. Do not re-open this without a first-stage vector.
+
+### What the next physical boot answers
+
+One question, and the collection distinguishes the outcomes: **at what elapsed
+instant do the four readiness components actually flip?** Read it from the
+`EARLY_ROOT_READINESS_PASS` line:
+
+```
+wait=<outcome> first_state=<…> first_at_ms=<…> ready_at_ms=<…> waited_ms=<…> sweeps=<…>
+```
+
+- `waited_ms` well above 0 with `wait=…WAIT_PROCEED` → the wait earned real
+  time and `ready_at_ms` is the structural floor this path has been guessing at.
+- `waited_ms=0` → readiness was already true at 10.4 s, which would mean the
+  13985 ms fork in `cea5208c` was late rather than typical. Worth two more
+  boots before believing.
+- `wait=…WAIT_EXPIRED` → readiness never arrived in 17 s. **This and only this
+  one is a statement about the boot.** The arming is spent, but
+  `native_started=0` means the boot is not (R1), so Auto Root still runs.
+- `wait=…WAIT_NOT_PERMITTED` → **a defect in this repository, not the boot.**
+  It means the dispatch ran on the main looper and the wait degraded to one
+  sweep. Fix the caller's threading.
+- `wait=…WAIT_CLOCK_UNAVAILABLE` → `EarlyRootEnv.monotonicNow()` threw and
+  returned -1, so the deadline was never evaluated. Says **nothing** about
+  whether readiness was coming; `ready_at_ms=-1` is the corroborating tell.
+  Look for the clock failure, not at boot timing. (Codex caught this being
+  reported as an expiry on PR #74 — three causes were sharing one value, which
+  is §3.7's "a primary lookup being unavailable vs the lookup as a whole
+  failing".)
+- `wait=…WAIT_INTERRUPTED` → something interrupted the waiting thread
+  mid-sleep. Also says nothing about readiness. Find what interrupted it.
+
+Also read `sweeps=`. The sweep is not cheap — it is three AMS reflective
+lookups plus a full `/proc` walk reading every `cmdline`, which finds nothing
+and so scans the whole table on every early sweep. At 200 ms the deadline
+bounds it near 35 sweeps on a worker thread. If that cost shows up in the boot
+it is competing with, the fix is a cheaper existence check, **not** a longer
+interval: coarsening to 500 ms gives back a third of the 1343 ms the wait
+exists to recover.
+
+Cross-check `ready_at_ms` against `am_proc_bound` for
+`com.android.networkstack.process` in the same boot's logcat; they should be
+close, and a large gap means one of the other three prerequisites is the real
+floor.
+
+### Blockers, owner side
+
+- **`./build.sh`.** None of this Kotlin has been compiled — no SDK/NDK here.
+  PR #72 is the standing reminder: `Os.unlink` is not public Android API and the
+  offline gates cannot see that class of error.
+- The nine offline gates all exit 0, and every new audit guard was
+  mutation-checked (11 mutations, all caught).
+
+### Not done, and deliberately
+
+- **Forcing `network_stack` up earlier.** It was forked at 13985 ms only because
+  `cellbroadcastservice` bound it, while `NetworkStackClient` existed from
+  11270 ms. Binding it ourselves would move the floor to near `ams_ready`
+  (~670 ms). Left alone: it turns a check into an operation that starts a system
+  process during boot, which §3.6.1 costs differently, and it is the owner's
+  decision.
+- **Shortening the native chain.** The LKM write (3487 ms) and the trigger
+  loop's 1000 ms of `usleep` are 5537 of the 8971 ms after dispatch, and they
+  are where the remaining deficit has to come from. Changing the page-cache
+  write profile is not an agent's call.
