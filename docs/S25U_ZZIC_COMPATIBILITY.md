@@ -4370,6 +4370,176 @@ animation and a floor near 13.4 s, the post-dispatch chain has to fall from
 (3487), the trigger loop (2050, of which 1000 is `usleep`), the post-root wait
 (2038) and the app-side 628.
 
+## Boot `20261015_000846` — the full `/proc/enhanced_boot_stat`, and what lies after the animation
+
+Second early-root boot, captured with the readiness-trigger build. The owner
+supplied the **complete** `/proc/enhanced_boot_stat`, not an excerpt, so this is
+the first record here that covers the boot *after* `wm_boot_animation_done` —
+the segment every previous reading stopped at because logcat was filtered to the
+milestones.
+
+All figures below are the file's `ktime` column (`$(NF-1)`). The measured
+relationship between the two clocks on this boot is `time = ktime + 6113`, the
+same offset as the previous boot, so **ktime zero sits at time 6113**.
+
+The bootloader section does **not** account for that offset, and an earlier
+version of this paragraph said it did. The file's own `time` for `Bootloader
+end` is 5684, which leaves **429 ms between bootloader end and ktime zero that
+this file attributes to nothing**. (Its four bootloader deltas — 3083, +1024,
++10, +1566 — sum to 5683 against that end time of 5684; the 1 ms is the file's
+own rounding and is not the gap.) So the right statement is the measured one:
+every ktime figure here understates the time since the device was powered by
+**6113 ms**, of which 5684 is bootloader and 429 ms is unidentified. Naming the
+bootloader as the explanation was an inference, not a reading.
+
+### The measured timeline
+
+| ktime ms | event | delta |
+|---|---|---|
+| 1393 | `FirstStageMain Init` | |
+| 2698 | `SecondStageMain Init` | |
+| 5290 | `mount_all /vendor/etc/fstab.qcom --late` finished | 838 ms spent |
+| 6475 | `bpfloader` finished | 359 ms spent |
+| **6507** | `starting service 'zygote'` | |
+| 8004 | `boot_progress_preload_end` | |
+| **8267** | `SYSTEM_SERVER_START` | |
+| 8902 | `boot_progress_pms_start` | |
+| **12574** | `boot_progress_pms_ready` | `StartPackageManagerService` 3702 ms |
+| 12835 | `startBootstrapServices` done | 4237 ms total |
+| 14913 | `PHASE_SYSTEM_SERVICES_READY` | |
+| **15884** | `boot_progress_ams_ready` | |
+| 15910 | `PHASE_ACTIVITY_MANAGER_READY` | |
+| 16318 | `start`/`end networkManagement` | |
+| 16593 | `MakeConnectivityServiceReady` done | 275 ms |
+| **16595** | `PHASE_THIRD_PARTY_APPS_CAN_START` | |
+| 16963 | `StartSystemUI` | |
+| 16983 | `startOtherServices` done | 4125 ms total |
+| 16991 | `Loop forever` — `system_server` has nothing left to start | |
+| **17847** | `EARLY_ROOT_JOB_ENTERED` (trace, same boot) | |
+| 18230 | `CS Registered` (telephony) | |
+| 18278 | `GPRS Attached` | |
+| 18875 | `SIM onAllRecordsLoaded` | |
+| **20358** | **`wm_boot_animation_done`** | |
+| 20647 | `bootcomplete` (the firmware/bootchecker handshake of §3.6.2) | |
+| 25999 | `UM.onBeforeUnlockUser-0` done | 1049 ms |
+| 31853 | `UM.onBeforeUnlockUser-150` done | 1079 ms |
+| **32209** | `User150Unlock` done | **4963 ms** |
+| **33805** | `RecentsActivity.onCreate`, displayId 0 | 13157 ms after bootcomplete |
+| 34218 | `RecentsActivity.onResume` | |
+| 34485 | `RecentsActivity.onPause` | |
+| 34631 | `RecentsActivity.onStop` | |
+
+### What this changes: the boot does not stop at the animation — and what these milestones do NOT establish
+
+Everything in this record so far measured against `wm_boot_animation_done`,
+because that is where the second screen transition the owner objects to becomes
+visible. The full file shows the boot continuing for a further **13.4 s** of
+framework work after that point — `UM.onBeforeUnlockUser-0` at 25999, a run of
+user-150 work through 32209, `RecentsActivity` created at 33805.
+
+**What those three do not establish, stated before anything is built on them.**
+An earlier version of this section read them as "user 150 unlocked" and
+"launcher drawn" and concluded a 13447 ms deadline from the second. Both
+readings are wrong and the conclusion does not follow:
+
+- **User 150 is a secondary user** — Secure Folder on this firmware, not the
+  primary user. `User150Unlock` is not the device becoming usable and gates no
+  lock screen.
+  The nearest primary-user entry is `UM.onBeforeUnlockUser-0` **done** at
+  25999, and it is named that way deliberately: it is the completion of that
+  callback, **not** the instant CE storage unlocked. `finishUserUnlocking`
+  verifies CE storage is already unlocked *before* invoking the callback and
+  advances the user state only afterwards, so the two are different events and
+  this file holds one of them. An earlier version of this bullet called 25999
+  "the primary user's CE unlock", which is §3.7's collapse — and it would have
+  handed a future deadline the wrong instant. Whether the unlock followed a
+  credential entry is also not readable here.
+- **`RecentsActivity.onCreate` is activity creation, not a drawn frame.** The
+  four entries now in the table — `onCreate` 33805, `onResume` 34218, `onPause`
+  34485, `onStop` 34631 — record that the activity traversed those lifecycle
+  states inside 826 ms, and that is **all** they record. A draft of this bullet
+  called the burst "a pre-warm, not a launcher a user is looking at"; that is
+  the withdrawn "launcher drawn" claim inverted, and it contradicts the very
+  next sentence. A frame could have been presented in the interval after
+  `onResume`; nothing here says it was, and nothing here says it was not.
+  The sequence stays unclassified until a first-frame or window-visibility
+  marker exists.
+- **This file contains no keyguard or first-draw milestone at all.** So the
+  instant the lock screen appears — the thing the owner actually perceives — is
+  not in this evidence, in either direction.
+
+What is therefore measured is narrow and worth having on its own: the boot's
+framework work does not end with the animation, and at least 13.4 s of it
+follows. Which, if any, of these later instants is a deadline for this project
+is **not** established here.
+
+### Reachability: deliberately left open
+
+An earlier version of this section computed one. It applied boot `cea5208c`'s
+measured entry→`POST_ROOT_COMPLETE` length (24325 − 15354 = 8971 ms) to this
+boot's entry at 17847, got ≈26818 ms, and declared a weaker goal reachable
+because that figure fell before 32209 and 33805.
+
+That is §3.8 broken in the one way §3.8 exists to prevent: two boots' states
+combined into one apparently successful chain. Labelling the number an estimate
+does not convert it into per-boot evidence, and this record says so of other
+people's reasoning in four places. The two boots differ by 2.6 s in absolutes,
+and the deadlines it was compared against are the ones the subsection above just
+retired.
+
+So no reachability verdict is recorded here. What would produce one, in a single
+boot:
+
+1. that boot's own `EARLY_ROOT_POST_ROOT_COMPLETE` elapsed figure, which the
+   collector already records — the chain length must not be transplanted; and
+2. a deadline that is actually a deadline: a keyguard-visible or first-draw
+   marker, since neither user-150 unlock nor `RecentsActivity.onCreate` is one.
+
+Until both come from one boot, "root completes before X" has no X in evidence.
+
+What is independent of all of that, and unchanged: module activation is not
+covered. A userspace restart after root repeats roughly the
+`ams_ready`→`animation_done` span (4474 ms here) plus the unlock, §3.6.2 governs
+its postcondition, and the 2026-10-01 record above is a physical FAIL of that
+operation from a converged boot with the cause still unmeasured. Whether modules
+can be made active without that restart is the open question, not an assumption.
+
+### The animation's last 3.4 s: what happens in them, not what consumes them
+
+`system_server` reaches `Loop forever` at 16991 — it has started everything it
+is going to start — and the animation runs for a further **3367 ms**. The
+milestones that fall inside that span are telephony registration (`CS
+Registered` 18230, `GPRS Attached` 18278, `SIM onAllRecordsLoaded` 18875) and
+`StartSystemUI` 16963, which precedes it.
+
+**"Fall inside" is the whole claim.** A draft said those events were "what
+occupies that span", and the same correction applies here as to the bullet
+below: this file carries selected timestamps, not occupancy, so it cannot say
+what consumed the 3367 ms or that nothing else did. What does hold without an
+occupancy argument is narrower and is the part that matters: the three telephony
+milestones are a modem's answer rather than a task this project schedules, and
+`Loop forever` says `system_server` has no remaining service starts of its own.
+
+Two consequences for anyone re-opening the window question:
+
+- **Our entry at 17847 falls 856 ms after `Loop forever`, and 2511 ms before
+  the animation ends.** Those are the two measured intervals and the bullet
+  stops there. A draft attributed them — the 856 ms to "scheduler and callback
+  overhead", the 2511 ms to "the modem and SystemUI, not a queue we are behind
+  in". `/proc/enhanced_boot_stat` carries selected event timestamps and no
+  scheduler or occupancy data, so it cannot say what consumed either span, nor
+  that this chain was not queued behind other work. Attributing them needs a
+  scheduler trace. That matters precisely because the next bullet is
+  load-bearing for optimisation: an attribution nobody measured is the wrong
+  thing to optimise against.
+- **Shortening the pre-AMS boot would not help.** The largest single cost before
+  `ams_ready` is `StartPackageManagerService` at 3702 ms of a 4237 ms
+  `startBootstrapServices`, and PMS readiness is a prerequisite of AMS, which is
+  a prerequisite of any app process (§ the closed section above). Moving it
+  earlier moves the animation's end earlier too — the 4474 ms window measured
+  from `ams_ready` is the stable quantity across all three boots (4433 / 4474 /
+  4474, 41 ms spread) while absolutes moved 2.6 s. The window travels with AMS;
+  it does not widen when the boot gets faster.
 ## 2026-10-15 — the boot-health handshake DOES reconverge after a soft reboot; the 2026-10-01 mechanism did not reproduce
 
 The question this document has carried since 2026-10-01 —
