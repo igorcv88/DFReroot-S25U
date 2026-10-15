@@ -193,12 +193,47 @@ say "=== THE BUDGET (elapsed ms, from logcat) ==="
 # one worth one day, and a line whose date is not in that set is SKIPPED and
 # COUNTED rather than converted against the wrong origin. Counting matters:
 # skipping silently would hide a marker that fell before the clock set.
-# The dispatch instant comes from the TRACE, not from logcat, because the
-# logcat line ages out while /data/system does not - boot 89e00f66 lost it at
-# 71 s of uptime. It is the one number this collection exists to compare
-# against AMS ready, so it must not depend on the buffer that rolls.
-TRACE_DISPATCH=$(awk -F'\t' '$1 == "EARLY_ROOT_JOB_ENTERED" { print $3; exit }' \
+# The ENTRY instant comes from the TRACE, always, and never from logcat.
+#
+# Two reasons, and the first one is a mistake this script already published.
+#
+# 1. ENTRY and DISPATCH are different boundaries. `EARLY_ROOT_JOB_ENTERED` is
+#    the callback arriving; `EARLY_ROOT_DISPATCHED` is ~165 ms later, after
+#    readiness, the claim and the durable dispatch record. Reading whichever
+#    one happened to survive in logcat and labelling it "job entry" compared
+#    2205 ms (dispatch) for one boot against 1968 ms (entry) for another and
+#    reported the difference as scheduler variation. On one boundary the two
+#    boots are 2042 and 1968 - a 74 ms spread across a 5 s change of floor,
+#    which is a tighter result than the one that was published (3.7: two
+#    boundaries are not one number).
+#
+# 2. The logcat line ages out while /data/system does not - boot 89e00f66 had
+#    lost it by 71 s of uptime.
+#
+# WHICH entry step depends on which trigger claimed the run. The job writes
+# EARLY_ROOT_JOB_ENTERED; LOCKED_BOOT_COMPLETED writes
+# EARLY_ROOT_TRIGGER_ENTERED (AGENTS.md 3.11: two triggers, and the step names
+# are deliberately separate so a reader can tell which one got there).
+# Hardcoding the job's step left this empty on any boot the broadcast won.
+TRACE_CLAIM_TRIGGER=$(awk -F'\t' '$1 == "EARLY_ROOT_CLAIMED" {
+    if (match($5, /trigger=[^ ]+/)) print substr($5, RSTART + 8, RLENGTH - 8); exit }' \
     "$DIR/40_trace.txt" 2>/dev/null)
+case "${TRACE_CLAIM_TRIGGER:-}" in
+    job)  TRACE_ENTRY_STEP=EARLY_ROOT_JOB_ENTERED ;;
+    "")   TRACE_ENTRY_STEP= ;;
+    *)    TRACE_ENTRY_STEP=EARLY_ROOT_TRIGGER_ENTERED ;;
+esac
+if [ -n "${TRACE_ENTRY_STEP:-}" ]; then
+    TRACE_DISPATCH=$(awk -F'\t' -v step="$TRACE_ENTRY_STEP" \
+        '$1 == step { print $3; exit }' "$DIR/40_trace.txt" 2>/dev/null)
+else
+    # No claim recorded, so no trigger owns the run. Take the earliest entry
+    # step present rather than guessing a trigger, and say so below.
+    TRACE_DISPATCH=$(awk -F'\t' \
+        '$1 == "EARLY_ROOT_JOB_ENTERED" || $1 == "EARLY_ROOT_TRIGGER_ENTERED" \
+         { print $3; exit }' "$DIR/40_trace.txt" 2>/dev/null)
+fi
+say "entry step=${TRACE_ENTRY_STEP:-<no claim recorded>} claimed_trigger=${TRACE_CLAIM_TRIGGER:-<none>} entry_elapsed_ms=${TRACE_DISPATCH:-<none>}"
 awk -v tracedisp="${TRACE_DISPATCH:-}" '
 function tod(t) { split(t, a, ":"); split(a[3], s, ".")
                   return (a[1]*3600 + a[2]*60 + s[1]) * 1000 + s[2] }
@@ -230,8 +265,10 @@ function dayidx(ds) { split(ds, q, "-")
     }
 }
 { d[NR] = $1; v[NR] = tod($2); L[NR] = $0 }
+# Labelled as what it is - startService, after readiness and the claim - so it
+# is never mistaken for the callback arriving.
 /EARLY_ROOT\] DISPATCHED/ && match($0, /elapsed_ms=[0-9]+/) {
-    self["DFReroot dispatched"] = substr($0, RSTART + 11, RLENGTH - 11) + 0 }
+    self["dispatch (startService, ~165 ms after entry)"] = substr($0, RSTART + 11, RLENGTH - 11) + 0 }
 /EARLY_ROOT_RESULT=SUCCESS/ { resline = NR }
 END {
     n = 0; for (k in self) n++
@@ -269,16 +306,20 @@ END {
         printf "  (%d am_proc_* lines unplaceable: the wall clock moved)\n", unplaceable
     # The two numbers the whole collection exists for, stated rather than left
     # to the reader to subtract.
-    disp = 0; for (k in self) if (k ~ /dispatched/) disp = self[k]
     amsr = 0; for (k in self) if (k ~ /AMS ready/) amsr = self[k]
-    src = "logcat"
-    if (disp == 0 && tracedisp != "") { disp = tracedisp + 0; src = "trace" }
-    if (disp > 0 && amsr > 0) {
-        printf "\n  job entry - AMS ready = %d ms  <-- what actually governs our\n", disp - amsr
-        print  "  start, not minimum_latency_ms. Boot cea5208c: 2205 ms on a 15 s"
-        print  "  floor. Boot 89e00f66: 1968 ms on a 10 s floor. Both floors sit"
+    # The trace entry ONLY. There is no logcat fallback for this metric on
+    # purpose: falling back would silently swap the boundary, which is the
+    # defect this block used to have.
+    if (tracedisp == "") {
+        if (amsr > 0)
+            print "\n  entry - AMS ready: NOT COMPUTABLE, no entry step in the trace."
+    } else if (amsr > 0) {
+        printf "\n  entry - AMS ready = %d ms  <-- what governs our start, and it\n", tracedisp + 0 - amsr
+        print  "  is not minimum_latency_ms. On this same boundary: boot cea5208c"
+        print  "  2042 ms on a 15 s floor, boot 89e00f66 1968 ms on a 10 s floor."
+        print  "  A 74 ms spread across a 5 s change of floor. Both floors sit"
         print  "  BELOW AMS ready, so neither one binds."
-        printf "  (job entry read from %s, elapsed %d)\n", src, disp
+        printf "  (entry from the trace, elapsed %d; see the entry step line above)\n", tracedisp + 0
     }
     if (anim > 0) print "  (root completion is in 40_trace.txt: POST_ROOT_COMPLETE)"
 }
