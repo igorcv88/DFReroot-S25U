@@ -85,6 +85,19 @@ say ""
 # filter is now format-agnostic as well - belt and braces, because the next
 # variation will not be one that was predicted either.
 grab 10_logcat.txt logcat -d -b all -v threadtime
+# The boot timeline, from /proc rather than logcat. This is where the budget
+# comes from now, and it is the fix for the root cause of every extraction
+# defect this script has had: a ring buffer that rolls, a buffer set the
+# command did not request, a logcat format it did not produce, a date field
+# that moves. None of those exist here. The file is a kernel node, it is
+# current-boot, it does not age out within the boot, and its `ktime` column is
+# the SAME clock as the trace's elapsed_ms - so no conversion is needed at all.
+#
+# Found on 2026-10-15 while reading /system/bin/bootchecker for an unrelated
+# reason. It had been sitting there through three rounds of increasingly
+# careful logcat date arithmetic.
+grab 12_enhanced_boot_stat.txt cat /proc/enhanced_boot_stat
+grab 13_boot_stat.txt cat /proc/boot_stat
 grab 20_jobscheduler.txt dumpsys jobscheduler
 grab 30_thermalservice.txt dumpsys thermalservice
 
@@ -111,6 +124,20 @@ echo "[11_timeline.txt exit_status=$? lines=$(wc -l < "$DIR/11_timeline.txt" 2>/
 # to. A missing buffer and a boot that never logged a milestone look identical
 # in the output otherwise, and the first is a defect in this script while the
 # second is a fact about the device (AGENTS.md 3.7).
+# The rescue counters, every run. sys.rescue_boot_count counts boots in quick
+# succession, which IS this project's test cycle: arm, reboot, collect, reboot.
+# It read 2 on 2026-10-15 with rescue_level 0 and no rescueparty log ever
+# written - no past escalation, but the counter is not idle, and nobody was
+# watching it. /system/bin/bootchecker's own escalation path contains
+# --prompt_and_wipe_app_data, so this is not a cosmetic number.
+say ""
+say "=== rescue / boot-health counters ==="
+for k in sys.rescue_boot_count sys.prev.rescue_boot_count persist.sys.rescue_level \
+         dev.boot_count crashrecovery.rescue_boot_count \
+         persist.device_config.configuration.disable_rescue_party_factory_reset; do
+    say "$k=$(getprop "$k" 2>/dev/null)"
+done
+
 say ""
 say "=== events buffer present? (the budget is unreadable without it) ==="
 EVB=$(grep -ac 'beginning of events' "$DIR/10_logcat.txt" 2>/dev/null)
@@ -172,158 +199,65 @@ say "  WAIT_INTERRUPTED        something interrupted the thread; says NOTHING ab
 say "  WAIT_NOT_PERMITTED      a DEFECT in DFReroot's threading, not the boot"
 say ""
 
-say "=== THE BUDGET (elapsed ms, from logcat) ==="
-# Anchored on the kernel-boot t0 that the DFReroot trace and logcat share: the
-# DISPATCHED line carries both a logcat timestamp and its own elapsed_ms, so t0
-# is derived rather than assumed.
+say "=== THE BUDGET (ktime ms, from /proc/enhanced_boot_stat) ==="
+# No logcat, no clock conversion, no date. The `ktime` column of
+# /proc/enhanced_boot_stat is the same clock the trace's elapsed_ms uses, so
+# these numbers and the trace's are directly comparable with no arithmetic.
 #
-# THE DATE FIELD IS PART OF THE TIMESTAMP, and ignoring it was a real bug, not
-# a theoretical one. Two things move the date inside one boot's buffer:
-#
-#  - a boot that crosses MIDNIGHT. Time-of-day alone then goes backwards and
-#    t0 comes out negative, putting pre-midnight events ~24 h after boot;
-#  - the CLOCK BEING SET during boot, which happens in every boot. The
-#    cea5208c capture carries 3647 lines dated 02-02 (pre-NTP) followed by
-#    221580 dated 10-14. All 86 budget markers were in the 10-14 block there,
-#    so this did not corrupt that budget - but nothing made that true, and a
-#    marker landing on the far side of the clock set would have been silently
-#    off by eight months.
-#
-# So dates are tracked in order of appearance FROM THE ANCHOR onward, each new
-# one worth one day, and a line whose date is not in that set is SKIPPED and
-# COUNTED rather than converted against the wrong origin. Counting matters:
-# skipping silently would hide a marker that fell before the clock set.
-# The ENTRY instant comes from the TRACE, always, and never from logcat.
-#
-# Two reasons, and the first one is a mistake this script already published.
-#
-# 1. ENTRY and DISPATCH are different boundaries. `EARLY_ROOT_JOB_ENTERED` is
-#    the callback arriving; `EARLY_ROOT_DISPATCHED` is ~165 ms later, after
-#    readiness, the claim and the durable dispatch record. Reading whichever
-#    one happened to survive in logcat and labelling it "job entry" compared
-#    2205 ms (dispatch) for one boot against 1968 ms (entry) for another and
-#    reported the difference as scheduler variation. On one boundary the two
-#    boots are 2042 and 1968 - a 74 ms spread across a 5 s change of floor,
-#    which is a tighter result than the one that was published (3.7: two
-#    boundaries are not one number).
-#
-# 2. The logcat line ages out while /data/system does not - boot 89e00f66 had
-#    lost it by 71 s of uptime.
-#
-# WHICH entry step depends on which trigger claimed the run. The job writes
-# EARLY_ROOT_JOB_ENTERED; LOCKED_BOOT_COMPLETED writes
-# EARLY_ROOT_TRIGGER_ENTERED (AGENTS.md 3.11: two triggers, and the step names
-# are deliberately separate so a reader can tell which one got there).
-# Hardcoding the job's step left this empty on any boot the broadcast won.
-TRACE_CLAIM_TRIGGER=$(awk -F'\t' '$1 == "EARLY_ROOT_CLAIMED" {
-    if (match($5, /trigger=[^ ]+/)) print substr($5, RSTART + 8, RLENGTH - 8); exit }' \
-    "$DIR/40_trace.txt" 2>/dev/null)
-case "${TRACE_CLAIM_TRIGGER:-}" in
-    job)  TRACE_ENTRY_STEP=EARLY_ROOT_JOB_ENTERED ;;
-    "")   TRACE_ENTRY_STEP= ;;
-    *)    TRACE_ENTRY_STEP=EARLY_ROOT_TRIGGER_ENTERED ;;
-esac
-if [ -n "${TRACE_ENTRY_STEP:-}" ]; then
-    TRACE_DISPATCH=$(awk -F'\t' -v step="$TRACE_ENTRY_STEP" \
-        '$1 == step { print $3; exit }' "$DIR/40_trace.txt" 2>/dev/null)
-else
-    # No claim recorded, so no trigger owns the run. Take the earliest entry
-    # step present rather than guessing a trigger, and say so below.
-    TRACE_DISPATCH=$(awk -F'\t' \
-        '$1 == "EARLY_ROOT_JOB_ENTERED" || $1 == "EARLY_ROOT_TRIGGER_ENTERED" \
-         { print $3; exit }' "$DIR/40_trace.txt" 2>/dev/null)
-fi
-say "entry step=${TRACE_ENTRY_STEP:-<no claim recorded>} claimed_trigger=${TRACE_CLAIM_TRIGGER:-<none>} entry_elapsed_ms=${TRACE_DISPATCH:-<none>}"
+# Field layout: a milestone line is `!@Boot_EBS_x: <name>  <time> <ktime> <delta>`
+# so ktime is $(NF-1). A `Took Nms by '...'` line has only <time> <ktime>, which
+# is why only !@Boot_EBS_ lines are parsed - taking $NF blindly would read the
+# delta on one shape and the ktime on the other.
 awk -v tracedisp="${TRACE_DISPATCH:-}" '
-function tod(t) { split(t, a, ":"); split(a[3], s, ".")
-                  return (a[1]*3600 + a[2]*60 + s[1]) * 1000 + s[2] }
-function dayidx(ds) { split(ds, q, "-")
-    c[1]=0;   c[2]=31;  c[3]=60;  c[4]=91;  c[5]=121; c[6]=152
-    c[7]=182; c[8]=213; c[9]=244; c[10]=274; c[11]=305; c[12]=335
-    return c[q[1]+0] + (q[2]+0) }
-# The platform milestones REPORT THEIR OWN ELAPSED MS as the message body, in
-# both logcat formats: `boot_progress_ams_ready: 15879` and
-# `boot_progress_ams_ready( 2988): 15879` both end in 15879. Reading that value
-# is exact, needs no clock at all, and is therefore immune to the whole class
-# of date problems - midnight, the pre-NTP clock set, a correction mid-boot.
-# This was sitting in the log the entire time and I was converting timestamps
-# instead; boot 89e00f66 is where reading the raw lines showed it.
-#
-# Only am_proc_start / am_proc_bound do not self-report (their message is the
-# process tuple), so they alone still need a clock, and t0 comes from a
-# self-reporting milestone on a line of the same capture: t0 = clock - value.
-/boot_progress_start|boot_progress_system_run|boot_progress_pms_ready|boot_progress_ams_ready|boot_progress_enable_screen|wm_boot_animation_done/ {
-    if ($NF ~ /^[0-9]+$/) {
-        val = $NF + 0
-        if (/boot_progress_start/)          self["zygote"] = val
-        if (/boot_progress_system_run/)     self["system_server"] = val
-        if (/boot_progress_pms_ready/)      self["PMS ready"] = val
-        if (/boot_progress_ams_ready/)    { self["AMS ready  <-- no app process starts before this"] = val
-                                            t0 = tod($2) - val; t0d = dayidx($1) }
-        if (/boot_progress_enable_screen/)  self["screen enabled"] = val
-        if (/wm_boot_animation_done/)       self["ANIMATION ENDED  <-- the deadline that matters"] = val
-    }
+/^!@Boot_EBS_/ {
+    k = $(NF-1) + 0
+    if (/starting service .zygote/)                  m["zygote"] = k
+    if (/BOOT_PROGRESS_SYSTEM_RUN/)                  m["system_server"] = k
+    if (/boot_progress_pms_ready/)                   m["PMS ready"] = k
+    if (/PHASE_SYSTEM_SERVICES_READY/)               m["phase SYSTEM_SERVICES_READY"] = k
+    if (/boot_progress_ams_ready/)                 { m["AMS ready  <-- no app process starts before this"] = k; ams = k }
+    if (/PHASE_THIRD_PARTY_APPS_CAN_START/)          m["phase THIRD_PARTY_APPS_CAN_START"] = k
+    if (/wm_boot_animation_done/)                  { m["ANIMATION ENDED  <-- the deadline that matters"] = k; anim = k }
+    if (/bootcomplete/)                            { m["firmware bootcomplete (bootchecker)"] = k; bc = k }
 }
-{ d[NR] = $1; v[NR] = tod($2); L[NR] = $0 }
-# Labelled as what it is - startService, after readiness and the claim - so it
-# is never mistaken for the callback arriving.
-/EARLY_ROOT\] DISPATCHED/ && match($0, /elapsed_ms=[0-9]+/) {
-    self["dispatch (startService, ~165 ms after entry)"] = substr($0, RSTART + 11, RLENGTH - 11) + 0 }
-/EARLY_ROOT_RESULT=SUCCESS/ { resline = NR }
 END {
-    n = 0; for (k in self) n++
+    n = 0; for (kk in m) { n++; key[n] = kk }
     if (n == 0) {
-        print "  NOT COMPUTABLE: no platform milestone in this capture. Either the"
-        print "  event buffer was not captured, or the lines aged out of the ring"
-        print "  buffer before collection, or the logcat FORMAT changed and the"
-        print "  filter missed them. The three are different problems - compare"
-        print "  events_buffer_header above against a grep of 10_logcat.txt."
+        print "  NOT COMPUTABLE: /proc/enhanced_boot_stat held no !@Boot_EBS_ lines."
+        print "  That is a missing or unreadable kernel node, not a slow boot and"
+        print "  not a logcat problem - check 12_enhanced_boot_stat.txt."
         exit
     }
-    # Sort by value, so the order is the boot order whatever was found.
-    for (k in self) { nk++; key[nk] = k }
-    for (i = 1; i <= nk; i++) for (j = i+1; j <= nk; j++)
-        if (self[key[j]] < self[key[i]]) { tmp = key[i]; key[i] = key[j]; key[j] = tmp }
-    # am_proc_* need the clock, and only when a self-reporting anchor gave t0.
-    if (t0 != "") {
-        for (i = 1; i <= NR; i++) {
-            if (L[i] !~ /networkstack\.process/) continue
-            gap = dayidx(d[i]) - t0d
-            if (gap == 0) off = 0
-            else if (gap == 1 && v[i] < t0) off = 86400000
-            else { unplaceable++; continue }
-            if (L[i] ~ /am_proc_start/ && !seenstart++) ap["network_stack forked"] = v[i] + off - t0
-            if (L[i] ~ /am_proc_bound/ && !seenbound++) ap["network_stack BOUND  <-- earliest readiness can be true"] = v[i] + off - t0
-        }
-        for (k in ap) { nk++; key[nk] = k; self[k] = ap[k] }
-        for (i = 1; i <= nk; i++) for (j = i+1; j <= nk; j++)
-            if (self[key[j]] < self[key[i]]) { tmp = key[i]; key[i] = key[j]; key[j] = tmp }
+    for (i = 1; i <= n; i++) for (j = i+1; j <= n; j++)
+        if (m[key[j]] < m[key[i]]) { t = key[i]; key[i] = key[j]; key[j] = t }
+    for (i = 1; i <= n; i++) printf "  %7d  %s\n", m[key[i]], key[i]
+
+    # The animation window, which is the quantity the whole project races. It
+    # measured 4433 / 4474 / 4474 ms across three boots - a 41 ms spread - while
+    # the absolute instants moved by 2.6 s. So the budget is stated RELATIVE to
+    # AMS ready; stating it in absolute ms made a stable structure look noisy.
+    if (ams > 0 && anim > 0) {
+        printf "\n  animation window (ANIMATION ENDED - AMS ready) = %d ms\n", anim - ams
+        print  "  reference: 4433 / 4474 / 4474 ms over three boots (41 ms spread)."
     }
-    for (i = 1; i <= nk; i++) printf "  %7d  %s\n", self[key[i]], key[i]
-    if (t0 == "")
-        print "  (am_proc_* omitted: no self-reporting milestone to anchor a clock on)"
-    if (unplaceable > 0)
-        printf "  (%d am_proc_* lines unplaceable: the wall clock moved)\n", unplaceable
-    # The two numbers the whole collection exists for, stated rather than left
-    # to the reader to subtract.
-    amsr = 0; for (k in self) if (k ~ /AMS ready/) amsr = self[k]
-    # The trace entry ONLY. There is no logcat fallback for this metric on
-    # purpose: falling back would silently swap the boundary, which is the
-    # defect this block used to have.
+    if (bc > 0 && anim > 0)
+        printf "  firmware bootcomplete follows the animation by %d ms (ref 289)\n", bc - anim
     if (tracedisp == "") {
-        if (amsr > 0)
-            print "\n  entry - AMS ready: NOT COMPUTABLE, no entry step in the trace."
-    } else if (amsr > 0) {
-        printf "\n  entry - AMS ready = %d ms  <-- what governs our start, and it\n", tracedisp + 0 - amsr
-        print  "  is not minimum_latency_ms. On this same boundary: boot cea5208c"
-        print  "  2042 ms on a 15 s floor, boot 89e00f66 1968 ms on a 10 s floor."
-        print  "  A 74 ms spread across a 5 s change of floor. Both floors sit"
-        print  "  BELOW AMS ready, so neither one binds."
-        printf "  (entry from the trace, elapsed %d; see the entry step line above)\n", tracedisp + 0
+        if (ams > 0) print "\n  entry - AMS ready: NOT COMPUTABLE, no entry step in the trace."
+    } else if (ams > 0) {
+        e = tracedisp + 0
+        printf "\n  entry - AMS ready = %d ms  <-- what governs our start, and it\n", e - ams
+        print  "  is not minimum_latency_ms. Reference: 2042 ms on a 15 s floor,"
+        print  "  1968 ms on a 10 s floor. Both floors sit BELOW AMS ready."
+        if (anim > 0) {
+            printf "  animation left when we entered = %d ms\n", anim - e
+            print  "  the chain entry->root measured 8971 and 11395 ms, so that is"
+            print  "  the deficit this path has to close."
+        }
+        printf "  (entry from the trace, elapsed %d; see the entry step line above)\n", e
     }
-    if (anim > 0) print "  (root completion is in 40_trace.txt: POST_ROOT_COMPLETE)"
 }
-' "$DIR/11_timeline.txt" >> "$OUT" 2>> "$DIR/_stderr.txt"
+' "$DIR/12_enhanced_boot_stat.txt" >> "$OUT" 2>> "$DIR/_stderr.txt"
 
 say ""
 say "=== NATIVE CHAIN (per-mark deltas, ms) ==="
