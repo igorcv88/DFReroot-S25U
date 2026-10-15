@@ -4376,12 +4376,19 @@ the first record here that covers the boot *after* `wm_boot_animation_done` —
 the segment every previous reading stopped at because logcat was filtered to the
 milestones.
 
-All figures below are the file's `ktime` column (`$(NF-1)`); `time = ktime +
-6113` on this boot, the same offset as before, and the bootloader section
-accounts for it: bootloader start 3083, display +1024, load kernel +10, end
-+1566 → **5684 ms of bootloader before ktime 0**. A user's perception clock
-starts there, so every ktime figure in this record understates perceived boot by
-~5.7 s.
+All figures below are the file's `ktime` column (`$(NF-1)`). The measured
+relationship between the two clocks on this boot is `time = ktime + 6113`, the
+same offset as the previous boot, so **ktime zero sits at time 6113**.
+
+The bootloader section does **not** account for that offset, and an earlier
+version of this paragraph said it did. The file's own `time` for `Bootloader
+end` is 5684, which leaves **429 ms between bootloader end and ktime zero that
+this file attributes to nothing**. (Its four bootloader deltas — 3083, +1024,
++10, +1566 — sum to 5683 against that end time of 5684; the 1 ms is the file's
+own rounding and is not the gap.) So the right statement is the measured one:
+every ktime figure here understates the time since the device was powered by
+**6113 ms**, of which 5684 is bootloader and 429 ms is unidentified. Naming the
+bootloader as the explanation was an inference, not a reading.
 
 ### The measured timeline
 
@@ -4417,38 +4424,72 @@ starts there, so every ktime figure in this record understates perceived boot by
 | **32209** | `User150Unlock` done | **4963 ms** |
 | **33805** | `RecentsActivity.onCreate`, displayId 0 | 13157 ms after bootcomplete |
 | 34218 | `RecentsActivity.onResume` | |
+| 34485 | `RecentsActivity.onPause` | |
+| 34631 | `RecentsActivity.onStop` | |
 
-### What this changes: the animation is not the last deadline, and the one after it is 13 s wider
+### What this changes: the boot does not stop at the animation — and what these milestones do NOT establish
 
 Everything in this record so far measured against `wm_boot_animation_done`,
 because that is where the second screen transition the owner objects to becomes
-visible. The full file shows what follows it, and the gap is large:
+visible. The full file shows the boot continuing for a further **13.4 s** of
+framework work after that point — `UM.onBeforeUnlockUser-0` at 25999, a run of
+user-150 work through 32209, `RecentsActivity` created at 33805.
 
-- animation end → launcher drawn: **33805 − 20358 = 13447 ms**
-- animation end → user 150 unlocked: **32209 − 20358 = 11851 ms**
+**What those three do not establish, stated before anything is built on them.**
+An earlier version of this section read them as "user 150 unlocked" and
+"launcher drawn" and concluded a 13447 ms deadline from the second. Both
+readings are wrong and the conclusion does not follow:
 
-So "inside the animation" and "before the user can interact" are not two
-phrasings of one deadline. They are **13.4 s apart on this firmware**, and the
-whole deficit this record has been tracking (6580 ms on boot `cea5208c`) fits
-inside that gap with room to spare.
+- **User 150 is a secondary user** — Secure Folder on this firmware, not the
+  primary user. `User150Unlock` is not the device becoming usable and gates no
+  lock screen. The primary user's CE unlock is `UM.onBeforeUnlockUser-0` at
+  25999, and whether that followed a credential entry or happened
+  automatically is not readable from this file either.
+- **`RecentsActivity.onCreate` is activity creation, not a drawn frame.** And
+  the four entries now in the table — `onCreate` 33805, `onResume` 34218,
+  `onPause` 34485, `onStop` 34631 — are a create-and-tear-down burst inside
+  826 ms, which is the shape of a pre-warm, not of a launcher a user is looking
+  at. Nothing here says a frame was presented or that anything was
+  interactive.
+- **This file contains no keyguard or first-draw milestone at all.** So the
+  instant the lock screen appears — the thing the owner actually perceives — is
+  not in this evidence, in either direction.
 
-Applying boot `cea5208c`'s measured entry→`POST_ROOT_COMPLETE` length
-(24325 − 15354 = 8971 ms) to this boot's entry at 17847 puts root at **≈26818
-ms** — 5391 ms before user 150 finishes unlocking and 6987 ms before the
-launcher draws. **That is an estimate**, not a measurement: the chain length is
-transplanted from the other boot, and the two boots differ by 2.6 s in absolute
-terms. The number that would settle it is this boot's own
-`EARLY_ROOT_POST_ROOT_COMPLETE`, which the collector records; it is not
-transcribed here because the figure above is derived, and a derived number must
-not be filed as an observation (§2).
+What is therefore measured is narrow and worth having on its own: the boot's
+framework work does not end with the animation, and at least 13.4 s of it
+follows. Which, if any, of these later instants is a deadline for this project
+is **not** established here.
 
-This does not make the owner's original goal reachable. It makes a different,
-weaker goal reachable *without any of the reductions still on the table*, and it
-is the measurement the goal redefinition turns on. What it does **not** cover is
-module activation: a userspace restart after root repeats roughly the
-`ams_ready`→`animation_done` span (4474 ms here) plus the unlock, and §3.6.2
-governs its postcondition. Whether modules can be made active without that
-restart is unevidenced and is the next question, not an assumption.
+### Reachability: deliberately left open
+
+An earlier version of this section computed one. It applied boot `cea5208c`'s
+measured entry→`POST_ROOT_COMPLETE` length (24325 − 15354 = 8971 ms) to this
+boot's entry at 17847, got ≈26818 ms, and declared a weaker goal reachable
+because that figure fell before 32209 and 33805.
+
+That is §3.8 broken in the one way §3.8 exists to prevent: two boots' states
+combined into one apparently successful chain. Labelling the number an estimate
+does not convert it into per-boot evidence, and this record says so of other
+people's reasoning in four places. The two boots differ by 2.6 s in absolutes,
+and the deadlines it was compared against are the ones the subsection above just
+retired.
+
+So no reachability verdict is recorded here. What would produce one, in a single
+boot:
+
+1. that boot's own `EARLY_ROOT_POST_ROOT_COMPLETE` elapsed figure, which the
+   collector already records — the chain length must not be transplanted; and
+2. a deadline that is actually a deadline: a keyguard-visible or first-draw
+   marker, since neither user-150 unlock nor `RecentsActivity.onCreate` is one.
+
+Until both come from one boot, "root completes before X" has no X in evidence.
+
+What is independent of all of that, and unchanged: module activation is not
+covered. A userspace restart after root repeats roughly the
+`ams_ready`→`animation_done` span (4474 ms here) plus the unlock, §3.6.2 governs
+its postcondition, and the 2026-10-01 record above is a physical FAIL of that
+operation from a converged boot with the cause still unmeasured. Whether modules
+can be made active without that restart is the open question, not an assumption.
 
 ### The animation's last 3.4 s are not ours to move
 
