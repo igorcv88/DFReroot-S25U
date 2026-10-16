@@ -119,16 +119,38 @@
             android:exported="false"
             android:directBootAware="true" />
         <!--
-          The notification action for "Apply Modules (Soft Reboot)". Never
-          exported: the PendingIntent names this component explicitly, so the
-          platform delivers it with this app's own identity and no external caller
-          needs - or gets - a way in. It authorises nothing on arrival either;
-          SoftRebootPolicy re-derives every permission from the same-boot post-root
-          record and a digest comparison on the binary it is about to invoke.
+          The notification action for "Apply Modules (Soft Reboot)", and since
+          2026-10-15 also the early chain's handoff target. Never exported: both
+          callers name this component explicitly, so the platform delivers with
+          this app's own identity and no external caller needs - or gets - a way
+          in. It authorises nothing on arrival either; SoftRebootPolicy
+          re-derives every permission from the same-boot post-root record and a
+          digest comparison on the binary it is about to invoke.
+
+          directBootAware is REQUIRED, and was the third thing that silently
+          killed the chained soft reboot. While the user is locked, PMS resolves
+          only direct-boot-aware components, so a sendBroadcast naming a
+          non-aware receiver matches nothing and is dropped with no error. The
+          early chain runs pre-unlock - `user_unlocked=0` is measured at the
+          callback in three consecutive boots - so before this attribute the
+          handoff went nowhere. Every other component on that path
+          (DfrBootReceiver, DfrAutoRootService, DfrEarlyBootJobService,
+          DfrEarlyRootJobService, DfrEarlyRootService) already carries it; this
+          receiver did not, because until now it was only ever reached by a
+          notification tap, which happens after unlock.
+
+          What this attribute does NOT establish: that the teardown behaves the
+          same pre-unlock. The receiver's own records live in device-protected
+          storage and the daemon is chosen through a root shell, so the gates
+          themselves are reachable - but ksud's `soft_reboot()` re-running
+          `on_post_data_fs` while credential-encrypted storage is still locked is
+          a condition the manual path has never exercised. See
+          docs/EARLY_ROOT.md.
         -->
         <receiver
             android:name=".DfrSoftRebootReceiver"
-            android:exported="false" />
+            android:exported="false"
+            android:directBootAware="true" />
     </application>
 
 </manifest>

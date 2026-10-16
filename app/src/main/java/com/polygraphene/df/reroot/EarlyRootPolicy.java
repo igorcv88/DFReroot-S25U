@@ -636,6 +636,23 @@ public final class EarlyRootPolicy {
     /** A boundary refused. Carries the verdict code, so the log names which one. */
     public static final String STEP_REFUSED = "EARLY_ROOT_REFUSED";
     /**
+     * The chained soft reboot's own step, carrying the {@code chainSoftReboot}
+     * verdict verbatim.
+     *
+     * Its own step for 3.11's reason, and the reason is specific here: the
+     * operation it hands off to tears userspace down and has two unexplained
+     * firmware reboots behind it, so "the owner did not tick the box", "the
+     * arming was from another boot" and "the box was ticked and the broadcast
+     * went out" must be three readable outcomes in the per-boot trace rather
+     * than one silence. Whoever reads a boot that did not come back needs to
+     * know which of those happened before assigning a cause.
+     *
+     * Written on EVERY outcome, including NOT_REQUESTED, because a trace that
+     * appears only on the interesting path cannot tell "not asked for" from
+     * "the process died before deciding".
+     */
+    public static final String STEP_CHAIN_SOFT_REBOOT = "EARLY_ROOT_CHAIN_SOFT_REBOOT";
+    /**
      * {@code BOOT_COMPLETED} observed in the same boot, by the one component the
      * early path never touches.
      *
@@ -679,6 +696,7 @@ public final class EarlyRootPolicy {
             STEP_BEFORE_NATIVE, STEP_NATIVE_RETURNED, STEP_NATIVE_PROFILE,
             STEP_POST_ROOT_COMPLETE,
             STEP_SELINUX_ENFORCING, STEP_FAILED, STEP_REFUSED,
+            STEP_CHAIN_SOFT_REBOOT,
             STEP_LOCKED_BOOT_OBSERVED, STEP_BOOT_COMPLETED_OBSERVED);
 
     /**
@@ -865,7 +883,7 @@ public final class EarlyRootPolicy {
      * (AGENTS.md 3.6.1).
      */
     private static final Set<String> ARM_OPTIONAL_KEYS = Set.of(
-            "armed_thermal_status", "armed_thermal_headroom");
+            "armed_thermal_status", "armed_thermal_headroom", "armed_soft_reboot");
 
     private static final Set<String> JOURNAL_KEYS = Set.of(
             "boot_id", "phase", "attempts", "native_started");
@@ -1075,10 +1093,27 @@ public final class EarlyRootPolicy {
         public final String deviceFingerprint;
         /** Identifies the one arming operation this record was written by. */
         public final String generation;
+        /**
+         * The owner ticked "soft reboot automatically in the same boot" when
+         * they armed THIS cycle.
+         *
+         * Optional in the record and false when absent, for the reason
+         * AGENTS.md 3.6.1 gives for {@code transport_fix}: a build that never
+         * wrote the key must keep arming and rooting exactly as before, so a
+         * missing key is "not asked for" and never "unknown, refuse". It is a
+         * key required to ACT, never to parse.
+         *
+         * It rides the ARM record rather than the cycle because the cycle is
+         * created in the boot that runs, by the trigger, while this is the
+         * owner's decision taken before the reboot - and 3.11 says that
+         * decision is spent with the arming rather than kept as a standing
+         * switch.
+         */
+        public final boolean softReboot;
 
         private Arm(String armedBootId, int jobId, String namespace, long minimumLatencyMs,
                     int versionCode, String versionName, String ksudSha256,
-                    String deviceFingerprint, String generation) {
+                    String deviceFingerprint, String generation, boolean softReboot) {
             this.armedBootId = armedBootId;
             this.jobId = jobId;
             this.namespace = namespace;
@@ -1088,6 +1123,7 @@ public final class EarlyRootPolicy {
             this.ksudSha256 = ksudSha256;
             this.deviceFingerprint = deviceFingerprint;
             this.generation = generation;
+            this.softReboot = softReboot;
         }
     }
 
@@ -1700,7 +1736,7 @@ public final class EarlyRootPolicy {
                                    long wallclockMs, String generation) {
         return formatArm(bootId, jobId, namespace, minimumLatencyMs, scheduleResult,
                 versionCode, versionName, ksudSha256, deviceFingerprint, elapsedMs,
-                wallclockMs, generation, THERMAL_STATUS_UNAVAILABLE, Float.NaN);
+                wallclockMs, generation, THERMAL_STATUS_UNAVAILABLE, Float.NaN, false);
     }
 
     public static String formatArm(String bootId, int jobId, String namespace,
@@ -1709,6 +1745,17 @@ public final class EarlyRootPolicy {
                                    String deviceFingerprint, long elapsedMs,
                                    long wallclockMs, String generation,
                                    int thermalStatus, float thermalHeadroom) {
+        return formatArm(bootId, jobId, namespace, minimumLatencyMs, scheduleResult,
+                versionCode, versionName, ksudSha256, deviceFingerprint, elapsedMs,
+                wallclockMs, generation, thermalStatus, thermalHeadroom, false);
+    }
+    public static String formatArm(String bootId, int jobId, String namespace,
+                                   long minimumLatencyMs, int scheduleResult,
+                                   int versionCode, String versionName, String ksudSha256,
+                                   String deviceFingerprint, long elapsedMs,
+                                   long wallclockMs, String generation,
+                                   int thermalStatus, float thermalHeadroom,
+                                   boolean softReboot) {
         return "state=" + STATE_ARMED + "\n"
                 + "armed_boot_id=" + bootId + "\n"
                 + "job_id=" + jobId + "\n"
@@ -1732,7 +1779,14 @@ public final class EarlyRootPolicy {
                  * missing measurement must not read as a cool device.
                  */
                 + "armed_thermal_status=" + formatThermalStatus(thermalStatus) + "\n"
-                + "armed_thermal_headroom=" + formatHeadroom(thermalHeadroom) + "\n";
+                + "armed_thermal_headroom=" + formatHeadroom(thermalHeadroom) + "\n"
+                /*
+                 * Written as 1/0 rather than omitted when false, so a record
+                 * from a build that HAS the field distinguishes "asked for" from
+                 * "not asked for" without relying on absence. Absence still
+                 * reads false - that is the older build, not a refusal.
+                 */
+                + "armed_soft_reboot=" + (softReboot ? 1 : 0) + "\n";
     }
 
     /** null means malformed, unreadable, incomplete, or never actually scheduled. */
@@ -1776,12 +1830,171 @@ public final class EarlyRootPolicy {
                     && !DEFAULT_UID_NAMESPACE.equals(namespace)) {
                 return null;
             }
+            /*
+             * Strict when present, false when absent. A value that is neither
+             * "0" nor "1" refuses the whole record rather than reading as
+             * false: the field authorises a userspace teardown, and a garbled
+             * value is not evidence that nobody asked for one (AGENTS.md 2).
+             */
+            String softRaw = values.get("armed_soft_reboot");
+            boolean softReboot = false;
+            if (softRaw != null) {
+                String t = softRaw.trim();
+                if ("1".equals(t)) softReboot = true;
+                else if (!"0".equals(t)) return null;
+            }
             return new Arm(values.get("armed_boot_id"), jobId, namespace, latency,
                     versionCode, values.get("version_name"), values.get("ksud_sha256"),
-                    values.get("device_fingerprint"), values.get("generation"));
+                    values.get("device_fingerprint"), values.get("generation"),
+                    softReboot);
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    /*
+     * ==================================================================
+     * The chained soft reboot (2026-10-15, owner decision)
+     * ==================================================================
+     *
+     * What the owner asked for, in their words: when the early chain finishes
+     * post-root, run the soft reboot, and ACCEPT WHATEVER MOMENT THAT IS -
+     * boot animation, lock screen, three seconds after it, no condition on the
+     * boot phase at all. The goal of landing inside the animation was tried and
+     * is not reachable (see the dossier), and one visible blink beats unlocking,
+     * waiting, opening a root manager and tapping by hand.
+     *
+     * So this decision deliberately reads NO boot-phase signal. It does not
+     * consult sys.boot_completed, LOCKED_BOOT_COMPLETED, the keyguard or any
+     * clock. That absence is the feature, and it is why this is a named
+     * function with its own negatives rather than an `if` in the service.
+     *
+     * What it does NOT do, because the owner did not ask for it and 3.6 forbids
+     * an agent deciding it: remove a gate. The dispatch this authorises goes
+     * through DfrSoftRebootReceiver, which re-derives EVERY permission
+     * (SoftRebootPolicy.evaluate: same-boot post-root record, the per-boot lock,
+     * the ksud digest, the firmware boot-health verdict). "No checking" meant no
+     * TIMING check. The teardown's own gates stay exactly where they were, and
+     * reusing that receiver verbatim is also what keeps 3.2 satisfied: there is
+     * one soft-reboot sequence, not a second copy reachable from here.
+     *
+     * Three facts, three values (3.7). "The owner did not ask for it", "the
+     * root run this would follow did not succeed" and "there is no arming to
+     * read" send the next run to different places.
+     */
+
+    /** The owner ticked the box and the run succeeded: dispatch. */
+    public static final String CHAIN_SOFT_REBOOT_DISPATCH =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_DISPATCH";
+    /** The box was not ticked. The common case, and not a failure. */
+    public static final String CHAIN_SOFT_REBOOT_NOT_REQUESTED =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_NOT_REQUESTED";
+    /** Root did not complete, so there is nothing to re-apply modules onto. */
+    public static final String CHAIN_SOFT_REBOOT_ROOT_INCOMPLETE =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_ROOT_INCOMPLETE";
+    /** No arm record, or one this build cannot account for. */
+    public static final String CHAIN_SOFT_REBOOT_NO_ARMING =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_NO_ARMING";
+    /** The arm record exists but could not be read. Never a pass. */
+    public static final String CHAIN_SOFT_REBOOT_ARM_UNREADABLE =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_ARM_UNREADABLE";
+    /** No cycle record, or one this build cannot account for. */
+    public static final String CHAIN_SOFT_REBOOT_NO_CYCLE =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_NO_CYCLE";
+    /** The cycle record exists but could not be read. Never a pass. */
+    public static final String CHAIN_SOFT_REBOOT_CYCLE_UNREADABLE =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_CYCLE_UNREADABLE";
+    /** The live cycle descends from a different arming than the one read. */
+    public static final String CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_ARMING =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_ARMING";
+    /** The cycle is bound to another boot: not this run's authorisation (3.8). */
+    public static final String CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT";
+    /** The cycle was never claimed, so no run happened for this to follow. */
+    public static final String CHAIN_SOFT_REBOOT_CYCLE_UNCLAIMED =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_CYCLE_UNCLAIMED";
+
+    /**
+     * May the early chain hand this boot to the soft reboot?
+     *
+     * Pure, so the paths that only occur on hardware are reachable from a host
+     * test (AGENTS.md 5). Every refusal is a distinct value.
+     *
+     * <h2>Why the authorisation is read across TWO records</h2>
+     *
+     * The first version compared {@code currentBootId} to the arm record's
+     * {@code armed_boot_id} and required them to be EQUAL. That is backwards,
+     * and the gate below says why: {@link #ARM_SAME_BOOT} REFUSES an early run
+     * whose callback fired in the boot the job was armed in, because an arming
+     * takes effect only in a later kernel boot. So in every run that can reach
+     * post-root those two ids necessarily DIFFER, and the first version
+     * returned a foreign-arming refusal every time: the feature was dead on
+     * arrival. Its test passed only because the test fed the ARMED boot as the
+     * current boot - an input this code path cannot produce. Found by Codex
+     * review on PR #81, and it is the fifth time in this repository that a
+     * component was validated against an input its own caller never generates.
+     *
+     * The authorisation spans two records because the question spans two boots:
+     *
+     * <ul>
+     *   <li>the ARM record says WHAT the owner authorised - the tick - and was
+     *       written before the reboot, in the previous boot;</li>
+     *   <li>the CYCLE record says that authorisation is live HERE: it is
+     *       created in the run boot, names that boot, and carries the arming's
+     *       generation.</li>
+     * </ul>
+     *
+     * Binding through the generation is what makes this 3.5 rather than two
+     * loose facts: the tick is honoured only when the cycle this run claimed
+     * descends from the arming that carries it. A tick in a stale arm record
+     * beside a cycle from a different arming authorises nothing.
+     *
+     * @param armRecord   the arm record as read, or null, or RECORD_UNREADABLE
+     * @param cycleRecord the cycle record as read, or null, or RECORD_UNREADABLE
+     * @param currentBootId the boot this run happened in
+     * @param rootSucceeded the coordinator's own verdict for this run
+     */
+    public static String chainSoftReboot(String armRecord, String cycleRecord,
+                                         String currentBootId, boolean rootSucceeded) {
+        /*
+         * Root first, and before any record is parsed. A soft reboot asks the
+         * RESIDENT KernelSU to re-run the module lifecycle; with no root in this
+         * boot there is no resident KernelSU. Deciding it here keeps the reason
+         * readable - and the caller invokes this on failure too, so the trace
+         * says "refused because root was incomplete" instead of falling silent
+         * on the path where nothing is dispatched.
+         */
+        if (!rootSucceeded) return CHAIN_SOFT_REBOOT_ROOT_INCOMPLETE;
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(armRecord)) {
+            return CHAIN_SOFT_REBOOT_ARM_UNREADABLE;
+        }
+        Arm arm = parseArm(armRecord);
+        if (arm == null) return CHAIN_SOFT_REBOOT_NO_ARMING;
+        if (AutoRootPolicy.RECORD_UNREADABLE.equals(cycleRecord)) {
+            return CHAIN_SOFT_REBOOT_CYCLE_UNREADABLE;
+        }
+        Cycle cycle = parseCycle(cycleRecord);
+        if (cycle == null) return CHAIN_SOFT_REBOOT_NO_CYCLE;
+        if (!cycle.generation.equals(arm.generation)) {
+            return CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_ARMING;
+        }
+        /*
+         * 3.8, and the one comparison that actually places this authorisation in
+         * this boot: the cycle is written in the run boot and names it.
+         */
+        if (blank(currentBootId)) return CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT;
+        if (!currentBootId.trim().equals(cycle.runBootId)) {
+            return CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT;
+        }
+        /*
+         * A BOUND cycle means no trigger ever claimed it, so there was no early
+         * run for a soft reboot to follow. Reaching here with one means the
+         * caller's success verdict and the durable record disagree, and that is
+         * a refusal rather than something resolved in favour of acting (2).
+         */
+        if (!cycle.claimed()) return CHAIN_SOFT_REBOOT_CYCLE_UNCLAIMED;
+        if (!arm.softReboot) return CHAIN_SOFT_REBOOT_NOT_REQUESTED;
+        return CHAIN_SOFT_REBOOT_DISPATCH;
     }
 
     public static String formatJournal(String bootId, String phase, int attempts,

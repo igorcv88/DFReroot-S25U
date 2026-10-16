@@ -58,6 +58,14 @@ public class EarlyRootPolicyTest {
                 generation);
     }
 
+    /** The same arming with the owner's soft-reboot box ticked. */
+    private static String armSoft(boolean softReboot) {
+        return EarlyRootPolicy.formatArm(ARMED_BOOT, EarlyRootPolicy.EXPECTED_JOB_ID,
+                NS, 15_000L, 1, CODE, NAME, KSUD, FP, 300_000L, 1759000000000L,
+                GEN, EarlyRootPolicy.THERMAL_STATUS_UNAVAILABLE, Float.NaN,
+                softReboot);
+    }
+
     /** Every element satisfied; each test below spoils exactly one. */
     private static EarlyRootPolicy.Inputs ready() {
         EarlyRootPolicy.Inputs in = new EarlyRootPolicy.Inputs();
@@ -1859,6 +1867,177 @@ public class EarlyRootPolicyTest {
                         EarlyRootPolicy.STEP_READINESS_PASS, "boot-x", 14_070,
                         "sys_boot_completed=0", "proc=PASS " + waitDetail)) != null,
                 "the wait detail parses inside the readiness step's line");
+
+        // ---- the trace vocabulary is CLOSED, so every declared step must
+        //      be in it ------------------------------------------------------
+        // EarlyRootStore.trace() refuses a step parseTraceLine() cannot
+        // account for ("unaccountable trace step"), and a caller that treats a
+        // trace failure as a refusal - which 3.11 requires - is then dead at
+        // that boundary. STEP_CHAIN_SOFT_REBOOT was declared and not
+        // registered, so the chained soft reboot could never dispatch: the
+        // gate added to satisfy 3.11 was the thing killing it. Found by Codex
+        // review on PR #81.
+        //
+        // Asserted REFLECTIVELY rather than one constant at a time, because
+        // the defect is structural: any future STEP_ constant someone declares
+        // without registering has exactly this failure, silently, at whatever
+        // boundary writes it.
+        int steps = 0;
+        for (java.lang.reflect.Field f : EarlyRootPolicy.class.getDeclaredFields()) {
+            if (!f.getName().startsWith("STEP_")) continue;
+            if (f.getType() != String.class) continue;
+            if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            String value;
+            try {
+                f.setAccessible(true);
+                value = (String) f.get(null);
+            } catch (ReflectiveOperationException e) {
+                check(false, "cannot read " + f.getName());
+                continue;
+            }
+            steps++;
+            check(EarlyRootPolicy.parseTraceLine(EarlyRootPolicy.formatTraceStep(
+                            value, "boot-x", 1_000L, "sys_boot_completed=0", "d")) != null,
+                    f.getName() + " (" + value + ") is declared but not in the "
+                            + "trace vocabulary; EarlyRootStore.trace() would "
+                            + "refuse it as unaccountable and any caller that "
+                            + "treats a trace failure as a refusal is dead at "
+                            + "that boundary");
+        }
+        check(steps >= 20, "the reflective step sweep found only " + steps
+                + " STEP_ constants; it is not actually covering the vocabulary");
+
+        // ---- the chained soft reboot (2026-10-15) ------------------------
+        // The owner's decision is "after post-root, whatever moment it is", so
+        // the only things this may read are the tick, the two records that bind
+        // it to this run, and the run's own verdict. No boot phase.
+        //
+        // THE INPUTS HERE ARE THE ONES PRODUCTION PRODUCES. The first version
+        // of this block fed ARMED_BOOT as the current boot and passed while the
+        // feature was dead: ARM_SAME_BOOT refuses a run whose callback fired in
+        // the armed boot, so a real run's current boot ALWAYS differs from
+        // armed_boot_id. RUN_BOOT below is that different boot, and the cycle
+        // is bound to it the way the trigger binds it.
+        final String RUN_BOOT = "run-boot-7f1c";
+        check(!RUN_BOOT.equals(ARMED_BOOT),
+                "the run boot must differ from the armed boot, or this block is "
+                        + "testing an input the early path cannot produce");
+        final String claimedCycle = EarlyRootPolicy.formatCycle(
+                EarlyRootPolicy.CYCLE_CLAIMED, GEN, RUN_BOOT,
+                EarlyRootPolicy.TRIGGER_JOB, 14_000L, 15_300L);
+        final String boundCycle = EarlyRootPolicy.formatCycle(
+                EarlyRootPolicy.CYCLE_BOUND, GEN, RUN_BOOT,
+                EarlyRootPolicy.TRIGGER_NONE, 14_000L, -1L);
+
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_DISPATCH.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), claimedCycle, RUN_BOOT, true)),
+                "the real shape dispatches: box ticked, cycle claimed for this "
+                        + "run boot from this arming, root succeeded");
+        // The regression that made the feature dead on arrival.
+        check(!EarlyRootPolicy.CHAIN_SOFT_REBOOT_DISPATCH.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), claimedCycle, ARMED_BOOT, true)),
+                "the ARMED boot is not the run boot, and must not dispatch: that "
+                        + "is the boot ARM_SAME_BOOT refuses outright");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NOT_REQUESTED.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(false), claimedCycle, RUN_BOOT, true)),
+                "box not ticked is NOT_REQUESTED, which is not a failure");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NOT_REQUESTED.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                arm(), claimedCycle, RUN_BOOT, true)),
+                "an arm record from a build with no such field reads as not "
+                        + "requested, so an older arming still roots and never "
+                        + "tears down userspace unasked");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_ROOT_INCOMPLETE.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), claimedCycle, RUN_BOOT, false)),
+                "a run that did not establish root cannot chain a soft reboot, "
+                        + "and the caller invokes this on that path too so the "
+                        + "reason is recorded rather than absent");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_ARM_UNREADABLE.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                AutoRootPolicy.RECORD_UNREADABLE, claimedCycle,
+                                RUN_BOOT, true)),
+                "an unreadable arm record refuses and says so, never passing");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NO_ARMING.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                null, claimedCycle, RUN_BOOT, true)),
+                "no arm record is NO_ARMING");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NO_ARMING.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                "state=whatever\n", claimedCycle, RUN_BOOT, true)),
+                "a malformed arm record is NO_ARMING, not a dispatch");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_CYCLE_UNREADABLE.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), AutoRootPolicy.RECORD_UNREADABLE,
+                                RUN_BOOT, true)),
+                "an unreadable cycle record refuses; it is the half that places "
+                        + "the authorisation in this boot");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NO_CYCLE.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), null, RUN_BOOT, true)),
+                "no cycle record is NO_CYCLE: a tick alone authorises nothing");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NO_CYCLE.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), "state=nonsense\n", RUN_BOOT, true)),
+                "a malformed cycle record is NO_CYCLE");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_ARMING.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true),
+                                EarlyRootPolicy.formatCycle(
+                                        EarlyRootPolicy.CYCLE_CLAIMED, "other-gen",
+                                        RUN_BOOT, EarlyRootPolicy.TRIGGER_JOB,
+                                        14_000L, 15_300L),
+                                RUN_BOOT, true)),
+                "a cycle from a DIFFERENT arming does not inherit this arming's "
+                        + "tick (3.5: the claim is bound to the bytes that carry it)");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), claimedCycle, "a-third-boot", true)),
+                "a cycle bound to another boot is not this run's authorisation (3.8)");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), claimedCycle, "", true)),
+                "no current boot_id cannot place the authorisation, so it refuses");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_CYCLE_FOREIGN_BOOT.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), claimedCycle, null, true)),
+                "a null boot_id refuses rather than throwing");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_CYCLE_UNCLAIMED.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), boundCycle, RUN_BOOT, true)),
+                "a BOUND cycle means no trigger ran: the success verdict and the "
+                        + "durable record disagree, which refuses");
+        // A garbled value is not evidence that nobody asked (2).
+        check(EarlyRootPolicy.parseArm(
+                        armSoft(true).replace("armed_soft_reboot=1",
+                                "armed_soft_reboot=yes")) == null,
+                "armed_soft_reboot=yes refuses the whole arm record rather than "
+                        + "reading as false or as true");
+        check(EarlyRootPolicy.parseArm(armSoft(true)) != null
+                        && EarlyRootPolicy.parseArm(armSoft(true)).softReboot,
+                "a ticked record round-trips through format/parse");
+        check(EarlyRootPolicy.parseArm(armSoft(false)) != null
+                        && !EarlyRootPolicy.parseArm(armSoft(false)).softReboot,
+                "an unticked record round-trips as false");
+        check(EarlyRootPolicy.parseArm(arm()) != null
+                        && !EarlyRootPolicy.parseArm(arm()).softReboot,
+                "the field is required to ACT, never to parse: the older "
+                        + "three-argument format still yields a valid arming");
+        // And it reads NO boot-phase signal at all - that is the owner's
+        // decision, so it is asserted rather than left to inspection.
+        for (boolean rooted : new boolean[] { true, false }) {
+            for (String armRec : new String[] { armSoft(true), armSoft(false), arm() }) {
+                String a1 = EarlyRootPolicy.chainSoftReboot(
+                        armRec, claimedCycle, RUN_BOOT, rooted);
+                String b1 = EarlyRootPolicy.chainSoftReboot(
+                        armRec, claimedCycle, RUN_BOOT, rooted);
+                check(a1.equals(b1), "chainSoftReboot is a function of its four "
+                        + "arguments only; nothing ambient may move it");
+            }
+        }
 
         System.out.println("EarlyRootPolicyTest: " + pass + "/" + (pass + fail)
                 + " passed");
