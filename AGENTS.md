@@ -490,16 +490,61 @@ restarting its own boot watchdog, and the rule that restores that flag is keyed
 on `dev.bootcomplete=1`. So a restart the framework survives can still leave the
 firmware believing the boot never completed.
 
-**What is observed there, and what is not.** The two init rules are read out of
-the device's own `bootchecker.rc`. Whether anything sets `dev.bootcomplete=1`
-again after a soft reboot — and therefore whether that rule runs again — has
-never been read on this firmware. An earlier version of this section called the
-rule "edge triggered" and concluded it "could not re-fire while the property
-stayed 1". That is a claim about init's property-change dispatch that nobody
-verified: init queues a matching action when a property is *set*, and whether a
-value-preserving set re-queues it was never read out of the source. This is the
-fourth causal claim in this investigation to be stated ahead of its evidence, so
-it is now stated as the question it is.
+**MEASURED on 2026-10-15: the flags DO come back, which is evidence against the
+proposed mechanism and not a refutation of it.** This section
+used to carry the question "does anything set `dev.bootcomplete=1` again after a
+soft reboot, and does `dev.platform_bootcomplete` come back?" — stated as a
+question because an earlier draft had answered it from init's dispatch semantics
+without reading them, the fourth causal claim here stated ahead of its evidence.
+
+It has now been read, twice, in two different boots. **Both flags come back.**
+`post_platform_bootcomplete_seen=1` and `post_dev_bootcomplete_seen=1`,
+`BOOT_HEALTH_CONVERGED`, settled across two post-restart observations, with the
+post half written by a different pid than the pre half — the restarted
+framework, as the second durable rule below requires. No reboot followed, in
+either boot. `docs/S25U_ZZIC_COMPATIBILITY.md` holds the capture.
+
+**And be exact about what that does to the hypothesis, because an earlier
+version of this paragraph was not.** It said the proposed chain —
+`dev.bootcomplete` stays 1, the restoring rule never re-fires,
+`dev.platform_bootcomplete` stays 0, `bootchecker` times out — was "broken at
+its third link and is not the mechanism". It is not. **Both samples are runs
+that did not fail.** Neither the 2026-10-01 nor the 2026-10-12 rollback has a
+post-restart property record, so nothing here says what
+`dev.platform_bootcomplete` did during a boot that went on to roll back. A
+non-deterministic failure is free to take the hypothesised branch only on the
+runs where it fails, and two clean runs cannot see that.
+
+So this is **evidence against the hypothesis and a non-reproduction**, which is
+what `docs/HANDOFF.md`'s own reading guide for this record already said to call
+it. What would actually refute it is one thing and only one thing: the flags
+captured during a run that then rolls back.
+
+Either way it is not a clearance. An unexplained, non-deterministic firmware
+reboot is a worse thing to automate than an understood one, so this measurement
+did not make the operation routine. §3.6.1 still governs: worst outcome is a
+full reboot with a staged rollback, so the gate stays and
+`BOOT_HEALTH_UNKNOWN` still refuses.
+
+**And what is measured is the LATE dispatch only.** Both samples were dispatched
+into a fully settled boot (uptime 147 s and 81 s at the pre-read) with both
+`bootchecker` services already `stopped`. Nothing here speaks for a dispatch
+early in the boot.
+
+A log reading adds one fact and settles nothing beyond it: a process of the
+`bootchecker` binary (pid 2585) logged at ktime ~20946 and again at ~67331 in one
+boot, the same pid across the 27 s mark, cycling on a 60 s sleep. **Which init
+service owns that pid is unidentified**, and the rc action names `bootchecker`
+while the `dev.bootcomplete=1` rule starts `bootchecker-bootc`, so what a
+`restart bootchecker` at ~27 s would meet is still unread. A draft of this
+paragraph said it would meet a live watchdog; that was an inference from an
+unmapped pid, and worse, live-versus-stopped was never shown to be the variable
+that separates the one failing dispatch from the clean ones — all three were
+**late** dispatches. A draft of this retraction then said "with the services
+settled", which is the same error again: only the two clean runs read those
+properties, and the 2026-10-01 record contains no reading of either, so the
+failed run's service state is unmeasured. The direct read of the two
+`init.svc.*` properties early in a boot is owed, not retired.
 
 The durable rules:
 

@@ -598,11 +598,32 @@ That is a deliberate boundary, not an oversight, and the reason is attribution:
 
 - `POST_SOFT_REBOOT_STABILITY` is a physical **FAIL** twice - a
   `bootchecker_timeout` rollback, and an `lmkd` stall 66 minutes later - and
-  AGENTS.md 3.6.2 records that the cause of the first is still an open question
-  nobody has measured. Samsung's own `bootchecker.rc` zeroes
-  `dev.platform_bootcomplete` when `init.svc.zygote=restarting`, and whether
-  anything sets `dev.bootcomplete=1` again after a soft reboot **has never been
-  read on this firmware**;
+  AGENTS.md 3.6.2 records that the cause of the first is **still** an open
+  question. Samsung's own `bootchecker.rc` zeroes `dev.platform_bootcomplete`
+  when `init.svc.zygote=restarting`, and whether anything sets
+  `dev.bootcomplete=1` again after a soft reboot **has now been read, on
+  2026-10-15, in two boots: both flags come back** and the handshake
+  reconverges (`docs/S25U_ZZIC_COMPATIBILITY.md`). That removed the leading
+  hypothesis without supplying a cause — both samples are runs that did not
+  fail, so they are a non-reproduction, not a refutation — which leaves this
+  boundary a FAIL with *less* explanation than before, not more. **Do not
+  re-run that measurement for this question; it is collected.** What is still
+  unread is the early-dispatch case below;
+- **the one unread question is now the early dispatch, and it is the one this
+  boundary would create.** Both 2026-10-15 samples were dispatched into a
+  settled boot — pre-read uptimes 147 s and 81 s, with `init.svc.bootchecker`
+  and `init.svc.bootchecker-bootc` already `stopped` before the teardown. A
+  teardown chained onto the early-root path fires near 27 s. One fact about that
+  instant has been read and it does not reach a verdict: a process of the
+  `bootchecker` binary (pid 2585) logged at ktime ~20946 and again at ~67331 in
+  boot `20261015_000846`, one pid across 27000, cycling on a 60 s sleep.
+  **Which init service owns it is unidentified** - init's own service lines are
+  absent from that logcat - and the rc action names `bootchecker` while the
+  `dev.bootcomplete=1` rule starts `bootchecker-bootc`. A draft here concluded
+  the restart would land on a live watchdog; that is withdrawn as an inference
+  from an unmapped pid. The two `init.svc.*` reads early in a boot are owed, and
+  whatever they say, 3.6.1 makes exercising the chained form an operation rather
+  than a probe;
 - stacking a userspace teardown on top of an early root that has never passed
   once would make the next failure impossible to attribute to either half. Run 1
   and run 2 failed for unrelated reasons; a third failure with two unproven
