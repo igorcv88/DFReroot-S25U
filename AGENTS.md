@@ -546,6 +546,32 @@ properties, and the 2026-10-01 record contains no reading of either, so the
 failed run's service state is unmeasured. The direct read of the two
 `init.svc.*` properties early in a boot is owed, not retired.
 
+**And the early dispatch is no longer hypothetical, which is why that owed read
+matters more than it did.** The owner decided on 2026-10-15 that the chain
+should hand off to the soft reboot as soon as post-root finishes, at whatever
+moment that falls, and `DfrEarlyRootService` now does so when the arming dialog's
+soft-reboot box was ticked for that boot. Three things about it are the point:
+
+- **It removes no gate.** The handoff is the same intent the notification action
+  sends, to the same receiver, which re-derives the post-root record, the
+  per-boot lock, the ksud digest, the `transport_fix` marker and the boot-health
+  verdict. "No checking" was about the MOMENT, never about permission.
+- **It reads no boot phase, deliberately**, and
+  `tools/profile_binding_audit.py` fails if one is added. A later "just check
+  `boot_completed` first" would quietly restore the manual tap the chain exists
+  to remove, so that absence is a guarded property rather than an oversight.
+- **It is authorised per arming and spent with it** - an optional key in the arm
+  record, never a standing switch (3.11).
+
+None of that makes the teardown safe in that window, and the paragraphs above
+are the reason: two unexplained rollbacks, no established cause, and the
+service state at ~27 s unread. `DfrSoftRebootReceiver` also had to be made
+`directBootAware` for the handoff to be delivered at all, since the chain runs
+pre-unlock - which makes it REACHABLE and says nothing about ksud re-running
+`on_post_data_fs` while credential-encrypted storage is locked, a condition the
+manual path has never exercised. Whoever reads this before arming that box
+should know it is the first thing to put the teardown in that window.
+
 The durable rules:
 
 - **An operation that re-creates userspace is not finished when the UI returns.**
