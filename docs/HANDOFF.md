@@ -2132,7 +2132,24 @@ clears it is written by a daemon outside this app. What the gate prevents is one
 specific thing: a *second* userspace teardown stacked on a handshake that has not
 converged.
 
-### The acceptance run that closes this
+### The acceptance run that closes this — **DONE on 2026-10-15. Do not re-run it.**
+
+> **This procedure is collected evidence, not a pending action.** It ran on
+> 2026-10-15 (`dfr_sr_20261015_154058`) and the record came back complete in
+> **two** boots: `post_platform_bootcomplete_seen=1`,
+> `post_dev_bootcomplete_seen=1`, `post_first_verdict=BOOT_HEALTH_CONVERGED`,
+> `post_crash_recovery_seen=0`, `post_settled=1`, pre and post halves written by
+> different pids, `SYSTEM_RESTART` in DropBox with **no** new
+> `SYSTEM_LAST_KMSG_*`, and no reboot. That is the first bullet of step 4 below:
+> **"did not reproduce in one window"** — evidence against the handshake being
+> the cause, not a refutation, exactly as that bullet says to read it.
+> `docs/S25U_ZZIC_COMPATIBILITY.md` holds the capture.
+>
+> Running it again buys nothing and costs another userspace teardown, which
+> §3.6.1 does not treat as a free diagnostic. **The remaining question is a
+> different one — see "What is still owed" below.** The steps are kept because
+> they are the reading guide for the record, and because a future change to the
+> operation would need them again.
 
 One boot, one tap, no new build needed afterwards if it passes:
 
@@ -2200,8 +2217,10 @@ One boot, one tap, no new build needed afterwards if it passes:
 
 | Owed | Blocked on |
 |---|---|
-| A coordination design for the Samsung handshake (handoff front 1 and 3) | step 4 above. Every design is a guess until that record comes back |
-| The second module lifecycle in one kernel (front 5) | mostly module-side, not this repository; and step 4 may make it the primary suspect |
+| **Which `bootchecker` service, if any, is running at ~27 s?** One read of `init.svc.bootchecker` **and** `init.svc.bootchecker-bootc` early in an ordinary boot | nothing — a `getprop`, no teardown, no build. **This row was briefly marked answered and that was wrong.** A `bootchecker`-binary process (pid 2585) was found alive across ktime 27000 in boot `20261015_000846`, but which init service owns that pid is unidentified (init's own service lines are absent from that logcat), and the rc action names `bootchecker` while the `dev.bootcomplete=1` rule starts `bootchecker-bootc`. So the pid proves a process, not the service. Capture **both** properties, not one |
+| What the firmware does when `restart bootchecker` fires early in a boot | the row above, plus a decision. Note that live-versus-stopped has **not** been shown to be the variable that separates the 2026-10-01 rollback from the 2026-10-15 clean runs — all three were late dispatches, and the failed run's service state is **unmeasured** (only the two clean runs read `init.svc.bootchecker*`). §3.6.1 makes exercising this an **operation**, not a probe: worst outcome is an unplanned full reboot with a staged rollback |
+| A coordination design for the Samsung handshake (handoff front 1 and 3) | ~~step 4 above~~ — **that record is in** (2026-10-15, two boots, reconverged). The handshake is no longer the leading suspect, and no cause has replaced it, so a design still has nothing to design *against* |
+| The second module lifecycle in one kernel (front 5) | mostly module-side, not this repository. The 2026-10-15 non-reproduction **promotes it to the primary suspect**, which is what step 4's first bullet said it would do |
 | `POST_ROOT_LSPOSED_COMPAT`, and the negative half of Auto Root (opt-out suppressing the next boot) | unchanged by this work |
 
 ## Descriptor boundary of the root transport — 2026-10-01

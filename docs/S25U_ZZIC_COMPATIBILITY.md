@@ -2978,7 +2978,9 @@ What shipped:
 above is a physical FAIL twice, and AGENTS.md 3.6.2 states what is *observed*
 there and what is not: Samsung's `bootchecker.rc` zeroes
 `dev.platform_bootcomplete` on `init.svc.zygote=restarting`, and whether
-anything sets `dev.bootcomplete=1` again afterwards has never been read. The
+anything sets `dev.bootcomplete=1` again afterwards **was read on 2026-10-15 —
+both flags come back** (see the 2026-10-15 section below), which removed the
+leading hypothesis without supplying a cause and left the FAIL standing. The
 early-root path deliberately does **not** restart the framework, apply modules
 or touch the soft-reboot transport, so it does not enter that failure mode - but
 it does write to the page cache *while the same boot watchdog is still running*,
@@ -4538,3 +4540,230 @@ Two consequences for anyone re-opening the window question:
   from `ams_ready` is the stable quantity across all three boots (4433 / 4474 /
   4474, 41 ms spread) while absolutes moved 2.6 s. The window travels with AMS;
   it does not widen when the boot gets faster.
+## 2026-10-15 — the boot-health handshake DOES reconverge after a soft reboot; the 2026-10-01 mechanism did not reproduce
+
+The question this document has carried since 2026-10-01 —
+
+```text
+does anything on this firmware set dev.bootcomplete=1 again after an emulated
+soft reboot, and does dev.platform_bootcomplete come back?
+```
+
+— is answered. **Yes, both.** Owner capture, `dfr_sr_20261015_154058`, read
+through root in Termux. Two samples, from two different boots.
+
+### Sample 1 — boot `73415ff4-7276-4275-bcf5-0104e8b3f491`, measured live
+
+Dispatch at 15:31:11 (`claimed_at_ms=1792089071409`, `phase=CLAIMED`),
+pre-read at uptime 147034 ms.
+
+| field | value |
+|---|---|
+| `pre_verdict` | `BOOT_HEALTH_CONVERGED` |
+| `pre_pid` / `pre_proc_starttime` | 2929 / 4839 |
+| `exec_outcome` | `RETURNED` |
+| `post_first_verdict` | `BOOT_HEALTH_CONVERGED` |
+| `post_platform_bootcomplete_seen` | **1** |
+| `post_dev_bootcomplete_seen` | **1** |
+| `post_converged_seen` | 1 |
+| `post_crash_recovery_seen` | **0** |
+| `post_observations` / `post_settled` | 2 / 1 |
+| `post_window_opened_ms` → `post_read_start_ms` | 202123 → 502225 |
+| `post_pid` / `post_proc_starttime` | **31184 / 15318** |
+
+**The two halves were written by different processes** — pid 2929 with
+`starttime` 4839 before, pid 31184 with `starttime` 15318 after. That is
+§3.6.2's second durable rule satisfied by observation rather than by design
+intent: the post half came from the *restarted* framework, which is the only
+observer this app can have, since `stop` kills the process that asked.
+
+### The restart happened, and the kernel did not reboot
+
+Three independent readings, all from the same capture:
+
+- **DropBox gained `SYSTEM_RESTART@1792089124834`** (15:32:04, 53 s after the
+  claim) and **no new `SYSTEM_LAST_KMSG_*` of any suffix.** The only kmsg entry
+  is `SYSTEM_LAST_KMSG_0_20261015_153008_RP@1792089008433`, which predates the
+  dispatch by 63 s — it belongs to the boot this test ran in. A framework
+  restart record, no boot record.
+- **The pre and post halves carry the same `boot_id`**, nine minutes apart. A
+  firmware reboot would have changed it.
+- `/sys/class/sec/sec_hw_param/extra_info` read **empty**, which on this
+  firmware is the successful no-panic reading (§3.6.1), not a failed one.
+
+### Live state at +9 minutes (15:40:56)
+
+```text
+sys.boot_completed=1   dev.bootcomplete=1   dev.platform_bootcomplete=1
+init.svc.bootchecker=stopped       init.svc.bootchecker-bootc=stopped
+persist.sys.rescue_level=0         dev.attempting_reboot=(empty)
+```
+
+`dumpsys rollback` gained **no** entry: the three snapshots differ only in two
+rendered timestamps, 187 ms apart, which is `dumpsys`' own derivation and not an
+event.
+
+One counter did move, and it is recorded because this document previously
+worried about it: **`sys.rescue_boot_count` 1 → 2.** `persist.sys.rescue_level`
+stayed 0, so nothing escalated; RescueParty counts the framework restart as a
+boot. Expected, not a defect, and not evidence of a problem.
+
+### Sample 2 — boot `9f2826d1-3b81-4f57-a2d9-330e54e94532`, from the "before" snapshot
+
+The pre-dispatch read of 15:30:48 was expected to show nothing interesting. It
+in fact held a **complete** `POST_EXEC` record from the *previous* boot's soft
+reboot: `exec_outcome=RETURNED`, `post_first_verdict=BOOT_HEALTH_CONVERGED`,
+`post_platform_bootcomplete_seen=1`, `post_dev_bootcomplete_seen=1`,
+`post_crash_recovery_seen=0`, `post_observations=2`, `post_settled=1`, settled
+at uptime 449280 ms, pre-read at 81249 ms. Pre pid 3023 / `starttime` 799, post
+pid 22764 / `starttime` 8853 — different processes again.
+
+So the reconvergence is **n=2 across two boots**, not a single observation.
+
+### What this is evidence against — and why it is NOT a refutation
+
+The mechanism this document proposed for the 2026-10-01 rollback was: a
+`dev.bootcomplete` that stays at 1 never re-fires the restoring rule, so
+`dev.platform_bootcomplete` stays 0, so `bootchecker` times out. The flag comes
+back in both samples, with `bootchecker` ending `stopped`.
+
+**That is evidence against the hypothesis. It is not a refutation, and an
+earlier version of this section called it one.** Both samples are runs that did
+*not* fail. Neither the 2026-10-01 nor the 2026-10-12 rollback has a
+post-restart property record, so nothing measured here says what
+`dev.platform_bootcomplete` did during a boot that went on to roll back — and a
+non-deterministic failure is free to take the hypothesised branch only on the
+runs where it fails. Two clean runs cannot see that branch by construction.
+
+`docs/HANDOFF.md`'s reading guide for this exact record already said so, in
+advance, for this exact outcome: "evidence against the handshake being the
+cause — not a refutation of the interaction… treat it as *did not reproduce in
+one window*." That guidance was written before the run and was right; writing
+"refuted" afterwards ignored it. The one observation that would refute the
+hypothesis is the flags captured **during a run that then rolls back**, and
+this capture is not that.
+
+What the window does add: the incident's rollback landed ~2 minutes after its
+dispatch, and here the record settled at `post_read_start_ms=502225` with live
+properties still converged at 15:40:56, 9m45s after the claim. So the
+non-reproduction covers more than the incident's own latency — which
+strengthens it as evidence and still does not convert it into a refutation.
+
+Which leaves the failure without a cause. And this capture adds a second
+occurrence that was not in this record: `dumpsys rollback` holds
+
+```text
+2026-10-01T14:03:19.497576: Rolling back all available. Reason: NATIVE_CRASH
+2026-10-01T14:03:19.500609: Rolling back bootchecker_timeout. Reason: NATIVE_CRASH
+2026-10-01T14:03:19.513751: Rolling back bootchecker_timeout. Reason: NATIVE_CRASH
+2026-10-12T12:34:22.228774: Rolling back all available. Reason: NATIVE_CRASH
+2026-10-12T12:34:22.229112: Rolling back bootchecker_timeout. Reason: NATIVE_CRASH
+```
+
+**The 2026-10-12 pair is unattributed.** That date is recorded here for the
+throne_tracker kernel panics, but those are timestamped 16:46:51 and 22:30:12 —
+both *after* 12:34:22, so the rollback is not their consequence. What produced
+it is not established by this capture, and it must not be assumed to be the same
+event as 2026-10-01 merely because it names the same rollback.
+
+So the position after this measurement is **two unexplained firmware reboots and
+two clean runs of the same operation from the same converged pre-state.** That
+is a non-deterministic failure with no established cause, which is a worse thing
+to automate than an understood one. Answering the question moved the uncertainty
+from the mechanism to the cause; it did not make the operation routine. The
+`BOOT_HEALTH_CONVERGED` gate stays, and `BOOT_HEALTH_UNKNOWN` still refuses.
+
+### The scope limit, stated because the next proposal lands outside it
+
+Both samples are **late** dispatches. Pre-read uptimes were 147 s and 81 s, and
+in both the handshake had fully converged and **both `bootchecker` services read
+`stopped` before the teardown**. Nothing measured here speaks for a dispatch
+early in the boot, while that watchdog may still be live.
+
+That matters because the standing proposal is to chain the soft reboot onto the
+early-root path, which would fire it at roughly 27 s — 6 s after `bootcomplete`
+(20647 ms on the boot recorded above), in a window where `bootchecker` is
+`class late_start oneshot` and may not yet have stopped. Whether it has is
+**not read**, in either direction, and is not inferable from these two samples.
+Treating this measurement as permission for the chained form would be the
+absence-as-permission error (§2) one level up: evidence about the late dispatch
+reused as evidence about the early one.
+
+### The early-dispatch question, only partly answered: a `bootchecker` process exists at ~27 s, service unidentified
+
+The scope limit above named one unread fact and said it cost a `getprop` early in
+an ordinary boot. An earlier version of this section claimed the `logcat` of boot
+`20261015_000846` had answered it for free and retired the measurement. It had
+not, and the measurement is reinstated below. What the log does carry is four
+lines - the entire `bootchecker` output of that boot:
+
+```text
+00:07:56.555 I/main::sub_command( 6848): bootchecker starts with --writebootc mode! (bootchecker)
+00:07:56.556 I/main::sub_command( 6848): !@ Bootcompleted time is 26760 (bootchecker)
+00:07:56.855 I/main::boot_status ( 2585): spawn_debore_update() boot_completed (bootchecker)
+00:08:43.240 I/main::boot_status ( 2585): Slept for 60 seconds (bootchecker)
+```
+
+**The anchor.** The second line prints `26760`, which is exactly the `time`
+column of `!@Boot_EBS_F: bootcomplete 26760 20647 288` in that boot's
+`/proc/enhanced_boot_stat`. So that wall clock instant, 00:07:56.556, is
+ktime 20647, which puts ktime 0 at 00:07:35.909. The anchor assumes the line is
+emitted when the value is computed — a sub-second assumption for a line that
+prints what it just read, and the conclusion below survives an error of several
+seconds either way.
+
+**What is read.** A `bootchecker` process, **pid 2585**, logged
+at 00:07:56.855 → ktime ≈ **20946**, and again at 00:08:43.240 → ktime ≈
+**67331**. One pid at both ends, so that process existed continuously across
+ktime 27000. **A `bootchecker` process is alive at ~27 s.** `Slept for 60
+seconds` also says it is cycling rather than winding down.
+
+**What is NOT resolved, and an earlier version of this section built on it
+anyway.** Which init service owns pid 2585 is unknown. That is not a detail: the
+rc action is `on property:init.svc.zygote=restarting -> restart bootchecker`,
+which names the `bootchecker` service, while the `dev.bootcomplete=1` rule starts
+`bootchecker-bootc`. If pid 2585 is the latter, the former may already have
+stopped by 27 s and nothing above says otherwise.
+
+The suggestive reading is that pid 6848 - which ran `--writebootc`, the
+`dev.bootcomplete=1` rule's job, and appeared at exactly that rule's instant - is
+`bootchecker-bootc`, leaving 2585 (lower pid, earlier, doing `boot_status` work)
+as the `class late_start` `bootchecker`. **That is an inference and this capture
+cannot promote it:** init's own service lines are absent from this logcat. The
+whole 5 MB dump holds one `init`-tagged line and none naming bootchecker, so the
+file that would answer "which service" is not this one.
+
+**So the conclusion is withdrawn.** An earlier version of this section said
+`restart bootchecker` "would land on a live watchdog rather than a stopped
+service", and retired the direct measurement on that basis. It does not follow
+from a pid whose service is unidentified. The `getprop` of
+`init.svc.bootchecker` / `init.svc.bootchecker-bootc` early in an ordinary boot
+is **still owed**, and retiring it here was the error.
+
+**And a second error, which the review did not name.** Even granting the
+mapping, live-versus-stopped has never been shown to be the variable that
+distinguishes a failing dispatch from a clean one. All three dispatches were
+**late**: 2026-10-01 minutes after the UI returned, and the two 2026-10-15 runs
+at pre-read uptimes 147 s and 81 s. So "the early window is riskier because the
+watchdog is live there" was a causal story laid on top of an unresolved mapping
+- two layers of inference presented as one reading, in a section whose own
+subject is that error.
+
+**And the first retraction of it over-claimed in the other direction**, which a
+later review caught: it added "in all three the services were settled", making
+"stopped" common to the failure and the successes alike. Only the two
+2026-10-15 runs captured `init.svc.bootchecker` and `init.svc.bootchecker-bootc`
+at all. **The 2026-10-01 record contains no reading of either**, so the failed
+run's service state is unmeasured, and asserting it was the same absent-evidence
+inference the retraction existed to remove. Third time on this one theme that a
+correction introduced the next over-claim; the comparison now stops at "all
+three were late".
+
+**What stands, and it is narrow:** a process of the `bootchecker` binary existed
+across ktime 27000 and was cycling on a 60 s sleep rather than winding down.
+Everything about which service that is, and about what a restart at that instant
+would meet, remains unread.
+
+**The boot this was read from is the relevant one.** `20261015_000846` is an
+early-root boot — the exact shape a chained dispatch would run in — not a
+synthetic or idle boot.
