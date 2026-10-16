@@ -585,16 +585,47 @@ A refusal in any boot is reported as a refusal with its code. Do not re-arm
 "to see if it works this time" before reading the trace — that is how a
 reproducible failure becomes an anecdote.
 
-## 9. What comes after: the half of the goal this path does not do
+## 9. What comes after: the second half, and what it is gated on
 
 The owner's requirement is one visible initialisation with root and modules
-already live. This path delivers the first half - the root chain inside the
-animation - and **does not** restart userspace, apply modules, or make
-Zygisk-dependent components live. `DfrEarlyRootService` ends at
-`POST_ROOT_COMPLETE` and its verdict notification carries no Apply Modules
-action; `tools/profile_binding_audit.py` fails if either changes.
+already live. This section used to say flatly that the path **does not** restart
+userspace or apply modules, and that `tools/profile_binding_audit.py` fails if
+that changes. **That was true until 2026-10-15 and is now wrong in both halves**,
+which an owner review caught: the audit's guard was deliberately EXCHANGED, not
+removed, and `DfrEarlyRootService` now hands off to `DfrSoftRebootReceiver` when
+the arming dialog's soft-reboot box was ticked for that boot. Leaving the old
+text would have made the specialised document deny a feature `AGENTS.md` §3.6.2
+already describes.
 
-That is a deliberate boundary, not an oversight, and the reason is attribution:
+The contract as it actually stands, in three states, because they are three
+different outcomes (3.7) and only the first is the old behaviour:
+
+| opt-in | what happens |
+|---|---|
+| **OFF** (the default; box unticked, or an arm record from a build without the field) | exactly the old boundary. The path ends at `POST_ROOT_COMPLETE`, nothing restarts userspace, and the verdict notification still carries no Apply Modules action. The chain records `EARLY_ROOT_CHAIN_SOFT_REBOOT=…NOT_REQUESTED` and stops. |
+| **ON, and the receiver's gates pass** | the handoff is broadcast and the receiver re-derives every permission it has always re-derived - the same-boot post-root record, the per-boot one-shot lock, the ksud digest, the `transport_fix` marker and the firmware boot-health verdict. Nothing was loosened to make this reachable. |
+| **ON, and the firmware boot-health verdict is not `CONVERGED`** | the receiver refuses, **and the refusal happens in `precheck()`, before `AutoRootStore.claimSoftReboot()`** - so the boot's one-shot attempt is NOT spent. What the current code does not do is come back: there is no retry and no re-evaluation, so the observable outcome is root PASS with modules unapplied, i.e. the manual tap this was meant to remove. That branch is live, untested end to end, and is this section's open item. |
+
+The third row is not hypothetical on this firmware. Convergence requires
+`sys.boot_completed=1`, `dev.bootcomplete=1`, `dev.platform_bootcomplete=1`,
+zygote `running` **and both** `init.svc.bootchecker` and
+`init.svc.bootchecker-bootc` reading `stopped`
+(`SoftRebootHealthPolicy.verdict()`). The chain reaches `POST_ROOT_COMPLETE`
+around 22-28 s, and a `bootchecker`-binary process was observed alive across
+ktime 27000 in one boot - service unidentified, so this does not prove a refusal,
+but it is exactly why the owed read of those two properties is the measurement
+that decides whether the opt-in works at all rather than a detail.
+
+**And the pre-unlock risk is accepted knowingly or not at all.**
+`DfrSoftRebootReceiver` had to be marked `android:directBootAware="true"` for the
+handoff to be delivered, because the chain runs with the user locked and PMS
+resolves only direct-boot-aware components then. That makes the handoff
+*reachable*; it says nothing about ksud re-running `on_post_data_fs` while
+credential-encrypted storage is still locked, which the manual path has never
+exercised.
+
+The historical record below is kept unchanged, because the reason the boundary
+existed has not been explained away - only decided around:
 
 - `POST_SOFT_REBOOT_STABILITY` is a physical **FAIL** twice - a
   `bootchecker_timeout` rollback, and an `lmkd` stall 66 minutes later - and
