@@ -7,7 +7,9 @@
 > not claim or execute the soft reboot. `sys.boot_completed` had been 1 since
 > at least 19.779 s; the other OEM signals at 26 s were not recorded. A change
 > on a separate PR waits up to 120 s for PENDING and records each observed
-> property value in `/data/system/dfreroot-softreboot-wait`. Physical validation
+> property value in `/data/system/dfreroot-softreboot-wait`. The wait holds a
+> bounded partial wake lock and the receiver samples SELinux and the other
+> live authorisation inputs after it. Physical validation
 > of the wait, teardown and post-restart boot health remains outstanding.
 
 **Read `AGENTS.md` first.** This file is the moving implementation handoff:

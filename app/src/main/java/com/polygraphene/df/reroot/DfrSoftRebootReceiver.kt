@@ -3,6 +3,7 @@ package com.polygraphene.df.reroot
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 
@@ -93,10 +94,6 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
         val inputs = SoftRebootPolicy.Inputs()
         inputs.currentBootId = bootId
         inputs.requestBootId = requestBootId
-        inputs.postRootRecord = readPostRoot()
-        inputs.liveSelinux = DfrRootCoordinator.readLiveSelinux()
-        inputs.lockRecord = AutoRootStore.softRebootLock()
-        inputs.pinnedKsudSha256 = KsudStage.pinnedKsudSha256()
         /*
          * Scope first, then measure.
          *
@@ -129,6 +126,12 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
             }
             healthSnapshot = awaitBootHealth(context, bootId, healthSnapshot) ?: return
         }
+        // The automatic wait may last two minutes. Authorisation must describe
+        // the state after it, especially the live SELinux mode and boot lock.
+        inputs.postRootRecord = readPostRoot()
+        inputs.liveSelinux = DfrRootCoordinator.readLiveSelinux()
+        inputs.lockRecord = AutoRootStore.softRebootLock()
+        inputs.pinnedKsudSha256 = KsudStage.pinnedKsudSha256()
         inputs.bootHealthVerdict = if (anchorAsserted) {
             SoftRebootHealthPolicy.verdict(healthSnapshot)
         } else {
@@ -467,47 +470,69 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
     private fun awaitBootHealth(
         context: Context, bootId: String, initial: SoftRebootHealthPolicy.Snapshot
     ): SoftRebootHealthPolicy.Snapshot? {
-        val started = SystemClock.elapsedRealtime()
-        var snapshot = initial
-        var lastDetails: String? = null
-        while (true) {
-            val elapsed = SystemClock.elapsedRealtime() - started
-            val verdict = SoftRebootHealthPolicy.verdict(snapshot)
-            val decision = SoftRebootHealthPolicy.waitDecision(
-                verdict, elapsed, BOOT_HEALTH_WAIT_MS)
-            val phase = if (decision == SoftRebootHealthPolicy.WAIT) "WAITING" else decision
-            val details = SoftRebootHealth.snapshotDetails(snapshot)
-            // Before waiting or dispatching, persist the exact values behind the verdict.
-            // Repeated polls write only when the snapshot changes or the wait ends.
-            if (lastDetails != details || decision != SoftRebootHealthPolicy.WAIT) {
-                val failure = AutoRootStore.writeSoftRebootWait(
-                    SoftRebootHealth.waitRecord(bootId, phase, elapsed, snapshot))
-                if (failure != null) {
-                    Log.e(TAG, "[DFR][SOFT_REBOOT_WAIT] REFUSED trace write: $failure")
+        val wakeLock = try {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DFReroot:softreboot-wait")
+                .apply {
+                    setReferenceCounted(false)
+                    acquire(BOOT_HEALTH_WAIT_MS + WAKELOCK_MARGIN_MS)
+                }
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][SOFT_REBOOT_WAIT] REFUSED no wake lock", t)
+            RootNotifier.notifySoftReboot(context,
+                context.getString(R.string.notif_soft_reboot_refused),
+                "automatic soft reboot could not keep the boot-health wait awake")
+            return null
+        }
+        try {
+            val started = SystemClock.elapsedRealtime()
+            var snapshot = initial
+            var lastDetails: String? = null
+            while (true) {
+                val elapsed = SystemClock.elapsedRealtime() - started
+                val verdict = SoftRebootHealthPolicy.verdict(snapshot)
+                val decision = SoftRebootHealthPolicy.waitDecision(
+                    verdict, elapsed, BOOT_HEALTH_WAIT_MS)
+                val phase = if (decision == SoftRebootHealthPolicy.WAIT) "WAITING" else decision
+                val details = SoftRebootHealth.snapshotDetails(snapshot)
+                // Before waiting or dispatching, persist the exact values behind the verdict.
+                // Repeated polls write only when the snapshot changes or the wait ends.
+                if (lastDetails != details || decision != SoftRebootHealthPolicy.WAIT) {
+                    val failure = AutoRootStore.writeSoftRebootWait(
+                        SoftRebootHealth.waitRecord(bootId, phase, elapsed, snapshot))
+                    if (failure != null) {
+                        Log.e(TAG, "[DFR][SOFT_REBOOT_WAIT] REFUSED trace write: $failure")
+                        RootNotifier.notifySoftReboot(context,
+                            context.getString(R.string.notif_soft_reboot_refused),
+                            "the automatic boot-health record could not be written ($failure)")
+                        return null
+                    }
+                    lastDetails = details
+                }
+                if (decision == SoftRebootHealthPolicy.ALLOW) {
+                    Log.i(TAG, "[DFR][SOFT_REBOOT_WAIT] READY after ${elapsed}ms " + details)
+                    return snapshot
+                }
+                if (decision != SoftRebootHealthPolicy.WAIT) {
+                    Log.i(TAG, "[DFR][SOFT_REBOOT_WAIT] $decision after ${elapsed}ms " + details)
                     RootNotifier.notifySoftReboot(context,
                         context.getString(R.string.notif_soft_reboot_refused),
-                        "the automatic boot-health record could not be written ($failure)")
+                        "automatic soft reboot stopped: $decision ($verdict); root is unaffected")
                     return null
                 }
-                lastDetails = details
+                Thread.sleep(BOOT_HEALTH_POLL_MS)
+                if (DfrRootCoordinator.readBootId() != bootId) {
+                    Log.e(TAG, "[DFR][SOFT_REBOOT_WAIT] REFUSED boot_id changed")
+                    return null
+                }
+                snapshot = SoftRebootHealth.snapshot()
             }
-            if (decision == SoftRebootHealthPolicy.ALLOW) {
-                Log.i(TAG, "[DFR][SOFT_REBOOT_WAIT] READY after ${elapsed}ms " + details)
-                return snapshot
+        } finally {
+            try {
+                wakeLock.release()
+            } catch (t: Throwable) {
+                Log.e(TAG, "[DFR][SOFT_REBOOT_WAIT] wake lock release failed", t)
             }
-            if (decision != SoftRebootHealthPolicy.WAIT) {
-                Log.i(TAG, "[DFR][SOFT_REBOOT_WAIT] $decision after ${elapsed}ms " + details)
-                RootNotifier.notifySoftReboot(context,
-                    context.getString(R.string.notif_soft_reboot_refused),
-                    "automatic soft reboot stopped: $decision ($verdict); root is unaffected")
-                return null
-            }
-            Thread.sleep(BOOT_HEALTH_POLL_MS)
-            if (DfrRootCoordinator.readBootId() != bootId) {
-                Log.e(TAG, "[DFR][SOFT_REBOOT_WAIT] REFUSED boot_id changed")
-                return null
-            }
-            snapshot = SoftRebootHealth.snapshot()
         }
     }
 
@@ -585,6 +610,7 @@ class DfrSoftRebootReceiver : BroadcastReceiver() {
             "com.polygraphene.df.reroot.extra.WAIT_FOR_BOOT_HEALTH"
         const val BOOT_HEALTH_WAIT_MS = 120_000L
         const val BOOT_HEALTH_POLL_MS = 1_000L
+        const val WAKELOCK_MARGIN_MS = 15_000L
 
         /** KernelSU's own daemon path, offered as a candidate but never trusted. */
         const val ADB_KSUD = "/data/adb/ksud"

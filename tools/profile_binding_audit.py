@@ -1907,6 +1907,21 @@ def audit():
             or "AutoRootStore.writeSoftRebootWait(" not in soft_receiver_code:
         fail("automatic soft-reboot wait lost its scope, bounded decision, "
              "boot identity check, or durable observation")
+    wait_at = soft_receiver_code.find(
+        "healthSnapshot = awaitBootHealth(context, bootId, healthSnapshot)")
+    for live_read in ("inputs.postRootRecord = readPostRoot()",
+                      "inputs.liveSelinux = DfrRootCoordinator.readLiveSelinux()",
+                      "inputs.lockRecord = AutoRootStore.softRebootLock()"):
+        if soft_receiver_code.find(live_read) < wait_at:
+            fail("automatic soft-reboot precheck uses %s sampled before the "
+                 "two-minute wait" % live_read)
+    if "PowerManager.PARTIAL_WAKE_LOCK" not in soft_receiver_code \
+            or "acquire(BOOT_HEALTH_WAIT_MS + WAKELOCK_MARGIN_MS)" \
+            not in soft_receiver_code \
+            or not re.search(r"finally\s*\{\s*try\s*\{\s*wakeLock\.release\(\)",
+                             soft_receiver_code):
+        fail("automatic boot-health wait lost its bounded partial wake lock "
+             "or guaranteed release")
     if "SoftRebootHealth.recordPreExec(bootId, healthSnapshot)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer writes the pre-teardown boot-health "
              "half; the process that could report the outcome is the one `stop` "

@@ -557,9 +557,11 @@ soft-reboot box was ticked for that boot. Three things about it are the point:
 `BOOT_HEALTH_PENDING`. `sys.boot_completed` was already 1 by 19.8 s; the exact
 remaining OEM signal was not captured. The owner authorised waiting for the
 firmware handshake after that immediate handoff. The receiver now waits up to
-120 s on PENDING only, persists the property snapshot, and refuses UNKNOWN,
-crash recovery, a changed boot id or timeout. Its final gate still re-reads
-health immediately before exec. Manual actions retain their immediate check.
+120 s on PENDING only, holds a bounded partial wake lock, persists the property
+snapshot, and refuses UNKNOWN, crash recovery, a changed boot id or timeout.
+The receiver re-reads the post-root record, SELinux and one-shot lock after the
+wait; its final gate still re-reads health immediately before exec. Manual
+actions retain their immediate check.
 
 - **It removes no gate.** The handoff is the same intent the notification action
   sends, to the same receiver, which re-derives the post-root record, the
