@@ -578,6 +578,33 @@ public class SoftRebootHealthPolicyTest {
                         && !SoftRebootHealthPolicy.permitsDispatch(null)
                         && !SoftRebootHealthPolicy.permitsDispatch("BOOT_HEALTH_FINE"), null);
 
+        check("automatic wait permits only a converged boot",
+                SoftRebootHealthPolicy.ALLOW.equals(SoftRebootHealthPolicy.waitDecision(
+                        SoftRebootHealthPolicy.CONVERGED, 0, 120_000))
+                        && SoftRebootHealthPolicy.ALLOW.equals(
+                                SoftRebootHealthPolicy.waitDecision(
+                                        SoftRebootHealthPolicy.NOT_APPLICABLE, 0, 120_000)), null);
+        check("pending waits within a finite window then expires",
+                SoftRebootHealthPolicy.WAIT.equals(SoftRebootHealthPolicy.waitDecision(
+                        SoftRebootHealthPolicy.PENDING, 119_999, 120_000))
+                        && SoftRebootHealthPolicy.TIMED_OUT.equals(
+                                SoftRebootHealthPolicy.waitDecision(
+                                        SoftRebootHealthPolicy.PENDING, 120_000, 120_000)), null);
+        check("unknown and crash recovery never wait or dispatch",
+                SoftRebootHealthPolicy.REFUSE.equals(SoftRebootHealthPolicy.waitDecision(
+                        SoftRebootHealthPolicy.HEALTH_UNKNOWN, 0, 120_000))
+                        && SoftRebootHealthPolicy.REFUSE.equals(
+                                SoftRebootHealthPolicy.waitDecision(
+                                        SoftRebootHealthPolicy.CRASH_RECOVERY, 0, 120_000))
+                        && SoftRebootHealthPolicy.REFUSE.equals(
+                                SoftRebootHealthPolicy.waitDecision(null, 0, 120_000))
+                        && SoftRebootHealthPolicy.REFUSE.equals(
+                                SoftRebootHealthPolicy.waitDecision(
+                                        SoftRebootHealthPolicy.PENDING, -1, 120_000))
+                        && SoftRebootHealthPolicy.REFUSE.equals(
+                                SoftRebootHealthPolicy.waitDecision(
+                                        SoftRebootHealthPolicy.PENDING, 0, 0)), null);
+
         System.out.println("");
         System.out.println("SoftRebootHealthPolicyTest: " + pass + "/" + (pass + fail)
                 + " passed");

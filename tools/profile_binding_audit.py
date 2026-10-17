@@ -1890,9 +1890,23 @@ def audit():
         fail("the boundary boot-health re-read is not between the pre-teardown "
              "record and the exec; the decision snapshot must stay in the record "
              "and the fresh reading must gate the call")
-    if soft_receiver_code.count("SoftRebootHealth.snapshot()") != 1:
-        fail("DfrSoftRebootReceiver takes more than one boot-health reading; the "
-             "gated state and the recorded state would be different states")
+    # Automatic polls precede the decision. The final snapshot is used for both
+    # the dispatch gate and pre-exec record; the boundary re-read stays separate.
+    if soft_receiver_code.count("SoftRebootHealth.snapshot()") != 2 \
+            or "healthSnapshot = awaitBootHealth(context, bootId, healthSnapshot)" \
+            not in soft_receiver_code \
+            or "snapshot = SoftRebootHealth.snapshot()" not in soft_receiver_code:
+        fail("DfrSoftRebootReceiver no longer uses the final automatic-wait "
+             "snapshot for both the dispatch gate and pre-exec record")
+    if "if (waitForHealth && anchorAsserted" not in soft_receiver_code \
+            or "intent.getBooleanExtra(EXTRA_WAIT_FOR_BOOT_HEALTH, false)" \
+            not in soft_receiver_code \
+            or "SoftRebootHealthPolicy.waitDecision(" not in soft_receiver_code \
+            or "BOOT_HEALTH_WAIT_MS" not in soft_receiver_code \
+            or "DfrRootCoordinator.readBootId() != bootId" not in soft_receiver_code \
+            or "AutoRootStore.writeSoftRebootWait(" not in soft_receiver_code:
+        fail("automatic soft-reboot wait lost its scope, bounded decision, "
+             "boot identity check, or durable observation")
     if "SoftRebootHealth.recordPreExec(bootId, healthSnapshot)" not in soft_receiver_code:
         fail("DfrSoftRebootReceiver no longer writes the pre-teardown boot-health "
              "half; the process that could report the outcome is the one `stop` "
@@ -3038,6 +3052,9 @@ def audit():
         fail("the early chain no longer hands the soft reboot to "
              "DfrSoftRebootReceiver.ACTION_APPLY_MODULES; a second path into "
              "the teardown is a second place a gate can be forgotten (3.2)")
+    if ".putExtra(DfrSoftRebootReceiver.EXTRA_WAIT_FOR_BOOT_HEALTH, true)" \
+            not in service_src:
+        fail("the early chain no longer requests the bounded OEM-health wait")
     for banned in ("SoftRebootPolicy.evaluate", "RootTransport.prepare",
                    "SoftRebootHealth.recordPreExec"):
         if banned in service_src:

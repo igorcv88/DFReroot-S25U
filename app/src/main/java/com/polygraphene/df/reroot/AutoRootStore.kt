@@ -331,6 +331,11 @@ object AutoRootStore {
      */
     const val SOFT_REBOOT_HEALTH_PATH = "/data/system/dfreroot-softreboot-health"
 
+    /** The automatic wait's last observed properties, including a refusal. */
+    const val SOFT_REBOOT_WAIT_PATH = "/data/system/dfreroot-softreboot-wait"
+
+    fun writeSoftRebootWait(body: String): String? = write(SOFT_REBOOT_WAIT_PATH, body)
+
     fun softRebootHealth(): String? = read(SOFT_REBOOT_HEALTH_PATH)
 
     /**

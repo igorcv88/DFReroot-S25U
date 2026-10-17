@@ -1,5 +1,15 @@
 # DFReroot S25U / ZZIC — handoff
 
+> **2026-10-17 early-root/soft-reboot observation:** Boot
+> `3cea067e-2772-466b-a476-18cd482a5905` reached `POST_ROOT_COMPLETE` at
+> 26.062 s, SELinux Enforcing at 26.063 s and handed off to the soft-reboot
+> receiver at 26.083 s. The receiver reported `BOOT_HEALTH_PENDING` and did
+> not claim or execute the soft reboot. `sys.boot_completed` had been 1 since
+> at least 19.779 s; the other OEM signals at 26 s were not recorded. A change
+> on a separate PR waits up to 120 s for PENDING and records each observed
+> property value in `/data/system/dfreroot-softreboot-wait`. Physical validation
+> of the wait, teardown and post-restart boot health remains outstanding.
+
 **Read `AGENTS.md` first.** This file is the moving implementation handoff:
 what is physically proven now, what still needs to be implemented, and the
 acceptance criteria for the next signed build. If this file disagrees with
