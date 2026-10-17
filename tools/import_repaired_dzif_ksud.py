@@ -25,14 +25,14 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_REPO = "igorcv88/RMGLabs-Payloads"
-SOURCE_COMMIT = "bbd765b048cf26d91c05788d8bf08b85f1ccaff1"
+SOURCE_COMMIT = "1744867bcbce530ac6f84d5e91ce88b2345dc3b1"
 NAME = "ksud-pa3q-S938BXXUCDZIF-dfreroot-v3.3.0"
 ASSET = ROOT / "app/src/main/assets/ksud-dzif"
-EXPECTED_SHA256 = "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee"
-EXPECTED_BYTES = 6670840
+EXPECTED_SHA256 = "a885a4d7643d9c282c1f8f2d89837f00163bf13b9674a90992efc6608a7168f7"
+EXPECTED_BYTES = 6677576
 EXPECTED_KSU_COMMIT = "932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e"
-EXPECTED_MODULE_SHA256 = "dd193d36d13caea129572e9ffdeedfeebdadb860fcb7d8d7a72b1e3e58301220"
-EXPECTED_BUILD_ID = "cc25bef1fe27d0567035cf578e2325ac065cf0e5"
+EXPECTED_MODULE_SHA256 = "54f3ac938683227ff35f9c27b7316f8948d65df8f8174e860c6d24d76105f5ec"
+EXPECTED_BUILD_ID = "aac86c92710e0f92b39c8a6ea777143908764174"
 
 
 def gh_get(repo_path: str, output: Path) -> None:
@@ -72,6 +72,9 @@ def main() -> int:
     parser.add_argument("--from-file", type=Path, metavar="KSUD",
                         help="use a locally supplied daemon instead of downloading it")
     args = parser.parse_args()
+    if args.from_file is None:
+        print("REFUSED: review pair is a CI artifact; supply --from-file", file=sys.stderr)
+        return 1
     try:
         assert_pins()
         ASSET.parent.mkdir(parents=True, exist_ok=True)
@@ -117,8 +120,8 @@ def main() -> int:
                     "ksud_sha256": EXPECTED_SHA256,
                     "module_sha256": EXPECTED_MODULE_SHA256,
                     "module_build_id": EXPECTED_BUILD_ID,
-                    "module_size": "3618008",
-                    "source_commit": "aa7cd863ed5a4c75303b929976d8f6a063e02b1c",
+                    "module_size": "3629608",
+                    "source_commit": "1744867bcbce530ac6f84d5e91ce88b2345dc3b1",
                 }
                 for field, expected in required.items():
                     if fields.get(field) != expected:

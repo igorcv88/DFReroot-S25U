@@ -35,8 +35,8 @@ object KsudStage {
                 "S938BXXUCDZIF_OXMCDZIF:user/release-keys",
         assetName = "ksud-dzif",
         sha256 =
-            "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee",
-        size = 6670840L,
+            "a885a4d7643d9c282c1f8f2d89837f00163bf13b9674a90992efc6608a7168f7",
+        size = 6677576L,
     )
 
     private fun currentSpec(): KsudSpec? = when (Build.FINGERPRINT) {

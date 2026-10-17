@@ -1,0 +1,88 @@
+name: DZIF DEFEX signed APK review (no release)
+on:
+  push:
+    branches: ['review/dzif-generic-defex-20261017']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platforms;android-36
+            build-tools;36.0.0
+            cmake;3.22.1
+      - name: Install pinned NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver=27.0.12077973
+          ndk="$ANDROID_SDK_ROOT/ndk/$ver"
+          sdkmanager --install "ndk;$ver"
+          test -f "$ndk/source.properties"
+          test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          echo "ANDROID_NDK=$ndk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+      - name: Offline audits and regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh tools/tests/run_tests.sh
+          sh tools/tests/run_installer_tests.sh
+          python3 tools/profile_binding_audit.py
+          python3 tools/dzif_profile_binding_audit.py
+          python3 -m compileall -q tools
+          git diff --check
+      - name: Decode existing signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          chmod 600 "$RUNNER_TEMP/release.jks"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+      - name: Build both APKs signed, without release
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export DFR_VERSION_CODE="$(cat .github/dzif-defex-apk-review-version.txt)"
+          export DFR_VERSION_NAME=0.0.0-defex-review
+          ./build.sh
+          ./tools/ci_build_audit.sh
+          apksigner="$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
+          aapt2="$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt2"
+          mkdir -p review-out
+          for apk in df_reroot.apk df_installer.apk; do
+            "$apksigner" verify --print-certs "$apk"
+            "$aapt2" dump badging "$apk" | grep -m1 '^package:'
+            cp "$apk" review-out/
+          done
+          a="$("$apksigner" verify --print-certs df_reroot.apk | grep -i 'SHA-256 digest' | head -1)"
+          b="$("$apksigner" verify --print-certs df_installer.apk | grep -i 'SHA-256 digest' | head -1)"
+          test -n "$a" && test "$a" = "$b"
+          printf 'commit=%s\ncode=%s\n' "$GITHUB_SHA" "$DFR_VERSION_CODE" > review-out/BUILD.txt
+          printf '%s\n' "$a" > review-out/SIGNER.txt
+          (cd review-out && sha256sum df_reroot.apk df_installer.apk > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dfr-dzif-defex-apk-${{ github.sha }}
+          path: review-out/
+          retention-days: 14
+          if-no-files-found: error
