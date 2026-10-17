@@ -184,6 +184,25 @@ object SoftRebootHealth {
     /** The live verdict, for the re-read taken at the dispatch boundary. */
     fun liveVerdict(): String = SoftRebootHealthPolicy.verdict(snapshot())
 
+    fun snapshotDetails(s: SoftRebootHealthPolicy.Snapshot): String =
+        SoftRebootHealthPolicy.allProperties().joinToString(" ") { "$it=${s.get(it)}" }
+
+    /** Durable evidence for the automatic handoff, before any teardown claim. */
+    fun waitRecord(bootId: String, phase: String, elapsedMs: Long,
+                   s: SoftRebootHealthPolicy.Snapshot): String = buildString {
+        append("schema_version=1\nboot_id=").append(bootId)
+        append("\nphase=").append(phase)
+        append("\nelapsed_ms=").append(elapsedMs)
+        append("\nverdict=").append(SoftRebootHealthPolicy.verdict(s))
+        append("\nread_start_ms=").append(s.readStartMs)
+        append("\nread_end_ms=").append(s.readEndMs)
+        for (property in SoftRebootHealthPolicy.allProperties()) {
+            append('\n').append(property).append('=')
+                .append(s.get(property).replace('\n', ' ').replace('\r', ' '))
+        }
+        append('\n')
+    }
+
     private fun monotonic(): Long = try {
         SystemClock.elapsedRealtime()
     } catch (t: Throwable) {
