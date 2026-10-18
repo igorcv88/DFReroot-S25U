@@ -129,9 +129,11 @@ object DfrEarlyRoot {
                 AutoRootStore.deviceFingerprint(), KsudStage.pinnedKsudSha256())) {
             return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.ARTEFACT_NOT_AUTHORIZED}" +
                 " - the early window is not authorized for this firmware" +
-                " and daemon/module pair. The first physical early load of it" +
-                " ended in a kernel panic inside kernelsu.ko (list_del" +
-                " corruption in its manager discovery); see docs/EARLY_ROOT.md." +
+                " and daemon/module pair (ksud=${KsudStage.pinnedKsudSha256()})." +
+                " Only pairs the owner explicitly authorized may be loaded" +
+                " early, because the first early load of an earlier DZIF pair" +
+                " panicked inside kernelsu.ko; a new daemon is a new pair, not" +
+                " a pair known to panic. See docs/EARLY_ROOT.md." +
                 " The manual run and Auto Root after a full boot are unaffected."
         }
         /*

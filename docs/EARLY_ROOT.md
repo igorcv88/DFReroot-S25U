@@ -784,6 +784,21 @@ it does not establish early-load safety. The prior unattributed panic boot
 in source after the kernel log investigation. Its incident record remains on
 disk. Any new incident, unreadable record or different daemon still refuses.
 
+**Owner decision, 2026-10-18:** the owner authorized one early attempt for
+the same DZIF fingerprint and the DEFEX v2 daemon SHA-256
+`89eb37bd8a3b9c5e9f7e7391ccacf634bf6391cf3c8f6a305a7e7eb54e8a4a9e`
+(embedded `kernelsu.ko` `ca08bc0adf102b4da920aac714a30a99043ae00eefa473128e32932a8e056f03`,
+build ID `3a682471778910778f2c4c718fd90b56a4d7ab13`, policy chain including
+`throne-tracker-serialise`; see `docs/DZIF_GENERIC_DEFEX_REVIEW.md`). Unlike the
+2026-10-13 entry, this authorization was given **before** a manual full-boot
+`POST_ROOT_COMPLETE` of this pair on hardware, by the owner's explicit choice.
+It is permission to attempt, not evidence: the first armed boot is the first
+physical run of this daemon in the early window, and no dossier row is
+promoted by the decision itself. The previous `3861dbd4…` entry is retained.
+The arming refusal text no longer says that any unlisted pair "ended in a
+kernel panic": that was true only of `f680f959…`, and it misreported every new
+daemon as the one that panicked.
+
 ### What three boots are for
 
 They are not what authorizes the attempt; they are what **promotes the
