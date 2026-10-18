@@ -2475,6 +2475,55 @@ That redesign is not implemented here. It needs the KernelSU v3.3.0 UAPI at
 is read first-hand, `SOFT_REBOOT_TRANSPORT` stays `BLOCKED` and no code here
 claims otherwise.
 
+### Two releases shipped the early window shut, and said nothing — 2026-10-18
+
+The owner hit `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED` at arming time and the
+message named neither half of the pair. The device is on the pinned DZIF
+firmware (`ro.build.fingerprint` read directly), so the firmware half was never
+the problem. The daemon half was, and the release history shows it exactly:
+
+| tag | tagged | bundled DZIF daemon | allowlist contained | early window |
+|---|---|---|---|---|
+| `v2.0.35-dzif` | 10-16 09:16 | `3861dbd4…` | `3861dbd4…` | open |
+| `v2.0.36-dzif` | 10-17 20:47 | `a885a4d7…` | `3861dbd4…` | **shut, silently** |
+| `v2.0.37-dzif` | 10-18 05:08 | `89eb37bd…` | `3861dbd4…` | **shut, silently** |
+| `v2.0.38-dzif` | 10-18 06:28 | `89eb37bd…` | `3861dbd4…`, `89eb37bd…` | open |
+
+The device was running `v2.0.38-dzif` (`versionCode=20038`) when this was
+diagnosed, so the current build arms; the refusal came from one of the two
+before it.
+
+**The gate was correct every time.** A newly bundled daemon is a new pair, and
+AGENTS.md 3.11 says plainly that an unlisted pair is one the owner has not
+authorized — absence is never permission. Nothing here is an argument for
+loosening that.
+
+**What failed is the release telling anyone.** `tools/release_notes.py` had no
+Early Integrated Root section at all, so two releases advertised a feature that
+could not run on them and an operator had to spend an arming to find out.
+AGENTS.md 6.3 requires those notes to "state every gate and say plainly when and
+why the build will refuse", and for this gate they did not.
+
+Closed by generating it rather than writing it: the audit parses the compiled
+allowlist and the staged digests per profile into
+`checks.early_load`, and the notes print one row per profile saying whether the
+window is open or will refuse. Four properties are guarded, each
+mutation-verified:
+
+- the notes carry the section, name each bundled daemon, and state the matching
+  verdict — checked by **running the generator and comparing its output**, not
+  by looking for a literal, because a text guard for a hardcoded `True` is
+  defeated by writing the literal somewhere else (that mutation passed the first
+  version of the check);
+- every 64-hex digest literal inside `EARLY_LOAD_AUTHORIZED_ARTEFACTS` is
+  accounted for by a parsed pair, and likewise for `KsudStage`. Counting call
+  sites instead is derived from the same text as the parse, so renaming an entry
+  moves both and one authorized pair goes invisible — also verified by mutation;
+- exactly one row of that section may name a given digest, because the same
+  abbreviation appears in the DZIF boundary table above and a window taken from
+  the first occurrence read the wrong row;
+- the generator must not assert the state, and must exit zero.
+
 ### The effective DZIF policy, read from the policy image — 2026-10-18
 
 The two `UNVERIFIED` rows above are now answered, and a third question nobody had
