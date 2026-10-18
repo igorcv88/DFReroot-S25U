@@ -1,0 +1,66 @@
+# Post-flash transport review — 2026-10-18
+
+Baseline: `3b70be723ed13874b19726a0485028f7ee99fb7d`.
+
+PR #83 merged at a9ed5f7; #84 merged at 3b70be7. PR #85 is still open at
+daee27d and explicitly does not implement a transport fix. Its review finding
+about flattened boot-health outcomes has a correction on that branch, not in
+this main. Do not claim it has landed by reading its documentation.
+
+## Current transport boundary
+
+RootTransport.prepare stages and hashes the pinned daemon, then calls
+System.loadLibrary("dfrsu"). The DFR application runs in system_server.
+StageHop already documents why libexp must instead load in network_stack.
+Thus library packaging/discoverability and successful executable mapping are
+different gates. A readable file or a changed SELinux label proves neither.
+
+The native transport's host tests start after library loading and fake the
+privileged KernelSU calls. Their PASS does not reproduce the Samsung linker
+policy and cannot prove that the application reaches nativeRunRootShell.
+Without the post-flash policy/AVCs and a physical library-load test, no safe
+transport correction is claimed. No permissive policy, app-data relabeling,
+system UID grant, native-helper execution from /data, or execution override
+was added in this change.
+
+Manual root and POST_ROOT_COMPLETE can still be tested separately from Apply
+Modules: the latter depends on this transport. Do not replay the exploit to
+recover a post-root library refusal, and do not treat the root refusal of an
+unrecognized OWO fingerprint as a bootstrap defect.
+
+## Host changes and evidence
+
+The descriptor regression used /proc/$$/fd. In the validation environment $$
+named a PID absent from that procfs, so the positive controls failed. Inspecting
+/proc/self/fd in the executed process fixes the observation. The descriptor
+quarantine, grant gate, driver-fd exception and descriptor-range mutation tests
+still kill all four mutations. Device execution and SELinux behavior are
+unchanged.
+
+A synthetic fingerprint changing only OXM to OWO, while preserving the DZIF
+AP/kernel fields, is refused by the native target classifier. This is a
+negative fixture, not a prediction of the real OWO fingerprint. The current
+profile remains the historical OXM profile pending physical evidence.
+
+The Payloads ko-loaded reader writes ko_sha256 but previously ignored it when
+reading. The proposed strict parser requires this daemon's embedded module
+digest and rejects duplicate/unknown fields. No new daemon hash is pinned in
+this DFR change, and the Early Root authorization list is untouched.
+
+## Physical sequence and recovery
+
+1. Collect checkpoint A before root: real fingerprint, CSC, kernel, vendor,
+   vbmeta, boot ID, Play Protect, separate integrity verdicts and Key Attestation.
+2. Review a new exact profile and artifact pair against that capture. Until
+   then, OWO execution remains refused. An APK build alone is not permission.
+3. Run one approved manual root attempt, then verify same-boot post-root status
+   and live SELinux Enforcing. Record the daemon and loaded module identities.
+4. Apply modules only after the library mapping and root transport are physically
+   proven. A refusal leaves this stage unvalidated; it does not justify another
+   exploit attempt.
+5. Use a full reboot to clear kernel/mount state after a partial module mount.
+   A framework/soft restart retains the kernel boot ID and is not a reset of
+   the exploit budget. Do not arm Early Root until its exact pair is authorized.
+
+No fastboot unlock, patched boot flash or AVB/verity disabling is part of this
+procedure. Automatic device recovery is not implemented by these host changes.

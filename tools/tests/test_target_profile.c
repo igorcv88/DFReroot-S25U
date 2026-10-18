@@ -106,6 +106,15 @@ static void test_target_detection(void) {
           "DZIF class resolves to the DZIF profile");
     CHECK(dfr_target_is_exact(c), "DZIF class is an exact target");
 
+    /* Synthetic regional suffix, NOT a claim about the post-flash device.
+     * Equal AP/kernel cannot enroll an unobserved OWO firmware. */
+    o = dzif_observed();
+    o.fingerprint = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
+                    "S938BXXUCDZIF_OWOCDZIF:user/release-keys";
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_MISMATCH && !m.all_ok,
+          "unobserved OWO suffix with identical DZIF kernel -> MISMATCH");
+
     /* Cross-firmware mixtures must fail closed even though model/codename match. */
     o = dzif_observed();
     o.fingerprint = DFR_PROFILE_ZZIC.fingerprint;
