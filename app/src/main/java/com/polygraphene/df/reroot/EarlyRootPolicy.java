@@ -653,23 +653,6 @@ public final class EarlyRootPolicy {
      */
     public static final String STEP_CHAIN_SOFT_REBOOT = "EARLY_ROOT_CHAIN_SOFT_REBOOT";
     /**
-     * The one deferred re-dispatch of a soft reboot the chain already asked for
-     * in this boot.
-     *
-     * Its own step, never a second {@link #STEP_CHAIN_SOFT_REBOOT} line, for
-     * two reasons that are both 3.7. A reader has to be able to tell the
-     * handoff the chain made at post-root from the one taken afterwards,
-     * because those two moments are different firmware states and send the
-     * next investigation to different places. And this step IS the one-shot:
-     * {@link #chainSoftRebootRetry} refuses when this boot's trace already
-     * carries it, so collapsing it into the step it follows would make the
-     * retry re-authorise itself on every BOOT_COMPLETED of the boot - and
-     * BOOT_COMPLETED is re-delivered under the same boot_id by every framework
-     * restart, including the one a successful soft reboot performs.
-     */
-    public static final String STEP_CHAIN_SOFT_REBOOT_RETRY =
-            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY";
-    /**
      * {@code BOOT_COMPLETED} observed in the same boot, by the one component the
      * early path never touches.
      *
@@ -713,7 +696,7 @@ public final class EarlyRootPolicy {
             STEP_BEFORE_NATIVE, STEP_NATIVE_RETURNED, STEP_NATIVE_PROFILE,
             STEP_POST_ROOT_COMPLETE,
             STEP_SELINUX_ENFORCING, STEP_FAILED, STEP_REFUSED,
-            STEP_CHAIN_SOFT_REBOOT, STEP_CHAIN_SOFT_REBOOT_RETRY,
+            STEP_CHAIN_SOFT_REBOOT,
             STEP_LOCKED_BOOT_OBSERVED, STEP_BOOT_COMPLETED_OBSERVED);
 
     /**
@@ -1062,7 +1045,16 @@ public final class EarlyRootPolicy {
     private static final Set<String> EARLY_LOAD_AUTHORIZED_ARTEFACTS = Set.of(
             artefactKey(
                     "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OXMCDZIF:user/release-keys",
-                    "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee"));
+                    "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee"),
+            // Owner decision 2026-10-18: DEFEX v2 daemon (embedded kernelsu.ko
+            // ca08bc0a..., build-id 3a682471...), authorized for an early
+            // attempt BEFORE any manual full-boot PASS of this pair. It keeps
+            // the throne-tracker serialisation that repaired the 2026-10-12
+            // panic, which is a source fact, not early-load evidence.
+            // docs/EARLY_ROOT.md records the decision.
+            artefactKey(
+                    "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OXMCDZIF:user/release-keys",
+                    "89eb37bd8a3b9c5e9f7e7391ccacf634bf6391cf3c8f6a305a7e7eb54e8a4a9e"));
 
     private EarlyRootPolicy() {}
 
@@ -1088,15 +1080,13 @@ public final class EarlyRootPolicy {
      * Does the allowlist name this FIRMWARE at all, under any daemon digest?
      *
      * Added because the arming refusal was unreadable in the one situation it
-     * exists for. On 2026-10-18 the owner hit
-     * {@link #ARTEFACT_NOT_AUTHORIZED} at arming time and the message named
-     * neither half of the pair, so the only thing it communicated was that
-     * something was not authorized. Those two halves have DIFFERENT next steps
-     * (3.7): a firmware absent from the list is "this build of this device has
-     * never been authorized for the early window", while a listed firmware with
-     * an unlisted digest is "the daemon/module bytes changed since the owner
-     * authorized this pair" - one is a decision to take, the other is an
-     * artefact to rebuild or re-authorize.
+     * exists for. On 2026-10-18 the owner hit {@link #ARTEFACT_NOT_AUTHORIZED}
+     * at arming time and could not tell which half of the pair was unlisted.
+     * Those two halves have DIFFERENT next steps (3.7): a firmware absent from
+     * the list has never been authorized for the early window at all, while a
+     * listed firmware with an unlisted digest means the daemon/module bytes
+     * changed since the owner authorized that pair - which is exactly what had
+     * happened, the DZIF DEFEX v2 daemon being a new pair.
      *
      * It answers only about the firmware half and therefore cannot authorise
      * anything: {@link #earlyLoadAuthorized} remains the only gate, and it
@@ -2039,184 +2029,6 @@ public final class EarlyRootPolicy {
         if (!cycle.claimed()) return CHAIN_SOFT_REBOOT_CYCLE_UNCLAIMED;
         if (!arm.softReboot) return CHAIN_SOFT_REBOOT_NOT_REQUESTED;
         return CHAIN_SOFT_REBOOT_DISPATCH;
-    }
-
-    /** The deferred handoff is authorised and has not been taken: dispatch. */
-    public static final String CHAIN_SOFT_REBOOT_RETRY_DISPATCH =
-            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_DISPATCH";
-    /**
-     * The trace exists but could not be read.
-     *
-     * Never a pass, and specifically never "then treat it as no request": an
-     * unreadable trace is also an unreadable one-shot, so proceeding on it
-     * would be a re-dispatch with no bound on how many times it can happen.
-     */
-    public static final String CHAIN_SOFT_REBOOT_RETRY_TRACE_UNREADABLE =
-            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_TRACE_UNREADABLE";
-    /**
-     * This boot's trace carries no authorised handoff for the retry to follow.
-     *
-     * The ordinary outcome on every boot that did not run the early chain, and
-     * on every boot where the chain refused the handoff itself. It is not a
-     * failure, and it is the value that keeps BOOT_COMPLETED from inventing a
-     * teardown nobody asked for.
-     */
-    public static final String CHAIN_SOFT_REBOOT_RETRY_NOT_REQUESTED =
-            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_NOT_REQUESTED";
-    /** The authorisation the chain had has since stopped holding. */
-    public static final String CHAIN_SOFT_REBOOT_RETRY_UNAUTHORIZED =
-            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_UNAUTHORIZED";
-    /** The per-boot soft-reboot lock exists but could not be read. */
-    public static final String CHAIN_SOFT_REBOOT_RETRY_LOCK_UNREADABLE =
-            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_LOCK_UNREADABLE";
-    /**
-     * The teardown already took this boot's one attempt.
-     *
-     * This is the value that separates "the receiver refused before claiming"
-     * from "the receiver proceeded", and the whole retry rests on that
-     * distinction being readable from disk: {@code DfrSoftRebootReceiver} runs
-     * {@code SoftRebootPolicy.precheck} - boot-health included - and returns
-     * BEFORE {@code AutoRootStore.claimSoftReboot}, so a boot-health refusal
-     * leaves no lock while a dispatched teardown leaves one naming this boot.
-     */
-    public static final String CHAIN_SOFT_REBOOT_RETRY_ALREADY_CLAIMED =
-            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_ALREADY_CLAIMED";
-    /**
-     * The boot could not be named, so no record can be placed in it.
-     *
-     * Its own value rather than {@link #CHAIN_SOFT_REBOOT_RETRY_NOT_REQUESTED}:
-     * "this boot asked for nothing" and "this build cannot tell which boot it
-     * is in" are different faults and send a reader to different places (3.7).
-     */
-    public static final String CHAIN_SOFT_REBOOT_RETRY_NO_BOOT_ID =
-            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_NO_BOOT_ID";
-    /** The one deferred attempt of this boot is spent. */
-    public static final String CHAIN_SOFT_REBOOT_RETRY_ALREADY_RETRIED =
-            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_ALREADY_RETRIED";
-
-    /**
-     * May a later moment in THIS boot re-dispatch the soft reboot the early
-     * chain already authorised?
-     *
-     * <h2>The defect this closes</h2>
-     *
-     * The owner reported it on PR #81 and it is real. The chain hands off the
-     * moment post-root finishes - by their decision, at whatever moment that
-     * falls - and the receiver then re-derives the firmware's boot-health
-     * handshake, which requires {@code sys.boot_completed},
-     * {@code dev.bootcomplete}, {@code dev.platform_bootcomplete}, a running
-     * zygote AND both {@code init.svc.bootchecker} and
-     * {@code init.svc.bootchecker-bootc} reading {@code stopped}. The chain
-     * finishes in the low tens of seconds, and a {@code bootchecker} process of
-     * this firmware was measured still alive across ktime 27 s. So
-     * {@code BOOT_HEALTH_PENDING} at the handoff is the likely case, not an
-     * edge one - and the outcome was root PASS with the modules never applied,
-     * with nothing that would ever try again.
-     *
-     * <h2>What this does NOT do</h2>
-     *
-     * It does not touch the boot-health gate. That gate came out of two
-     * physical {@code bootchecker_timeout} rollbacks and 3.6 reserves removing
-     * it for the owner. The retry's whole job is to ask the SAME receiver, with
-     * the same gates, at a moment when the firmware may have converged.
-     *
-     * It also authorises nothing new. Permission still comes from the arm and
-     * cycle records through {@link #chainSoftReboot}, which can only REMOVE it;
-     * this adds three refusals on top of that one.
-     *
-     * <h2>Why the authority is the trace and not a new record</h2>
-     *
-     * A deferred handoff needs to survive to a later moment in the boot, and
-     * the per-boot trace already is that: appended durably, fsync'd, bound to
-     * {@code boot_id}, and already carrying the chain's own handoff verdict.
-     * Adding a second file for the same fact would be a second place the state
-     * can disagree, and the only question it answers - "did this boot's chain
-     * authorise a handoff that was not taken" - is answered by two lines of the
-     * trace and the lock. So: {@link #STEP_CHAIN_SOFT_REBOOT} with
-     * {@link #CHAIN_SOFT_REBOOT_DISPATCH} is the request,
-     * {@link #STEP_CHAIN_SOFT_REBOOT_RETRY} is the one-shot, and the
-     * soft-reboot lock says whether the teardown happened.
-     *
-     * <h2>Why the lock check is load-bearing and not belt-and-braces</h2>
-     *
-     * A soft reboot does not change {@code boot_id} - it restarts userspace,
-     * not the kernel - so after a SUCCESSFUL teardown this boot's trace still
-     * carries the chain's DISPATCH line and {@code BOOT_COMPLETED} is delivered
-     * again under the same id. Without the lock check that is a second
-     * teardown, which is precisely the boot loop the lock exists to prevent.
-     *
-     * Pure, so every one of those refusals is reachable from a host test
-     * (AGENTS.md 5).
-     */
-    public static String chainSoftRebootRetry(String armRecord, String cycleRecord,
-                                              String traceRecord, String lockRecord,
-                                              String currentBootId) {
-        if (AutoRootPolicy.RECORD_UNREADABLE.equals(traceRecord)) {
-            return CHAIN_SOFT_REBOOT_RETRY_TRACE_UNREADABLE;
-        }
-        if (blank(currentBootId)) return CHAIN_SOFT_REBOOT_RETRY_NO_BOOT_ID;
-        if (!traceHasStepDetail(traceRecord, currentBootId.trim(),
-                STEP_CHAIN_SOFT_REBOOT, CHAIN_SOFT_REBOOT_DISPATCH)) {
-            return CHAIN_SOFT_REBOOT_RETRY_NOT_REQUESTED;
-        }
-        /*
-         * rootSucceeded is passed as true on the authority of the line just
-         * found, not asserted by this caller: CHAIN_SOFT_REBOOT_DISPATCH is
-         * unreachable unless the chain itself observed a successful run in this
-         * boot, and that line is bound to this boot_id. There is no live root
-         * result to read at BOOT_COMPLETED, and inventing a looser notion of
-         * "rooted" here is how the two would drift apart - the receiver's own
-         * PostRootStatus check still runs regardless.
-         */
-        String authorization =
-                chainSoftReboot(armRecord, cycleRecord, currentBootId, true);
-        if (!CHAIN_SOFT_REBOOT_DISPATCH.equals(authorization)) {
-            return CHAIN_SOFT_REBOOT_RETRY_UNAUTHORIZED + "=" + authorization;
-        }
-        if (AutoRootPolicy.RECORD_UNREADABLE.equals(lockRecord)) {
-            return CHAIN_SOFT_REBOOT_RETRY_LOCK_UNREADABLE;
-        }
-        if (!blank(lockRecord)) {
-            Map<String, String> lock = SoftRebootPolicy.parseLock(lockRecord);
-            if (lock == null) return CHAIN_SOFT_REBOOT_RETRY_LOCK_UNREADABLE;
-            if (currentBootId.trim().equals(lock.get("boot_id"))) {
-                return CHAIN_SOFT_REBOOT_RETRY_ALREADY_CLAIMED;
-            }
-            // A lock naming another boot is last boot's record and locks nothing.
-        }
-        if (traceHasStepDetail(traceRecord, currentBootId.trim(),
-                STEP_CHAIN_SOFT_REBOOT_RETRY, null)) {
-            return CHAIN_SOFT_REBOOT_RETRY_ALREADY_RETRIED;
-        }
-        return CHAIN_SOFT_REBOOT_RETRY_DISPATCH;
-    }
-
-    /**
-     * Does this boot's trace carry that step, optionally with that detail?
-     *
-     * Distinct from {@link #traceHasStep}, which asks only about the step name
-     * and about the file as a whole. Both narrowings matter here: the retry's
-     * authority is a verdict ({@code DISPATCH}, not a refusal written by the
-     * same step) and it is boot-scoped (3.8), and a trace file is append-only
-     * across a boot boundary until it is rotated. A null {@code detail} asks
-     * about the step alone.
-     *
-     * Lines this build cannot account for are skipped rather than counted, as
-     * everywhere else here: a line the reader drops cannot satisfy a presence
-     * test.
-     */
-    public static boolean traceHasStepDetail(String record, String bootId,
-                                             String step, String detail) {
-        if (blank(record) || blank(bootId) || blank(step)) return false;
-        if (AutoRootPolicy.RECORD_UNREADABLE.equals(record)) return false;
-        for (String line : record.split("\n", -1)) {
-            TraceStep parsed = parseTraceLine(line);
-            if (parsed == null) continue;
-            if (!step.equals(parsed.step)) continue;
-            if (!bootId.equals(parsed.bootId)) continue;
-            if (detail == null || detail.equals(parsed.detail)) return true;
-        }
-        return false;
     }
 
     public static String formatJournal(String bootId, String phase, int attempts,

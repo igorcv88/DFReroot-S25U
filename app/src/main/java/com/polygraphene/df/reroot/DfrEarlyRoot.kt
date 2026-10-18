@@ -162,7 +162,10 @@ object DfrEarlyRoot {
             return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.ARTEFACT_NOT_AUTHORIZED}" +
                 " - $which. fingerprint=$armFingerprint" +
                 " ksud=${if (armKsud.isEmpty()) "<none pinned for this fingerprint>" else armKsud}." +
-                " Authorizing a pair is an owner decision; see" +
+                " A new daemon is a NEW pair, not a pair known to panic: only" +
+                " pairs the owner explicitly authorized may be loaded early," +
+                " because the first early load of an earlier DZIF pair panicked" +
+                " inside kernelsu.ko. Authorizing one is an owner decision; see" +
                 " docs/EARLY_ROOT.md section 11. The manual run and Auto Root" +
                 " after a full boot are unaffected."
         }

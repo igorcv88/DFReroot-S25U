@@ -604,15 +604,7 @@ different outcomes (3.7) and only the first is the old behaviour:
 |---|---|
 | **OFF** (the default; box unticked, or an arm record from a build without the field) | exactly the old boundary. The path ends at `POST_ROOT_COMPLETE`, nothing restarts userspace, and the verdict notification still carries no Apply Modules action. The chain records `EARLY_ROOT_CHAIN_SOFT_REBOOT=…NOT_REQUESTED` and stops. |
 | **ON, and the receiver's gates pass** | the handoff is broadcast and the receiver re-derives every permission it has always re-derived - the same-boot post-root record, the per-boot one-shot lock, the ksud digest, the `transport_fix` marker and the firmware boot-health verdict. Nothing was loosened to make this reachable. |
-| **ON, and the firmware boot-health verdict is not `CONVERGED`** | the receiver refuses, **and the refusal happens in `precheck()`, before `AutoRootStore.claimSoftReboot()`** - so the boot's one-shot attempt is NOT spent. A deferred retry then comes back for it, once, in the same boot: `DfrBootReceiver` on `BOOT_COMPLETED` re-derives the authorisation through `EarlyRootPolicy.chainSoftRebootRetry`, waits a bounded 180 s for the handshake to converge, records `EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY` and only then re-sends the same intent to the same receiver. It is one attempt, it removes no gate, and a wait that does not converge is recorded and dropped - with its own terminal reason (`…HEALTH_TIMEOUT` plus the verdict it was stuck at, `…HEALTH_UNREADABLE`, `…HEALTH_NO_CLOCK`, `…HEALTH_INTERRUPTED`) and the time actually spent, because the trace is the only record that survives a boot that does not come back. |
-
-**The retry waits because BOOT_COMPLETED is not convergence, and that is measured.**
-In the owner's boot of 2026-10-18 the early chain finished at 20.347 s, the handoff
-went out 13 ms later, and the handshake did not converge until 68.728 s - past
-`BOOT_COMPLETED`, measured at ~42 s on this device. A retry pinned to the broadcast
-alone would refuse for the same reason the chain's own handoff did, so the wait is
-the feature rather than padding. The 13 ms also closes a question: there is nothing
-to win between root and the handoff, and the ~48 s is the firmware's, not ours.
+| **ON, and the firmware boot-health verdict is not `CONVERGED`** | the receiver refuses, **and the refusal happens in `precheck()`, before `AutoRootStore.claimSoftReboot()`** - so the boot's one-shot attempt is NOT spent. What the current code does not do is come back: there is no retry and no re-evaluation, so the observable outcome is root PASS with modules unapplied, i.e. the manual tap this was meant to remove. That branch is live, untested end to end, and is this section's open item. |
 
 The third row is not hypothetical on this firmware. Convergence requires
 `sys.boot_completed=1`, `dev.bootcomplete=1`, `dev.platform_bootcomplete=1`,
@@ -791,6 +783,21 @@ it does not establish early-load safety. The prior unattributed panic boot
 `5a7c2537-9693-44f9-8b2e-e26a1b3a10f2` is acknowledged by exact boot id
 in source after the kernel log investigation. Its incident record remains on
 disk. Any new incident, unreadable record or different daemon still refuses.
+
+**Owner decision, 2026-10-18:** the owner authorized one early attempt for
+the same DZIF fingerprint and the DEFEX v2 daemon SHA-256
+`89eb37bd8a3b9c5e9f7e7391ccacf634bf6391cf3c8f6a305a7e7eb54e8a4a9e`
+(embedded `kernelsu.ko` `ca08bc0adf102b4da920aac714a30a99043ae00eefa473128e32932a8e056f03`,
+build ID `3a682471778910778f2c4c718fd90b56a4d7ab13`, policy chain including
+`throne-tracker-serialise`; see `docs/DZIF_GENERIC_DEFEX_REVIEW.md`). Unlike the
+2026-10-13 entry, this authorization was given **before** a manual full-boot
+`POST_ROOT_COMPLETE` of this pair on hardware, by the owner's explicit choice.
+It is permission to attempt, not evidence: the first armed boot is the first
+physical run of this daemon in the early window, and no dossier row is
+promoted by the decision itself. The previous `3861dbd4…` entry is retained.
+The arming refusal text no longer says that any unlisted pair "ended in a
+kernel panic": that was true only of `f680f959…`, and it misreported every new
+daemon as the one that panicked.
 
 ### What three boots are for
 

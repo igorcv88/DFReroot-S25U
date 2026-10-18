@@ -552,14 +552,25 @@ should hand off to the soft reboot as soon as post-root finishes, at whatever
 moment that falls, and `DfrEarlyRootService` now does so when the arming dialog's
 soft-reboot box was ticked for that boot. Three things about it are the point:
 
+**Follow-up on 2026-10-17:** A physical early-root run reached verified root at
+26.1 s and immediately handed off, but the receiver refused
+`BOOT_HEALTH_PENDING`. `sys.boot_completed` was already 1 by 19.8 s; the exact
+remaining OEM signal was not captured. The owner authorised waiting for the
+firmware handshake after that immediate handoff. The receiver now waits up to
+120 s on PENDING only, holds a bounded partial wake lock, persists the property
+snapshot, and refuses UNKNOWN, crash recovery, a changed boot id or timeout.
+The receiver re-reads the post-root record, SELinux and one-shot lock after the
+wait; its final gate still re-reads health immediately before exec. Manual
+actions retain their immediate check.
+
 - **It removes no gate.** The handoff is the same intent the notification action
   sends, to the same receiver, which re-derives the post-root record, the
   per-boot lock, the ksud digest, the `transport_fix` marker and the boot-health
   verdict. "No checking" was about the MOMENT, never about permission.
-- **It reads no boot phase, deliberately**, and
+- **The early-root service reads no boot phase**, and
   `tools/profile_binding_audit.py` fails if one is added. A later "just check
-  `boot_completed` first" would quietly restore the manual tap the chain exists
-  to remove, so that absence is a guarded property rather than an oversight.
+  `boot_completed` first" there would create a second decision path. The
+  receiver owns the OEM health reading and the bounded wait.
 - **It is authorised per arming and spent with it** - an optional key in the arm
   record, never a standing switch (3.11).
 

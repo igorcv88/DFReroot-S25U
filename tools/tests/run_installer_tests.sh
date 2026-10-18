@@ -87,18 +87,9 @@ java -cp "$OUT" EarlyBootProbePolicyTest
 # persisted job restored after the window closed, an app update between the
 # arming and the boot, a journal from a run that died after transaction 5, a
 # /dev/df* probe that answers EACCES rather than ENOENT.
-#
-# SoftRebootPolicy and its two dependencies are on this line because the
-# deferred soft-reboot retry reads the per-boot lock through
-# SoftRebootPolicy.parseLock rather than re-implementing the parse. A second
-# parser for the same bytes would be a second answer to "was this boot's one
-# attempt spent", which is the exact distinction the retry rests on.
 $JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
     app/src/main/java/com/polygraphene/df/reroot/EarlyBootProbePolicy.java \
     app/src/main/java/com/polygraphene/df/reroot/EarlyRootPolicy.java \
-    app/src/main/java/com/polygraphene/df/reroot/PostRootStatus.java \
-    app/src/main/java/com/polygraphene/df/reroot/SoftRebootHealthPolicy.java \
-    app/src/main/java/com/polygraphene/df/reroot/SoftRebootPolicy.java \
     tools/tests/EarlyRootPolicyTest.java
 java -cp "$OUT" EarlyRootPolicyTest

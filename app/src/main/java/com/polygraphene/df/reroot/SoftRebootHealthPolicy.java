@@ -394,6 +394,19 @@ public final class SoftRebootHealthPolicy {
         return CONVERGED.equals(verdict) || NOT_APPLICABLE.equals(verdict);
     }
 
+    /** Only an observed, ordinary in-progress boot may be waited on. */
+    public static final String WAIT = "WAIT";
+    public static final String ALLOW = "ALLOW";
+    public static final String REFUSE = "REFUSE";
+    public static final String TIMED_OUT = "TIMED_OUT";
+
+    public static String waitDecision(String verdict, long elapsedMs, long limitMs) {
+        if (permitsDispatch(verdict)) return ALLOW;
+        if (!PENDING.equals(verdict)) return REFUSE;
+        if (elapsedMs < 0 || limitMs <= 0) return REFUSE;
+        return elapsedMs >= limitMs ? TIMED_OUT : WAIT;
+    }
+
     private SoftRebootHealthPolicy() {}
 
     private static boolean blank(String s) {

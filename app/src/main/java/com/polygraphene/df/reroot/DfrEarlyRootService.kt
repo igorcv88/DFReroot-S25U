@@ -435,12 +435,10 @@ class DfrEarlyRootService : Service() {
      * Hand this boot to the soft reboot, if the owner ticked the box when they
      * armed it.
      *
-     * The owner's decision of 2026-10-15, in their words: when post-root
-     * finishes, run the soft reboot and accept whatever moment that is. Landing
-     * inside the boot animation was attempted and is not reachable on this
-     * firmware; one visible blink beats unlocking, waiting for the framework to
-     * settle, opening a root manager and tapping by hand. So nothing here reads
-     * a boot phase - not `sys.boot_completed`, not the keyguard, not a clock.
+     * The handoff still happens immediately after post-root. The receiver now
+     * waits for the OEM boot-health handshake to converge before it attempts a
+     * teardown (owner's follow-up after the 2026-10-17 physical refusal).
+     * This service does not read a boot phase or duplicate that receiver's gate.
      *
      * ## Why this is a broadcast and not a call
      *
@@ -458,10 +456,8 @@ class DfrEarlyRootService : Service() {
      * one shape that could turn a module re-apply into a second chain run.
      * Pointing at the receiver from here adds no such path.
      *
-     * "No timing check" is NOT "no gates": the owner asked for no condition on
-     * the moment, and 3.6 reserves removing a gate for an explicit decision of
-     * theirs. A refusal from the receiver therefore still refuses, and says so
-     * in its own trace.
+     * The handoff is a request, not permission. The receiver's bounded wait
+     * and its existing final boundary gate decide whether it may execute.
      */
     private fun chainSoftReboot(context: Context, bootId: String, rootSucceeded: Boolean) {
         val armRecord = try {
@@ -504,6 +500,7 @@ class DfrEarlyRootService : Service() {
             context.sendBroadcast(
                 Intent(context, DfrSoftRebootReceiver::class.java)
                     .setAction(DfrSoftRebootReceiver.ACTION_APPLY_MODULES)
+                    .putExtra(DfrSoftRebootReceiver.EXTRA_WAIT_FOR_BOOT_HEALTH, true)
                     .putExtra(RootNotifier.EXTRA_BOOT_ID, bootId)
             )
             Log.i(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_CHAIN=$verdict boot_id=$bootId" +
