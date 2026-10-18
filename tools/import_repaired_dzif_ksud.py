@@ -25,14 +25,14 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_REPO = "igorcv88/RMGLabs-Payloads"
-SOURCE_COMMIT = "1744867bcbce530ac6f84d5e91ce88b2345dc3b1"
+SOURCE_COMMIT = '7f03e0a72653e84b472d7f8ec8c71c502c2e9822'
 NAME = "ksud-pa3q-S938BXXUCDZIF-dfreroot-v3.3.0"
 ASSET = ROOT / "app/src/main/assets/ksud-dzif"
-EXPECTED_SHA256 = "a885a4d7643d9c282c1f8f2d89837f00163bf13b9674a90992efc6608a7168f7"
-EXPECTED_BYTES = 6677576
+EXPECTED_SHA256 = '89eb37bd8a3b9c5e9f7e7391ccacf634bf6391cf3c8f6a305a7e7eb54e8a4a9e'
+EXPECTED_BYTES = 6678728
 EXPECTED_KSU_COMMIT = "932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e"
-EXPECTED_MODULE_SHA256 = "54f3ac938683227ff35f9c27b7316f8948d65df8f8174e860c6d24d76105f5ec"
-EXPECTED_BUILD_ID = "aac86c92710e0f92b39c8a6ea777143908764174"
+EXPECTED_MODULE_SHA256 = 'ca08bc0adf102b4da920aac714a30a99043ae00eefa473128e32932a8e056f03'
+EXPECTED_BUILD_ID = '3a682471778910778f2c4c718fd90b56a4d7ab13'
 
 
 def gh_get(repo_path: str, output: Path) -> None:
@@ -120,8 +120,8 @@ def main() -> int:
                     "ksud_sha256": EXPECTED_SHA256,
                     "module_sha256": EXPECTED_MODULE_SHA256,
                     "module_build_id": EXPECTED_BUILD_ID,
-                    "module_size": "3629608",
-                    "source_commit": "1744867bcbce530ac6f84d5e91ce88b2345dc3b1",
+                    "module_size": "3630896",
+                    "source_commit": "7f03e0a72653e84b472d7f8ec8c71c502c2e9822",
                 }
                 for field, expected in required.items():
                     if fields.get(field) != expected:
