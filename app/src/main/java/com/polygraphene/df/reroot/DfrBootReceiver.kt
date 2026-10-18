@@ -241,7 +241,11 @@ class DfrBootReceiver : BroadcastReceiver() {
                  * is a boot that must not be torn down.
                  */
                 val waited = awaitBootHealth(bootId)
-                val detail = if (waited) verdict else RETRY_HEALTH_TIMEOUT
+                val detail = if (waited.converged) {
+                    "$verdict ${waited.detail()}"
+                } else {
+                    waited.detail()
+                }
                 val traceFailure = EarlyRootStore.trace(
                     bootId, EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT_RETRY,
                     EarlyRootEnv.monotonicNow(),
@@ -254,7 +258,7 @@ class DfrBootReceiver : BroadcastReceiver() {
                         " re-ask on every re-delivered BOOT_COMPLETED")
                     return@Runnable
                 }
-                if (!waited) {
+                if (!waited.converged) {
                     /*
                      * The one-shot is spent deliberately on a timeout. The
                      * alternative - leaving the line unwritten so a later
@@ -266,10 +270,9 @@ class DfrBootReceiver : BroadcastReceiver() {
                      * reading from every refusal above it (3.7).
                      */
                     Log.i(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY=$detail" +
-                        " boot_id=$bootId (waited ${RETRY_HEALTH_BUDGET_MS} ms;" +
-                        " the teardown was NOT asked for, because a boot this" +
-                        " firmware does not consider complete must not be" +
-                        " restarted)")
+                        " boot_id=$bootId (the teardown was NOT asked for," +
+                        " because a boot this firmware does not consider" +
+                        " complete must not be restarted)")
                     return@Runnable
                 }
                 appContext.sendBroadcast(
@@ -306,7 +309,7 @@ class DfrBootReceiver : BroadcastReceiver() {
      * exist would wait out the whole budget every time. The policy's own gate
      * makes that call; this only mirrors it so the wait ends.
      */
-    private fun awaitBootHealth(bootId: String): Boolean {
+    private fun awaitBootHealth(bootId: String): HealthWait {
         val startMs = SystemClock.elapsedRealtime()
         var last = ""
         while (true) {
@@ -315,24 +318,78 @@ class DfrBootReceiver : BroadcastReceiver() {
             } catch (t: Throwable) {
                 Log.e(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY cannot read the" +
                     " boot-health handshake: $t")
-                return false
+                return HealthWait(false, RETRY_HEALTH_UNREADABLE, last,
+                    spentSince(startMs))
             }
             if (verdict != last) {
                 Log.i(TAG, "[DFR][EARLY_ROOT][SOFT_REBOOT_RETRY] boot_health=" +
-                    "$verdict boot_id=$bootId elapsed_ms=" +
-                    "${SystemClock.elapsedRealtime() - startMs}")
+                    "$verdict boot_id=$bootId elapsed_ms=${spentSince(startMs)}")
                 last = verdict
             }
-            if (SoftRebootHealthPolicy.permitsDispatch(verdict)) return true
-            val spentMs = SystemClock.elapsedRealtime() - startMs
-            if (spentMs < 0 || spentMs >= RETRY_HEALTH_BUDGET_MS) return false
+            if (SoftRebootHealthPolicy.permitsDispatch(verdict)) {
+                return HealthWait(true, verdict, verdict, spentSince(startMs))
+            }
+            val spentMs = spentSince(startMs)
+            if (spentMs < 0) {
+                return HealthWait(false, RETRY_HEALTH_NO_CLOCK, last, spentMs)
+            }
+            if (spentMs >= RETRY_HEALTH_BUDGET_MS) {
+                return HealthWait(false, RETRY_HEALTH_TIMEOUT, last, spentMs)
+            }
             try {
                 Thread.sleep(RETRY_HEALTH_STEP_MS)
             } catch (t: InterruptedException) {
                 Log.e(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY wait interrupted", t)
-                return false
+                return HealthWait(false, RETRY_HEALTH_INTERRUPTED, last,
+                    spentSince(startMs))
             }
         }
+    }
+
+    /**
+     * Elapsed monotonic time, or a negative value when the clock cannot be
+     * read.
+     *
+     * Factored out because the wait's terminal reason now reports how long it
+     * actually waited, and a reason that carries a made-up duration is worse
+     * than one that carries none: the old log line printed the whole budget on
+     * every non-convergent exit, including the ones that returned in
+     * milliseconds.
+     */
+    private fun spentSince(startMs: Long): Long = try {
+        SystemClock.elapsedRealtime() - startMs
+    } catch (t: Throwable) {
+        Log.e(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY monotonic clock lost: $t")
+        -1L
+    }
+
+    /**
+     * What the bounded boot-health wait actually ended on.
+     *
+     * A Boolean was the first shape and it collapsed five different endings
+     * into one durable line: a budget exhausted while the handshake sat at
+     * `PENDING`, one exhausted at `CRASH_RECOVERY`, an unreadable handshake, a
+     * lost clock and an interrupted sleep. Those are not the same event and
+     * they do not lead to the same next step - `CRASH_RECOVERY` says a rollback
+     * was already in flight, `UNKNOWN` says the properties could not be
+     * classified, `UNREADABLE` says the read itself threw - and the trace is
+     * the only record that survives a boot that does not come back. AGENTS.md
+     * 3.7, caught by Codex review on PR #85.
+     *
+     * [reason] is the terminal reason, [lastVerdict] the last handshake value
+     * actually observed (blank when none was), and [spentMs] how long the wait
+     * really took rather than the budget it was given.
+     */
+    private class HealthWait(
+        val converged: Boolean,
+        val reason: String,
+        val lastVerdict: String,
+        val spentMs: Long,
+    ) {
+        /** One field of the trace, so every ending is distinguishable on disk. */
+        fun detail(): String = reason +
+            (if (lastVerdict.isEmpty()) "" else " last=$lastVerdict") +
+            " spent_ms=$spentMs"
     }
 
     /**
@@ -801,6 +858,25 @@ class DfrBootReceiver : BroadcastReceiver() {
          * that never arrived (3.7).
          */
         const val RETRY_HEALTH_TIMEOUT = "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_HEALTH_TIMEOUT"
+
+        /**
+         * The handshake could not be read at all, the clock was lost, or the
+         * wait was interrupted.
+         *
+         * Three values rather than one, and none of them reuses
+         * [RETRY_HEALTH_TIMEOUT]: a budget that ran out while the firmware sat
+         * at a known-bad verdict is a statement about the firmware, while these
+         * are statements about this process's ability to observe it. The
+         * timeout value additionally carries the last verdict seen, so
+         * "exhausted at PENDING" and "exhausted at CRASH_RECOVERY" - a rollback
+         * already in flight - are not one line either (3.7).
+         */
+        const val RETRY_HEALTH_UNREADABLE =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_HEALTH_UNREADABLE"
+        const val RETRY_HEALTH_INTERRUPTED =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_HEALTH_INTERRUPTED"
+        const val RETRY_HEALTH_NO_CLOCK =
+            "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_HEALTH_NO_CLOCK"
 
         /*
          * Single daemon thread: the marker is a read-modify-write, and two

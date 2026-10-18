@@ -3216,11 +3216,11 @@ def audit():
         if wait_at > retry_send_at:
             fail("the deferred retry broadcasts before waiting for the "
                  "handshake, so the wait cannot change the outcome")
-        if "if (!waited)" not in retry_fn:
+        if "if (!waited.converged)" not in retry_fn:
             fail("the deferred retry does not branch on the wait's result; a "
                  "timeout that falls through to the broadcast asks for a "
                  "teardown in a boot the firmware does not consider complete")
-        timeout_at = retry_fn.find("if (!waited)")
+        timeout_at = retry_fn.find("if (!waited.converged)")
         if timeout_at < 0 or timeout_at > retry_send_at:
             fail("the deferred retry's timeout branch does not return before "
                  "the broadcast")
@@ -3238,27 +3238,58 @@ def audit():
                      "unbounded, or that does not read the same handshake the "
                      "receiver gates on, is not the condition it claims to be"
                      % required)
-        # EXACTLY ONE success exit, and it is the one the handshake guards.
-        # Checked by counting rather than by presence: the first version of this
-        # guard asked whether `return false` appeared at all, and a mutation
-        # that turned the unreadable-handshake path into `return true` passed it
-        # untouched, because the other refusing exits still matched. Every exit
-        # that is not the converged verdict must refuse (AGENTS.md 2).
-        if wait_fn.count("return true") != 1:
-            fail("the deferred retry's wait has %d success exits; exactly one is "
-                 "allowed and it must be the one guarded by permitsDispatch - "
+        # EXACTLY ONE converged exit, and it is the one the handshake guards.
+        # Checked by counting rather than by presence: an earlier version asked
+        # whether a refusing exit appeared at all, and a mutation that turned
+        # the unreadable-handshake path into a success passed it untouched,
+        # because the other refusing exits still matched. Every ending that is
+        # not the converged verdict must refuse (AGENTS.md 2).
+        converged = wait_fn.count("HealthWait(true")
+        if converged != 1:
+            fail("the deferred retry's wait has %d converged exits; exactly one "
+                 "is allowed and it must be the one guarded by permitsDispatch - "
                  "any other way out that reports success turns an unreadable or "
                  "unconverged handshake into permission to tear userspace down"
-                 % wait_fn.count("return true"))
+                 % converged)
         if not re.search(r"if \(SoftRebootHealthPolicy\.permitsDispatch\(verdict\)\)"
-                         r" return true", wait_fn):
-            fail("the deferred retry's one success exit is not the handshake's "
+                         r" \{\s+return HealthWait\(true", wait_fn):
+            fail("the deferred retry's one converged exit is not the handshake's "
                  "own verdict; a wait that succeeds on anything else is a sleep "
                  "pretending to be a condition")
-        if wait_fn.count("return false") < 3:
-            fail("the deferred retry's wait no longer refuses on all three of "
-                 "an unreadable handshake, an exhausted budget and an "
-                 "interrupted wait; absence of a reading is never a pass (2)")
+        # ...and every other ending is its OWN durable reason, never one
+        # collapsed value. A Boolean here put an exhausted budget, a
+        # CRASH_RECOVERY verdict, an unreadable handshake, a lost clock and an
+        # interrupted sleep on one trace line; those have different next steps
+        # and the trace is the only record that survives a boot that does not
+        # come back (3.7, Codex on PR #85).
+        for reason in ("RETRY_HEALTH_TIMEOUT", "RETRY_HEALTH_UNREADABLE",
+                       "RETRY_HEALTH_NO_CLOCK", "RETRY_HEALTH_INTERRUPTED"):
+            if reason not in wait_fn:
+                fail("the deferred retry's wait no longer reaches %s; collapsing "
+                     "it into another ending makes two different investigations "
+                     "read as one line (3.7)" % reason)
+        if wait_fn.count("HealthWait(false") < 4:
+            fail("the deferred retry's wait has fewer than four refusing exits; "
+                 "an exhausted budget, an unreadable handshake, a lost clock and "
+                 "an interrupted wait are four endings, and absence of a reading "
+                 "is never a pass (2)")
+        # The timeout carries the verdict it was stuck at, or "exhausted at
+        # PENDING" and "exhausted at CRASH_RECOVERY" are indistinguishable.
+        if not re.search(r"HealthWait\(false, RETRY_HEALTH_TIMEOUT, last",
+                         wait_fn):
+            fail("the deferred retry's timeout no longer records the last "
+                 "handshake verdict it observed; a rollback already in flight "
+                 "and a merely slow boot then read identically")
+        # And the reason reaches the TRACE, not only logcat: logcat does not
+        # survive the reboot this operation can cause.
+        if ".detail()" not in retry_fn:
+            fail("the deferred retry writes a trace detail that does not carry "
+                 "the wait's terminal reason; logcat may not survive what this "
+                 "operation can do to the boot (3.6.1)")
+        if "RETRY_HEALTH_BUDGET_MS} ms" in retry_fn:
+            fail("the deferred retry logs the whole budget as the time waited; "
+                 "every non-convergent exit but the timeout returns early, so "
+                 "that line states a duration that did not happen")
 
         # (R5) It decides off system_server's looper. This receiver is hosted in
         #      the system process; three record reads and an fsync'd append
