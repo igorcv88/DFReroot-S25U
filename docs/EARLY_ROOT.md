@@ -604,7 +604,15 @@ different outcomes (3.7) and only the first is the old behaviour:
 |---|---|
 | **OFF** (the default; box unticked, or an arm record from a build without the field) | exactly the old boundary. The path ends at `POST_ROOT_COMPLETE`, nothing restarts userspace, and the verdict notification still carries no Apply Modules action. The chain records `EARLY_ROOT_CHAIN_SOFT_REBOOT=…NOT_REQUESTED` and stops. |
 | **ON, and the receiver's gates pass** | the handoff is broadcast and the receiver re-derives every permission it has always re-derived - the same-boot post-root record, the per-boot one-shot lock, the ksud digest, the `transport_fix` marker and the firmware boot-health verdict. Nothing was loosened to make this reachable. |
-| **ON, and the firmware boot-health verdict is not `CONVERGED`** | the receiver refuses, **and the refusal happens in `precheck()`, before `AutoRootStore.claimSoftReboot()`** - so the boot's one-shot attempt is NOT spent. What the current code does not do is come back: there is no retry and no re-evaluation, so the observable outcome is root PASS with modules unapplied, i.e. the manual tap this was meant to remove. That branch is live, untested end to end, and is this section's open item. |
+| **ON, and the firmware boot-health verdict is not `CONVERGED`** | the receiver refuses, **and the refusal happens in `precheck()`, before `AutoRootStore.claimSoftReboot()`** - so the boot's one-shot attempt is NOT spent. A deferred retry then comes back for it, once, in the same boot: `DfrBootReceiver` on `BOOT_COMPLETED` re-derives the authorisation through `EarlyRootPolicy.chainSoftRebootRetry`, waits a bounded 180 s for the handshake to converge, records `EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY` and only then re-sends the same intent to the same receiver. It is one attempt, it removes no gate, and a timeout is recorded and dropped. |
+
+**The retry waits because BOOT_COMPLETED is not convergence, and that is measured.**
+In the owner's boot of 2026-10-18 the early chain finished at 20.347 s, the handoff
+went out 13 ms later, and the handshake did not converge until 68.728 s - past
+`BOOT_COMPLETED`, measured at ~42 s on this device. A retry pinned to the broadcast
+alone would refuse for the same reason the chain's own handoff did, so the wait is
+the feature rather than padding. The 13 ms also closes a question: there is nothing
+to win between root and the handoff, and the ~48 s is the firmware's, not ours.
 
 The third row is not hypothetical on this firmware. Convergence requires
 `sys.boot_completed=1`, `dev.bootcomplete=1`, `dev.platform_bootcomplete=1`,

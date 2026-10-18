@@ -72,6 +72,38 @@ class DfrBootReceiver : BroadcastReceiver() {
             dispatchEarlyRoot(context, arrivalMs)
         }
         /*
+         * The deferred half of the chained soft reboot, and BOOT_COMPLETED
+         * only.
+         *
+         * Not a second trigger and not a second sequence: it re-sends the one
+         * intent the chain already sent, to the one receiver that re-derives
+         * every gate. What it adds is a LATER MOMENT, which is the only thing
+         * the defect it closes is about - the chain hands off when post-root
+         * finishes, and the firmware's boot-health handshake is very likely
+         * still PENDING then, so the receiver refused and nothing ever asked
+         * again. The owner reported that on PR #81.
+         *
+         * LOCKED_BOOT_COMPLETED is deliberately not accepted here. Convergence
+         * requires `sys.boot_completed=1` among other things, and that property
+         * is not set at locked boot - a retry there could only reproduce the
+         * refusal it exists to outlive. This is the first moment in the boot at
+         * which the handshake can read positive at all; whether it DOES is
+         * unmeasured on this firmware, and the two `[DFR][SOFT_REBOOT_HEALTH]
+         * PRE_DISPATCH=` lines of one boot - the chain's and this one's - are
+         * what will say so.
+         *
+         * It authorises nothing. EarlyRootPolicy.chainSoftRebootRetry requires
+         * this boot's own trace to carry the chain's DISPATCH verdict, re-reads
+         * the arm and cycle records through the same chainSoftReboot that
+         * authorised the first handoff, refuses if the per-boot soft-reboot
+         * lock was claimed (the teardown ran: a soft reboot does not change
+         * boot_id, so BOOT_COMPLETED arrives again under the same one), and
+         * spends itself by writing its own trace step.
+         */
+        if (action == Intent.ACTION_BOOT_COMPLETED) {
+            retrySoftRebootChain(context)
+        }
+        /*
          * LOCKED_BOOT_COMPLETED arrives before the user unlocks; BOOT_COMPLETED
          * after. Both are accepted because the state this needs lives in
          * device-protected storage, and the policy's own one-attempt-per-boot
@@ -134,6 +166,173 @@ class DfrBootReceiver : BroadcastReceiver() {
         SystemClock.elapsedRealtime()
     } catch (_: Throwable) {
         -1L
+    }
+
+    /**
+     * Re-ask for the soft reboot the early chain already authorised in this
+     * boot, once, off this looper.
+     *
+     * ## Why a thread and not the telemetry executor
+     *
+     * This receiver runs on system_server's main looper (the app declares
+     * `android:process="system"`). The decision reads three durable records and
+     * then appends an fsync'd trace line; inline, that delays the boot for
+     * every install on every boot. The marker executor is a single thread that
+     * also carries the probe's read-modify-write, and serialising a teardown
+     * handoff behind unrelated telemetry is the shape the early trigger's own
+     * comment already refuses.
+     *
+     * ## Why the refusals are logged and nothing else
+     *
+     * Every refusal here is a decision not to act, and a boot that is not
+     * handed to a teardown is the state this device is already in. The DISPATCH
+     * case is the one that gets a durable record, and it gets it BEFORE the
+     * broadcast - same rule, same reason, as the chain's own step: a record of
+     * having asked must exist before the asking (3.6.1), and here it is also
+     * the one-shot itself.
+     *
+     * A trace that cannot be written therefore refuses the dispatch. That is
+     * not belt-and-braces: without the line there is no bound on how many times
+     * a re-delivered BOOT_COMPLETED can re-ask, and an unbounded re-ask is a
+     * boot loop with the lock as its only brake.
+     */
+    private fun retrySoftRebootChain(context: Context) {
+        val appContext = context.applicationContext ?: context
+        val task = Runnable {
+            try {
+                val bootId = DfrRootCoordinator.readBootId()
+                val armRecord = EarlyRootStore.readArm()
+                val cycleRecord = EarlyRootStore.readCycle()
+                val traceRecord = EarlyRootStore.readTrace()
+                val lockRecord = AutoRootStore.softRebootLock()
+                val verdict = EarlyRootPolicy.chainSoftRebootRetry(
+                    armRecord, cycleRecord, traceRecord, lockRecord, bootId)
+                if (EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_DISPATCH != verdict) {
+                    Log.i(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY=$verdict" +
+                        " boot_id=$bootId")
+                    return@Runnable
+                }
+                /*
+                 * BOOT_COMPLETED is not when the firmware converges, and that
+                 * is measured rather than assumed.
+                 *
+                 * The first version of this retry asked the receiver the
+                 * instant BOOT_COMPLETED arrived, on the reasoning that it is
+                 * the first moment `sys.boot_completed` can be 1 at all. It is,
+                 * and it is still too early: in the owner's boot of
+                 * 2026-10-18 the chain finished at 20.347 s, the handoff went
+                 * out 13 ms later, and the handshake did not converge until
+                 * 68.728 s - well past BOOT_COMPLETED, which has been measured
+                 * at ~42 s on this device. So a retry pinned to that broadcast
+                 * would have refused for the SAME reason the chain's handoff
+                 * did, and shipped as a feature that cannot fire.
+                 *
+                 * Hence the wait, and the shape of it. The budget is bounded
+                 * and the step is coarse, because nothing here is racing
+                 * anything: the only thing this thread does is read properties
+                 * until the handshake the receiver will re-derive reads
+                 * CONVERGED.
+                 *
+                 * This reading decides WHEN to ask, never WHETHER. The receiver
+                 * takes its own single reading and gates on that, which is what
+                 * keeps one boot-health gate in this app rather than two
+                 * (3.2) - and it is why a timeout here is recorded and dropped
+                 * rather than escalated: a boot whose firmware never converged
+                 * is a boot that must not be torn down.
+                 */
+                val waited = awaitBootHealth(bootId)
+                val detail = if (waited) verdict else RETRY_HEALTH_TIMEOUT
+                val traceFailure = EarlyRootStore.trace(
+                    bootId, EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT_RETRY,
+                    EarlyRootEnv.monotonicNow(),
+                    EarlyRootEnv.bootState(appContext), detail)
+                if (traceFailure != null) {
+                    Log.e(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY refused: the" +
+                        " deferred handoff's trace was not persisted" +
+                        " ($traceFailure); that line is both the pre-operation" +
+                        " record and the one-shot, so without it this would" +
+                        " re-ask on every re-delivered BOOT_COMPLETED")
+                    return@Runnable
+                }
+                if (!waited) {
+                    /*
+                     * The one-shot is spent deliberately on a timeout. The
+                     * alternative - leaving the line unwritten so a later
+                     * BOOT_COMPLETED tries again - has no bound, and a boot
+                     * that did not converge in the whole budget is not a boot
+                     * that will converge on the next broadcast. The recorded
+                     * line is also the diagnostic: it says the retry waited and
+                     * the firmware never got there, which is a different
+                     * reading from every refusal above it (3.7).
+                     */
+                    Log.i(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY=$detail" +
+                        " boot_id=$bootId (waited ${RETRY_HEALTH_BUDGET_MS} ms;" +
+                        " the teardown was NOT asked for, because a boot this" +
+                        " firmware does not consider complete must not be" +
+                        " restarted)")
+                    return@Runnable
+                }
+                appContext.sendBroadcast(
+                    Intent(appContext, DfrSoftRebootReceiver::class.java)
+                        .setAction(DfrSoftRebootReceiver.ACTION_APPLY_MODULES)
+                        .putExtra(RootNotifier.EXTRA_BOOT_ID, bootId)
+                )
+                Log.i(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY=$verdict" +
+                    " boot_id=$bootId (re-dispatched to DfrSoftRebootReceiver," +
+                    " which re-derives every gate including boot-health)")
+            } catch (t: Throwable) {
+                Log.e(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY failed", t)
+            }
+        }
+        try {
+            Thread(task, "dfr-soft-reboot-retry").apply { isDaemon = true }.start()
+        } catch (t: Throwable) {
+            Log.e(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY=UNAVAILABLE" +
+                " reason=thread_start ($t); refusing to decide it on" +
+                " system_server's looper")
+        }
+    }
+
+    /**
+     * Wait, bounded, for the firmware's own boot-health handshake to converge.
+     *
+     * Returns true when it read `CONVERGED` within the budget, false otherwise -
+     * including when the clock or the properties cannot be read, because an
+     * unreadable handshake is not a converged one (AGENTS.md 2).
+     *
+     * `NOT_APPLICABLE` counts as converged for the same reason
+     * `SoftRebootPolicy` accepts it: this is a Samsung mechanism and this app
+     * runs off-target too, where waiting for an OEM handshake that does not
+     * exist would wait out the whole budget every time. The policy's own gate
+     * makes that call; this only mirrors it so the wait ends.
+     */
+    private fun awaitBootHealth(bootId: String): Boolean {
+        val startMs = SystemClock.elapsedRealtime()
+        var last = ""
+        while (true) {
+            val verdict = try {
+                SoftRebootHealth.liveVerdict()
+            } catch (t: Throwable) {
+                Log.e(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY cannot read the" +
+                    " boot-health handshake: $t")
+                return false
+            }
+            if (verdict != last) {
+                Log.i(TAG, "[DFR][EARLY_ROOT][SOFT_REBOOT_RETRY] boot_health=" +
+                    "$verdict boot_id=$bootId elapsed_ms=" +
+                    "${SystemClock.elapsedRealtime() - startMs}")
+                last = verdict
+            }
+            if (SoftRebootHealthPolicy.permitsDispatch(verdict)) return true
+            val spentMs = SystemClock.elapsedRealtime() - startMs
+            if (spentMs < 0 || spentMs >= RETRY_HEALTH_BUDGET_MS) return false
+            try {
+                Thread.sleep(RETRY_HEALTH_STEP_MS)
+            } catch (t: InterruptedException) {
+                Log.e(TAG, "[DFR][EARLY_ROOT] SOFT_REBOOT_RETRY wait interrupted", t)
+                return false
+            }
+        }
     }
 
     /**
@@ -573,6 +772,35 @@ class DfrBootReceiver : BroadcastReceiver() {
     companion object {
         const val TAG = "DFReroot"
         const val EXTRA_RECEIVER_UPTIME_MS = "dfr_receiver_uptime_ms"
+
+        /**
+         * How long the deferred soft-reboot retry waits for the firmware's
+         * boot-health handshake, and how coarsely it looks.
+         *
+         * The budget comes from a measurement, not from taste: in the owner's
+         * boot of 2026-10-18 the early chain finished at 20.347 s and the
+         * handshake converged at 68.728 s - about 48 s of waiting, past
+         * BOOT_COMPLETED (~42 s on this device). 180 s leaves room for a
+         * slower boot without becoming an indefinite wait, and a boot that has
+         * not converged by then is one this build must not tear down anyway.
+         *
+         * The step is deliberately coarse. Nothing here is racing anything:
+         * the teardown is already late by construction, and a tight poll inside
+         * system_server would cost more than the seconds it could save.
+         */
+        const val RETRY_HEALTH_BUDGET_MS = 180_000L
+        const val RETRY_HEALTH_STEP_MS = 5_000L
+
+        /**
+         * The firmware never reported a complete boot inside the budget.
+         *
+         * Its own detail value rather than a reused refusal: every other
+         * outcome of the retry is a statement about this build's own records,
+         * and this one is a statement about the firmware. A reader who sees it
+         * knows the authorisation was intact and the handshake was the thing
+         * that never arrived (3.7).
+         */
+        const val RETRY_HEALTH_TIMEOUT = "EARLY_ROOT_CHAIN_SOFT_REBOOT_RETRY_HEALTH_TIMEOUT"
 
         /*
          * Single daemon thread: the marker is a read-modify-write, and two

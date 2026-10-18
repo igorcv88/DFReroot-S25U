@@ -1,6 +1,7 @@
 import com.polygraphene.df.reroot.AutoRootPolicy;
 import com.polygraphene.df.reroot.EarlyBootProbePolicy;
 import com.polygraphene.df.reroot.EarlyRootPolicy;
+import com.polygraphene.df.reroot.SoftRebootPolicy;
 
 /**
  * Host regression suite for the Early Integrated Root policy.
@@ -767,6 +768,38 @@ public class EarlyRootPolicyTest {
                         && !EarlyRootPolicy.earlyLoadAuthorized(FP, ""),
                 "a missing fingerprint or an unpinned daemon digest is not a"
                         + " cleared artefact; absence is never clearance");
+        // --- which HALF is unlisted, for the refusal message (2026-10-18) ---
+        // The owner hit ARTEFACT_NOT_AUTHORIZED at arming time and the message
+        // named neither half, so it could not be acted on. "This firmware was
+        // never authorized" and "this firmware is authorized but these daemon
+        // bytes are not" have different next steps (3.7), and the first must
+        // not inherit the second's kernel-panic sentence - attributing a DZIF
+        // panic to a device that is not on DZIF is a false statement about the
+        // owner's artefact.
+        check(EarlyRootPolicy.earlyLoadFirmwareListed(DZIF_FP),
+                "the authorized firmware is recognised as listed, so a digest "
+                        + "mismatch on it can be reported as a digest mismatch");
+        check(!EarlyRootPolicy.earlyLoadFirmwareListed(FP),
+                "the ZZIC firmware is not named in the allowlist at all; that is "
+                        + "the reading the arming refusal owes a device on it, "
+                        + "and it is NOT the panicked-pair message");
+        check(EarlyRootPolicy.earlyLoadFirmwareListed(DZIF_FP)
+                        && !EarlyRootPolicy.earlyLoadAuthorized(DZIF_FP, "c".repeat(64)),
+                "the firmware half being listed authorises nothing on its own; "
+                        + "only the pair does (3.5)");
+        check(!EarlyRootPolicy.earlyLoadFirmwareListed(null)
+                        && !EarlyRootPolicy.earlyLoadFirmwareListed("")
+                        && !EarlyRootPolicy.earlyLoadFirmwareListed("   "),
+                "a fingerprint that could not be read is not a listed firmware; "
+                        + "absence is never clearance (2)");
+        check(!EarlyRootPolicy.earlyLoadFirmwareListed(
+                        DZIF_FP.substring(0, DZIF_FP.length() - 1)),
+                "a TRUNCATED fingerprint must not match by prefix; the key's NUL "
+                        + "separator is what keeps a partial read from reading as "
+                        + "the authorized firmware");
+        check(!EarlyRootPolicy.earlyLoadFirmwareListed(DZIF_FP + "-x"),
+                "nor does a fingerprint the authorized one is a prefix of");
+
         // Half a key is not a key: the pair is what was validated, so a daemon
         // carried to another firmware, or another daemon on this firmware, is a
         // different experiment.
@@ -2037,6 +2070,158 @@ public class EarlyRootPolicyTest {
                 check(a1.equals(b1), "chainSoftReboot is a function of its four "
                         + "arguments only; nothing ambient may move it");
             }
+        }
+
+        // ---- the deferred retry of that handoff (owner's P1 on PR #81) ---
+        // The defect: the chain hands off the instant post-root finishes, the
+        // receiver re-derives the firmware's boot-health handshake, and that
+        // handshake is very likely still PENDING that early - so it refused and
+        // NOTHING ever asked again. Root PASS, modules never applied.
+        //
+        // The retry re-asks the SAME receiver at BOOT_COMPLETED. Every negative
+        // below is unreachable on a device without spending a reboot, which is
+        // why they are here: a one-shot that is not one-shot, a retry for a
+        // handoff nobody authorised, and a retry after the teardown already ran
+        // are each a boot loop or a teardown nobody asked for.
+        final String chainDispatched = EarlyRootPolicy.formatTraceStep(
+                EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT, RUN_BOOT, 22_000L,
+                "sys_boot_completed=0",
+                EarlyRootPolicy.CHAIN_SOFT_REBOOT_DISPATCH);
+        final String chainRefused = EarlyRootPolicy.formatTraceStep(
+                EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT, RUN_BOOT, 22_000L,
+                "sys_boot_completed=0",
+                EarlyRootPolicy.CHAIN_SOFT_REBOOT_NOT_REQUESTED);
+        final String retryTaken = EarlyRootPolicy.formatTraceStep(
+                EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT_RETRY, RUN_BOOT, 44_000L,
+                "sys_boot_completed=1",
+                EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_DISPATCH);
+        final String spentLock = SoftRebootPolicy.formatLock(RUN_BOOT, 44_100L);
+
+        // The integrated sequence the owner asked for, as one ordered story:
+        // post-root success -> the chain authorises -> the receiver refuses on
+        // boot health, leaving NO lock -> BOOT_COMPLETED re-asks -> and the
+        // boot's one deferred attempt is then spent.
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_DISPATCH.equals(
+                        EarlyRootPolicy.chainSoftReboot(
+                                armSoft(true), claimedCycle, RUN_BOOT, true)),
+                "step 1: post-root succeeded and the chain authorises the handoff");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_DISPATCH.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle, chainDispatched,
+                                null, RUN_BOOT)),
+                "step 2: the receiver refused on boot health BEFORE claiming, so "
+                        + "there is no lock and the deferred handoff is authorised "
+                        + "- this is the P1 the owner reported");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_ALREADY_RETRIED.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle,
+                                chainDispatched + retryTaken, null, RUN_BOOT)),
+                "step 3: the trace line IS the one-shot. BOOT_COMPLETED is "
+                        + "re-delivered under the same boot_id by any framework "
+                        + "restart, so without this the retry re-asks forever");
+        // The one that would be a second teardown. A soft reboot restarts
+        // userspace, not the kernel, so a SUCCESSFUL one comes back to the same
+        // boot_id with the chain's DISPATCH line still in the trace.
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_ALREADY_CLAIMED.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle, chainDispatched,
+                                spentLock, RUN_BOOT)),
+                "a lock naming this boot means the teardown RAN; re-asking then "
+                        + "is the second teardown the lock exists to prevent");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_DISPATCH.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle, chainDispatched,
+                                SoftRebootPolicy.formatLock("some-older-boot", 9L),
+                                RUN_BOOT)),
+                "a lock naming ANOTHER boot is last boot's record and locks "
+                        + "nothing in this one (3.8)");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_LOCK_UNREADABLE.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle, chainDispatched,
+                                AutoRootPolicy.RECORD_UNREADABLE, RUN_BOOT)),
+                "an unreadable lock refuses: it may be this boot's spent attempt");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_LOCK_UNREADABLE.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle, chainDispatched,
+                                "boot_id=" + RUN_BOOT + "\nphase=WHATEVER\n",
+                                RUN_BOOT)),
+                "a lock this build cannot account for refuses rather than being "
+                        + "read as absent");
+        // No request to follow: the common case on every ordinary boot.
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_NOT_REQUESTED.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle, null, null, RUN_BOOT)),
+                "no trace at all is NOT_REQUESTED: BOOT_COMPLETED may never "
+                        + "invent a teardown the chain did not ask for");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_NOT_REQUESTED.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle, chainRefused, null,
+                                RUN_BOOT)),
+                "the chain's own REFUSAL is not a request to retry; the authority "
+                        + "is the DISPATCH verdict, not the step name");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_NOT_REQUESTED.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle,
+                                EarlyRootPolicy.formatTraceStep(
+                                        EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT,
+                                        "a-previous-boot", 22_000L,
+                                        "sys_boot_completed=0",
+                                        EarlyRootPolicy.CHAIN_SOFT_REBOOT_DISPATCH),
+                                null, RUN_BOOT)),
+                "a DISPATCH line from ANOTHER boot authorises nothing here; the "
+                        + "trace file is append-only across a boot boundary (3.8)");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_TRACE_UNREADABLE.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle,
+                                AutoRootPolicy.RECORD_UNREADABLE, null, RUN_BOOT)),
+                "an unreadable trace refuses, and specifically does not read as "
+                        + "'no request': it is also an unreadable one-shot");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_NO_BOOT_ID.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle, chainDispatched,
+                                null, null)),
+                "a boot that cannot be named gets its own refusal, not the one "
+                        + "that means nobody asked (3.7)");
+        check(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_NO_BOOT_ID.equals(
+                        EarlyRootPolicy.chainSoftRebootRetry(
+                                armSoft(true), claimedCycle, chainDispatched,
+                                null, "  ")),
+                "a blank boot_id refuses the same way");
+        // The authorisation can only ever be REMOVED by the retry, never added.
+        check(EarlyRootPolicy.chainSoftRebootRetry(
+                        null, claimedCycle, chainDispatched, null, RUN_BOOT)
+                        .startsWith(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_UNAUTHORIZED),
+                "an arming that has since gone withdraws the handoff; the retry "
+                        + "re-reads it rather than trusting the trace line alone");
+        check(EarlyRootPolicy.chainSoftRebootRetry(
+                        armSoft(false), claimedCycle, chainDispatched, null, RUN_BOOT)
+                        .endsWith(EarlyRootPolicy.CHAIN_SOFT_REBOOT_NOT_REQUESTED),
+                "the underlying refusal is carried out verbatim, so the trace "
+                        + "says WHICH authorisation stopped holding (3.7)");
+        check(EarlyRootPolicy.chainSoftRebootRetry(
+                        armSoft(true), boundCycle, chainDispatched, null, RUN_BOOT)
+                        .startsWith(EarlyRootPolicy.CHAIN_SOFT_REBOOT_RETRY_UNAUTHORIZED),
+                "a cycle that is no longer claimed withdraws it too");
+        // The retry's own step has to be in the vocabulary, or EarlyRootStore
+        // refuses the line, the caller refuses the dispatch, and the feature is
+        // inert - which is exactly how the chain itself shipped dead once.
+        check(EarlyRootPolicy.parseTraceLine(retryTaken) != null,
+                "STEP_CHAIN_SOFT_REBOOT_RETRY must be an accountable step, or the "
+                        + "one-shot cannot be written and the retry never fires");
+        check(!EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT.equals(
+                        EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT_RETRY),
+                "the deferred handoff may not reuse the chain's step: that step is "
+                        + "the one-shot, and one name for both moments makes the "
+                        + "retry re-authorise itself");
+        for (int i = 0; i < 2; i++) {
+            check(EarlyRootPolicy.chainSoftRebootRetry(
+                            armSoft(true), claimedCycle, chainDispatched, null,
+                            RUN_BOOT)
+                            .equals(EarlyRootPolicy.chainSoftRebootRetry(
+                                    armSoft(true), claimedCycle, chainDispatched,
+                                    null, RUN_BOOT)),
+                    "chainSoftRebootRetry is a function of its five arguments "
+                            + "only; nothing ambient may move it");
         }
 
         System.out.println("EarlyRootPolicyTest: " + pass + "/" + (pass + fail)

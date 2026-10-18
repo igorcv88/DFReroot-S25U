@@ -304,6 +304,23 @@ public final class SoftRebootPolicy {
                 + "; found:" + (found.length() == 0 ? " none" : found.toString()));
     }
 
+    /**
+     * The lock record, parsed, for a caller outside the teardown sequence.
+     *
+     * Exposed rather than re-implemented because the per-boot lock is now read
+     * by two decisions - this policy's own refusal and
+     * {@link EarlyRootPolicy#chainSoftRebootRetry}, which must distinguish "the
+     * receiver refused before claiming" from "the teardown already ran". A
+     * second parser for the same bytes would be a second answer to the same
+     * question, and the strictness here (an unknown key, a duplicate, a wrong
+     * phase, all null) is the part that must not be re-stated loosely.
+     *
+     * null on anything this build cannot fully account for.
+     */
+    public static Map<String, String> parseLock(String record) {
+        return parse(record);
+    }
+
     /** null on anything this build cannot fully account for. */
     private static Map<String, String> parse(String record) {
         if (blank(record)) return null;

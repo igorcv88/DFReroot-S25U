@@ -3109,6 +3109,197 @@ def audit():
              "would refuse every arm record written by a build without it, "
              "which breaks arming on any device that has not rebuilt (3.6.1)")
 
+    # --- the deferred retry of that handoff (owner's P1 on PR #81) --------
+    # The chain hands off the instant post-root finishes; the receiver then
+    # re-derives the firmware's boot-health handshake, which needs
+    # sys.boot_completed, dev.bootcomplete, dev.platform_bootcomplete, a running
+    # zygote AND both init.svc.bootchecker* reading stopped. The chain finishes
+    # in the low tens of seconds and a bootchecker process of this firmware was
+    # measured alive across ktime 27 s, so PENDING there is the likely case -
+    # and the outcome was root PASS with the modules never applied, with nothing
+    # that would ever ask again.
+    #
+    # This is the one place in this feature that DOES key on a boot phase, and
+    # that is a difference in kind rather than a softening: the CHAIN still
+    # reads none (guard (4) above), and what this adds is a strictly later
+    # moment at which the same receiver, with the same gates, is asked once
+    # more. The gates are untouched - 3.6 reserves removing the boot-health
+    # refusal for the owner, and it came out of two physical rollbacks.
+    #
+    # Kotlin cannot be unit-tested here, so each property is static. The
+    # negatives of the DECISION are in EarlyRootPolicyTest.
+    boot_receiver_code = code_only(boot_receiver_src)
+
+    # (R1) The decision is the pure function. An `if` here would be judgement
+    #      nothing tests, and this one decides whether to tear userspace down.
+    if "EarlyRootPolicy.chainSoftRebootRetry(" not in boot_receiver_code:
+        fail("DfrBootReceiver no longer calls EarlyRootPolicy.chainSoftRebootRetry; "
+             "the deferred soft-reboot handoff's decision belongs in the pure, "
+             "host-tested unit (AGENTS.md 5), and its P1 is that a boot whose "
+             "handshake was PENDING at post-root never asked again")
+
+    # (R2) BOOT_COMPLETED only. Convergence requires sys.boot_completed=1 among
+    #      other things, and that property is not set at locked boot - a retry
+    #      there could only reproduce the refusal it exists to outlive.
+    retry_guard = re.search(
+        r"if \(action == Intent\.ACTION_BOOT_COMPLETED\) \{\s+"
+        r"retrySoftRebootChain\(", boot_receiver_code)
+    if not retry_guard:
+        fail("the deferred soft-reboot retry is not gated on BOOT_COMPLETED "
+             "alone; at LOCKED_BOOT_COMPLETED sys.boot_completed is still 0, so "
+             "the boot-health handshake cannot converge and the retry would "
+             "spend its one attempt reproducing the refusal")
+
+    retry_fn = boot_receiver_code[
+        boot_receiver_code.find("private fun retrySoftRebootChain"):]
+    if not retry_fn:
+        fail("DfrBootReceiver.retrySoftRebootChain is gone; the deferred handoff "
+             "has no carrier")
+    else:
+        retry_fn = retry_fn[:retry_fn.find("\n    private fun ", 1)] or retry_fn
+
+        # (R3) It hands off to the RECEIVER, never re-implementing the teardown.
+        #      Same reasoning as the chain's (2): one soft-reboot sequence, so
+        #      this path cannot be the one that forgets a gate (3.2).
+        if "DfrSoftRebootReceiver.ACTION_APPLY_MODULES" not in retry_fn:
+            fail("the deferred retry no longer hands the soft reboot to "
+                 "DfrSoftRebootReceiver.ACTION_APPLY_MODULES; a second path into "
+                 "the teardown is a second place a gate can be forgotten (3.2)")
+        for banned in ("SoftRebootPolicy.evaluate", "SoftRebootPolicy.precheck",
+                       "RootTransport.prepare", "SoftRebootHealth.recordPreExec",
+                       "AutoRootStore.claimSoftReboot"):
+            if banned in retry_fn:
+                fail("DfrBootReceiver's deferred retry references %r; it must ask "
+                     "the receiver that re-derives every gate - boot-health "
+                     "included - and re-implement no part of it (3.2)" % banned)
+
+        # (R4) The trace precedes the broadcast AND refuses it when it cannot be
+        #      written. Here that line is not only the pre-operation record
+        #      (3.6.1) but the ONE-SHOT itself: BOOT_COMPLETED is re-delivered
+        #      under the same boot_id by every framework restart - including the
+        #      one a successful soft reboot performs - so a retry that cannot
+        #      record itself has no bound on how often it re-asks.
+        if "EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT_RETRY" not in retry_fn:
+            fail("the deferred retry no longer writes its own trace step; it is "
+                 "both the pre-operation record and the one-shot (3.11)")
+        if "EarlyRootPolicy.STEP_CHAIN_SOFT_REBOOT," in retry_fn:
+            fail("the deferred retry writes the CHAIN's step instead of its own; "
+                 "one name for both moments makes the retry re-authorise itself "
+                 "on every re-delivered BOOT_COMPLETED, and collapses two "
+                 "different firmware states into one reading (3.7)")
+        retry_trace_at = retry_fn.find("STEP_CHAIN_SOFT_REBOOT_RETRY")
+        retry_send_at = retry_fn.find("sendBroadcast")
+        if retry_send_at < 0 or retry_trace_at > retry_send_at:
+            fail("the deferred retry broadcasts before tracing, or does not "
+                 "broadcast at all; the record of having asked must exist before "
+                 "the asking (3.6.1), and here it is also the one-shot")
+        retry_gate = re.search(r"if \(\w*[Ff]ailure != null\)\s*\{", retry_fn)
+        if not retry_gate or retry_gate.start() > retry_send_at:
+            fail("the deferred retry does not return on a failed trace before "
+                 "broadcasting; without that line there is no bound on how many "
+                 "times a re-delivered BOOT_COMPLETED can re-ask")
+
+        # (R4a) And it waits for the firmware before asking, bounded, with the
+        #      timeout as its own recorded outcome. BOOT_COMPLETED is NOT when
+        #      the handshake converges: measured 2026-10-18, chain done at
+        #      20.347 s, converged at 68.728 s, with BOOT_COMPLETED around 42 s
+        #      on this device. A retry pinned to the broadcast refuses for the
+        #      same reason the chain's own handoff did, which is a feature that
+        #      cannot fire - the fourth time in this repository that a path
+        #      shipped inert.
+        if "awaitBootHealth(" not in retry_fn:
+            fail("the deferred retry asks the receiver without waiting for the "
+                 "firmware's boot-health handshake; it was measured converging "
+                 "at 68.728 s in a boot whose BOOT_COMPLETED is ~42 s, so this "
+                 "is a retry that refuses for the very reason it exists")
+        wait_at = retry_fn.find("awaitBootHealth(")
+        if wait_at > retry_send_at:
+            fail("the deferred retry broadcasts before waiting for the "
+                 "handshake, so the wait cannot change the outcome")
+        if "if (!waited)" not in retry_fn:
+            fail("the deferred retry does not branch on the wait's result; a "
+                 "timeout that falls through to the broadcast asks for a "
+                 "teardown in a boot the firmware does not consider complete")
+        timeout_at = retry_fn.find("if (!waited)")
+        if timeout_at < 0 or timeout_at > retry_send_at:
+            fail("the deferred retry's timeout branch does not return before "
+                 "the broadcast")
+        # ...and the wait is bounded and reads the handshake rather than a clock
+        # alone. An unbounded wait inside system_server is a thread that never
+        # ends; a wait that does not read the verdict is a sleep pretending to
+        # be a condition.
+        wait_fn = boot_receiver_code[
+            boot_receiver_code.find("private fun awaitBootHealth"):]
+        wait_fn = wait_fn[:wait_fn.find("\n    private fun ", 1)] or wait_fn
+        for required in ("RETRY_HEALTH_BUDGET_MS", "SoftRebootHealth.liveVerdict(",
+                         "SoftRebootHealthPolicy.permitsDispatch("):
+            if required not in wait_fn:
+                fail("the deferred retry's wait lost %r; a wait that is "
+                     "unbounded, or that does not read the same handshake the "
+                     "receiver gates on, is not the condition it claims to be"
+                     % required)
+        # EXACTLY ONE success exit, and it is the one the handshake guards.
+        # Checked by counting rather than by presence: the first version of this
+        # guard asked whether `return false` appeared at all, and a mutation
+        # that turned the unreadable-handshake path into `return true` passed it
+        # untouched, because the other refusing exits still matched. Every exit
+        # that is not the converged verdict must refuse (AGENTS.md 2).
+        if wait_fn.count("return true") != 1:
+            fail("the deferred retry's wait has %d success exits; exactly one is "
+                 "allowed and it must be the one guarded by permitsDispatch - "
+                 "any other way out that reports success turns an unreadable or "
+                 "unconverged handshake into permission to tear userspace down"
+                 % wait_fn.count("return true"))
+        if not re.search(r"if \(SoftRebootHealthPolicy\.permitsDispatch\(verdict\)\)"
+                         r" return true", wait_fn):
+            fail("the deferred retry's one success exit is not the handshake's "
+                 "own verdict; a wait that succeeds on anything else is a sleep "
+                 "pretending to be a condition")
+        if wait_fn.count("return false") < 3:
+            fail("the deferred retry's wait no longer refuses on all three of "
+                 "an unreadable handshake, an exhausted budget and an "
+                 "interrupted wait; absence of a reading is never a pass (2)")
+
+        # (R5) It decides off system_server's looper. This receiver is hosted in
+        #      the system process; three record reads and an fsync'd append
+        #      inline would delay every boot of every install, permanently.
+        if "Thread(task" not in retry_fn:
+            fail("the deferred retry runs on the receiver's looper; that looper "
+                 "is system_server's main thread, and the decision reads three "
+                 "durable records and fsyncs a trace line")
+
+    # (R6) The policy's second-teardown guard stays. A soft reboot restarts
+    #      userspace, not the kernel, so boot_id survives it and BOOT_COMPLETED
+    #      arrives again with the chain's DISPATCH line still in the trace. The
+    #      per-boot lock is the only thing that separates "the receiver refused
+    #      before claiming" from "the teardown already ran", and that
+    #      distinction is the whole basis of this retry.
+    retry_policy = policy_src[policy_src.find("public static String chainSoftRebootRetry("):]
+    retry_policy = retry_policy[:retry_policy.find("\n    public static boolean traceHasStepDetail")] \
+        or retry_policy
+    if "SoftRebootPolicy.parseLock(" not in retry_policy:
+        fail("chainSoftRebootRetry no longer reads the per-boot soft-reboot lock "
+             "through SoftRebootPolicy.parseLock; without it a SUCCESSFUL soft "
+             "reboot - which keeps the same boot_id - is followed by a second "
+             "teardown, and a second parser for those bytes would be a second "
+             "answer to whether this boot's attempt was spent (3.5)")
+    for required in ("CHAIN_SOFT_REBOOT_RETRY_ALREADY_CLAIMED",
+                     "CHAIN_SOFT_REBOOT_RETRY_ALREADY_RETRIED",
+                     "CHAIN_SOFT_REBOOT_RETRY_LOCK_UNREADABLE",
+                     "CHAIN_SOFT_REBOOT_RETRY_TRACE_UNREADABLE"):
+        if required not in retry_policy:
+            fail("chainSoftRebootRetry no longer reaches %s; every one of these "
+                 "is a boot loop or an unasked-for teardown if it is dropped, "
+                 "and an unreadable record is never a pass (2)" % required)
+    # ...and it re-reads the authorisation rather than trusting its own trace.
+    # The trace line says the chain asked; it does not say the arming still
+    # stands. chainSoftReboot can only REMOVE permission here.
+    if "chainSoftReboot(armRecord, cycleRecord, currentBootId, true)" not in retry_policy:
+        fail("chainSoftRebootRetry no longer re-derives the arm/cycle "
+             "authorisation through chainSoftReboot; a trace line from earlier "
+             "in the boot is a record that something was asked, never a standing "
+             "permission (3.11)")
+
     # The floor must stay below the structural AMS floor, or the clock is back
     # to choosing the moment. Asserted here and not in EarlyRootPolicyTest
     # because it is a Kotlin constant and a Java host test cannot read it.
