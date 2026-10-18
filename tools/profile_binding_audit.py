@@ -4207,6 +4207,51 @@ def audit(json_mode=False):
         fail("arming schedules the job before checking the early-load "
              "allowlist; a suspended artefact would leave a pending job behind")
 
+    # --- the native transport's load is re-attemptable, success is not -------
+    # `by lazy` cached the FIRST answer for the life of system_server, so one
+    # failure was a failure for the whole boot. The DZIF policy read of
+    # 2026-10-18 is what makes that matter: the mapping is refused by the
+    # file's LABEL (`apk_data_file` has map and read for this domain, not
+    # execute), and a label is mutable - so a transport redesign that gets the
+    # bytes under an executable label would be met by a cached false and look
+    # like a fix that does not work. Owner review, PR #85.
+    #
+    # Guarded in both directions, because each half is one edit from being
+    # wrong: a cached failure is a dead boot, and a re-attempted SUCCESS would
+    # walk the loader on every call for nothing.
+    transport_src = code_only(dfr_source("RootTransport.kt"))
+    if "by lazy" in transport_src and "libraryLoaded" in transport_src:
+        fail("RootTransport caches the library-load result with `by lazy` "
+             "again; a failure then lasts the whole boot of system_server, and "
+             "the refusal is by the file's LABEL, which is mutable")
+    if not re.search(r"private fun libraryLoaded\(\): Boolean", transport_src):
+        fail("RootTransport.libraryLoaded is no longer a function, so a caller "
+             "cannot get a fresh attempt after the one that failed")
+    load_fn = transport_src[transport_src.find("private fun libraryLoaded("):]
+    load_fn = load_fn[:load_fn.find("\n    private fun ", 1)] or load_fn
+    if "if (libraryLoadedOnce) return true" not in load_fn:
+        fail("RootTransport re-walks the loader after a SUCCESSFUL load; the "
+             "success is the half that must be remembered")
+    if "libraryLoadedOnce = true" not in load_fn:
+        fail("RootTransport never records a successful load, so every call "
+             "re-attempts it")
+    for banned in ("Thread.sleep", "while (", "for ("):
+        if banned in load_fn:
+            fail("RootTransport's library load polls or loops (%r); it gets one "
+                 "fresh attempt per ask and must never become a retry loop"
+                 % banned)
+    # And nothing in the shipped app may relabel a file to get that execute
+    # permission. 3.6 reserves that decision for the owner, and the cost is
+    # recorded in docs/S25U_ZZIC_COMPATIBILITY.md: ksu_file is executable by
+    # EVERY domain on the device.
+    for banned in ("ksu_file", "setfilecon", "restorecon", "chcon"):
+        for name, src in (("RootTransport.kt", transport_src),
+                          ("KsudStage.kt", code_only(ks_src))):
+            if banned in src:
+                fail("%s references %r; moving the transport onto an executable "
+                     "SELinux label is an owner decision under 3.6, not a patch "
+                     "an agent applies because a load failed" % (name, banned))
+
     # --- is the EARLY window actually open for what this build stages? ------
     # v2.0.36 and v2.0.37 shipped with Early Integrated Root unreachable and
     # said nothing: each bundled a new DZIF daemon (a885a4d7..., then

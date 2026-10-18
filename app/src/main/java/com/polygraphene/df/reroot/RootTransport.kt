@@ -57,11 +57,45 @@ object RootTransport {
      */
     const val RC_DIGEST_CHANGED = 91
 
+    @Volatile
     private var libraryError: String? = null
 
-    private val libraryLoaded: Boolean by lazy {
-        try {
+    @Volatile
+    private var libraryLoadedOnce = false
+
+    /**
+     * Whether `libdfrsu.so` is mapped in this process, re-attempted on each ask.
+     *
+     * ## Why this is not `by lazy`
+     *
+     * It was, and `by lazy` caches the FIRST answer for the life of the
+     * process - which here is `system_server`, so a failure recorded once is a
+     * failure for the whole boot. That was invisible while the only cause of
+     * failure was permanent, and the effective DZIF policy read on 2026-10-18
+     * is what makes it matter: `system_server` has `map` and `read` on
+     * `apk_data_file` but neither `execute` nor `execmod`, so the mapping is
+     * refused by the LABEL of the file. A label is mutable. Any transport
+     * redesign that gets the bytes under a label this domain may execute would
+     * then be met by a cached `false` from the attempt made before the relabel,
+     * and the symptom would be a fix that appears not to work.
+     *
+     * Re-attempting costs nothing and risks nothing: `System.loadLibrary` on an
+     * already-loaded library is a no-op in the runtime's own bookkeeping, and
+     * the loader serialises concurrent loads of the same name. So the success is
+     * remembered - there is no reason to walk the loader again once it worked -
+     * and only the FAILURE is retried.
+     *
+     * It is not a retry loop and must not become one: nothing here waits, polls
+     * or sleeps, and nothing relabels anything. Each caller that asks gets one
+     * fresh attempt, and a caller that does not ask makes none. Found in the
+     * owner's review of PR #85.
+     */
+    private fun libraryLoaded(): Boolean {
+        if (libraryLoadedOnce) return true
+        return try {
             System.loadLibrary("dfrsu")
+            libraryLoadedOnce = true
+            libraryError = null
             true
         } catch (t: Throwable) {
             libraryError = "${t.javaClass.simpleName}: ${t.message}"
@@ -118,7 +152,7 @@ object RootTransport {
          */
         fun runAsRoot(command: String, timeoutMs: Long): Outcome =
             interpret(
-                if (!libraryLoaded) null
+                if (!libraryLoaded()) null
                 else nativeRunRootShell(
                     TRANSPORT_COMM, command, timeoutMs, transportFixAllowed
                 )
@@ -141,7 +175,7 @@ object RootTransport {
                 return Outcome(RC_NO_TRANSPORT, "no pinned ksud digest to compare against")
             }
             return interpret(
-                if (!libraryLoaded) null
+                if (!libraryLoaded()) null
                 else nativeExecPinnedDaemon(
                     TRANSPORT_COMM, path, pinned, arg, timeoutMs, transportFixAllowed
                 )
@@ -235,7 +269,7 @@ object RootTransport {
             Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_VERIFY=FAIL $why")
             return Preparation(null, "staged helper verification failed: $why")
         }
-        if (!libraryLoaded) {
+        if (!libraryLoaded()) {
             val why = libraryError ?: "libdfrsu.so did not load"
             Log.e(TAG, "[DFR][SOFT_REBOOT] PINNED_TRANSPORT_LIBRARY=FAIL $why")
             return Preparation(null, "the native root transport is unavailable ($why)")

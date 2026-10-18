@@ -2475,6 +2475,39 @@ That redesign is not implemented here. It needs the KernelSU v3.3.0 UAPI at
 is read first-hand, `SOFT_REBOOT_TRANSPORT` stays `BLOCKED` and no code here
 claims otherwise.
 
+### Two defects the policy read created, both from the owner's review — 2026-10-18
+
+The policy read above does not fix the transport, and two things it *does* change
+were missed until the owner's review of PR #85 named them.
+
+**A cached load failure lasts the whole boot, and the refusal is by a mutable
+property.** `RootTransport.libraryLoaded` was `by lazy`, so the first answer was
+the answer for the life of `system_server`. That was invisible while the only
+cause was permanent. It stops being invisible the moment the refusal is known to
+be the file's **label** — `apk_data_file` has `map` and `read` for this domain
+and neither `execute` nor `execmod` — because a label is mutable, so any
+transport redesign that gets the bytes under an executable label would be met by
+a cached `false` from the attempt made before the change, and would present as a
+fix that does not work. It is now a function: the SUCCESS is remembered, the
+failure is re-attempted once per ask, and nothing waits, polls or loops.
+`tools/profile_binding_audit.py` guards both halves and forbids the shipped app
+from relabelling anything to obtain that permission — that is the owner's
+decision under 3.6, with the cost recorded above.
+
+**The arming refusal blamed the owner's current artefact for the panic.** The
+listed-firmware branch read "the first physical early load of the authorized
+pair ended in a kernel panic", which was false when it was written: the pair
+that panicked is `f680f959…`, it is not on the allowlist, and the pairs that are
+have since rooted this device. A refusal that misattributes an incident is the
+same class of error as a collapsed signal one layer up — the reader acts on the
+attribution rather than on the refusal. It now names the historical digest and
+says explicitly that it says nothing against the bytes being refused.
+
+Neither of these is the transport fix, and the review's P1s stand unchanged:
+loading native code in `system_server` is still blocked, the `ksu_file` route is
+still only documented, and its security has not been shown equivalent to the
+isolation it would trade away.
+
 ### Two releases shipped the early window shut, and said nothing — 2026-10-18
 
 The owner hit `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED` at arming time and the
