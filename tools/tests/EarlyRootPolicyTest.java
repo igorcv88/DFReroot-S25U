@@ -744,6 +744,16 @@ public class EarlyRootPolicyTest {
         check(EarlyRootPolicy.earlyLoadAuthorized(DZIF_FP, REPAIRED_KSUD),
                 "the owner authorized this exact repaired DZIF pair for an early"
                         + " attempt, without claiming physical early acceptance");
+        final String DEFEX_V2_KSUD =
+                "89eb37bd8a3b9c5e9f7e7391ccacf634bf6391cf3c8f6a305a7e7eb54e8a4a9e";
+        check(EarlyRootPolicy.earlyLoadAuthorized(DZIF_FP, DEFEX_V2_KSUD),
+                "the owner authorized the DEFEX v2 DZIF pair for an early attempt"
+                        + " on 2026-10-18");
+        check(!EarlyRootPolicy.earlyLoadAuthorized("other/firmware", DEFEX_V2_KSUD),
+                "the DEFEX v2 authorization does not travel to another firmware");
+        check(!EarlyRootPolicy.earlyLoadAuthorized(DZIF_FP,
+                        "a885a4d7643d9c282c1f8f2d89837f00163bf13b9674a90992efc6608a7168f7"),
+                "the unauthorized DEFEX v1 review pair stays refused");
         check(!EarlyRootPolicy.earlyLoadAuthorized(DZIF_FP, "b".repeat(64))
                         && !EarlyRootPolicy.earlyLoadAuthorized("other/firmware",
                                 REPAIRED_KSUD),

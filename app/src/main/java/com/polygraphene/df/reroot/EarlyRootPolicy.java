@@ -1045,7 +1045,16 @@ public final class EarlyRootPolicy {
     private static final Set<String> EARLY_LOAD_AUTHORIZED_ARTEFACTS = Set.of(
             artefactKey(
                     "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OXMCDZIF:user/release-keys",
-                    "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee"));
+                    "3861dbd4e3b16f6edf5ac73601848522a055e62c3128be678e261d94547d32ee"),
+            // Owner decision 2026-10-18: DEFEX v2 daemon (embedded kernelsu.ko
+            // ca08bc0a..., build-id 3a682471...), authorized for an early
+            // attempt BEFORE any manual full-boot PASS of this pair. It keeps
+            // the throne-tracker serialisation that repaired the 2026-10-12
+            // panic, which is a source fact, not early-load evidence.
+            // docs/EARLY_ROOT.md records the decision.
+            artefactKey(
+                    "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OXMCDZIF:user/release-keys",
+                    "89eb37bd8a3b9c5e9f7e7391ccacf634bf6391cf3c8f6a305a7e7eb54e8a4a9e"));
 
     private EarlyRootPolicy() {}
 
