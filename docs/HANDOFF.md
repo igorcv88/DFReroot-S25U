@@ -1,7 +1,7 @@
 # DFReroot S25U / ZZIC — handoff
 
-> **Post-flash review, 2026-10-18:** OWO/ZTO is a requested regional identity,
-> not an observed runtime target. Main remains `3b70be7` with the OXM DZIF
+> **Post-flash review, 2026-10-18:** The owner supplied the OWO/ZTO runtime
+> identity at 17:24. Binary compatibility and the new vbmeta chain are pending. Main remains `3b70be7` with the OXM DZIF
 > fingerprint and DFR daemon `89eb37bd…`; #83/#84 are merged, #85 is open.
 > A synthetic OWO-suffix regression now proves that equal AP/kernel cannot
 > enroll another fingerprint. No runtime profile or early allowlist was widened.

@@ -39,8 +39,11 @@ unchanged.
 
 A synthetic fingerprint changing only OXM to OWO, while preserving the DZIF
 AP/kernel fields, is refused by the native target classifier. This is a
-negative fixture, not a prediction of the real OWO fingerprint. The current
-profile remains the historical OXM profile pending physical evidence.
+negative fixture, not a prediction of the real OWO fingerprint. The owner subsequently supplied the exact OWO/ZTO fingerprint and vbmeta
+digest b9e6d6cf…014c7. Its AP/kernel release/build timestamp match historical
+metadata, but binary compatibility and the new AVB chain are still pending.
+The runtime profile remains the historical OXM profile; no execution gate
+was widened.
 
 The Payloads ko-loaded reader writes ko_sha256 but previously ignored it when
 reading. The proposed strict parser requires this daemon's embedded module
@@ -64,3 +67,12 @@ this DFR change, and the Early Root authorization list is untouched.
 
 No fastboot unlock, patched boot flash or AVB/verity disabling is part of this
 procedure. Automatic device recovery is not implemented by these host changes.
+
+## Incremental build dependency
+
+CMake omitted the DZIF DirtyFrag module from exp.c OBJECT_DEPENDS although exp.c
+embeds it through .incbin. An incremental build could therefore retain the old
+embedded bytes after only that module changed. The dependency is now present;
+the host contract test inventories every embedded module and requires its
+explicit dependency. The non-publishing signed APK build verifies the full
+package/asset/signing chain; it does not authorize OWO execution.
