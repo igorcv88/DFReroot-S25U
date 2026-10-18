@@ -76,3 +76,19 @@ embedded bytes after only that module changed. The dependency is now present;
 the host contract test inventories every embedded module and requires its
 explicit dependency. The non-publishing signed APK build verifies the full
 package/asset/signing chain; it does not authorize OWO execution.
+
+## Signed APK review result
+
+Run 39163451470 passed at source 72e3cd26e7926992c2602beae10c5b1e64b0e0e8.
+Both APKs have the existing signer e5d68192109e8c65f4d433cb4beda0a47c40e7b73c9e48832673b24a6b0b9257.
+DFInstaller's embedded DFR APK was also independently compared byte for byte.
+
+- df_reroot.apk SHA-256: 7d0ae1d3028acb05bd9b5cd4f7749f17500d0796752882f738fefc8c4ba75e58
+- df_installer.apk SHA-256: c0991be9dc4e8ab319b9b019ad91be1e13ac05c9b83883f444a11cbc112c9d66
+
+This review package retains the historical 89eb37bd… daemon. The corrected
+0381b429… daemon is a separate, fully built/audited CI artifact from Payloads
+run 39162758466, not an implicit APK repin. Both the OWO binary compatibility
+review and the explicit selection/integration of its pair remain pending.
+The native transport mapping defect remains unresolved. These dev APKs are
+validation outputs, not an installation instruction or release-ready builds.

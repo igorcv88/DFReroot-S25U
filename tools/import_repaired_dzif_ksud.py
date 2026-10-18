@@ -142,7 +142,7 @@ def main() -> int:
         print(f"IMPORTED {ASSET.relative_to(ROOT)}")
         print(f"  size: {EXPECTED_BYTES}, sha256: {EXPECTED_SHA256}")
         print(f"  module_build_id: {EXPECTED_BUILD_ID}")
-        print("The Early Root authorization allowlist remains empty.")
+        print("The Early Root authorization allowlist is unchanged; import does not authorize a pair.")
         return 0
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         print(f"REFUSED: {e}", file=sys.stderr)
