@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -203,7 +204,12 @@ def parse_c_profile(path):
     return out
 
 
-def audit():
+def short_hash(h):
+    """The 16-hex abbreviation release_notes.py prints, so the two agree."""
+    return (h[:16] + "\u2026") if h and len(h) > 16 else (h or "<unpinned>")
+
+
+def audit(json_mode=False):
     r = {"violations": [], "checks": {}}
     c = parse_c_profile(PROFILE_C)
     with open(PROFILE_JSON) as f:
@@ -4171,12 +4177,214 @@ def audit():
              "`if (!EarlyRootPolicy.earlyLoadAuthorized(` branch is gone or was "
              "short-circuited); the owner would spend a full reboot to be "
              "refused, on the artefact that panicked")
+    # And the refusal NAMES THE PAIR IT SAW, plus which half is unlisted.
+    # On 2026-10-18 the owner hit this refusal and it named neither, so the only
+    # thing it communicated was that something was not authorized - with no way
+    # to tell "this firmware was never authorized" from "the daemon bytes
+    # changed since the owner authorized this pair", which was the real case
+    # (the DEFEX v2 daemon is a new pair). Those have different next steps, and
+    # the first must not inherit the second's kernel-panic sentence: attributing
+    # a DZIF panic to a device not on DZIF is a false statement about the
+    # owner's artefact (3.7).
+    for required in ("EarlyRootPolicy.earlyLoadFirmwareListed(",
+                     "fingerprint=$armFingerprint"):
+        if required not in early_root_arm_src:
+            fail("the arming refusal no longer reports %r; a refusal that names "
+                 "neither half of the pair cannot be acted on, and the owner "
+                 "hit exactly that on 2026-10-18 (3.7)" % required)
+    if "public static boolean earlyLoadFirmwareListed(" not in early_root_policy_src:
+        fail("EarlyRootPolicy.earlyLoadFirmwareListed is gone; the arming "
+             "refusal then cannot say which half of the pair is unlisted")
+    # It answers the FIRMWARE half only, so it can never stand in for the gate.
+    if "EARLY_LOAD_AUTHORIZED_ARTEFACTS.contains(" not in early_root_policy_src:
+        fail("earlyLoadAuthorized no longer compares the whole pair key; the "
+             "firmware-half helper must never become the gate (3.5)")
+
     arm_suspension = order(early_root_arm_src,
                            "EarlyRootPolicy.earlyLoadAuthorized(",
                            "scheduler.schedule(job)")
     if arm_suspension is None or arm_suspension != sorted(arm_suspension):
         fail("arming schedules the job before checking the early-load "
              "allowlist; a suspended artefact would leave a pending job behind")
+
+    # --- the native transport's load is re-attemptable, success is not -------
+    # `by lazy` cached the FIRST answer for the life of system_server, so one
+    # failure was a failure for the whole boot. The DZIF policy read of
+    # 2026-10-18 is what makes that matter: the mapping is refused by the
+    # file's LABEL (`apk_data_file` has map and read for this domain, not
+    # execute), and a label is mutable - so a transport redesign that gets the
+    # bytes under an executable label would be met by a cached false and look
+    # like a fix that does not work. Owner review, PR #85.
+    #
+    # Guarded in both directions, because each half is one edit from being
+    # wrong: a cached failure is a dead boot, and a re-attempted SUCCESS would
+    # walk the loader on every call for nothing.
+    transport_src = code_only(dfr_source("RootTransport.kt"))
+    if "by lazy" in transport_src and "libraryLoaded" in transport_src:
+        fail("RootTransport caches the library-load result with `by lazy` "
+             "again; a failure then lasts the whole boot of system_server, and "
+             "the refusal is by the file's LABEL, which is mutable")
+    if not re.search(r"private fun libraryLoaded\(\): Boolean", transport_src):
+        fail("RootTransport.libraryLoaded is no longer a function, so a caller "
+             "cannot get a fresh attempt after the one that failed")
+    load_fn = transport_src[transport_src.find("private fun libraryLoaded("):]
+    load_fn = load_fn[:load_fn.find("\n    private fun ", 1)] or load_fn
+    if "if (libraryLoadedOnce) return true" not in load_fn:
+        fail("RootTransport re-walks the loader after a SUCCESSFUL load; the "
+             "success is the half that must be remembered")
+    if "libraryLoadedOnce = true" not in load_fn:
+        fail("RootTransport never records a successful load, so every call "
+             "re-attempts it")
+    for banned in ("Thread.sleep", "while (", "for ("):
+        if banned in load_fn:
+            fail("RootTransport's library load polls or loops (%r); it gets one "
+                 "fresh attempt per ask and must never become a retry loop"
+                 % banned)
+    # And nothing in the shipped app may relabel a file to get that execute
+    # permission. 3.6 reserves that decision for the owner, and the cost is
+    # recorded in docs/S25U_ZZIC_COMPATIBILITY.md: ksu_file is executable by
+    # EVERY domain on the device.
+    for banned in ("ksu_file", "setfilecon", "restorecon", "chcon"):
+        for name, src in (("RootTransport.kt", transport_src),
+                          ("KsudStage.kt", code_only(ks_src))):
+            if banned in src:
+                fail("%s references %r; moving the transport onto an executable "
+                     "SELinux label is an owner decision under 3.6, not a patch "
+                     "an agent applies because a load failed" % (name, banned))
+
+    # --- is the EARLY window actually open for what this build stages? ------
+    # v2.0.36 and v2.0.37 shipped with Early Integrated Root unreachable and
+    # said nothing: each bundled a new DZIF daemon (a885a4d7..., then
+    # 89eb37bd...) while the allowlist still named only 3861dbd4..., so the
+    # arming refused every time. The gate was right; the RELEASE was silent.
+    # AGENTS.md 6.3 is explicit that the notes must "state every gate and say
+    # plainly when and why the build will refuse", and these two did not.
+    #
+    # This is deliberately NOT a requirement that the staged digest be listed.
+    # A new daemon arriving unlisted is 3.11 working as designed - the owner
+    # authorizes one exact pair, in the open, and absence is never permission.
+    # What is required is that the state be KNOWN at build time, so the notes
+    # can say it. A parse that finds nothing fails, for the same reason
+    # release_notes.py exits non-zero on an unreadable profile: a release must
+    # not ship notes that silently describe nothing.
+    # Scoped to the Set.of block. Counting artefactKey( over the whole file
+    # also catches the helper's declaration and the call inside
+    # earlyLoadAuthorized, which made 2 real entries read as 3 expected.
+    allow_block = re.search(
+        r"EARLY_LOAD_AUTHORIZED_ARTEFACTS\s*=\s*Set\.of\(([\s\S]*?)\);",
+        early_root_policy_src)
+    allow_block_src = allow_block.group(1) if allow_block else ""
+    allow_pairs = re.findall(
+        r'artefactKey\(\s*"([^"]+)"\s*,\s*"([0-9a-f]{64})"\s*\)',
+        allow_block_src)
+    # Counted, not merely non-empty: a rename that leaves ONE entry parsable
+    # still produces a confident, wrong answer for the others. The number of
+    # call sites in the source is the number of pairs this build authorizes.
+    # Counted by DIGEST LITERALS in the block, not by call sites. A call-site
+    # count is derived from the same text as the parse, so renaming an entry
+    # moves both and the check passes while one authorized pair has gone
+    # invisible - verified by mutation. Every 64-hex literal inside the block is
+    # a pair this build authorizes, whatever the call is spelled.
+    allow_expected = len(re.findall(r"[0-9a-f]{64}", allow_block_src))
+    if not allow_pairs or len(allow_pairs) != allow_expected:
+        fail("parsed %d of %d (fingerprint, ksud digest) pairs out of "
+             "EARLY_LOAD_AUTHORIZED_ARTEFACTS; the release notes cannot say "
+             "whether the early window is open for what this build stages, and "
+             "a partial parse would answer for some profiles and not others"
+             % (len(allow_pairs), allow_expected))
+    staged_specs = re.findall(
+        r'profileId\s*=\s*"([^"]+)"[\s\S]{0,400}?fingerprint\s*=\s*'
+        r'"([^"]+)"\s*\+\s*"([^"]+)"[\s\S]{0,400}?'
+        r'sha256\s*=\s*"([0-9a-f]{64})"',
+        ks_src)
+    # Instantiations only: the declaration is not a staged profile. Counted by
+    # a regex rather than by subtracting counts, which double-subtracted
+    # `data class KsudSpec(` and made two specs read as one.
+    # Same rule, same reason: every pinned digest in KsudStage is a profile
+    # whose early-load state the notes must be able to state.
+    spec_sites = len(re.findall(r'sha256\s*=\s*\n?\s*"[0-9a-f]{64}"', ks_src))
+    if not staged_specs or len(staged_specs) != max(spec_sites, 0):
+        fail("parsed %d of %d staged (profile, fingerprint, ksud digest) specs "
+             "out of KsudStage.kt; the early-load state of the unparsed ones is "
+             "unknown, which the notes must not describe as anything"
+             % (len(staged_specs), max(spec_sites, 0)))
+    authorized = {(fp, d) for fp, d in allow_pairs}
+    early_load = {}
+    for profile_id, fp_a, fp_b, digest in staged_specs:
+        fp = fp_a + fp_b
+        early_load[profile_id] = {
+            "fingerprint": fp,
+            "staged_ksud_sha256": digest,
+            "early_load_authorized": (fp, digest) in authorized,
+        }
+    r["checks"]["early_load"] = early_load
+    r["checks"]["early_load_authorized_pairs"] = [
+        {"fingerprint": fp, "ksud_sha256": d} for fp, d in allow_pairs]
+
+    # ...and the notes must actually SAY it. Publishing the state in this JSON
+    # and leaving the generator silent would reproduce v2.0.36/v2.0.37 exactly:
+    # the fact was derivable and nobody derived it. Guarded by the key the
+    # generator reads, so deleting the section fails here rather than at the
+    # next operator who hits the refusal (6.3).
+    notes_path = os.path.join(HERE, "release_notes.py")
+    try:
+        with open(notes_path, encoding="utf-8") as f:
+            notes_src = f.read()
+    except OSError as ex:
+        fail("cannot read release_notes.py: %s" % ex)
+        notes_src = ""
+    for required in ('"early_load"', "EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED",
+                     "early_load_authorized"):
+        if required not in notes_src:
+            fail("release_notes.py no longer reports the early-load state (%r "
+                 "is gone); v2.0.36 and v2.0.37 shipped with Early Integrated "
+                 "Root unreachable and said nothing, which is the one failure "
+                 "6.3 forbids this pair" % required)
+    # And it must not ASSERT the state. Checked by RUNNING the generator and
+    # comparing its output against what was computed above, not by looking for
+    # a hardcoded literal: a text guard for `= True` is defeated by writing the
+    # literal anywhere else, which a mutation of this very check demonstrated.
+    #
+    # Only in the human run. The generator invokes this tool with --json, so
+    # doing it there would recurse; the --json path deliberately skips it, which
+    # terminates after exactly one level.
+    if not json_mode:
+        notes_out = subprocess.run(
+            [sys.executable, notes_path], cwd=ROOT,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+        notes_text = notes_out.stdout.decode("utf-8", "replace")
+        if notes_out.returncode != 0:
+            fail("release_notes.py exits non-zero, so no release can describe "
+                 "this build at all")
+        # Scoped to the early-load section and to the ONE row that names the
+        # digest. The same abbreviation also appears in the DZIF boundary table
+        # above, and a window taken from the first occurrence read that row's
+        # text instead - which is how the first version of this check reported
+        # an authorized pair as refusing.
+        section = notes_text.split("### Early Integrated Root", 1)
+        if len(section) < 2:
+            fail("release_notes.py has no Early Integrated Root section; "
+                 "v2.0.36 and v2.0.37 shipped with that window unreachable and "
+                 "silent, which is the failure 6.3 forbids")
+            section = ["", ""]
+        for profile_id, e in early_load.items():
+            digest = short_hash(e["staged_ksud_sha256"])
+            rows = [ln for ln in section[1].splitlines() if digest in ln]
+            if len(rows) != 1:
+                fail("release_notes.py names %s's bundled daemon (%s) on %d "
+                     "rows of the early-load section; exactly one row must "
+                     "state that pair's window, or an operator cannot tell "
+                     "which claim applies" % (profile_id, digest, len(rows)))
+                continue
+            open_claim = "available" in rows[0]
+            if open_claim != e["early_load_authorized"]:
+                fail("release_notes.py says %s's early window is %s while the "
+                     "compiled allowlist says %s; a release must never claim a "
+                     "gate state the shipped profile does not have (6.3)"
+                     % (profile_id,
+                        "available" if open_claim else "refusing",
+                        "authorized" if e["early_load_authorized"]
+                        else "unauthorized"))
 
     r["checks"]["early_root"] = {
         "job_service_exported": "true (BIND_JOB_SERVICE)",
@@ -4656,7 +4864,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
-    r = audit()
+    r = audit(json_mode=a.json)
     print(json.dumps(r, indent=2) if a.json else human(r))
     return 0 if r["status"] == "PASS" else 1
 
