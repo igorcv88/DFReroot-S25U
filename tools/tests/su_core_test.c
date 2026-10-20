@@ -365,8 +365,10 @@ int main(void)
         int sv[2] = { -1, -1 };
         struct stat sb;
         char socket_marker[64] = "";
+        /* The host may expose procfs from a different PID namespace: $$ then
+         * names no directory here. Let the inspecting process resolve itself. */
         char *list_argv[] = { (char *)"/bin/sh", (char *)"-c",
-                              (char *)"ls -l /proc/$$/fd", NULL };
+                              (char *)"ls -l /proc/self/fd", NULL };
         char big[8192];
 
         check(stray_fd >= 0 && driver_seed >= 0 &&

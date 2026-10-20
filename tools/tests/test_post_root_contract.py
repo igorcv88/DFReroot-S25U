@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Static guards for assembly/native/UI post-root ordering."""
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[2]
 stage = (ROOT / "app/src/main/jni/stage1.S").read_text()
@@ -19,6 +20,17 @@ def check(condition, label):
     checks.append(label)
     if not condition:
         raise AssertionError(label)
+
+
+cmake = (ROOT / 'app/src/main/jni/CMakeLists.txt').read_text()
+dependency_match = re.search(r'OBJECT_DEPENDS\s+"([^"]+)"', cmake)
+dependencies = dependency_match.group(1).split(';') if dependency_match else []
+embedded_modules = set(re.findall(r'dirtyfrag-[A-Za-z0-9.-]+\.ko', exp))
+check(bool(embedded_modules), 'native embedded-module dependency inventory is nonempty')
+for module in sorted(embedded_modules):
+    dependency = '${CMAKE_SOURCE_DIR}/' + module
+    check(dependency in dependencies,
+          'changing embedded ' + module + ' invalidates exp.c on incremental builds')
 
 
 finit = stage.index("mov x8, #SYS_finit_module")

@@ -1,5 +1,20 @@
 # DFReroot S25U / ZZIC — handoff
 
+> **Post-flash review, 2026-10-18:** The owner supplied the OWO/ZTO runtime
+> identity at 17:24. Binary compatibility and the new vbmeta chain are pending. Main remains `3b70be7` with the OXM DZIF
+> fingerprint and DFR daemon `89eb37bd…`; #83/#84 are merged, #85 is open.
+> A synthetic OWO-suffix regression now proves that equal AP/kernel cannot
+> enroll another fingerprint. No runtime profile or early allowlist was widened.
+> The host descriptor test now inspects `/proc/self/fd`, avoiding a shell PID
+> from a namespace not represented by host procfs. The suite and all four
+> descriptor/authorization mutations pass. This changes no device transport.
+> `RootTransport` still attempts `System.loadLibrary("dfrsu")` in
+> system_server; the documented executable-mapping denial remains unresolved.
+> A proposed Payloads fix binds the ko-loaded reader to the embedded module
+> digest. Its new daemon must be built/reviewed before any APK repin; this
+> review does not authorize it for Early Root. See
+> `docs/POSTFLASH_TRANSPORT_REVIEW.md` for the validation boundaries.
+
 > **2026-10-17 early-root/soft-reboot observation:** Boot
 > `3cea067e-2772-466b-a476-18cd482a5905` reached `POST_ROOT_COMPLETE` at
 > 26.062 s, SELinux Enforcing at 26.063 s and handed off to the soft-reboot
