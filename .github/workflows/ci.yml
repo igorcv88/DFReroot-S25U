@@ -14,6 +14,11 @@ on:
 permissions:
   contents: read
 
+# Drop obsolete PR runs when new commits arrive; manual release is unaffected.
+concurrency:
+  group: dfreroot-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gates:
     name: Offline gates (no device, no SDK)
