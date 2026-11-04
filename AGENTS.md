@@ -842,29 +842,20 @@ and the `assets/df_reroot.apk` bundled inside the installer must be
 **byte-identical** to the published `df_reroot.apk` — `tools/ci_build_audit.sh`
 proves this.
 
-### 6.1 GitHub Actions minutes are a real, billed cost
+### 6.1 GitHub Actions: automatic PR gates, manual signed releases
 
-**Do not dispatch a workflow that is not absolutely necessary.** Runner minutes
-come out of the owner's account, and almost nothing in this repository needs a
-runner to be checked.
-
-- **Every validation runs locally, with no device and no SDK.** The list is §5.
-  Run it on your own machine. A push that only wants "CI to check it" is a
-  workflow dispatch that buys nothing the commands in §5 did not already prove.
-- **`release.yml` is the validation run.** It executes the whole offline gate
-  set *before* it spends a signed build, so a logic regression fails there in
-  seconds. That is by design: it means there is no separate CI run to schedule.
-- **`ci.yml` is manual-dispatch only and is disabled at the repository level.**
-  That is deliberate — it used to run a full SDK + NDK + Gradle build on every
-  push to every branch, re-proving what `release.yml` already gates. **Never
-  re-enable it**, never add push/PR triggers to any workflow, and never enable
-  a workflow the owner disabled.
-- **The only routinely justified dispatch is `release.yml`**, when a release is
-  actually wanted, because producing signed APKs needs the repository secrets
-  and cannot be done anywhere else. One dispatch, not one per attempt: get the
-  build right locally first.
-- If you genuinely believe a runner is needed for something else, **ask before
-  dispatching.** Do not spend the minutes and explain afterwards.
+- `.github/workflows/ci.yml` runs on pull requests and can also be dispatched manually.
+  Offline Gate A/H/F/G tests and security audits must pass before Gate E builds
+  and audits the native package. The CI build uses a disposable signing key;
+  it is never an installable release artifact.
+- `.github/workflows/release.yml` remains manual and is the only path that
+  uses release signing secrets and publishes signed deliverables.
+- Keep the automatic PR workflow read-only and free of production credentials.
+  Do not enable automatic publishing on pull requests.
+- A passing CI run proves host tests, compile and packaging only. It does not
+  replace the firmware/device compatibility and evidence gates.
+- Do not dispatch signed release or hardware operations without the owner's
+  specific instruction. Keep local commands in §5 usable for fast checks.
 
 ### 6.2 Every change goes through a pull request
 
