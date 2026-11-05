@@ -5,27 +5,19 @@ name: CI
 # matrix in docs/S25U_ZZIC_COMPATIBILITY.md is the authority on what is actually
 # verified on the ZZIC device.
 #
-# MANUAL ONLY, on purpose. This previously ran on every push to every branch,
-# which meant a full SDK + NDK + Gradle build per commit - minutes spent
-# re-proving what release.yml already gates before it spends a signed build (it
-# runs Gate A, the section 39 binding audit and Gate G first, then Gate E and the
-# signature identity check after). Every offline gate here also runs locally with
-# no runner at all:
-#
-#   sh tools/tests/run_tests.sh
-#   sh tools/tests/test_resolve_release_tag.sh
-#   python3 tools/profile_binding_audit.py
-#   python3 tools/elf_audit.py
-#   for ko in app/src/main/jni/dirtyfrag-android*.ko; do python3 tools/ko_audit.py "$ko"; done
-#
-# Run this workflow by hand (Actions -> CI -> Run workflow) when a change needs
-# the compile checked without cutting a release. Restoring per-push runs is a
-# one-line change to the trigger below.
+# Runs on every pull request to catch regressions before merge. Release builds
+# remain separately gated and signed only by the manual release workflow.
 on:
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# Drop obsolete PR runs when new commits arrive; manual release is unaffected.
+concurrency:
+  group: dfreroot-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   gates:
@@ -155,6 +147,7 @@ jobs:
 
   build:
     name: Gate E - build + native packaging audit
+    needs: gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -165,14 +158,11 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: >-
-            platforms;android-36
-            build-tools;36.0.0
-            ndk;27.0.12077973
-            cmake;3.22.1
+      - name: Install Android SDK packages on hosted runner
+        run: |
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit)"
+          test -x "$SDKMANAGER"
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
       - name: Export NDK location
         run: |
