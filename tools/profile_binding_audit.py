@@ -4599,6 +4599,68 @@ def audit():
                                       if not missing_signals
                                       else "MISSING %d" % len(missing_signals))
 
+    # --- DFInstaller's root authorization is read, never guessed -----------
+    #
+    # MainActivity.kt needs an Android runtime, so the decision itself lives in
+    # SuAuthorization.java and is covered by tools/tests/SuAuthorizationTest.java.
+    # What cannot be unit-tested here is that the Activity still *calls* it. The
+    # shape it replaced - rooted = rootOut.contains("uid=0") over stdout, stderr
+    # and [rc=N] concatenated together - was wrong in the permissive direction:
+    # any output mentioning the token enabled every privileged button, and the
+    # exit status was never consulted. A revert to that shape must fail a gate,
+    # not a review.
+    installer_dir = os.path.join(ROOT, "installer", "src", "main", "java",
+                                 "com", "polygraphene", "df", "installer")
+
+    def installer_source(name):
+        path = os.path.join(installer_dir, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+        except OSError as ex:
+            fail("cannot read installer/%s: %s" % (name, ex))
+            return ""
+
+    su_auth_src = installer_source("SuAuthorization.java")
+    installer_main_src = installer_source("MainActivity.kt")
+    installer_main_code = code_only(installer_main_src)
+
+    su_auth_signals = [
+        ("SuAuthorization.classify(",
+         "the Activity must route the root check through the classifier"),
+        ("auth.rooted()",
+         "permission must come from the classifier's single passing verdict"),
+        ("SuAuthorization.Verdict.SU_ABSENT",
+         "a missing su and a refused su must stay distinguishable in the UI"),
+        ("execSuRaw(",
+         "the three signals must reach the classifier unmerged"),
+    ]
+    missing_su_auth = [
+        "MainActivity.kt no longer contains %r: %s" % (needle, why)
+        for needle, why in su_auth_signals if needle not in installer_main_code
+    ]
+    # The substring verdict must not come back, under any variable name.
+    if re.search(r'rooted\s*=\s*[^\n;]*\.contains\s*\(', installer_main_code):
+        missing_su_auth.append(
+            "MainActivity.kt decides `rooted` with a .contains() substring "
+            "test again; a denial that merely echoes uid=0 would read as a "
+            "grant, and the exit status would go unread")
+    # The classifier itself must keep exactly one door open, and must not start
+    # treating android.uid.system as root.
+    if "verdict == Verdict.ROOT_OK" not in code_only(su_auth_src):
+        missing_su_auth.append(
+            "SuAuthorization.rooted() no longer gates on ROOT_OK alone")
+    for forbidden in ("uid == 1000", "uid == 2000"):
+        if forbidden in code_only(su_auth_src):
+            missing_su_auth.append(
+                "SuAuthorization accepts %s; only uid 0 is root, and "
+                "android.uid.system is not a substitute for it" % forbidden)
+    for m in missing_su_auth:
+        fail("DFInstaller su-authorization regression: %s" % m)
+    r["checks"]["installer_su_authorization"] = (
+        "all %d present" % len(su_auth_signals) if not missing_su_auth
+        else "MISSING %d" % len(missing_su_auth))
+
     r["status"] = "PASS" if not r["violations"] else "FAIL"
     return r
 

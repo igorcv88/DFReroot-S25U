@@ -79,18 +79,28 @@ class MainActivity : Activity() {
     }
 
     private fun refreshAll() {
-        val rootOut = execSu("id")
-        rooted = rootOut.contains("uid=0")
+        val rootRun = execSuRaw("id")
+        // Fail-closed, and every failure named separately. "No su" sends the
+        // owner to obtain temporary root; "su refused this package" sends them
+        // to authorize DFInstaller, which under a managerless contract is a
+        // different action with no Manager prompt to approve. Reporting the
+        // second as the first asks for an exploit re-run that fixes nothing.
+        val auth = SuAuthorization.classify(
+            rootRun.execFailed, rootRun.rc, rootRun.stdout, rootRun.stderr)
+        rooted = auth.rooted()
         if (!rooted) {
             injected = false
+            val absent = auth.verdict() == SuAuthorization.Verdict.SU_ABSENT
             ui {
-                rootState.text = getString(R.string.root_missing)
+                rootState.text =
+                    getString(if (absent) R.string.root_missing else R.string.root_denied)
                 keyState.text = getString(R.string.key_unknown)
                 updateButtons()
             }
             append("$ su -c id")
-            append(rootOut)
-            append(getString(R.string.hint_need_root))
+            append(render(rootRun))
+            append(auth.detail())
+            append(getString(if (absent) R.string.hint_need_root else R.string.hint_su_denied))
             return
         }
         ui { rootState.text = getString(R.string.root_ok) }
@@ -243,22 +253,47 @@ class MainActivity : Activity() {
         return s.toString()
     }
 
-    private fun execSu(script: String): String {
-        try {
+    /**
+     * One `su -c` attempt, held as the separate signals the shell produced.
+     *
+     * The three were previously concatenated into one string before anything
+     * looked at them, and that string was then substring-tested for "uid=0".
+     * A refusal that quoted the request back therefore read as a grant. Keep
+     * them apart; see SuAuthorization for the reasoning and the test cases.
+     */
+    private class SuRun(
+        val execFailed: Boolean,
+        val rc: Int,
+        val stdout: String,
+        val stderr: String,
+        val error: String? = null,
+    )
+
+    private fun execSuRaw(script: String): SuRun {
+        return try {
             val p = Runtime.getRuntime().exec(arrayOf("su", "-c", script))
             val out = p.inputStream.readBytes().toString(Charsets.UTF_8)
             val err = p.errorStream.readBytes().toString(Charsets.UTF_8)
-            val rc = p.waitFor()
-            return buildString {
-                if (out.isNotBlank()) append(out.trim()).append("\n")
-                if (err.isNotBlank()) append("[stderr] ").append(err.trim()).append("\n")
-                append("[rc=$rc]")
-            }
+            SuRun(false, p.waitFor(), out, err)
         } catch (t: Throwable) {
-            return "[x] su exec failed: ${t.message}\n" +
-                "    first obtain temporary root (e.g. ghostlock) so su works"
+            SuRun(true, -1, "", "", t.message)
         }
     }
+
+    /** The log rendering, byte-for-byte what execSu produced before. */
+    private fun render(run: SuRun): String {
+        if (run.execFailed) {
+            return "[x] su exec failed: ${run.error}\n" +
+                "    first obtain temporary root (e.g. ghostlock) so su works"
+        }
+        return buildString {
+            if (run.stdout.isNotBlank()) append(run.stdout.trim()).append("\n")
+            if (run.stderr.isNotBlank()) append("[stderr] ").append(run.stderr.trim()).append("\n")
+            append("[rc=${run.rc}]")
+        }
+    }
+
+    private fun execSu(script: String): String = render(execSuRaw(script))
 
     private fun runBg(block: () -> Unit) {
         busyCount.incrementAndGet()

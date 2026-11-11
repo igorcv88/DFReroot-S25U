@@ -93,3 +93,15 @@ $JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/EarlyRootPolicy.java \
     tools/tests/EarlyRootPolicyTest.java
 java -cp "$OUT" EarlyRootPolicyTest
+
+# DFInstaller's root authorization. The permissive cases are the point: the
+# Activity used to decide it had root by substring-testing stdout, stderr and
+# [rc=N] concatenated together, so a refusal that merely echoed uid=0 enabled
+# every privileged button and the exit status went unread. None of these states
+# can be produced on demand on a device - a refusal needs an unauthorized
+# package, a non-zero uid a half-granted shell - which is why the decision is a
+# pure class and lives here.
+$JAVAC -nowarn -d "$OUT" \
+    installer/src/main/java/com/polygraphene/df/installer/SuAuthorization.java \
+    tools/tests/SuAuthorizationTest.java
+java -cp "$OUT" SuAuthorizationTest
