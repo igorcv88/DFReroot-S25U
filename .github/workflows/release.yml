@@ -274,12 +274,18 @@ jobs:
       - name: Profile / module binding invariant (DZIF)
         run: python3 tools/dzif_profile_binding_audit.py
 
+      # OWO pins a distinct signed vbmeta chain and a distinct managerless DFR
+      # daemon. Its binding audit re-derives the AVB digest from committed blobs,
+      # compares the captured dm-verity table, and hashes the bundled daemon.
+      # Run the same fail-closed gate as ci.yml before a release is signed.
+      - name: Profile / module / AVB binding invariant (DZIF-OWO)
+        run: python3 tools/dzif_owo_profile_binding_audit.py
+
       - name: Gate F - userspace ELF audit tool (no artefacts, expect UNVERIFIED)
         run: python3 tools/elf_audit.py
 
-      # Re-derives ro.boot.vbmeta.digest from the committed vbmeta blobs and
-      # compares it to the value both profiles pin. Costs no extra runner: it
-      # runs inside the offline gate set that already precedes the signed build.
+      # ZZIC's AVB verifier remains independent of the OWO binding audit.
+      # Both reproduce their pinned vbmeta digests offline before signing.
       - name: Gate B - /vendor AVB provenance, reproduced from committed blobs
         run: python3 tools/verify_zzic_avb.py
 
@@ -436,14 +442,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           {
-            echo "## DFReroot ${VER} — Galaxy S25 Ultra SM-S938B / ZZIC + DZIF exact profiles"
+            echo "## DFReroot ${VER} — Galaxy S25 Ultra SM-S938B exact profiles"
             echo
             echo "Install \`df_installer_${VER}.apk\` first; \`df_reroot_${VER}.apk\` is also"
             echo "bundled inside it, so it does not need to be sideloaded separately."
             echo
-            # Generated from tools/zzic_profile.json and the binding audit, never
-            # hand-maintained here: the v2.0.2 notes described two blockers the
-            # build had already cleared, because prose cannot notice a profile change.
+            # Generated from the three exact profile JSON files and their
+            # binding audits, never hand-maintained here. Older notes described
+            # blockers their builds had already cleared, and manual prose also
+            # omitted the OWO profile after its integration.
             python3 tools/release_notes.py
             echo "### Checksums"
             echo
