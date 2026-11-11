@@ -28,7 +28,10 @@ if [ -n "${ANDROID_HOME:-}" ]; then
 fi
 echo
 echo "## Native module payloads (compiled-in .ko + splicehelper + ksud asset)"
-for f in app/src/main/jni/dirtyfrag-android*.ko app/src/main/assets/ksud app/src/main/assets/ksud-dzif; do
+# Globbed, not listed: the two names were hardcoded, so assets/ksud-dzif-owo
+# was packaged into the APK without its digest ever reaching the provenance
+# record. A per-profile daemon arriving unrecorded is the failure this avoids.
+for f in app/src/main/jni/dirtyfrag-android*.ko app/src/main/assets/ksud*; do
     [ -f "$f" ] && printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"
 done
 echo
