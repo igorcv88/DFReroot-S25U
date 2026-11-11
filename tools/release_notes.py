@@ -7,7 +7,9 @@ Why: the v2.0.2-zzic notes told operators the build would refuse because
 `crash_dump64`'s hash "has never been captured from hardware". By the time that
 release was cut the hash HAD been captured; the prose was simply older than the
 code, and nothing could notice. Anything here that can drift is therefore read
-out of tools/zzic_profile.json and tools/profile_binding_audit.py at build time.
+out of the ZZIC, DZIF/OXM and DZIF/OWO profiles and their binding audits at
+build time. A new exact profile must appear in these generated notes before
+the release workflow publishes it.
 
     tools/release_notes.py          # prints the markdown section
 
@@ -37,7 +39,16 @@ def load():
         [sys.executable, os.path.join(HERE, "dzif_profile_binding_audit.py"), "--json"],
         cwd=ROOT, stdout=subprocess.PIPE, check=False)
     dzif_audit = json.loads(dzif_out.stdout.decode())
-    return profile, audit, dzif_profile, dzif_audit
+
+    with open(os.path.join(HERE, "dzif_owo_profile.json")) as f:
+        owo_profile = json.load(f)
+    owo_out = subprocess.run(
+        [sys.executable, os.path.join(HERE, "dzif_owo_profile_binding_audit.py"), "--json"],
+        cwd=ROOT, stdout=subprocess.PIPE, check=False)
+    owo_audit = json.loads(owo_out.stdout.decode())
+    if owo_out.returncode != 0 or owo_audit.get("status") != "PASS":
+        raise ValueError("DZIF/OWO profile/AVB/daemon binding audit did not pass")
+    return profile, audit, dzif_profile, dzif_audit, owo_profile, owo_audit
 
 
 def short(h):
@@ -46,7 +57,7 @@ def short(h):
 
 def main():
     try:
-        profile, audit, dzif_profile, dzif_audit = load()
+        profile, audit, dzif_profile, dzif_audit, owo_profile, owo_audit = load()
     except Exception as e:  # noqa: BLE001
         print("cannot build release notes from the profile: %s" % e, file=sys.stderr)
         return 1
@@ -206,6 +217,54 @@ def main():
         "A non-zero preflight result is a clean refusal: transaction 5 is not issued "
         "and `nativeStarted` remains false. Do not treat the offline Gate-G PASS "
         "as proof that CVE-2026-43284 is exploitable on this firmware.")
+    add("")
+    # The OWO image has the same kernel module bytes as OXM, confirmed by
+    # direct device reads, but a different vbmeta digest and a distinct DFR
+    # managerless daemon. Its offline PASS must never be described as a
+    # physical root or Wallet PASS. Both signing continuity and the physical
+    # qualification plan remain separate from the build.
+    owo_checks = owo_audit.get("checks") or {}
+    add("### DZIF/OWO exact-target state")
+    add("")
+    add("This APK also carries the fail-closed `S25U_DZIF_OWO` profile "
+        "(`%s`). It pins the OWO multi-CSC firmware rather than a ZTO-only "
+        "sales-code gate." % owo_profile.get("display"))
+    add("The module was found byte-identical to the OXM module on the device; "
+        "the OWO vbmeta chain was independently reproduced from captured "
+        "blobs. The DFR managerless daemon is a separate bundled build, "
+        "not the RMG daemon already installed on the device.")
+    add("")
+    add("| OWO boundary | State | Evidence |")
+    add("| --- | --- | --- |")
+    add("| firmware identity | pinned; host PASS | `%s`; vbmeta `%s` (different "
+        "from OXM) |" % (owo_profile.get("fingerprint"),
+                         short(owo_profile.get("vbmeta_digest"))))
+    add("| vendor AVB / dm-verity | offline %s | digest `%s` reproduced; signed "
+        "vendor descriptor compared against the physical dm-verity table "
+        "captured in the same boot |"
+        % (owo_checks.get("avb_status", "UNKNOWN"),
+           short(owo_checks.get("avb_digest_reproduced"))))
+    add("| exact DirtyFrag module / ABI | offline PASS | `%s`, sha256 `%s`; "
+        "modversions `%s` |"
+        % (owo_profile.get("ko_filename"),
+           short(owo_profile.get("ko_sha256")),
+           owo_checks.get("MODVERSION_COVERAGE", "<unknown>")))
+    add("| DFR managerless Secure Late-Load daemon | offline PASS | %s bytes, "
+        "sha256 `%s`; asset verified against the pin |"
+        % (owo_profile.get("ksud_size"),
+           short(owo_profile.get("ksud_sha256"))))
+    add("| forbidden CLI command refusal | **NOT ESTABLISHED** | binary "
+        "capability indicators do not prove CLI dispatch reachability; "
+        "device/emulator refusal test is still owed |")
+    add("| DFInstaller authorisation, DirtyFrag completion and Wallet/Integrity | "
+        "**PHYSICAL NOT PERFORMED** | no OWO run, same-boot "
+        "`POST_ROOT_COMPLETE` or post-injection Wallet acceptance has "
+        "been qualified |")
+    add("")
+    add("The OWO physical procedure is recorded in "
+        "`docs/S25U_DZIF_OWO_PHYSICAL_QUALIFICATION.md`. "
+        "Do not infer device compatibility or permission to inject the "
+        "certificate from an offline PASS.")
     add("")
     # --- Early Integrated Root: open, or refusing, and why -------------------
     # v2.0.36 and v2.0.37 shipped with this window unreachable and said nothing.
