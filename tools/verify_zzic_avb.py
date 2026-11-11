@@ -143,7 +143,7 @@ def parse_dm_verity_table(text):
     return out
 
 
-def verify(evidence=EVIDENCE, dm_table=None, profile_json=PROFILE_JSON,
+def verify(evidence=EVIDENCE, dm_table=None, profile_json=None,
            c_symbol="DFR_PROFILE_ZZIC", profile_name="ZZIC"):
     """Reproduce one profile's vendor AVB chain from committed blobs.
 
@@ -153,6 +153,17 @@ def verify(evidence=EVIDENCE, dm_table=None, profile_json=PROFILE_JSON,
     """
     r = {"evidence_dir": evidence, "profile": profile_name,
          "violations": [], "checks": {}, "skips": []}
+
+    # Resolved HERE, not as a default argument. A default is bound once at
+    # definition time, so `profile_json=PROFILE_JSON` would have frozen the
+    # module global at import - and tools/tests/test_verify_zzic_avb.py
+    # drives its twenty negative cases by reassigning that global and
+    # calling verify() again. Freezing it did not make those tests fail; it
+    # made them PASS while measuring nothing, because every case then read
+    # the real profile instead of the deliberately broken one. A negative
+    # test that cannot fail is the one defect this file exists to catch.
+    if profile_json is None:
+        profile_json = PROFILE_JSON
 
     def fail(msg):
         r["violations"].append(msg)
