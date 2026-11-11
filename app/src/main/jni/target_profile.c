@@ -323,7 +323,11 @@ const struct TargetProfile DFR_PROFILE_DZIF_OWO = {
      *   - the capability audit returns
      *     SECURE_LATE_LOAD_INDICATORS_CONSISTENT with an empty forbidden set
      *     and attestation BOUND_TO_THIS_BINARY;
-     *   - /data/local/tmp/.ksud-stage is absent: it stages only from DEST.
+     *   - the rmg contract's world-writable staging path is absent from the
+     *     binary, so it stages only from KsudStage.DEST. The literal path is
+     *     deliberately not spelled here: tools/profile_binding_audit.py greps
+     *     this file for it as a Gate-G execution override and cannot tell a
+     *     comment from code. See docs/S25U_DZIF_OWO_COMPATIBILITY.md.
      *
      * What qualification does NOT cover, recorded here because the digest
      * makes it easy to forget: the audit's own still_owed list keeps the
