@@ -207,6 +207,46 @@ def main():
         "and `nativeStarted` remains false. Do not treat the offline Gate-G PASS "
         "as proof that CVE-2026-43284 is exploitable on this firmware.")
     add("")
+    # --- Early Integrated Root: open, or refusing, and why -------------------
+    # v2.0.36 and v2.0.37 shipped with this window unreachable and said nothing.
+    # Each bundled a newer DZIF daemon than the early-load allowlist named, so
+    # the arming refused on every boot - correctly, per AGENTS.md 3.11, since an
+    # unlisted pair is one the owner has not authorized. What was wrong was the
+    # silence: AGENTS.md 6.3 requires these notes to "state every gate and say
+    # plainly when and why the build will refuse", and an operator had to hit
+    # the refusal to learn it.
+    #
+    # Read out of the compiled allowlist and the staged digests, never asserted:
+    # that is the whole reason this file exists (see the module docstring).
+    early = audit.get("checks", {}).get("early_load")
+    add("### Early Integrated Root — per profile, for THIS build")
+    add("")
+    if not early:
+        add("**State unknown for this build.** The early-load allowlist or the "
+            "staged daemon digests could not be read, so these notes decline to "
+            "describe the window rather than guess at it.")
+    else:
+        add("The early window is opened per (firmware, bundled daemon) pair by an "
+            "explicit owner decision. A newly bundled daemon is a **new pair**, "
+            "so it starts unauthorized and the arming refuses until the owner "
+            "lists it - absence is never permission.")
+        add("")
+        add("| Profile | Bundled daemon | Early Integrated Root |")
+        add("| --- | --- | --- |")
+        for profile_id in sorted(early):
+            e = early[profile_id]
+            state = ("**available** (this exact pair is authorized)"
+                     if e.get("early_load_authorized")
+                     else "**will refuse** — this bundled daemon is not in the "
+                          "early-load allowlist; arming reports "
+                          "`EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED`")
+            add("| `%s` | `%s` | %s |"
+                % (profile_id, short(e.get("staged_ksud_sha256")), state))
+        add("")
+        if not all(e.get("early_load_authorized") for e in early.values()):
+            add("A refusal there costs nothing and writes nothing: the manual run "
+                "and Auto Root after a full boot are unaffected.")
+            add("")
     if not dzif_ok:
         add("> **The DZIF exact-profile binding audit did not pass for this build.**")
         add("")

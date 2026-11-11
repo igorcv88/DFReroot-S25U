@@ -2475,6 +2475,178 @@ That redesign is not implemented here. It needs the KernelSU v3.3.0 UAPI at
 is read first-hand, `SOFT_REBOOT_TRANSPORT` stays `BLOCKED` and no code here
 claims otherwise.
 
+### Two defects the policy read created, both from the owner's review — 2026-10-18
+
+The policy read above does not fix the transport, and two things it *does* change
+were missed until the owner's review of PR #85 named them.
+
+**A cached load failure lasts the whole boot, and the refusal is by a mutable
+property.** `RootTransport.libraryLoaded` was `by lazy`, so the first answer was
+the answer for the life of `system_server`. That was invisible while the only
+cause was permanent. It stops being invisible the moment the refusal is known to
+be the file's **label** — `apk_data_file` has `map` and `read` for this domain
+and neither `execute` nor `execmod` — because a label is mutable, so any
+transport redesign that gets the bytes under an executable label would be met by
+a cached `false` from the attempt made before the change, and would present as a
+fix that does not work. It is now a function: the SUCCESS is remembered, the
+failure is re-attempted once per ask, and nothing waits, polls or loops.
+`tools/profile_binding_audit.py` guards both halves and forbids the shipped app
+from relabelling anything to obtain that permission — that is the owner's
+decision under 3.6, with the cost recorded above.
+
+**The arming refusal blamed the owner's current artefact for the panic.** The
+listed-firmware branch read "the first physical early load of the authorized
+pair ended in a kernel panic", which was false when it was written: the pair
+that panicked is `f680f959…`, it is not on the allowlist, and the pairs that are
+have since rooted this device. A refusal that misattributes an incident is the
+same class of error as a collapsed signal one layer up — the reader acts on the
+attribution rather than on the refusal. It now names the historical digest and
+says explicitly that it says nothing against the bytes being refused.
+
+Neither of these is the transport fix, and the review's P1s stand unchanged:
+loading native code in `system_server` is still blocked, the `ksu_file` route is
+still only documented, and its security has not been shown equivalent to the
+isolation it would trade away.
+
+### Two releases shipped the early window shut, and said nothing — 2026-10-18
+
+The owner hit `EARLY_ROOT_ARTEFACT_NOT_AUTHORIZED` at arming time and the
+message named neither half of the pair. The device is on the pinned DZIF
+firmware (`ro.build.fingerprint` read directly), so the firmware half was never
+the problem. The daemon half was, and the release history shows it exactly:
+
+| tag | tagged | bundled DZIF daemon | allowlist contained | early window |
+|---|---|---|---|---|
+| `v2.0.35-dzif` | 10-16 09:16 | `3861dbd4…` | `3861dbd4…` | open |
+| `v2.0.36-dzif` | 10-17 20:47 | `a885a4d7…` | `3861dbd4…` | **shut, silently** |
+| `v2.0.37-dzif` | 10-18 05:08 | `89eb37bd…` | `3861dbd4…` | **shut, silently** |
+| `v2.0.38-dzif` | 10-18 06:28 | `89eb37bd…` | `3861dbd4…`, `89eb37bd…` | open |
+
+The device was running `v2.0.38-dzif` (`versionCode=20038`) when this was
+diagnosed, so the current build arms; the refusal came from one of the two
+before it.
+
+**The gate was correct every time.** A newly bundled daemon is a new pair, and
+AGENTS.md 3.11 says plainly that an unlisted pair is one the owner has not
+authorized — absence is never permission. Nothing here is an argument for
+loosening that.
+
+**What failed is the release telling anyone.** `tools/release_notes.py` had no
+Early Integrated Root section at all, so two releases advertised a feature that
+could not run on them and an operator had to spend an arming to find out.
+AGENTS.md 6.3 requires those notes to "state every gate and say plainly when and
+why the build will refuse", and for this gate they did not.
+
+Closed by generating it rather than writing it: the audit parses the compiled
+allowlist and the staged digests per profile into
+`checks.early_load`, and the notes print one row per profile saying whether the
+window is open or will refuse. Four properties are guarded, each
+mutation-verified:
+
+- the notes carry the section, name each bundled daemon, and state the matching
+  verdict — checked by **running the generator and comparing its output**, not
+  by looking for a literal, because a text guard for a hardcoded `True` is
+  defeated by writing the literal somewhere else (that mutation passed the first
+  version of the check);
+- every 64-hex digest literal inside `EARLY_LOAD_AUTHORIZED_ARTEFACTS` is
+  accounted for by a parsed pair, and likewise for `KsudStage`. Counting call
+  sites instead is derived from the same text as the parse, so renaming an entry
+  moves both and one authorized pair goes invisible — also verified by mutation;
+- exactly one row of that section may name a given digest, because the same
+  abbreviation appears in the DZIF boundary table above and a window taken from
+  the first occurrence read the wrong row;
+- the generator must not assert the state, and must exit zero.
+
+### The effective DZIF policy, read from the policy image — 2026-10-18
+
+The two `UNVERIFIED` rows above are now answered, and a third question nobody had
+asked turns out to be the one that matters. This is not an inference from AOSP
+source: it is the **running kernel's own policy**, pulled from
+`/sys/fs/selinux/policy` on the device (3 140 798 bytes, policy version 30, MLS,
+4 987 types + 520 attributes, 108 classes, 186 953 allow rules) in a boot whose
+`ro.build.fingerprint` is the pinned
+`samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OXMCDZIF:user/release-keys`.
+
+Two independent readers agree on the structure (`checkpolicy` 3.0 reports 5 507
+types = 4 987 + 520, and 108 classes; `setools` 4.6.0 with libsepol 3.11 reports
+the same), which is the self-check this record rests on. Both newer libsepol 3.5
+and setools 4.4.4 **refuse** the file — `libsepol.validate_avtab: Invalid avtab`
+and `Unknown extended permission: 3` — and that is one cause, not two: this
+kernel carries `nlmsg` extended permissions, which those versions predate. A
+toolchain that cannot read the policy is not evidence that the policy is
+malformed.
+
+The permissions below were computed by **expanding attributes**, not by reading
+rule text, so an `allow` written against `domain` is counted for
+`system_server` (verified a member of `domain` and of `coredomain`):
+
+| source | target type | `read` | `map` | `execute` | `execmod` |
+|---|---|---|---|---|---|
+| `system_server` | `apk_data_file` | yes | **yes** | **NO** | **NO** |
+| `system_server` | `system_data_file` | yes | **yes** | **NO** | **NO** |
+| `system_server` | `app_data_file` | yes | yes | NO | NO |
+| `system_server` | `ksu_file` | yes | yes | **yes** | **yes** |
+
+Four things follow, in order of weight.
+
+**`SYSTEM_SERVER_EXEC_SYSTEM_DATA_FILE` = REFUTED.** The command the section
+above left owed does not need to be run. `/data/system` is refused for the same
+reason `/data/app` is, so moving the artefact to that label and trying again was
+never going to work.
+
+**The redesign's own premise is refused by the same rule, and that is new.**
+"Obtain root before any exec" removes the `execve`, but it still requires the
+native code to be **mapped executable** inside `system_server`, and `execute` is
+what `apk_data_file` does not have. The owner observed exactly that on
+2026-10-18: `dlopen` of
+`/data/app/…/com.polygraphene.df.reroot-…/lib/arm64/libdfrsu.so`
+(`-rwxr-xr-x system system u:object_r:apk_data_file:s0`, 19 728 bytes) failed
+with `segment 2: Permission denied`. The policy explains the shape of that
+message precisely: `map` and `read` **are** allowed, so the read-only segments
+map and the executable one does not.
+
+**The AOSP `neverallow` the owner cited is the mechanism, and the policy itself
+carries the escape — by design, not as a hole.** `apk_data_file`,
+`system_data_file` and `app_data_file` all carry the `data_file_type` attribute,
+which is what
+`neverallow system_server data_file_type:file no_x_file_perms` ranges over.
+`ksu_file` carries `file_type` and `mlstrustedobject` and **not**
+`data_file_type` — so the root manager's own policy can, and does, grant
+`{ execute execute_no_trans execmod … }` on it to the whole `domain` attribute
+without violating that rule. `magisk_file` is identical in shape. The only
+permissive type in the whole policy is the `ksu` domain.
+
+**So there is an in-policy route, and it is a decision rather than a patch.**
+`system_server` holds `relabelfrom` on `apk_data_file` and `system_data_file` and
+`relabelto` on `ksu_file`, so the label can be applied without any policy edit,
+without permissive, and without touching the module's authorization predicate —
+which keeps working, because the executing domain stays `system_server`. What it
+costs is stated plainly so it is not discovered later: `allow domain
+ksu_file:file { execute execmod … }` means **every** domain on the device may
+execute anything carrying that label. That grant already exists and was made by
+the root manager's policy, not by this repository; using it for our own library
+widens what this app depends on, and whether that is acceptable is the owner's
+call under AGENTS.md 3.6. Nothing here implements it.
+
+The complete set of labels `system_server` may execute on this firmware, for
+whoever evaluates that decision: `ksu_file`, `magisk_file`,
+`same_process_hal_file`, `system_file`, `system_lib_file`, `system_linker_exec`,
+`vndk_sp_file`, `crash_dump_exec`, `clatd_exec`, `ksmbd_default_exec`,
+`logcat_exec`, `pbtombstone_exec`, `perfetto_exec`, `toolbox_exec`,
+`trace_redactor_exec`.
+
+**What this does NOT say.** It does not say the library ever loaded or never
+loaded. AGENTS.md 3.6.1 records the eleventh run installing a KernelSU driver fd
+for a forked child named `dfreroot-ksud` and panicking inside
+`allowed_for_su+0x12c [kernelsu]` 152 µs later, which is native code of this app
+executing inside `system_server`. That observation and this policy read are both
+evidence and they are not reconciled here: the policy was captured on 2026-10-18
+and the panic on 2026-10-12, and no policy image was captured in that boot. The
+honest statement is that the current policy refuses the mapping and the earlier
+boot behaved as though it did not. `PINNED_TRANSPORT_LIBRARY=FAIL` versus
+`PINNED_TRANSPORT_READY=PASS` is the per-boot marker that distinguishes them, and
+whoever closes this should read it in both.
+
 ### The supercall rebooted the device — 2026-09-29 (eleventh physical run)
 
 The grant-before-exec transport shipped and was tapped once. The device did a

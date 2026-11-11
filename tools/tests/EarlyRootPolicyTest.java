@@ -777,6 +777,36 @@ public class EarlyRootPolicyTest {
                         && !EarlyRootPolicy.earlyLoadAuthorized(FP, ""),
                 "a missing fingerprint or an unpinned daemon digest is not a"
                         + " cleared artefact; absence is never clearance");
+        // --- which HALF is unlisted, for the refusal message (2026-10-18) ---
+        // The owner hit ARTEFACT_NOT_AUTHORIZED at arming time and the message
+        // named neither half, so it could not be acted on. "This firmware was
+        // never authorized" and "this firmware is authorized but these daemon
+        // bytes are not" have different next steps (3.7) - and the second was
+        // the real case, the DEFEX v2 daemon being a new pair.
+        check(EarlyRootPolicy.earlyLoadFirmwareListed(DZIF_FP),
+                "the authorized firmware is recognised as listed, so a digest "
+                        + "mismatch on it can be reported as a digest mismatch");
+        check(!EarlyRootPolicy.earlyLoadFirmwareListed(FP),
+                "a firmware absent from the allowlist reads as absent, which is "
+                        + "a different refusal from a listed firmware carrying "
+                        + "unlisted daemon bytes");
+        check(EarlyRootPolicy.earlyLoadFirmwareListed(DZIF_FP)
+                        && !EarlyRootPolicy.earlyLoadAuthorized(DZIF_FP, "c".repeat(64)),
+                "the firmware half being listed authorises nothing on its own; "
+                        + "only the pair does (3.5)");
+        check(!EarlyRootPolicy.earlyLoadFirmwareListed(null)
+                        && !EarlyRootPolicy.earlyLoadFirmwareListed("")
+                        && !EarlyRootPolicy.earlyLoadFirmwareListed("   "),
+                "a fingerprint that could not be read is not a listed firmware; "
+                        + "absence is never clearance (2)");
+        check(!EarlyRootPolicy.earlyLoadFirmwareListed(
+                        DZIF_FP.substring(0, DZIF_FP.length() - 1)),
+                "a TRUNCATED fingerprint must not match by prefix; the key's NUL "
+                        + "separator is what keeps a partial read from reading as "
+                        + "the authorized firmware");
+        check(!EarlyRootPolicy.earlyLoadFirmwareListed(DZIF_FP + "-x"),
+                "nor does a fingerprint the authorized one is a prefix of");
+
         // Half a key is not a key: the pair is what was validated, so a daemon
         // carried to another firmware, or another daemon on this firmware, is a
         // different experiment.

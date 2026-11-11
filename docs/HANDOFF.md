@@ -1037,6 +1037,19 @@ The remaining sequence is:
    `docs/S25U_ZZIC_COMPATIBILITY.md`, "The exec proof came back negative".
    Staging and verification are unaffected: `PINNED_TRANSPORT_READY=PASS` still
    holds, and root itself is untouched by the refusal.
+   **The `system_data_file` row is no longer UNVERIFIED, and the redesign's own
+   premise is refused by the same rule.** The running policy was read from
+   `/sys/fs/selinux/policy` on 2026-10-18 (`docs/S25U_ZZIC_COMPATIBILITY.md`,
+   "The effective DZIF policy"): `system_server` has `read` and `map` but
+   **neither `execute` nor `execmod`** on `apk_data_file`, `system_data_file`
+   and `app_data_file` alike. Removing the `execve` does not help, because the
+   native code still has to be mapped executable inside `system_server` — which
+   is what the owner hit as `dlopen … segment 2: Permission denied`, with `map`
+   allowed and `execute` not. The one in-policy route found is `ksu_file`, a
+   label the root manager's policy deliberately keeps outside `data_file_type`
+   and grants execute on to the whole `domain` attribute; using it is an owner
+   decision with a cost stated in that section, and nothing is implemented for
+   it.
    What closes it is a redesign, now implemented (`app/src/main/jni/dfr_su_core.c`,
    loaded as `libdfrsu.so`): obtain root **before** any exec.
    The module reads `current`, so `fork()` inside `system_server` already carries

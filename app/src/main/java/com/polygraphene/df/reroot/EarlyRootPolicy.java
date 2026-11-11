@@ -1076,6 +1076,31 @@ public final class EarlyRootPolicy {
                 artefactKey(deviceFingerprint.trim(), ksudSha256.trim()));
     }
 
+    /**
+     * Does the allowlist name this FIRMWARE at all, under any daemon digest?
+     *
+     * Added because the arming refusal was unreadable in the one situation it
+     * exists for. On 2026-10-18 the owner hit {@link #ARTEFACT_NOT_AUTHORIZED}
+     * at arming time and could not tell which half of the pair was unlisted.
+     * Those two halves have DIFFERENT next steps (3.7): a firmware absent from
+     * the list has never been authorized for the early window at all, while a
+     * listed firmware with an unlisted digest means the daemon/module bytes
+     * changed since the owner authorized that pair - which is exactly what had
+     * happened, the DZIF DEFEX v2 daemon being a new pair.
+     *
+     * It answers only about the firmware half and therefore cannot authorise
+     * anything: {@link #earlyLoadAuthorized} remains the only gate, and it
+     * compares both halves. This exists so a refusal can say WHICH half.
+     */
+    public static boolean earlyLoadFirmwareListed(String deviceFingerprint) {
+        if (blank(deviceFingerprint)) return false;
+        String prefix = deviceFingerprint.trim() + "\u0000";
+        for (String key : EARLY_LOAD_AUTHORIZED_ARTEFACTS) {
+            if (key.startsWith(prefix)) return true;
+        }
+        return false;
+    }
+
     private static boolean blank(String s) {
         return s == null || s.trim().isEmpty();
     }

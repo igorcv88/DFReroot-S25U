@@ -125,16 +125,63 @@ object DfrEarlyRoot {
          * reboot on a dispatch that will refuse, or worse, on the artefact that
          * panicked the kernel on 2026-10-12.
          */
-        if (!EarlyRootPolicy.earlyLoadAuthorized(
-                AutoRootStore.deviceFingerprint(), KsudStage.pinnedKsudSha256())) {
+        val armFingerprint = AutoRootStore.deviceFingerprint()
+        val armKsud = KsudStage.pinnedKsudSha256()
+        if (!EarlyRootPolicy.earlyLoadAuthorized(armFingerprint, armKsud)) {
+            /*
+             * It NAMES THE PAIR IT SAW, and says which half is unlisted.
+             *
+             * The first version of this message named neither, and on
+             * 2026-10-18 that is exactly how it failed: the owner hit it, and
+             * all it said was that something was not authorized - no firmware,
+             * no digest, and no way to tell a device on an unauthorized
+             * firmware from an authorized firmware whose daemon bytes have
+             * changed. Those are different situations with different next steps
+             * (3.7), and a refusal a reader cannot act on is a refusal that
+             * costs a round trip to work out.
+             *
+             * The panic sentence is kept for the pair it is about and dropped
+             * for a firmware that was never listed, because attributing a DZIF
+             * kernel panic to a device that is not on DZIF is the collapse this
+             * repository is built against: it reads as "your pair crashed the
+             * kernel" when the truth is "your pair has never been authorized to
+             * try".
+             */
+            val listed = EarlyRootPolicy.earlyLoadFirmwareListed(armFingerprint)
+            val which = if (listed) {
+                /*
+                 * It names the HISTORICAL pair by digest and does not call it
+                 * "the authorized pair".
+                 *
+                 * The first version of this branch said "the first physical
+                 * early load of the authorized pair ended in a kernel panic",
+                 * which was false by the time it was written: the pair that
+                 * panicked is f680f959..., it is NOT on the allowlist, and the
+                 * pairs that are have since rooted this device. A refusal that
+                 * blames the owner's current artefact for an incident it had no
+                 * part in is the same class of error as 3.7's collapsed signal,
+                 * one layer up - the reader acts on the attribution, not on the
+                 * refusal. Caught in the owner's review of PR #85.
+                 */
+                "this firmware IS authorized, but not with this daemon/module" +
+                    " digest - the bytes changed since the owner authorized the" +
+                    " pair, so the authorization does not carry over to them" +
+                    " (3.5). This says nothing against these bytes: the pair" +
+                    " that panicked inside kernelsu.ko on 2026-10-12 was" +
+                    " f680f959..., which is not on the allowlist either"
+            } else {
+                "this firmware is not named in the allowlist at all, under any" +
+                    " digest; the early window has never been authorized for it"
+            }
             return "[x] EARLY_ROOT_NOT_ARMED: ${EarlyRootPolicy.ARTEFACT_NOT_AUTHORIZED}" +
-                " - the early window is not authorized for this firmware" +
-                " and daemon/module pair (ksud=${KsudStage.pinnedKsudSha256()})." +
-                " Only pairs the owner explicitly authorized may be loaded" +
-                " early, because the first early load of an earlier DZIF pair" +
-                " panicked inside kernelsu.ko; a new daemon is a new pair, not" +
-                " a pair known to panic. See docs/EARLY_ROOT.md." +
-                " The manual run and Auto Root after a full boot are unaffected."
+                " - $which. fingerprint=$armFingerprint" +
+                " ksud=${if (armKsud.isEmpty()) "<none pinned for this fingerprint>" else armKsud}." +
+                " A new daemon is a NEW pair, not a pair known to panic: only" +
+                " pairs the owner explicitly authorized may be loaded early," +
+                " because one earlier DZIF pair panicked inside kernelsu.ko on" +
+                " its first early load. Authorizing one is an owner decision; see" +
+                " docs/EARLY_ROOT.md section 11. The manual run and Auto Root" +
+                " after a full boot are unaffected."
         }
         /*
          * And refused while the device is too hot to be dispatched punctually.
