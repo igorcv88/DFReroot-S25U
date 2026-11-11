@@ -134,30 +134,63 @@ Observed live: pid 4310, `Uid 1073`, `context=u:r:network_stack:s0`,
 | F — ELF | inherited from DZIF | same `/system` and `/vendor` bytes as OXM, confirmed by hash |
 | G — module | **as DZIF** | same kernel image; live BTF equals the digest the DZIF witness table was derived from. Shares `DFR_DZIF_KO_*`, so a demotion moves both profiles |
 | V — vendor provenance | **PASS** | eleven anchors pinned; digest reproduced offline; live dm table compared |
-| ksud / daemon | **REFUSES** | unpinned on purpose — see below |
+| ksud / daemon | **PASS (host)** | pinned to the audited DFR managerless build; digest, size and asset bytes agree — see below |
 | Physical | **NOT PERFORMED** | nothing in this record was obtained by running the chain |
 
-## The daemon is unpinned, and that is the point
+## The daemon
 
-`ksud_sha256` is `NULL` and `ksud_size` is `0`. Consequences, in order:
+`ksud_sha256` is `6b7246e5…def2` and `ksud_size` is `5817624`, naming the
+audited DFR managerless Secure Late-Load daemon bundled as
+`app/src/main/assets/ksud-dzif-owo`.
 
-1. `KsudStage.currentSpec()` returns null for this fingerprint, so
-   `stageFromAssets` refuses.
-2. `DfrRootCoordinator` then refuses **before the hop** — ahead of the first
-   page-cache write. No artefact is modified.
+This profile first landed with the daemon at `NULL`/`0`, which made
+`KsudStage.currentSpec()` return null and `DfrRootCoordinator` refuse **before
+the hop** — ahead of the first page-cache write — because no DFR pair existed
+for the `dfreroot` staging contract. `RMGLabs-Payloads` PR #28 built one.
 
-So this profile recognises the device and satisfies every evidence gate, and the
-chain still cannot complete. That is deliberate: the DFR managerless Secure
-Late-Load pair for the `dfreroot` staging contract **does not exist yet**.
-`RMGLabs-Payloads` PR #28 is what makes it buildable.
+### Provenance
 
-**Do not substitute the daemon already on the device.** `/data/adb/ksud` is
-`95b2cc36…81a5` (5797976 B), the RMG OWO managerless review daemon. It carries
-the `rmg` staging contract (`/data/local/tmp/.ksud-stage`), not
-`/data/system/dfreroot-ksud`, and it is the pair currently preserving the
-owner's Wallet and Play Integrity state. Pin this profile's daemon only from an
-audited DFR build, with its own digest and size, and add the asset binding and
-byte checks in the same change.
+| | |
+|---|---|
+| run | `43028391105`, 22 steps, all `success` |
+| source commit | `ae3607778e815e6461d499d1da4e3be066c750fe` |
+| cargo features | `secure-late-load,managerless-app-grants` |
+| KernelSU | `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e` (versionCode 32601, UAPI 2) |
+| daemon | `6b7246e519d3a2c6419a2a833a4239bb81343da6bda6b1c00a0fa2f4d63bdef2`, 5817624 B, build-id `85e4c750…` |
+| embedded module | `4b8965cdd3c733315c84767d3d26c1f71eaec9071b07d13fa08940bd4fe8731c`, 3634632 B, build-id `e61c8770…` |
+| publication | refused — `publish_artifacts=false`, the publish step skipped |
+
+### What qualification established
+
+- All eleven DFR closeout markers survive the Secure Late-Load rewrite, so the
+  `dfreroot` staging contract is intact rather than compiled out.
+- The module embedded in the daemon digests to the module this run built, so
+  the daemon cannot late-load a different one.
+- That module's modversions (156/156) and manual relocations (64/64) resolve
+  against the DZIF kernel release, which OWO shares; no `S938BXXUCZZIC` leak.
+- `tools/ksud_capability_audit.py` returns
+  `SECURE_LATE_LOAD_INDICATORS_CONSISTENT`, `forbidden_present = []`,
+  `attestation_binding = BOUND_TO_THIS_BINARY`.
+- `/data/local/tmp/.ksud-stage` is absent from the binary: it stages only from
+  `/data/system/dfreroot-ksud`.
+
+### What it did not
+
+The capability audit's own `still_owed` list keeps the CLI-level refusal test
+— every forbidden subcommand must be unrecognised — which needs a device or an
+emulator, and reports `reachability_claim = NOT_ESTABLISHED_BY_THIS_TOOL`. An
+indicator present proves the code is in the binary, not that the CLI dispatches
+to it. Pinning does not discharge the physical gates below.
+
+### Do not substitute the daemon already on the device
+
+`/data/adb/ksud` is `95b2cc36…81a5` (5797976 B), the **RMG** OWO managerless
+review daemon. It carries the `rmg` staging contract
+(`/data/local/tmp/.ksud-stage`), not `/data/system/dfreroot-ksud`, and it is the
+pair currently preserving the owner's Wallet and Play Integrity state. The two
+are distinct in both halves — daemon `6b7246e5…` vs `95b2cc36…`, module
+`4b8965cd…` vs `a7d03cb9…` — and that digest is listed in
+`RMG_DAEMONS` in the binding audit so bundling the wrong file fails on the host.
 
 The loaded module's build-id could not be read in the capture
 (`loaded_kernelsu_build_note_hex=UNREADABLE`), so the running `kernelsu` module
@@ -182,8 +215,9 @@ SHA-256. The provenance records the LF digest — what `git show :<path>` produc
 
 ## What is still owed
 
-- A DFR managerless pair for the `dfreroot` contract, built and audited, before
-  this profile's daemon can be pinned.
+- The CLI-level refusal test on the pinned daemon: every forbidden subcommand
+  must be unrecognised. Needs a device or an emulator, so the capability audit
+  still reports `reachability_claim = NOT_ESTABLISHED_BY_THIS_TOOL`.
 - Every physical gate. A green CI run proves host logic, compilation and
   packaging; it proves nothing about `system_server`, the Samsung linker, kernel
   stability, Wallet or Play Integrity.

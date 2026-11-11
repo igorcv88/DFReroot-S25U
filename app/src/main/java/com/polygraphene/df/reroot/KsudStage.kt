@@ -39,9 +39,35 @@ object KsudStage {
         size = 6678728L,
     )
 
+    /**
+     * The OWO multi-CSC sibling of [DZIF]. Same build number, same kernel,
+     * different signed image - so it gets its own asset and its own digest
+     * rather than sharing DZIF's.
+     *
+     * This daemon is NOT the RMG one. It carries the dfreroot staging contract
+     * (/data/system/dfreroot-ksud, the DEST below) and was built with
+     * secure-late-load + managerless-app-grants from RMGLabs-Payloads
+     * ae3607778e815e6461d499d1da4e3be066c750fe. The RMG managerless daemon
+     * living at /data/adb/ksud on the owner's device (95b2cc36..., 5797976
+     * bytes) stages from a different path and must never be substituted here:
+     * the size and digest below are what make that substitution a refusal
+     * instead of a silent success.
+     */
+    private val DZIF_OWO = KsudSpec(
+        profileId = "S25U_DZIF_OWO",
+        fingerprint =
+            "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/" +
+                "S938BXXUCDZIF_OWOCDZIF:user/release-keys",
+        assetName = "ksud-dzif-owo",
+        sha256 =
+            "6b7246e519d3a2c6419a2a833a4239bb81343da6bda6b1c00a0fa2f4d63bdef2",
+        size = 5817624L,
+    )
+
     private fun currentSpec(): KsudSpec? = when (Build.FINGERPRINT) {
         ZZIC.fingerprint -> ZZIC
         DZIF.fingerprint -> DZIF
+        DZIF_OWO.fingerprint -> DZIF_OWO
         else -> null
     }
 

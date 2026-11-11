@@ -199,13 +199,32 @@ static void test_target_detection(void) {
           "both One UI 9 profiles pin the artefact hashes read on OWO");
 
     /*
-     * The daemon is deliberately unpinned, so the staging handoff refuses
-     * before the first page-cache write. A pinned value appearing here without
-     * an audited DFR build behind it is the failure this asserts against.
+     * The daemon, pinned to the audited DFR managerless Secure Late-Load
+     * build. This assertion used to require NULL/0, because no such build
+     * existed and an unpinned ksud is what made staging refuse before the
+     * first page-cache write. Now that one exists, the exact bytes are the
+     * assertion: the digest below is checked against the bundled asset by
+     * tools/dzif_owo_profile_binding_audit.py, and the two values here are
+     * what stop the RMG daemon (95b2cc36..., 5797976 bytes) from being
+     * substituted for it.
      */
-    CHECK(DFR_PROFILE_DZIF_OWO.ksud_sha256 == NULL &&
-          DFR_PROFILE_DZIF_OWO.ksud_size == 0,
-          "the DZIF/OWO daemon is unpinned, so staging refuses");
+    CHECK(DFR_PROFILE_DZIF_OWO.ksud_sha256 != NULL &&
+          !strcmp(DFR_PROFILE_DZIF_OWO.ksud_sha256,
+                  "6b7246e519d3a2c6419a2a833a4239bb81343da6bda6b1c00a0fa2f4d"
+                  "63bdef2") &&
+          DFR_PROFILE_DZIF_OWO.ksud_size == 5817624,
+          "the DZIF/OWO daemon pins the audited DFR managerless build");
+
+    /*
+     * And it is not the OXM one. The two profiles share a kernel and a module
+     * on purpose; the daemon is the one artefact they must never share, since
+     * each carries its own staging contract.
+     */
+    CHECK(DFR_PROFILE_DZIF.ksud_sha256 != NULL &&
+          strcmp(DFR_PROFILE_DZIF_OWO.ksud_sha256,
+                 DFR_PROFILE_DZIF.ksud_sha256) != 0 &&
+          DFR_PROFILE_DZIF_OWO.ksud_size != DFR_PROFILE_DZIF.ksud_size,
+          "the two One UI 9 profiles pin different daemons");
 
     /* One negative per compared field: each alone must refuse. */
     {

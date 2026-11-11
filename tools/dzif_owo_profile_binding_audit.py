@@ -14,12 +14,16 @@ of target_profile.c and compares EVERY field against tools/dzif_owo_profile.json
 actually do, and the artefact hashes that were read on the OWO device and found
 equal actually are.
 
-It also asserts the daemon stays unpinned. That is not a placeholder: the DFR
-managerless Secure Late-Load pair for this staging contract does not exist yet,
-and an unpinned ksud is what makes KsudStage refuse and DfrRootCoordinator
-refuse "before the hop" - ahead of the first page-cache write. A digest
-appearing here without an audited DFR build behind it is a regression, so it
-fails rather than passes.
+It also audits the pinned daemon. This profile first landed with ksud at NULL/0
+so that KsudStage refused and DfrRootCoordinator refused "before the hop",
+because no DFR managerless Secure Late-Load pair existed for this staging
+contract. RMGLabs-Payloads PR #28 built one, so the refusal moved rather than
+went away: the digest must be present, must be identical in the JSON profile,
+the C profile and KsudStage's own spec table, must equal the SHA-256 of the
+asset actually bundled at its pinned size, and must not be one of the RMG
+daemons - those stage from /data/adb/ksud under a different contract. Three
+copies of a digest that agree only with each other prove nothing, so the
+bundled bytes are what this tool hashes.
 
 Usage:
     tools/dzif_owo_profile_binding_audit.py [--json]
@@ -53,6 +57,19 @@ SYMVERS = GATE_G / "DZIF-derived-minimal.symvers"
 PROVENANCE = GATE_G / "DZIF-modversion-provenance.json"
 
 C_PROFILE_SYMBOL = "DFR_PROFILE_DZIF_OWO"
+
+# The bundled DFR managerless daemon for this profile. Its own asset name, not
+# the OXM one: same build number and kernel, different signed image.
+KSUD_OWO_ASSET = "ksud-dzif-owo"
+
+# Daemons that are NOT this asset, by digest, so a copy-paste of the wrong file
+# fails here instead of on the device. These carry the rmg staging contract and
+# stage from /data/adb/ksud; the DFR one stages from /data/system/dfreroot-ksud.
+RMG_DAEMONS = {
+    # ksud-pa3q-S938BXXUCDZIF-OWO-managerless-review-v3.3.0, 5797976 bytes:
+    # the promoted RMG pair running on the owner's device today.
+    "95b2cc363f420b075c1b1301cb959d29d2cd5845372eb3e89b849d020981d8a5",
+}
 
 # Fields that MUST differ between the two regional profiles. Equality in any of
 # them means one profile was copied and not corrected.
@@ -202,24 +219,70 @@ def main():
     if not HEX64.match(str(profile.get("vbmeta_digest") or "")):
         fail("the OWO vbmeta digest is not 64 lowercase hex characters")
 
-    # ------------------------------------------------- 3. the daemon is unpinned
-    if profile.get("ksud_sha256") is not None or profile.get("ksud_size") != 0:
-        fail("the OWO daemon is pinned (%r/%r). Pin it only from an audited "
-             "DFR managerless build, and add the asset binding and byte "
-             "checks at the same time - a digest with no bundled asset behind "
-             "it is the shape 3.5 refuses"
-             % (profile.get("ksud_sha256"), profile.get("ksud_size")))
-    if c_profile and (c_profile.get("ksud_sha256") is not None
-                      or c_profile.get("ksud_size") != 0):
-        fail("%s pins a daemon the JSON does not" % C_PROFILE_SYMBOL)
-    # KsudStage must have no OWO spec, so currentSpec() returns null and
-    # stageFromAssets refuses. The coordinator then refuses before the hop.
+    # --------------------------------------------------- 3. the pinned daemon
+    # This section used to assert the opposite - that the daemon stayed NULL/0
+    # so staging refused - because no DFR managerless pair existed. One does
+    # now, so the refusal moved: a digest is required, and it must be the
+    # digest of the asset actually bundled, in both the JSON and the C profile
+    # and in KsudStage's own spec table. A pin with no asset behind it, or
+    # three copies of the digest that disagree, is the shape 3.5 refuses.
+    ksud_sha = str(profile.get("ksud_sha256") or "")
+    ksud_size = profile.get("ksud_size")
+    if not HEX64.match(ksud_sha) or not isinstance(ksud_size, int) \
+            or ksud_size <= 0:
+        fail("the OWO daemon is not pinned (%r/%r). It must name an audited "
+             "DFR managerless build by digest and size"
+             % (profile.get("ksud_sha256"), ksud_size))
+    if c_profile and (c_profile.get("ksud_sha256") != ksud_sha
+                      or c_profile.get("ksud_size") != ksud_size):
+        fail("%s pins a different daemon than the JSON: %r/%r vs %r/%r"
+             % (C_PROFILE_SYMBOL, c_profile.get("ksud_sha256"),
+                c_profile.get("ksud_size"), ksud_sha, ksud_size))
+
+    # The bundled asset decides. A digest that matches itself proves nothing.
+    asset = ROOT / "app/src/main/assets" / KSUD_OWO_ASSET
+    if not asset.is_file():
+        fail("the OWO daemon is pinned but assets/%s is not bundled"
+             % KSUD_OWO_ASSET)
+    if asset.stat().st_size != ksud_size:
+        fail("assets/%s is %d bytes, the OWO profile pins %d"
+             % (KSUD_OWO_ASSET, asset.stat().st_size, ksud_size))
+    asset_digest = sha256(asset)
+    checks["ksud_sha256_actual"] = asset_digest
+    if asset_digest != ksud_sha:
+        fail("assets/%s digests %s, the OWO profile pins %s"
+             % (KSUD_OWO_ASSET, asset_digest, ksud_sha))
+    if asset_digest in RMG_DAEMONS:
+        fail("assets/%s is the RMG daemon (%s). It stages from /data/adb/ksud "
+             "under the rmg contract and must not be served as the DFR one"
+             % (KSUD_OWO_ASSET, asset_digest))
+
+    # KsudStage is the code path that actually stages, so its own copy of the
+    # pin has to agree with the profile's - and has to be bound to the OWO
+    # fingerprint, not inherited from the OXM spec.
     ks_src = read_text(KSUD_STAGE, "KsudStage.kt")
-    if "_OWOCDZIF" in ks_src:
-        fail("KsudStage.kt names the OWO fingerprint while the profile's "
-             "daemon is unpinned; staging must refuse until an audited DFR "
-             "pair exists")
-    checks["daemon"] = "unpinned (staging refuses)"
+    if "_OWOCDZIF" not in ks_src:
+        fail("KsudStage.kt has no OWO spec, so currentSpec() returns null and "
+             "staging refuses on the very device this profile pins")
+    owo_spec = re.search(
+        r"val DZIF_OWO = KsudSpec\((.*?)\n    \)", ks_src, re.S)
+    if not owo_spec:
+        fail("KsudStage.kt names the OWO fingerprint outside a DZIF_OWO "
+             "KsudSpec; this audit cannot read the pin it actually stages")
+    else:
+        body = owo_spec.group(1)
+        for label, needle in (("digest", ksud_sha),
+                              ("size", "%dL" % ksud_size),
+                              ("asset", '"%s"' % KSUD_OWO_ASSET),
+                              ("fingerprint", "_OWOCDZIF")):
+            if needle not in body:
+                fail("KsudStage.kt's DZIF_OWO spec does not carry the pinned "
+                     "%s (%s)" % (label, needle))
+        if "DZIF_OWO.fingerprint -> DZIF_OWO" not in ks_src:
+            fail("KsudStage.kt defines a DZIF_OWO spec that currentSpec() "
+                 "never selects, so staging still refuses")
+    checks["daemon"] = "pinned %s (%d bytes, asset %s)" % (
+        ksud_sha[:16], ksud_size, KSUD_OWO_ASSET)
 
     # ----------------------------------------------------------- 4. the module
     ko_name = profile.get("ko_filename")
