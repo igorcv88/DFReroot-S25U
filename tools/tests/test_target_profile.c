@@ -70,10 +70,28 @@ static struct ObservedTarget dzif_observed(void) {
     return o;
 }
 
+/*
+ * The OWO observation, transcribed from the owner's read-only capture:
+ * boot_id 52ee18f7-3937-4f99-8dca-c0f51d5d5204, 2026-11-11T12:21:51Z,
+ * reader u:r:ksu:s0, SELinux enforcing, COLLECTION_COMPLETE=YES.
+ *
+ * Derived from dzif_observed() and overriding exactly the one field that
+ * differs, because that IS the relationship between the two firmwares: one
+ * build, one kernel, two regional images. Writing it out again by hand
+ * would let the shared fields drift apart without any test noticing.
+ */
+static struct ObservedTarget owo_observed(void) {
+    struct ObservedTarget o = dzif_observed();
+    o.fingerprint = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
+                    "S938BXXUCDZIF_OWOCDZIF:user/release-keys";
+    return o;
+}
+
 static const char *cls_name(dfr_target_class c) {
     switch (c) {
         case DFR_TARGET_S25U_ZZIC: return "S25U_ZZIC";
         case DFR_TARGET_S25U_DZIF: return "S25U_DZIF";
+        case DFR_TARGET_S25U_DZIF_OWO: return "S25U_DZIF_OWO";
         case DFR_TARGET_MISMATCH:  return "MISMATCH";
         default:                   return "UPSTREAM_GENERIC";
     }
@@ -106,14 +124,133 @@ static void test_target_detection(void) {
           "DZIF class resolves to the DZIF profile");
     CHECK(dfr_target_is_exact(c), "DZIF class is an exact target");
 
-    /* Synthetic regional suffix, NOT a claim about the post-flash device.
-     * Equal AP/kernel cannot enroll an unobserved OWO firmware. */
+    /*
+     * OWO is now an OBSERVED exact target, so the former MISMATCH expectation
+     * here is gone - but only because the observation exists. It was captured
+     * read-only in one boot on the owner's device (boot_id
+     * 52ee18f7-3937-4f99-8dca-c0f51d5d5204, 2026-11-11T12:21:51Z, root in
+     * u:r:ksu:s0, SELinux enforcing), and every field this profile pins was
+     * read there. See docs/S25U_DZIF_OWO_COMPATIBILITY.md.
+     *
+     * The rule the old case protected has not been relaxed: an equal AP and
+     * kernel still cannot enroll an UNOBSERVED regional firmware. That is now
+     * asserted below against a suffix nobody has captured.
+     */
+    o = owo_observed();
+    c = dfr_classify_target(&o, &m);
+    CHECK(c == DFR_TARGET_S25U_DZIF_OWO && m.all_ok,
+          "exact DZIF/OWO -> %s (all_ok=%d)", cls_name(c), m.all_ok);
+    CHECK(dfr_profile_for_class(c) == &DFR_PROFILE_DZIF_OWO,
+          "DZIF/OWO class resolves to the DZIF/OWO profile");
+    CHECK(dfr_target_is_exact(c), "DZIF/OWO class is an exact target");
+
+    /* A still-unobserved regional suffix on the same AP and kernel must refuse,
+     * which is the original rule this file has always enforced. */
     o = dzif_observed();
     o.fingerprint = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
-                    "S938BXXUCDZIF_OWOCDZIF:user/release-keys";
+                    "S938BXXUCDZIF_XEFCDZIF:user/release-keys";
     c = dfr_classify_target(&o, &m);
     CHECK(c == DFR_TARGET_MISMATCH && !m.all_ok,
-          "unobserved OWO suffix with identical DZIF kernel -> MISMATCH");
+          "unobserved XEF suffix with identical DZIF kernel -> MISMATCH");
+
+    /*
+     * The two One UI 9 profiles must be mutually exclusive. They differ in one
+     * compared field - the fingerprint - so an observation can satisfy at most
+     * one. If a future edit made either profile stop comparing it, both would
+     * match and the ordering in dfr_classify_target would silently become a
+     * priority decision over two live claims.
+     */
+    o = owo_observed();
+    c = dfr_classify_target(&o, &m);
+    CHECK(c != DFR_TARGET_S25U_DZIF, "the OWO observation is not DZIF/OXM");
+    o = dzif_observed();
+    c = dfr_classify_target(&o, &m);
+    CHECK(c != DFR_TARGET_S25U_DZIF_OWO, "the OXM observation is not DZIF/OWO");
+    CHECK(!dfr_streq(DFR_PROFILE_DZIF.fingerprint,
+                     DFR_PROFILE_DZIF_OWO.fingerprint),
+          "the two One UI 9 profiles pin different fingerprints");
+
+    /*
+     * OWO is a different signed image from OXM, and this digest is the proof.
+     * Equal values here would mean one of the two profiles was copied from the
+     * other and its AVB anchor never corrected - the quietest possible way for
+     * the vendor-ELF provenance chain to be wrong.
+     */
+    CHECK(!dfr_streq(DFR_PROFILE_DZIF.vbmeta_digest,
+                     DFR_PROFILE_DZIF_OWO.vbmeta_digest),
+          "the two One UI 9 profiles pin different vbmeta digests");
+
+    /*
+     * The artefact hashes, by contrast, SHOULD be equal - that is what the
+     * capture established by reading them directly on the OWO device. Asserting
+     * it keeps the relationship explicit: if a future firmware changes one of
+     * these on one CSC only, this fails and the profiles must diverge.
+     */
+    CHECK(dfr_streq(DFR_PROFILE_DZIF.crashdump_sha256,
+                    DFR_PROFILE_DZIF_OWO.crashdump_sha256) &&
+          dfr_streq(DFR_PROFILE_DZIF.vendor_target_sha256,
+                    DFR_PROFILE_DZIF_OWO.vendor_target_sha256) &&
+          dfr_streq(DFR_PROFILE_DZIF.libc_sha256,
+                    DFR_PROFILE_DZIF_OWO.libc_sha256) &&
+          dfr_streq(DFR_PROFILE_DZIF.libcxx_sha256,
+                    DFR_PROFILE_DZIF_OWO.libcxx_sha256) &&
+          dfr_streq(DFR_PROFILE_DZIF.btf_sha256,
+                    DFR_PROFILE_DZIF_OWO.btf_sha256),
+          "both One UI 9 profiles pin the artefact hashes read on OWO");
+
+    /*
+     * The daemon is deliberately unpinned, so the staging handoff refuses
+     * before the first page-cache write. A pinned value appearing here without
+     * an audited DFR build behind it is the failure this asserts against.
+     */
+    CHECK(DFR_PROFILE_DZIF_OWO.ksud_sha256 == NULL &&
+          DFR_PROFILE_DZIF_OWO.ksud_size == 0,
+          "the DZIF/OWO daemon is unpinned, so staging refuses");
+
+    /* One negative per compared field: each alone must refuse. */
+    {
+        struct ObservedTarget base = owo_observed();
+        struct ObservedTarget bad;
+
+        bad = base; bad.manufacturer = "Samsung";
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + capitalised manufacturer refuses");
+        bad = base; bad.model = "SM-S938U";
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + wrong model refuses");
+        bad = base; bad.device = "pa2q";
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + wrong codename refuses");
+        bad = base; bad.sdk = 36;
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + wrong SDK refuses");
+        bad = base; bad.android_release = 16;
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + wrong Android release refuses");
+        bad = base; bad.display = "CP2A.260605.016.S938BXXUCDZIG";
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + wrong display id refuses");
+        bad = base; bad.fingerprint = DFR_PROFILE_DZIF.fingerprint;
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO identity + OXM fingerprint refuses");
+        bad = base;
+        bad.kernel_release =
+            "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIG-4k";
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + a future kernel release refuses");
+        bad = base; bad.kernel_version = "#2 SMP PREEMPT Sun Sep 20 00:00:00 UTC 2026";
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + rebuilt kernel version refuses");
+        bad = base; bad.kernel_arch = "armv8l";
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + wrong arch refuses");
+        bad = base; bad.page_size = 16384;
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + 16K pages refuses");
+        bad = base; bad.abi = "armeabi-v7a";
+        CHECK(dfr_classify_target(&bad, &m) != DFR_TARGET_S25U_DZIF_OWO,
+              "OWO + 32-bit ABI refuses");
+    }
 
     /* Cross-firmware mixtures must fail closed even though model/codename match. */
     o = dzif_observed();

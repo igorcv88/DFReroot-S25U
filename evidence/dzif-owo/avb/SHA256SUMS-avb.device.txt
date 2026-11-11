@@ -1,0 +1,4 @@
+9c4765d3e0a576336c0ff20e4ee59a66dab915d749d025859b1fad0415ee6ce4  /sdcard/Download/DFR_OWO_AVB_52ee18f7-3937-4f99-8dca-c0f51d5d5204/vbmeta.img
+b06d0ecb77961f677df0b128e85cf91062ef9b61061d3d8a8bd5f776c822616f  /sdcard/Download/DFR_OWO_AVB_52ee18f7-3937-4f99-8dca-c0f51d5d5204/dtbo-vbmeta.img
+c0b812752f5713299f50955fcac5b38ad86e10146b2bab96e223ab139239d795  /sdcard/Download/DFR_OWO_AVB_52ee18f7-3937-4f99-8dca-c0f51d5d5204/optics-vbmeta.img
+99b1deefa34e0bbd71498f8bef26303280dd9dfca76287d1e5a422560ea82d6d  /sdcard/Download/DFR_OWO_AVB_52ee18f7-3937-4f99-8dca-c0f51d5d5204/prism-vbmeta.img

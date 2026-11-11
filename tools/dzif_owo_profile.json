@@ -1,0 +1,80 @@
+{
+  "id": "S25U_DZIF_OWO",
+  "manufacturer": "samsung",
+  "model": "SM-S938B",
+  "device": "pa3q",
+  "sdk": 37,
+  "android_release": 17,
+  "display": "CP2A.260605.016.S938BXXUCDZIF",
+  "fingerprint": "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/S938BXXUCDZIF_OWOCDZIF:user/release-keys",
+  "kernel_release": "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k",
+  "kernel_version": "#1 SMP PREEMPT Sat Sep 19 07:11:26 UTC 2026",
+  "page_size": 4096,
+  "abi": "arm64-v8a",
+  "kernel_arch": "aarch64",
+  "kernel_image_sha256": "b1b300e7e70d1aea03fcaff33dfc203b06f6322ac7ca177e6b9a39b6599713aa",
+  "btf_sha256": "e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c",
+  "crashdump_sha256": "9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f",
+  "vendor_target_sha256": "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
+  "libc_sha256": "88fba68b3d1fded4bfd25197f6de24f5b8794d3253de860ee261a4272be9e861",
+  "libcxx_sha256": "cb118e98c74d3454858921123b9b51ba13df9cad7dfa141dd892c453661a4d78",
+  "ksud_sha256": null,
+  "ksud_size": 0,
+  "post_root_record": "/data/system/dfreroot-post-root",
+  "kernelsu_version": 32601,
+  "kernelsu_uapi_version": 2,
+  "post_root_selinux": 1,
+  "vbmeta_digest": "b9e6d6cfa5bb6c1f542bcb94dbf68b803126bcac62c05da6eab1ea0ee4b014c7",
+  "vbmeta_avb_version": "1.2",
+  "vbmeta_hash_alg": "sha256",
+  "verified_boot_state": "green",
+  "vbmeta_device_state": "locked",
+  "flash_locked": "1",
+  "verity_mode": "enforcing",
+  "vendor_fstype": "erofs",
+  "vendor_mount_ro": 1,
+  "vendor_target_size": 51632,
+  "vendor_target_context": "u:object_r:vendor_file:s0",
+  "network_stack_process": "com.android.networkstack.process",
+  "network_stack_uid": 1073,
+  "network_stack_context": "u:r:network_stack:s0",
+  "network_stack_cap_eff": "0x800003c00",
+  "ko_verified": 1,
+  "ko_filename": "dirtyfrag-android15-6.6-S938BXXUCDZIF.ko",
+  "ko_sha256": "512862ee484b16c256737eae05fbc1b4b51fb38639f6a655f00938cb0c3ca926",
+  "targets": {
+    "/apex/com.android.runtime/bin/crash_dump64": "9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f",
+    "/vendor/lib64/libstagefrighthw.so": "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
+    "/system/lib64/libc.so": "88fba68b3d1fded4bfd25197f6de24f5b8794d3253de860ee261a4272be9e861",
+    "/system/lib64/libc++.so": "cb118e98c74d3454858921123b9b51ba13df9cad7dfa141dd892c453661a4d78"
+  },
+  "symbol_checks": {
+    "/system/lib64/libc.so": [
+      "__libc_init"
+    ],
+    "/system/lib64/libc++.so": [
+      "_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_"
+    ]
+  },
+  "vendor_avb": {
+    "_note": "OFFLINE ONLY. Verified by tools/verify_dzif_owo_avb.py against the vbmeta blobs under evidence/dzif-owo/avb/. Deliberately NOT mirrored into target_profile.c: reading the live dm-verity table needs a DM ioctl that has never been measured from u:r:network_stack:s0, so a runtime gate on these would be unsatisfiable by construction - the same trap that broke 2.0.2. A pinned field the runtime never compares is dead weight.",
+    "_canonical": "Block counts are canonical; byte offsets are DERIVED (blocks x block_size) and compared against the signed descriptor. Pinning both forms of one quantity is drift.",
+    "partition_name": "vendor",
+    "vbmeta_chain": [
+      "dtbo",
+      "optics",
+      "prism"
+    ],
+    "dm_verity_version": 1,
+    "hash_algorithm": "sha256",
+    "data_block_size": 4096,
+    "hash_block_size": 4096,
+    "data_blocks": 860461,
+    "tree_blocks": 6777,
+    "fec_num_roots": 2,
+    "fec_offset_blocks": 867238,
+    "fec_blocks": 6856,
+    "salt": "613c9e091c4c31c6bfa4cb560f83108f1bfe3d1e78562ffd3ee615859fd848c0",
+    "root_digest": "dcfb9c588ae33c38e9b28f6e64976e78be0f107596fb2df86c996e36701c1e09"
+  }
+}

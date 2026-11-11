@@ -44,6 +44,12 @@ jobs:
       - name: Profile / module binding invariant (DZIF)
         run: python3 tools/dzif_profile_binding_audit.py
 
+      # Also reproduces the OWO vbmeta digest from the committed blobs and
+      # compares the signed vendor descriptor against the live dm-verity
+      # table, so a half-corrected copy of the OXM profile fails here.
+      - name: Profile / module / AVB binding invariant (DZIF-OWO)
+        run: python3 tools/dzif_owo_profile_binding_audit.py
+
       - name: Python tool syntax
         run: python3 -m compileall -q tools
 

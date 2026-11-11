@@ -740,6 +740,7 @@ What must stay separate:
 | What is the target, and what is pinned about it? | `app/src/main/jni/target_profile.{h,c}` |
 | Same, for the offline Python tools | `tools/zzic_profile.json` |
 | Which gates are actually proven, and by what evidence? | `docs/S25U_ZZIC_COMPATIBILITY.md` |
+| Same, for the One UI 9 OWO profile | `docs/S25U_DZIF_OWO_COMPATIBILITY.md` |
 | What is left to do and what closes it? | `docs/HANDOFF.md` |
 | How the early-boot dispatch is accepted physically | `docs/EARLY_ROOT.md` |
 | Do the profile's internal invariants hold? | `tools/profile_binding_audit.py` |
@@ -765,6 +766,8 @@ sh    tools/tests/test_resolve_release_tag.sh
 python3 tools/profile_binding_audit.py    # profile invariants + drift + no override
 python3 tools/elf_audit.py                # Gate F
 python3 tools/verify_zzic_avb.py          # /vendor AVB provenance, offline
+python3 tools/verify_dzif_owo_avb.py      # same, for the OWO chain
+python3 tools/dzif_owo_profile_binding_audit.py  # OWO profile + AVB + Gate G
 python3 tools/ko_audit.py app/src/main/jni/dirtyfrag-android15-6.6.ko   # Gate G
 python3 tools/release_notes.py            # the notes still generate
 python3 -m compileall -q tools

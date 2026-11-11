@@ -194,6 +194,136 @@ const struct TargetProfile DFR_PROFILE_DZIF = {
     .ko_sha256   = DFR_DZIF_KO_SHA256,
 };
 
+/*
+ * One UI 9 Stable / DZIF on the OWO multi-CSC, the owner's own SM-S938B.
+ *
+ * This is a SEPARATE exact profile, not a relaxation of the OXM one. The two
+ * firmwares share a build number and a kernel but they are not the same
+ * signed image: ro.boot.vbmeta.digest differs (be1e4709... on OXM,
+ * b9e6d6cf... here), which is proof the AVB-covered partitions are not
+ * bit-identical. So nothing is inherited by analogy; every value below was
+ * read on the OWO device.
+ *
+ * EVIDENCE. One read-only capture, one boot, root in u:r:ksu:s0 with SELinux
+ * enforcing: boot_id 52ee18f7-3937-4f99-8dca-c0f51d5d5204 at
+ * 2026-11-11T12:21:51Z, begin and end boot_id equal, COLLECTION_COMPLETE=YES.
+ * Recorded in docs/S25U_DZIF_OWO_COMPATIBILITY.md.
+ *
+ * What the capture settled, and what it did not:
+ *
+ *   - crashdump, vendor ELF, libc and libc++ hash EXACTLY as on OXM. That was
+ *     previously an assumption that could not be acted on; it is now a direct
+ *     read on this firmware, with the vendor ELF read from u:r:ksu:s0 while
+ *     dm-verity was enforcing and the bootloader locked.
+ *   - the BTF digest matches too, read live from /sys/kernel/btf/vmlinux, which
+ *     is independent confirmation that the kernel is the same image the DZIF
+ *     Gate-G witness table was derived from. That is what lets this profile
+ *     reuse the DZIF DirtyFrag module rather than demand a second build of the
+ *     same bytes.
+ *   - kernel_image_sha256 was NOT read live - a running kernel does not expose
+ *     its own Image - and is carried over from the OWO kernel reference ZIP
+ *     recorded in RMGLabs-Payloads support/candidates/pa3q-DZIF-OWO.pending.json.
+ *     The live BTF match is what makes that carry-over evidence rather than
+ *     assumption, and it is still the weaker of the two anchors.
+ *
+ * REGIONAL SCOPE. This profile pins the _OWOCDZIF fingerprint and nothing
+ * else about region. The capture does record ro.boot.sales_code=ZTO,
+ * ro.csc.sales_code=ZTO, ro.boot.carrierid=ZTO and ro.omc.multi_csc=OWO, so a
+ * ZTO-exclusive gate is now possible - but it is deliberately NOT built here.
+ * The owner's decision was OWO compatibility. Another ZTO-less OWO device on
+ * this exact firmware therefore classifies exact, and that is the documented
+ * intent, not an oversight. Do not describe this profile as ZTO-exact.
+ *
+ * THE DAEMON IS UNPINNED ON PURPOSE. ksud_sha256/ksud_size are NULL/0, so
+ * KsudStage refuses to stage and DfrRootCoordinator refuses "before the hop" -
+ * ahead of the first page-cache write. The DFR managerless Secure Late-Load
+ * pair for this contract does not exist yet; RMGLabs-Payloads PR #28 is what
+ * builds it. The RMG OWO managerless daemon running on the device today
+ * (95b2cc36..., staged at /data/adb/ksud) is NOT this asset: it carries the
+ * rmg staging contract and must not be substituted here. Pin this pair only
+ * from an audited DFR build, with its own digest and size.
+ */
+const struct TargetProfile DFR_PROFILE_DZIF_OWO = {
+    .id            = "S25U_DZIF_OWO",
+    .manufacturer  = "samsung",
+    .model         = "SM-S938B",
+    .device        = "pa3q",
+    .sdk           = 37,
+    .android_release = 17,
+    .display       = "CP2A.260605.016.S938BXXUCDZIF",
+    .fingerprint   = "samsung/pa3qxxx/pa3q:17/CP2A.260605.016/"
+                     "S938BXXUCDZIF_OWOCDZIF:user/release-keys",
+    .kernel_release = "6.6.127-android15-8-p33f4ffe-abogkiS938BXXUCDZIF-4k",
+    .kernel_version = "#1 SMP PREEMPT Sat Sep 19 07:11:26 UTC 2026",
+    .page_size      = 4096,
+    .abi            = "arm64-v8a",
+    .kernel_arch    = "aarch64",
+
+    /* Carried from the OWO kernel reference ZIP; see the note above. */
+    .kernel_image_sha256 =
+        "b1b300e7e70d1aea03fcaff33dfc203b06f6322ac7ca177e6b9a39b6599713aa",
+    /* Read live from /sys/kernel/btf/vmlinux, 6425607 bytes. */
+    .btf_sha256 =
+        "e13df32a16b5536c43897542b4dbc2c7082f2aefb91249bc94a06bfc5870950c",
+    .crashdump_sha256 =
+        "9249d66445837c52322c2c86ee62efa64e49a7c1b72084c1ce98f72c12a1151f",
+    .vendor_target_sha256 =
+        "308b254a82c51695015182fc3b78b5d0cbb6e36cd6cf8f2f282452f8a47f8049",
+    .libc_sha256 =
+        "88fba68b3d1fded4bfd25197f6de24f5b8794d3253de860ee261a4272be9e861",
+    .libcxx_sha256 =
+        "cb118e98c74d3454858921123b9b51ba13df9cad7dfa141dd892c453661a4d78",
+
+    /*
+     * The OWO AVB chain, as the bootloader published it in the capture boot.
+     * This digest is the one field that proves OWO is a different signed image
+     * from OXM, so it is also the field a copy-paste of the OXM profile would
+     * get wrong most quietly.
+     */
+    .vbmeta_digest =
+        "b9e6d6cfa5bb6c1f542bcb94dbf68b803126bcac62c05da6eab1ea0ee4b014c7",
+    .vbmeta_avb_version  = "1.2",
+    .vbmeta_hash_alg     = "sha256",
+    .verified_boot_state = "green",
+    .vbmeta_device_state = "locked",
+    .flash_locked        = "1",
+    .verity_mode         = "enforcing",
+    .vendor_fstype       = "erofs",
+    .vendor_mount_ro     = 1,
+    .vendor_target_size  = 51632,
+    .vendor_target_context = "u:object_r:vendor_file:s0",
+
+    /* Observed live: pid 4310, Uid 1073, CapEff 0000000800003c00. */
+    .network_stack_process = "com.android.networkstack.process",
+    .network_stack_uid     = 1073,
+    .network_stack_context = "u:r:network_stack:s0",
+    .network_stack_cap_eff = 0x800003c00L,
+
+    /*
+     * Unpinned, and therefore refusing. See the DAEMON note above: this is the
+     * documented NULL/0 state, not an omission, and KsudStage plus
+     * DfrRootCoordinator turn it into a refusal before the first write.
+     */
+    .ksud_sha256      = NULL,
+    .ksud_size        = 0,
+    .post_root_record = "/data/system/dfreroot-post-root",
+    .kernelsu_version = 32601,
+    .kernelsu_uapi_version = 2,
+    .post_root_selinux = 1,
+
+    /*
+     * The DZIF DirtyFrag module, reused because the kernel is the same image:
+     * identical release, identical uname -v, and a BTF digest read live on this
+     * device that equals the one the DZIF witness table was derived from. The
+     * macros are shared deliberately - two copies of one digest is how they
+     * drift - so promoting or demoting that module moves both profiles at once,
+     * which is correct while they name the same kernel.
+     */
+    .ko_verified = DFR_DZIF_KO_VERIFIED,
+    .ko_filename = DFR_DZIF_KO_FILENAME,
+    .ko_sha256   = DFR_DZIF_KO_SHA256,
+};
+
 int dfr_streq(const char *a, const char *b) {
     if (a == NULL || b == NULL) return 0;
     return strcmp(a, b) == 0;
@@ -474,20 +604,22 @@ static int match_score(const struct TargetMatch *m) {
 }
 
 int dfr_target_is_exact(dfr_target_class cls) {
-    return cls == DFR_TARGET_S25U_ZZIC || cls == DFR_TARGET_S25U_DZIF;
+    return cls == DFR_TARGET_S25U_ZZIC || cls == DFR_TARGET_S25U_DZIF ||
+           cls == DFR_TARGET_S25U_DZIF_OWO;
 }
 
 const struct TargetProfile *dfr_profile_for_class(dfr_target_class cls) {
     switch (cls) {
         case DFR_TARGET_S25U_ZZIC: return &DFR_PROFILE_ZZIC;
         case DFR_TARGET_S25U_DZIF: return &DFR_PROFILE_DZIF;
+        case DFR_TARGET_S25U_DZIF_OWO: return &DFR_PROFILE_DZIF_OWO;
         default: return NULL;
     }
 }
 
 dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
                                      struct TargetMatch *out) {
-    struct TargetMatch zzic, dzif, chosen;
+    struct TargetMatch zzic, dzif, dzif_owo, chosen;
     memset(&chosen, 0, sizeof(chosen));
 
     if (obs == NULL) {
@@ -497,6 +629,7 @@ dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
 
     match_profile(obs, &DFR_PROFILE_ZZIC, &zzic);
     match_profile(obs, &DFR_PROFILE_DZIF, &dzif);
+    match_profile(obs, &DFR_PROFILE_DZIF_OWO, &dzif_owo);
 
     if (zzic.all_ok) {
         chosen = zzic;
@@ -504,7 +637,17 @@ dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
     } else if (dzif.all_ok) {
         chosen = dzif;
         chosen.cls = DFR_TARGET_S25U_DZIF;
-    } else if (zzic.anchor_hit || dzif.anchor_hit) {
+    } else if (dzif_owo.all_ok) {
+        /*
+         * Reachable only when DZIF/OXM did not match, and the two cannot
+         * both match: they pin different fingerprints, and fingerprint is
+         * compared for equality. The ordering is therefore not a priority
+         * decision, and test_target_profile.c asserts that no observation
+         * satisfies both.
+         */
+        chosen = dzif_owo;
+        chosen.cls = DFR_TARGET_S25U_DZIF_OWO;
+    } else if (zzic.anchor_hit || dzif.anchor_hit || dzif_owo.anchor_hit) {
         /*
          * For diagnostics choose the exact profile the observation most closely
          * resembles, but the verdict itself is still a hard MISMATCH. This keeps
@@ -512,6 +655,8 @@ dfr_target_class dfr_classify_target(const struct ObservedTarget *obs,
          * path merely because neither known profile matches completely.
          */
         chosen = match_score(&dzif) > match_score(&zzic) ? dzif : zzic;
+        if (match_score(&dzif_owo) > match_score(&chosen))
+            chosen = dzif_owo;
         chosen.cls = DFR_TARGET_MISMATCH;
         chosen.anchor_hit = 1;
     } else {
