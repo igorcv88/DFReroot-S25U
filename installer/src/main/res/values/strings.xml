@@ -15,10 +15,12 @@
     <string name="root_unknown">root: checking…</string>
     <string name="root_ok">root: OK (su works)</string>
     <string name="root_missing">root: MISSING — obtain temporary root first (e.g. ghostlock) and grant root access on the root manager</string>
+    <string name="root_denied">root: DENIED — su ran but did not grant root to DFInstaller</string>
     <string name="key_unknown">key: unknown</string>
     <string name="key_injected">key: INJECTED in android.uid.system</string>
     <string name="key_clean">key: not injected</string>
     <string name="hint_need_root">Obtain temporary root first (e.g. ghostlock), then press Recheck.</string>
+    <string name="hint_su_denied">su is present but did not grant root to this package. With no Manager APK there is no prompt to approve, so authorize DFInstaller for root out of band, then press Recheck.</string>
     <string name="inject_dialog_title">Inject Log</string>
     <string name="inject_dialog_close">Close</string>
     <string name="inject_running">⏳ Running…</string>
