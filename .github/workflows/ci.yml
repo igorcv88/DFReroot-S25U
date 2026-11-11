@@ -50,6 +50,45 @@ jobs:
       - name: Profile / module / AVB binding invariant (DZIF-OWO)
         run: python3 tools/dzif_owo_profile_binding_audit.py
 
+      # Compileall alone cannot catch a release note generator that silently
+      # omits a newly supported exact profile. Exercise the actual generator,
+      # bind its OWO values to the JSON pins and insist on honest physical state.
+      # Also keep release.yml's signing path behind the same OWO audit as CI.
+      - name: Generated release notes and signed-release OWO gate
+        run: |
+          python3 tools/release_notes.py > "$RUNNER_TEMP/compatibility-notes.md"
+          python3 - "$RUNNER_TEMP/compatibility-notes.md" <<'PY'
+          import json
+          import pathlib
+          import sys
+          import yaml
+
+          notes = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+          heading = "### DZIF/OWO exact-target state"
+          if notes.count(heading) != 1:
+              raise SystemExit("OWO release notes section missing or duplicated")
+          section = notes.split(heading, 1)[1].split("### Early Integrated Root", 1)[0]
+          p = json.loads(pathlib.Path("tools/dzif_owo_profile.json").read_text())
+          expected = (
+              p["fingerprint"],
+              p["vbmeta_digest"][:16],
+              p["ko_sha256"][:16],
+              p["ksud_sha256"][:16],
+              "**PHYSICAL NOT PERFORMED**",
+              "**NOT ESTABLISHED**",
+          )
+          for value in expected:
+              if value not in section:
+                  raise SystemExit("OWO release notes missing: " + value)
+
+          release = yaml.safe_load(pathlib.Path(".github/workflows/release.yml").read_text())
+          steps = release["jobs"]["release"]["steps"]
+          gate = "python3 tools/dzif_owo_profile_binding_audit.py"
+          if not any(step.get("run") == gate for step in steps):
+              raise SystemExit("signed Release lacks the OWO profile/AVB/daemon gate")
+          print("OWO release notes and signed-release gate: PASS")
+          PY
+
       - name: Python tool syntax
         run: python3 -m compileall -q tools
 
