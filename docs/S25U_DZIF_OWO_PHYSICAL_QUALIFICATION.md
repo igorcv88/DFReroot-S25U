@@ -25,10 +25,11 @@ say which one broke what:
 
 A prior incident reported an integrity investigation after `pastSigs` was
 removed, with no causal conclusion. So Wallet and Integrity are re-checked
-**between** those two steps. If they regress after the certificate and before
-DirtyFrag has ever run, the cause is the `packages.xml` edit; if they regress
-only afterwards, it is the kernel/daemon. Collapsing the two would make that
-question permanently unanswerable.
+**between** those two steps. A regression first observed at Gate 2 belongs to
+the interval after the certificate edit and before DirtyFrag; a regression
+first observed at Gate 4 belongs to the later interval. That timing narrows
+the investigation but does **not** by itself establish the edit, kernel or
+daemon as the cause.
 
 ## Preconditions
 
@@ -36,17 +37,19 @@ Every one of these must hold before anything is written.
 
 | # | Precondition | How it is satisfied |
 |---|---|---|
-| 1 | PRs #88, #89 and `RMGLabs-Payloads` #28 reviewed and merged | owner's decision |
-| 2 | A DFR managerless Secure Late-Load pair **built and audited** | `RMGLabs-Payloads` #28 makes it buildable; it does not build it |
-| 3 | That pair's digest and size pinned into `S25U_DZIF_OWO`, with the asset bundled and byte-checked | a follow-up PR, not this one |
-| 4 | Both APKs signed with the **same** key, and the release certificate the same one already trusted on the device | `release.yml` compares the two digests |
+| 1 | PRs #88, #89 and `RMGLabs-Payloads` #28 reviewed and merged | **DONE** — integrated into their respective `main` branches |
+| 2 | A DFR managerless Secure Late-Load pair **built and audited** | **DONE (offline)** — Payloads run `43028391105`; CLI-level refusal still owed |
+| 3 | That pair's digest and size pinned into `S25U_DZIF_OWO`, with the asset bundled and byte-checked | **DONE (offline)** — PR #89 pins SHA-256 `6b7246e5…def2`, 5817624 bytes, to `assets/ksud-dzif-owo`; binding audit and Gate E pass |
+| 4 | Both APKs signed with the **same** key, and the release certificate the same one already trusted on the device | `release.yml` compares the APKs with each other; continuity with the device-trusted certificate still requires an independent comparison |
 | 5 | `df_reroot.apk` embedded in DFInstaller byte-identical to the published APK | `tools/ci_build_audit.sh` |
 | 6 | A verified `packages.xml` backup, stock firmware for this exact build, and a **tested** restore path | owner |
 | 7 | `AUTO_ROOT=OFF`, Early Integrated Root disarmed, Apply Modules not attempted | `docs/AUTO_ROOT.md`, `docs/EARLY_ROOT.md` |
 | 8 | `su -c id` confirmed to work **from DFInstaller's own uid** | PR #88 makes the answer legible; it does not answer it |
 
-Precondition 3 is the one that currently blocks everything: the profile's daemon
-is deliberately unpinned, so the chain refuses before the first write.
+Preconditions 1–3 are now satisfied offline. They do not authorise device use:
+the CLI-level refusal test, signing-certificate continuity, root authorisation
+from DFInstaller's own uid and the remaining physical prerequisites are still
+unverified. The daemon pin is a build identity, not a physical PASS.
 
 ## Baseline (read-only, before any change)
 
@@ -98,13 +101,14 @@ device does not boot. On a boot failure, restore `packages.xml` from the backup
 Re-run the full baseline set: Wallet functional test, BASIC/DEVICE/STRONG, Play
 Protect certification.
 
-This is the gate that isolates the `pastSigs` risk. **Do not proceed to Gate 3
-until it is clean**, and do not run DirtyFrag "just to see" — that would destroy
-the attribution this split exists to provide.
+This gate establishes a measurement boundary before DirtyFrag. **Do not
+proceed to Gate 3 until it is clean**, and do not run DirtyFrag "just to see" —
+that would remove the ability to locate when a regression first appeared.
 
 **Stop if:** Wallet fails a real transaction, STRONG is lost, or certification
 changes. The recovery is `InjectMain --uninstall` and a reboot, then re-measure
-to confirm the regression follows the certificate.
+whether the regression persists. Recovery after rollback is additional
+evidence of temporal association, not conclusive proof of cause.
 
 ## Gate 3 — one manual DirtyFrag run
 
@@ -157,7 +161,12 @@ overwritten; Wallet or STRONG regress.
 
 ## What a green CI run does not prove
 
-It proves host logic, compilation and packaging. It proves nothing about
+The pinned daemon's capability audit reports
+`reachability_claim=NOT_ESTABLISHED_BY_THIS_TOOL`: each forbidden CLI subcommand
+still needs a refusal test on a suitable device or emulator. Do not count a
+compiled-out indicator as a demonstrated CLI refusal.
+
+CI proves host logic, compilation and packaging. It proves nothing about
 `system_server`, the Samsung linker, kernel stability under the LKM, Wallet
 acceptance, or the durability of the `packages.xml` edit. Preserving Wallet and
 STRONG is a **stop condition**, not a property static analysis can demonstrate.
