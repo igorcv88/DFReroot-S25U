@@ -169,8 +169,13 @@ VENDOR_PROVENANCE_STRINGS = [
 REQUIRED_ARTEFACT_HASHES = ["crashdump_sha256", "libc_sha256", "libcxx_sha256"]
 
 
-def parse_c_profile(path):
-    """Extract the DFR_PROFILE_ZZIC designated initialisers.
+def parse_c_profile(path, symbol="DFR_PROFILE_ZZIC"):
+    """Extract one profile's designated initialisers from target_profile.c.
+
+    Parameterised by symbol because there are now three profiles and the
+    OWO tools need the same reader; the default keeps every existing caller
+    reading ZZIC exactly as before. A copy per tool is how two readers of
+    one file end up disagreeing about what it says.
 
     Deliberately a small regex reader rather than a C parser: it only has to
     understand `.field = value,` with adjacent string-literal concatenation,
@@ -178,7 +183,7 @@ def parse_c_profile(path):
     """
     with open(path) as f:
         src = f.read()
-    start = src.index("DFR_PROFILE_ZZIC")
+    start = src.index(symbol)
     body = src[start:]
     body = body[body.index("{") + 1: body.index("\n};")]
     # strip comments so commented-out values never read as real ones

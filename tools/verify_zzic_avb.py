@@ -143,8 +143,27 @@ def parse_dm_verity_table(text):
     return out
 
 
-def verify(evidence=EVIDENCE, dm_table=None):
-    r = {"evidence_dir": evidence, "violations": [], "checks": {}, "skips": []}
+def verify(evidence=EVIDENCE, dm_table=None, profile_json=None,
+           c_symbol="DFR_PROFILE_ZZIC", profile_name="ZZIC"):
+    """Reproduce one profile's vendor AVB chain from committed blobs.
+
+    Parameterised so the DZIF/OWO profile gets the same proof rather than a
+    second copy of this logic. The defaults are ZZIC, so every existing
+    caller and the AGENTS.md section 5 command line are unchanged.
+    """
+    r = {"evidence_dir": evidence, "profile": profile_name,
+         "violations": [], "checks": {}, "skips": []}
+
+    # Resolved HERE, not as a default argument. A default is bound once at
+    # definition time, so `profile_json=PROFILE_JSON` would have frozen the
+    # module global at import - and tools/tests/test_verify_zzic_avb.py
+    # drives its twenty negative cases by reassigning that global and
+    # calling verify() again. Freezing it did not make those tests fail; it
+    # made them PASS while measuring nothing, because every case then read
+    # the real profile instead of the deliberately broken one. A negative
+    # test that cannot fail is the one defect this file exists to catch.
+    if profile_json is None:
+        profile_json = PROFILE_JSON
 
     def fail(msg):
         r["violations"].append(msg)
@@ -152,14 +171,14 @@ def verify(evidence=EVIDENCE, dm_table=None):
     def skip(what, why):
         r["skips"].append("%s: %s" % (what, why))
 
-    with open(PROFILE_JSON) as f:
+    with open(profile_json) as f:
         j = json.load(f)
     pins = j.get("vendor_avb")
     if not isinstance(pins, dict):
-        fail("tools/zzic_profile.json has no vendor_avb block; there is nothing "
-             "to verify the AVB evidence against")
+        fail("%s has no vendor_avb block; there is nothing to verify the "
+             "AVB evidence against" % os.path.relpath(profile_json, ROOT))
         return r
-    c = parse_c_profile(PROFILE_C)
+    c = parse_c_profile(PROFILE_C, c_symbol)
 
     # --- 1. the committed blobs are the ones the device hashed ---------------
     man_path = os.path.join(evidence, MANIFEST)
@@ -358,7 +377,11 @@ def verify(evidence=EVIDENCE, dm_table=None):
 
 def human(r):
     ck = r["checks"]
-    L = ["=== ZZIC /vendor AVB provenance (offline) ==="]
+    # The profile is named from the result, not hardcoded: this function now
+    # renders DZIF/OWO reports too, and a report headed ZZIC would mislabel
+    # the evidence it contains.
+    L = ["=== %s /vendor AVB provenance (offline) ==="
+         % r.get("profile", "ZZIC")]
     L.append("evidence dir        : %s" % os.path.relpath(r["evidence_dir"], ROOT))
     for name, digest in sorted((ck.get("blob_sha256") or {}).items()):
         L.append("  blob %-20s %s" % (name, digest))

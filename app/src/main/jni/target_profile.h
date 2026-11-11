@@ -209,12 +209,20 @@ struct TargetProfile {
 
 extern const struct TargetProfile DFR_PROFILE_ZZIC;
 extern const struct TargetProfile DFR_PROFILE_DZIF;
+extern const struct TargetProfile DFR_PROFILE_DZIF_OWO;
 
 typedef enum {
     DFR_TARGET_UPSTREAM_GENERIC = 0, /* unrelated device: run upstream path */
     DFR_TARGET_S25U_ZZIC        = 1, /* exact ZZIC target */
-    DFR_TARGET_S25U_DZIF        = 2, /* exact DZIF target */
-    DFR_TARGET_MISMATCH         = 3  /* pa3q/SM-S938B anchor hit, but no exact profile */
+    DFR_TARGET_S25U_DZIF        = 2, /* exact DZIF target (OXM multi-CSC) */
+    DFR_TARGET_MISMATCH         = 3, /* pa3q/SM-S938B anchor hit, but no exact profile */
+    /*
+     * Appended after MISMATCH rather than beside its sibling on purpose:
+     * these values are compared as integers in logs and host fixtures, and
+     * renumbering MISMATCH would silently change what an older record
+     * means. A new class costs a new number, never a shifted one.
+     */
+    DFR_TARGET_S25U_DZIF_OWO    = 4  /* exact DZIF target, OWO multi-CSC */
 } dfr_target_class;
 
 /* Exact-target helpers. NULL means generic/mismatch, never "best effort". */
@@ -417,6 +425,7 @@ struct TargetMatch {
  * Fail-closed classification against the exact pa3q profiles.
  *  - all ZZIC fields match               -> DFR_TARGET_S25U_ZZIC
  *  - all DZIF fields match               -> DFR_TARGET_S25U_DZIF
+ *  - all DZIF/OWO fields match           -> DFR_TARGET_S25U_DZIF_OWO
  *  - SM-S938B/pa3q anchor present but no exact profile matches
  *                                        -> DFR_TARGET_MISMATCH (refuse)
  *  - no pa3q anchor at all               -> DFR_TARGET_UPSTREAM_GENERIC

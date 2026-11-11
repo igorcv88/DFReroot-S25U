@@ -1,0 +1,2 @@
+Targets in the device-mapper table for vendor-verity:
+0-6883688: verity, 1 254:5 254:5 4096 4096 860461 860461 sha256 dcfb9c588ae33c38e9b28f6e64976e78be0f107596fb2df86c996e36701c1e09 613c9e091c4c31c6bfa4cb560f83108f1bfe3d1e78562ffd3ee615859fd848c0 10 restart_on_corruption ignore_zero_blocks use_fec_from_device 254:5 fec_blocks 867238 fec_start 867238 fec_roots 2

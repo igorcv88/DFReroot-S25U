@@ -1283,7 +1283,16 @@ int patch_ko(struct Reporter *reporter) {
 
         if (cls == DFR_TARGET_S25U_ZZIC) {
             ko = &ko_image_zzic;
-        } else if (cls == DFR_TARGET_S25U_DZIF) {
+        } else if (cls == DFR_TARGET_S25U_DZIF ||
+                   cls == DFR_TARGET_S25U_DZIF_OWO) {
+            /*
+             * Both One UI 9 profiles name one kernel image, so they select
+             * one module. The OWO device's live BTF digest equals the one
+             * the DZIF witness table was derived from, which is what makes
+             * this a shared artefact rather than a reused name; see
+             * DFR_PROFILE_DZIF_OWO. The guard stays on the same macro, so
+             * a demotion refuses both.
+             */
 #if DFR_DZIF_KO_VERIFIED
             ko = &ko_image_dzif;
 #else
