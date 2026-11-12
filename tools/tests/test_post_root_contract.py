@@ -4,14 +4,33 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[2]
-stage = (ROOT / "app/src/main/jni/stage1.S").read_text()
-exp = (ROOT / "app/src/main/jni/exp.c").read_text()
-main = (ROOT / "app/src/main/java/com/polygraphene/df/reroot/MainActivity.kt").read_text()
 DFR = ROOT / "app/src/main/java/com/polygraphene/df/reroot"
-coord = (DFR / "DfrRootCoordinator.kt").read_text()
-service = (DFR / "DfrAutoRootService.kt").read_text()
-receiver = (DFR / "DfrBootReceiver.kt").read_text()
-release_notes = (ROOT / "tools/release_notes.py").read_text()
+
+
+def src(path):
+    """Read a source file the same way on every checkout.
+
+    Two things here are not cosmetic. The encoding is pinned because stage1.S
+    carries UTF-8 comments and a host whose default is cp1252 cannot read it at
+    all. The CRLF fold is because this repository is routinely checked out with
+    core.autocrlf=true, which silently turns every multi-line anchor below into
+    a non-match - a test that passes in CI and fails on the owner's machine for
+    a reason that has nothing to do with the code it guards.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    return text.replace(chr(13) + chr(10), chr(10))
+
+
+stage = src(ROOT / "app/src/main/jni/stage1.S")
+exp = src(ROOT / "app/src/main/jni/exp.c")
+main = src(DFR / "MainActivity.kt")
+coord = src(DFR / "DfrRootCoordinator.kt")
+service = src(DFR / "DfrAutoRootService.kt")
+receiver = src(DFR / "DfrBootReceiver.kt")
+notifier = src(DFR / "RootNotifier.kt")
+post_root = src(DFR / "PostRootStatus.java")
+release_notes = src(ROOT / "tools/release_notes.py")
+cmake = src(ROOT / "app/src/main/jni/CMakeLists.txt")
 
 checks = []
 
@@ -22,7 +41,6 @@ def check(condition, label):
         raise AssertionError(label)
 
 
-cmake = (ROOT / 'app/src/main/jni/CMakeLists.txt').read_text()
 dependency_match = re.search(r'OBJECT_DEPENDS\s+"([^"]+)"', cmake)
 dependencies = dependency_match.group(1).split(';') if dependency_match else []
 embedded_modules = set(re.findall(r'dirtyfrag-[A-Za-z0-9.-]+\.ko', exp))
@@ -65,6 +83,40 @@ check("PostRootStatus.evaluate(record, bootId, liveSelinux)" in coord,
       "the coordinator validates the same-boot record and live SELinux state")
 check("ROOT_RESULT=SUCCESS" in coord and "POST_ROOT_COMPLETE=PASS" in coord,
       "final success signals are emitted only by the post-root path")
+
+# --- an unreadable record is not an absent one -------------------------------
+# The coordinator's wait collapsed every read failure into null, so EACCES, EIO
+# and an untraversable /data/system all reported "completion record absent or
+# empty". The verdict is a refusal either way; what was lost is the line that
+# separates "the daemon never published" from "it published and we could not
+# read it". Three other readers in this build already keep them apart.
+wait = coord[coord.index("private fun readPostRootRecord"):]
+check("AutoRootPolicy.RECORD_UNREADABLE" in wait,
+      "the post-root wait distinguishes an unreadable record from an absent one")
+check("PostRootStatus.unreadable()" in wait,
+      "the unreadable case gets its own verdict instead of being parsed as a record")
+check("catch (_: Throwable) {\n                null\n            }" not in coord,
+      "no reader of the completion record collapses a read failure into null")
+unreadable_fn = post_root[post_root.index("public static Verdict unreadable"):]
+check("return fail(" in unreadable_fn[:unreadable_fn.index("}")],
+      "the unreadable verdict is incomplete, built by the same refusal factory")
+
+# --- the verdict line describes the notification that was posted -------------
+# `apply_modules_offered` logged the PARAMETER, whose default is true, while the
+# action is attached only inside the success branch. Every failed run of the
+# normal path therefore reported an offer that was never made, in the one line a
+# physical-gate report is reconstructed from.
+check("apply_modules_offered=$applyModulesOffered" in notifier,
+      "the verdict logs the action that was attached, not the caller's request")
+check("var applyModulesOffered = false" in notifier,
+      "the logged offer starts false and is set only where the action is built")
+offer_set = notifier.index("applyModulesOffered = true")
+guard = notifier.index("if (pending != null && offerApplyModules)")
+addaction = notifier.index("b.addAction(")
+check(guard < offer_set < addaction,
+      "the offer is recorded inside the guard that decides it, before the action")
+check(notifier.count("applyModulesOffered = true") == 1,
+      "there is exactly one place that can claim the action was offered")
 check("DfrRootCoordinator.run(" in main and "DfrRootCoordinator.run(" in service,
       "button and boot service share one execution path")
 check("PostRootStatus.evaluate(" not in main and "PostRootStatus.evaluate(" not in service,

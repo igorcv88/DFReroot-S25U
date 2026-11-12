@@ -114,6 +114,19 @@ object RootNotifier {
         offerApplyModules: Boolean = true,
     ) {
         val b = base(context)
+        /*
+         * What was actually attached, not what the caller asked for.
+         *
+         * The parameter is only one of three conditions: the verdict has to be a
+         * success, the PendingIntent has to have been built, and the caller has to
+         * permit the offer. Logging the parameter alone said
+         * `apply_modules_offered=true` on every failed run of the normal path -
+         * the default is true and the FAIL branch attaches no action at all - so a
+         * gate report said an operation had been offered to the owner that had not.
+         * The verdict line is read by people reconstructing a physical run, and it
+         * has to describe the notification that was posted.
+         */
+        var applyModulesOffered = false
         if (result.success) {
             b.setContentTitle(context.getString(R.string.notif_root_restored))
             b.setContentText(
@@ -135,6 +148,7 @@ object RootNotifier {
                 null
             }
             if (pending != null && offerApplyModules) {
+                applyModulesOffered = true
                 /*
                  * An explicit Icon rather than null. Notification.Action.Builder has
                  * a second, deprecated (int, ...) overload, so a bare null leans on
@@ -158,7 +172,8 @@ object RootNotifier {
             b.setStyle(Notification.BigTextStyle().bigText(result.reason))
         }
         Log.i(TAG, "[DFR][NOTIFY] verdict who=$who success=${result.success}" +
-            " boot_id=${result.bootId} apply_modules_offered=$offerApplyModules")
+            " boot_id=${result.bootId} apply_modules_offered=$applyModulesOffered" +
+            " apply_modules_permitted=$offerApplyModules")
         post(context, b)
     }
 

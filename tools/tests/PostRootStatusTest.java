@@ -81,6 +81,25 @@ public final class PostRootStatusTest {
         refused(record(boot) + "transport_fix=a\ntransport_fix=b\n", boot, 1,
                 "a duplicated marker is refused outright");
 
+        /*
+         * The record exists and could not be read. The caller holds a sentinel,
+         * not a record; evaluate() would name the sentinel ("malformed status
+         * line: dfr_record_unreadable") instead of the I/O failure, so there is a
+         * verdict for it. It must refuse, must carry no marker, and must say what
+         * actually happened.
+         */
+        PostRootStatus.Verdict unreadable = PostRootStatus.unreadable();
+        expect(!unreadable.complete, "an unreadable record is refused");
+        expect(unreadable.transportFix == null,
+                "an unreadable record carries no transport fix");
+        expect(!PostRootStatus.transportFixAllowed(unreadable),
+                "an unreadable record means no supercall");
+        expect(unreadable.reason.contains("could not be read"),
+                "the unreadable verdict names the read failure, not an absent file");
+        expect(!unreadable.reason.equals(
+                        PostRootStatus.evaluate(null, boot, 1).reason),
+                "unreadable and absent are distinct reasons");
+
         System.out.println("PostRootStatusTest: " + checks + "/" + checks + " passed");
     }
 }
