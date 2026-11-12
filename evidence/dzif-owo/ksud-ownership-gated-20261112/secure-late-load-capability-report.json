@@ -1,0 +1,218 @@
+{
+  "binary": "ksud-pa3q-S938BXXUCDZIF-OWO-dfreroot-managerless-review-v3.3.0",
+  "ksud_sha256": "30428cd21fd03eea16dd216ed95a95a925f49864c6ace4fa61d957a609232a33",
+  "symbol_count": 20459,
+  "forbidden": {
+    "boot_image_write": {
+      "why": "opens a boot partition for writing; the one capability that can leave a locked device unbootable",
+      "symbols": [],
+      "literals": [],
+      "verdict": "NO_EVIDENCE"
+    },
+    "boot_image_patch": {
+      "why": "builds a modified boot image; the traditional install method this device does not use",
+      "symbols": [],
+      "literals": [],
+      "verdict": "NO_EVIDENCE"
+    },
+    "boot_image_restore": {
+      "why": "rewrites a boot image from a backup, reachable indirectly from the traditional uninstall path",
+      "symbols": [],
+      "literals": [],
+      "verdict": "NO_EVIDENCE"
+    },
+    "boot_image_patch_v2": {
+      "why": "second-generation image builder; unnecessary in a late-load-only build",
+      "symbols": [],
+      "literals": [],
+      "verdict": "NO_EVIDENCE"
+    },
+    "traditional_uninstall": {
+      "why": "the uninstall subcommand reaches image restoration, so it is a boot write path that the operator never asked for by name",
+      "symbols": [],
+      "literals": [],
+      "verdict": "NO_EVIDENCE"
+    },
+    "ota_slot_control": {
+      "why": "toggles A/B slot state; belongs to OTA install flows, not to loading a module into a running system",
+      "symbols": [],
+      "literals": [],
+      "verdict": "NO_EVIDENCE"
+    },
+    "root_allowlist_write": {
+      "why": "writes the kernel root allowlist, handing su to a third-party app. This one points the other way from every entry above: it ADDS privilege, and it is at least as consequential as arbitrary_insmod. It is forbidden here before any code for it exists, because the pair this repository ships refuses it anyway - SET_APP_PROFILE is only_manager (dispatch.c:782) and is_manager() is not uid==0 on the shipped .ko - so a candidate that carries it is a candidate whose pair was changed without this gate being revisited. The read-only listing is a separate capability; see PERMITTED.",
+      "symbols": [
+        "set_app_profile"
+      ],
+      "literals": [
+        "managerless-app-grants-v1"
+      ],
+      "verdict": "PRESENT"
+    },
+    "arbitrary_insmod": {
+      "why": "loads an arbitrary kernel module with kallsyms access; widens kernel modification well past the pinned pair",
+      "symbols": [],
+      "literals": [],
+      "verdict": "NO_EVIDENCE"
+    }
+  },
+  "required": {
+    "late_load": {
+      "why": "loads the pinned .ko and runs the late-load stages",
+      "symbols": [
+        "late_load"
+      ],
+      "literals": [
+        "late-load",
+        "LateLoad"
+      ],
+      "verdict": "PRESENT"
+    },
+    "kmi_identity": {
+      "why": "selects the embedded module for this kernel; late-load depends on it and it must survive the split from the image-patch code",
+      "symbols": [
+        "get_current_kmi",
+        "parse_kmi"
+      ],
+      "literals": [],
+      "verdict": "PRESENT"
+    },
+    "daemon_install": {
+      "why": "installs the userspace component the late-load stage needs; distinct from the public install subcommand",
+      "symbols": [
+        "finish_install"
+      ],
+      "literals": [],
+      "verdict": "PRESENT"
+    },
+    "module_management": {
+      "why": "the module subsystem the CLI administers, which is how this device is managed with no manager installed; evidenced by the install and prune paths, NOT by each individual subcommand",
+      "symbols": [
+        "install_module",
+        "prune_modules"
+      ],
+      "literals": [
+        "module"
+      ],
+      "verdict": "PRESENT"
+    },
+    "su": {
+      "why": "the authorised root shell",
+      "symbols": [
+        "4ksud2su"
+      ],
+      "literals": [],
+      "verdict": "PRESENT"
+    },
+    "allow_shell": {
+      "why": "lets the shell uid obtain root, which is the only route proven on the device",
+      "symbols": [],
+      "literals": [
+        "allow_shell",
+        "allow-shell"
+      ],
+      "verdict": "PRESENT"
+    },
+    "sepolicy": {
+      "why": "applies the SELinux rules modules and the chain need",
+      "symbols": [
+        "live_patch",
+        "parse_sepolicy"
+      ],
+      "literals": [],
+      "verdict": "PRESENT"
+    },
+    "init_event": {
+      "why": "runs the module lifecycle stages",
+      "symbols": [
+        "on_post_data_fs",
+        "on_boot_completed"
+      ],
+      "literals": [],
+      "verdict": "PRESENT"
+    },
+    "soft_reboot": {
+      "why": "restarts userspace",
+      "symbols": [],
+      "literals": [
+        "soft-reboot",
+        "SoftReboot"
+      ],
+      "verdict": "PRESENT"
+    },
+    "metamodule": {
+      "why": "the metamodule and OverlayFS mechanism modules rely on",
+      "symbols": [
+        "metamodule"
+      ],
+      "literals": [],
+      "verdict": "PRESENT"
+    }
+  },
+  "permitted": {
+    "root_allowlist_read": {
+      "why": "lists the uids the kernel currently allows root (NEW_GET_ALLOW_LIST, UID_GRANTED_ROOT, GET_MANAGER_APPID - all manager_or_root, so root can already do this with no daemon at all). It reads; it cannot grant. On a device managed with no manager installed it is the only way to see a grant left behind by an uninstalled app.",
+      "symbols": [
+        "6grants"
+      ],
+      "literals": [
+        "list-grants",
+        "ListGrants",
+        "/data/system/packages.list"
+      ],
+      "verdict": "PRESENT"
+    }
+  },
+  "authorized_app_grants_contract": {
+    "administrators": "manager-or-uid0-ksu-domain",
+    "boot_partition_writes": false,
+    "get_profile_permission": "manager_or_ksu_root",
+    "ksud_build_id": "a696370f4d9ef202afa7063389bd8da164cf355f",
+    "module_build_id": "e61c877018ef31e9e0bf2148e8f556ad3f63473e",
+    "module_name": "android15-6.6_kernelsu-pa3q-S938BXXUCDZIF-OWO-dfreroot-managerless-review-v3.3.0.ko",
+    "module_sha256": "4b8965cdd3c733315c84767d3d26c1f71eaec9071b07d13fa08940bd4fe8731c",
+    "patches_sha256": {
+      "kernelsu/patches/KernelSU-v3.3.0-samsung-kdp-rkp-defex.patch": "30496d2e6bed200d0841282854b45b315a4f379df828d09f48a1868a93d3849f",
+      "kernelsu/patches/apply-v330-cli-list-grants.py": "2e7d7ede575961dcd80c2f79fdb705ac1574343419c6d921c4cda72d5cc48c50",
+      "kernelsu/patches/apply-v330-lsposed-defex-fix.py": "3088e4787693d30b8cee21d072c2ae700f5403adb14feeda1460198c64fec161",
+      "kernelsu/patches/apply-v330-managerless-app-grants.py": "e1c2a888389d17bfd828ce5f00cc519ba6e4d576b37e27cab287db50ac605c96",
+      "kernelsu/patches/apply-v330-secure-late-load.py": "ffed6fa7d78cbee47ad777006f25f9c1d1612bda1d068110430f56f936244380",
+      "kernelsu/patches/apply-v330-staged-daemon-hotfix.py": "82e4a1d8ca0dd3ffb1cbfe0a1b0481c75ea0a633e8fcb6ac00146ea1ec901341",
+      "kernelsu/patches/apply-v330-throne-tracker-serialise.py": "fd13e1d6b928fe48873273ffca2b2d99555ef11486109a9a8f59f4711e5c8313",
+      "kernelsu/patches/generic-zygisk-defex.c.inc": "a1d2d4803b41904614d73d8387a8a558751998e832e00d5e64b69d81d6a99559",
+      "kernelsu/patches/managerless/contract.h.inc": "fabb722d33f9811ad93e1ae1e1c828453d8d7c88a49a1589d1c09bacd7374570",
+      "kernelsu/patches/managerless/grants.rs.inc": "5ef6b97b731c387f39baf0677541f15bdd93e87dc9d717d5ee0f9b1caa0844cd",
+      "kernelsu/patches/managerless/identity.rs.inc": "803725c9d6fb4a6517d76e9dd4578bed1e66135f873ae858d379cb2cddb500ae",
+      "kernelsu/patches/managerless/ioctl.rs.inc": "f31ab21ddde74b1bddb39490e2eab1271cc3b299e26b52ce58ce6c23660d6a73",
+      "kernelsu/patches/managerless/persistence.c.inc": "2b6574662cdfd940dea81a492addee7bd0bf0e36b0d49509f98a7fe36f3f3ff9"
+    },
+    "persist_permission": "manager_or_ksu_root",
+    "physical_validation": "NOT_PERFORMED",
+    "profile_size": 784,
+    "revision": 1,
+    "set_profile_permission": "manager_or_ksu_root",
+    "target": "pa3q-S938BXXUCDZIF-OWO",
+    "uapi_version": 2
+  },
+  "forbidden_present": [],
+  "required_missing": [],
+  "attestation_binding": "BOUND_TO_THIS_BINARY",
+  "build_attests_secure_late_load": true,
+  "verdict": "SECURE_LATE_LOAD_INDICATORS_CONSISTENT",
+  "still_owed": [
+    "a CLI-level refusal test on the candidate: every forbidden subcommand must be unrecognised, which needs a device or emulator",
+    "review of the compiled call graph, not only identifier presence",
+    "the attestation emitted by the build workflow itself rather than written by hand"
+  ],
+  "rejected_indicators": {
+    "BLKROSET": "a numeric ioctl constant, never a string literal. It is absent from the current shipped daemon, which does contain flash_partition, so treating its absence as evidence would pass the unhardened build.",
+    "uninstall (bare)": "matches module uninstall, which is required, as well as the forbidden traditional uninstall. Only the specific help strings distinguish them.",
+    "slot_suffix": "boot-info legitimately reads slot information. Only a write path (post_ota, bootctl) is forbidden.",
+    "install (bare)": "matches the required internal daemon installer as well as the public subcommand.",
+    "manager_appid": "already present in the shipped daemon, inside the string ksu_debug_manager_appid, so it cannot witness the grant-listing code either way.",
+    "allow_su (bindgen field)": "a field name of struct app_profile. It becomes a string only if something Debug-formats the struct, so its absence would not witness the absence of a write path. Measured zero times in the shipped daemon. The clap-derived allow-su/AllowSu are used instead."
+  },
+  "permitted_note": "PERMITTED capabilities never change the verdict. They are listed so a passing verdict states which audited capabilities it covers.",
+  "doctrine": "NO_EVIDENCE is not ABSENT: Rust inlines, and a numeric constant is never a string. Acceptance needs a positive statement from the build, not silence in the binary.",
+  "reachability_claim": "NOT_ESTABLISHED_BY_THIS_TOOL: an indicator firing proves the code is in the artifact, not that the CLI dispatches to it. A CLI-level refusal test on the candidate is still owed."
+}
