@@ -306,7 +306,7 @@ object DfrRootCoordinator {
         bootId: String,
         marker: Int,
     ): RootEnvironment.Classification {
-        val reading = routeReading(bootId, marker)
+        val reading = routeReading(bootId = bootId, marker = marker)
         host.log(reading.log)
         return reading.verdict
     }
