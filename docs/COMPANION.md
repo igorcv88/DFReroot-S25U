@@ -9,6 +9,46 @@ change (the laudo's PR C).
 
 ---
 
+## 0. Physical PASS — 2026-11-12
+
+The companion ran on the owner's device and attested the RMG pair. **This is
+the evidence the reuse route rests on**, and it is recorded here rather than
+inferred from anywhere else.
+
+```text
+exec_failed=false timed_out=false exit=0
+ATTESTATION=RMG_CONTRACT ROOT_OPERATION=PASS KSUD_PINNED=PASS
+CONTRACT_V1_ROUNDTRIP=PASS SELINUX_ENFORCING=PASS MODULE_NAMED=PASS
+
+DFRC_UID=0
+DFRC_SELINUX=Enforcing
+DFRC_NONCE=a9d2897721ef58507a3efe5416e35a66
+DFRC_KSUD_SHA256_PRE=95b2cc363f420b075c1b1301cb959d29d2cd5845372eb3e89b849d020981d8a5
+DFRC_KSUD_SIZE=5797976
+DFRC_STATUS=package=com.polygraphene.df.companion user=0 uid=10516 profile=present root=true persistence=not-checked
+DFRC_STATUS_RC=0
+DFRC_KSUD_SHA256_POST=95b2cc363f420b075c1b1301cb959d29d2cd5845372eb3e89b849d020981d8a5
+DFRC_MODULES=kernelsu
+DFRC_END=1
+```
+
+What it establishes: the companion was granted (uid 10516), a root operation
+bound to **this call's** nonce succeeded, the pinned RMG daemon's bytes were
+unchanged before and after it, and the loaded module answered the managerless
+contract ioctl. The digest matches `95b2cc36…981d8a5` on both reads.
+
+What it does **not** establish, and §2 says why at length: it is functional
+evidence about the loaded module, not a cryptographic attestation of its bytes.
+
+Two incidental facts worth keeping:
+
+- the signed review build produced an installable APK with **no NDK installed**,
+  even though `:app` declares `externalNativeBuild`. A step to provide one is
+  unnecessary; do not re-add it.
+- `DFRC_STATUS_RC=0` here is the *fixed* capture: the exit status is the
+  daemon's, taken with no pipeline in between. The pre-fix script would have
+  printed `0` whatever the daemon did.
+
 ## 1. Why a separate app, and not DFInstaller or DFReroot itself
 
 DFReroot runs entirely inside `system_server` (`sharedUserId=
@@ -129,6 +169,9 @@ say".
 | The attestation script contains no write-side token (`profile grant`, `insmod`, `setenforce`, `reboot`, …) | same |
 | The contract round-trip is still performed | same |
 | The root invocation has an enforced deadline and is force-killed on timeout | same |
+| Every client Binder transaction carries a deadline, PASSED to the enforcer rather than mentioned | same, structurally — the call's own argument list is read |
+| The abandoned worker of a timed-out transaction is a daemon thread | same |
+| The hung-remote case itself | `tools/tests/BoundedCallTest.java` |
 | No world-writable path is referenced (§3.6) | same |
 | Caller refusals: wrong uid, unanswered package lookup, missing client, foreign certificate, absent digest, version skew | `tools/tests/CompanionContractTest.java` |
 | Attestation refusals: no nonce, wrong nonce, truncated report, duplicate keys, non-zero uid, no root-only read, foreign daemon, failed or unparsable contract probe, size mismatch, daemon swapped mid-call, a FAILING daemon printing a valid-looking line | same |
@@ -180,6 +223,41 @@ PERSISTENT_DAEMON_CHANGED=NO
 The companion reports the middle three directly. The first and the last belong
 to DFReroot, and arrive with PR C.
 
+## 5.1 What "bounded" means on the client side, exactly
+
+The owner's review of PR C found that `ATTEST_TIMEOUT_MS` was declared and
+never read: the client called `binder.transact(code, data, reply, 0)`, which is
+synchronous and has **no** timeout. The companion bounds its own `su` child at
+20 s, and bounding a child is not bounding the call — the same handler also
+resolves packages, hashes certificates and occupies a binder thread, none of
+which that deadline covers. A declared constant that nothing enforces is worse
+than none, because it makes the call *look* bounded.
+
+Each transaction now runs inside `BoundedCall`, and the distinction it rests on
+is worth stating plainly:
+
+- **the caller is bounded** — it returns at the deadline, every time;
+- **the work is not cancelled**, because a synchronous binder transaction
+  cannot be. There is no interruptible wait to interrupt; the thread is parked
+  in the kernel driver until the remote answers or the system reclaims it,
+  which unbinding makes likely.
+
+So a timeout leaks **one daemon thread per timed-out attempt**. That is the
+trade against a caller stalled indefinitely inside `system_server`. It is an
+acceptable trade only because the attempts are operator-driven: an automatic
+caller that retried in a loop would make it the wrong one, and nothing here
+retries.
+
+Deadlines: bind 5 s, `TX_DESCRIBE` 5 s (no root, reads nothing — a remote that
+cannot answer the version handshake that fast is not one to then ask for an
+attestation), `TX_ATTEST` 30 s (outside the companion's own 20 s, so only a
+wedged handler trips it).
+
+**Still owed, and not claimed:** a same-build device test of
+DFReroot → companion over Binder, and an observation of the service-hung path on
+hardware. `BoundedCallTest` proves the deadline property on the host; it says
+nothing about how a wedged remote behaves on the device.
+
 ## 6. What is not wired, deliberately
 
 - **It is not a release artifact.** `./build.sh` builds it (so Gate E compiles
@@ -207,5 +285,20 @@ to DFReroot, and arrive with PR C.
   deliberately not a release version. Everywhere else in this repo an absent
   version is a refusal; here an explicit development pair says what the build
   is instead of borrowing a number that would make it look publishable.
-- **DFReroot does not call it.** `RootEnvironment.MODULE_ATTESTED_RMG` exists
-  and is still unreachable until PR C binds this provider to it.
+- ~~**DFReroot does not call it.**~~ **It does now** (PR C). `CompanionClient`
+  binds the service from a background thread, checks the provider's signing
+  certificate before binding, runs `TX_DESCRIBE` as a cheap version handshake
+  and then `TX_ATTEST`, and `CompanionProtocol` **re-derives** the attestation
+  level from the component signals instead of believing the summary. The app
+  declares the companion's signature-level permission, without which the
+  framework refuses the bind before any of this runs — a symptom identical to a
+  missing install and to a certificate mismatch, which is why all three are
+  reported separately.
+
+  Two things PR C deliberately did not do. The early-boot dispatch does **not**
+  ask the provider: the round trip costs a bind plus a root shell, its premise
+  is a window measured in seconds, and without an attestation the acquisition
+  route refuses anyway — so nothing is lost but diagnostic precision, and
+  `tools/profile_binding_audit.py` fails if any early-path source reaches
+  `CompanionClient`. And DFReroot still executes **no operation** through the
+  provider: it reads that state and says so.

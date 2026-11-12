@@ -2659,15 +2659,33 @@ def audit(json_mode=False):
              "owner decision, a verified recovery copy and a proven rollback, "
              "none of which exist in this build")
 
-    # The module reading may REMOVE permission and never grant it: both pairs
-    # load under the same name, and a module can hide itself from /proc/modules,
-    # so neither a hit nor an empty read identifies a provider.
-    for attested in ("MODULE_ATTESTED_RMG", "MODULE_ATTESTED_DFR",
-                     "MODULE_ATTESTED_NONE"):
-        if "RootEnvironment." + attested in probe_src:
-            fail("RootEnvironmentProbe produces %s; no reading available to "
-                 "system_server can attest which module the kernel is running, "
-                 "and inferring one is absence read as permission" % attested)
+    # The probe's OWN readings may REMOVE permission and never grant it: both
+    # pairs load under the same name, and a module can hide itself from
+    # /proc/modules, so neither a hit nor an empty read identifies a provider.
+    #
+    # This guard used to forbid MODULE_ATTESTED_* anywhere in the probe, which
+    # was right while no provider existed and is wrong now that one does. What
+    # survives is the invariant, not the spelling: the probe may not INFER an
+    # attestation from what it reads itself. So the two reading functions are
+    # scoped and checked, and the promotion is required to be dominated by the
+    # provider's own verdict (further down, in the app-side contract section).
+    for fn in ("private fun readLoadedModule", "fun readPersistentDaemon"):
+        at = probe_src.find(fn)
+        if at < 0:
+            fail("RootEnvironmentProbe no longer defines %s; the readings this "
+                 "guard scopes cannot be located" % fn)
+            continue
+        nxt = probe_src.find("\n    fun ", at + 1)
+        nxt2 = probe_src.find("\n    private fun ", at + 1)
+        ends = [x for x in (nxt, nxt2, len(probe_src)) if x > at]
+        body = probe_src[at:min(ends)]
+        for attested in ("MODULE_ATTESTED_RMG", "MODULE_ATTESTED_DFR",
+                         "MODULE_ATTESTED_NONE"):
+            if attested in body:
+                fail("%s in RootEnvironmentProbe produces %s; no reading "
+                     "available to system_server can attest which module the "
+                     "kernel is running, and inferring one is absence read as "
+                     "permission" % (fn, attested))
 
     # One derivation, two readers. The UI must ask the coordinator the same
     # question the run will ask, not classify on its own.
@@ -2702,6 +2720,169 @@ def audit(json_mode=False):
     if min(route_order) < 0 or route_order != sorted(route_order):
         fail("route selection no longer precedes staging and the remote hop; a "
              "refusal has to leave nothing staged and nothing written")
+
+    # --- the app side of the companion contract --------------------------
+    # The wire constants exist twice, because AGP cannot make one application
+    # module depend on another. That is the shape of 3.10, so it gets 3.10's
+    # treatment: both copies are parsed and compared. A drift here is not a
+    # compile error - it is a transaction the companion refuses on a device,
+    # reporting only "the transaction did not carry this interface's token".
+    client_src = code_only(dfr_source("CompanionProtocol.java"))
+    client_kt = code_only(dfr_source("CompanionClient.kt"))
+    app_manifest = re.sub(
+        r"<!--.*?-->", "",
+        open(os.path.join(ROOT, "app", "src", "main", "AndroidManifest.xml"),
+             encoding="utf-8").read(), flags=re.S)
+
+    def constants(src, names):
+        found = {}
+        for n in names:
+            m = re.search(r"\b" + n + r"\s*=\s*([^;]+);", src)
+            if m:
+                found[n] = m.group(1).strip()
+        return found
+
+    shared = ("PACKAGE", "ACTION", "PERMISSION", "DESCRIPTOR", "CONTRACT_VERSION",
+              "TX_DESCRIBE", "TX_ATTEST", "RC_OK", "RC_CALLER_REFUSED",
+              "RC_VERSION_MISMATCH", "RC_NO_ROOT", "RC_TIMEOUT", "RC_UNAVAILABLE",
+              "RC_UNKNOWN_TRANSACTION", "RC_ATTESTATION_INCONCLUSIVE")
+    provider_consts = constants(contract_src, shared)
+    client_consts = constants(client_src, shared)
+    for name in shared:
+        if name not in provider_consts:
+            fail("the companion's CompanionContract no longer defines %s; the two "
+                 "copies of the wire contract cannot be compared" % name)
+        elif name not in client_consts:
+            fail("CompanionProtocol (app side) no longer defines %s" % name)
+        elif provider_consts[name] != client_consts[name]:
+            fail("companion contract drift: %s is %s in the companion and %s in "
+                 "the app" % (name, provider_consts[name], client_consts[name]))
+
+    # The permission must be DECLARED by the app, or the framework refuses the
+    # bind before any of our code runs - and that symptom is identical to a
+    # missing install and to a certificate mismatch.
+    if ("com.polygraphene.df.companion.permission.ROOT_OPERATIONS"
+            not in app_manifest):
+        fail("the app does not declare the companion's permission; the bind "
+             "would be refused by the framework with a symptom that looks like "
+             "three other causes")
+
+    # Mutual authentication. The companion checks us; this side must check it,
+    # because a package NAME is not an identity.
+    if "signingDigest(context, CompanionProtocol.PACKAGE)" not in client_kt \
+            or "equals(theirs, ignoreCase = true)" not in client_kt:
+        fail("CompanionClient no longer compares the installed companion's "
+             "signing certificate with this build's; setPackage pins a name, "
+             "not a signer")
+
+    # Every Binder transaction the client makes carries a deadline.
+    #
+    # `binder.transact(..., 0)` is synchronous and has no timeout; a wedged
+    # remote handler blocks the caller forever. The constant that was supposed
+    # to bound it was declared and never read, which is worse than absent: it
+    # made the call look bounded. Owner's review of PR C.
+    tx_at = client_kt.find("binder.transact(")
+    bounded_at = client_kt.find("BoundedCall.run(")
+    if tx_at < 0:
+        fail("CompanionClient no longer transacts; the provider cannot be asked")
+    elif bounded_at < 0 or bounded_at > tx_at:
+        fail("CompanionClient's binder.transact() is not wrapped in BoundedCall; "
+             "a synchronous transaction has no timeout and a wedged remote "
+             "handler would stall the caller indefinitely")
+    # Each deadline must be PASSED to the thing that enforces it, not merely
+    # mentioned. The first version of this guard checked for the constant's
+    # presence anywhere, and a mutation that moved it from the boundedTransact
+    # argument into the error MESSAGE passed - a string satisfying a check
+    # about behaviour, the same shape as the comment that satisfied the
+    # `profile status` guard in PR B. So the call's own argument list is read.
+    for tx, const in (("TX_ATTEST", "ATTEST_TIMEOUT_MS"),
+                      ("TX_DESCRIBE", "DESCRIBE_TIMEOUT_MS")):
+        at = client_kt.find("CompanionProtocol." + tx + ",")
+        if at < 0:
+            fail("CompanionClient no longer issues %s" % tx)
+            continue
+        call = client_kt.rfind("boundedTransact(", 0, at)
+        close = client_kt.find(")", at)
+        if call < 0 or close < 0 or "CompanionProtocol." + const not in client_kt[call:close]:
+            fail("the %s transaction does not pass CompanionProtocol.%s to "
+                 "boundedTransact; a deadline that is only mentioned in a "
+                 "message makes the call look bounded when it is not"
+                 % (tx, const))
+    if "latch.await(CompanionProtocol.BIND_TIMEOUT_MS" not in client_kt:
+        fail("the bind wait no longer uses CompanionProtocol.BIND_TIMEOUT_MS")
+    bounded_src = code_only(dfr_source("BoundedCall.java"))
+    if "setDaemon(true)" not in bounded_src:
+        fail("BoundedCall's abandoned worker is not a daemon thread; a leaked "
+             "non-daemon thread would hold the process open")
+
+    # system_server must never block its main thread on this call.
+    main_guard = client_kt.find("Looper.myLooper() == Looper.getMainLooper()")
+    bind_at = client_kt.find("context.bindService(")
+    if main_guard < 0 or bind_at < 0 or main_guard > bind_at:
+        fail("CompanionClient does not refuse the main thread before binding; "
+             "this call waits on a bind and a root shell, so blocking that "
+             "looper is a stall of the system process")
+
+    # The attestation may only ever RAISE the module reading, and only to the
+    # one value a provider can justify - and the promotion must be DOMINATED by
+    # the provider's own verdict, which this side re-derived.
+    promote = probe_src.find("o.loadedModule = RootEnvironment.MODULE_ATTESTED_RMG")
+    if promote < 0:
+        fail("the probe no longer promotes an attested RMG module; the reuse "
+             "route would be unreachable")
+    else:
+        guard = probe_src.rfind("if (attestation.attestedRmg)", 0, promote)
+        nonnull = probe_src.rfind("if (attestation != null)", 0, promote)
+        if guard < 0 or nonnull < 0 or not nonnull < guard < promote:
+            fail("the probe promotes MODULE_ATTESTED_RMG outside "
+                 "`if (attestation != null) { if (attestation.attestedRmg)`; the "
+                 "only road to that value is a provider verdict this side "
+                 "re-derived")
+    for forbidden in ("MODULE_ATTESTED_NONE", "MODULE_ATTESTED_DFR"):
+        if "RootEnvironment." + forbidden in probe_src:
+            fail("the probe assigns %s; no attestation in this build can "
+                 "justify it" % forbidden)
+
+    # SELinux stays a separate, required element of the reuse route, and both
+    # readings are ANDed by the caller rather than one standing in for the other.
+    if "attestation.verdict.selinuxEnforcing && liveSelinux == 1" not in probe_src:
+        fail("the probe no longer requires BOTH SELinux readings; the provider's "
+             "and this process's are different facts (AGENTS.md 3.7)")
+    env_selinux = env_src.find("if (!o.selinuxEnforcing)")
+    if env_selinux < 0 or env_selinux > env_src.find("STATE_RMG_ACTIVE_VERIFIED,"
+                                                     " PROVIDER_RMG, true"):
+        fail("RootEnvironment no longer refuses an attested RMG pair without "
+             "Enforcing SELinux")
+
+    # Every call to routeReading() names its arguments.
+    #
+    # Not style. `providerContext` was added as the FIRST parameter of a
+    # signature that already took (bootId, marker), and the one positional
+    # caller silently rebound bootId onto it. Kotlin caught that only because
+    # String is not a Context; with two parameters of the same type it would
+    # have compiled and been wrong on the device - the route decided from a
+    # Context used as a boot id. Gate E is the only Kotlin check in this
+    # repository, so the mechanical guard for a defect class it catches only
+    # sometimes belongs offline.
+    for name in ("DfrRootCoordinator.kt", "MainActivity.kt"):
+        src = code_only(dfr_source(name))
+        for call in re.finditer(r"routeReading\(([^)]*)\)", src, re.S):
+            args = [a.strip() for a in call.group(1).split(",") if a.strip()]
+            if any("=" not in a for a in args):
+                fail("%s calls routeReading() positionally (%s); a signature "
+                     "that grows must be called by name, or the next parameter "
+                     "added in front silently rebinds the arguments"
+                     % (name, call.group(1).strip()[:60]))
+
+    # The early dispatch must not pay for the provider round trip: its premise
+    # is a window measured in seconds, and without an attestation the
+    # acquisition route refuses anyway.
+    for name in ("DfrEarlyRootService.kt", "DfrEarlyRootDispatch.kt",
+                 "DfrEarlyRootJobService.kt", "DfrEarlyBootJobService.kt"):
+        if "CompanionClient" in code_only(dfr_source(name)):
+            fail("%s reaches CompanionClient; the early window cannot afford a "
+                 "service bind plus a root shell, and refuses without it anyway"
+                 % name)
 
     # --- the arm-and-reboot flow ----------------------------------------
     # MainActivity and RebootRequest need an Android runtime, so the shape is

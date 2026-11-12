@@ -30,8 +30,12 @@ import java.security.MessageDigest
  * `apk_data_file` but neither `execute` nor `execmod`, so even our own
  * `libdfrsu.so` is refused a mapping in this domain (recorded in
  * `docs/S25U_ZZIC_COMPATIBILITY.md`), which rules out the KernelSU prctl UAPI
- * from here. That is why the attested states exist in the model and are
- * unreachable in this build, and why nothing below tries to infer one.
+ * from here.
+ *
+ * That provider now exists - the companion, which holds the grant this uid
+ * cannot hold - so [RootEnvironment.MODULE_ATTESTED_RMG] is reachable when
+ * [CompanionClient] returns it and this side re-derives it. Nothing below
+ * infers it: the only way to that value is an attestation passed in.
  */
 object RootEnvironmentProbe {
 
@@ -72,6 +76,8 @@ object RootEnvironmentProbe {
         markerState: Int,
         postRootComplete: Boolean,
         postRootUnreadable: Boolean,
+        attestation: CompanionClient.Outcome? = null,
+        liveSelinux: Int = -1,
     ): Reading {
         val log = StringBuilder()
         val o = RootEnvironment.Observation()
@@ -82,6 +88,42 @@ object RootEnvironmentProbe {
 
         o.loadedModule = readLoadedModule(log)
         o.persistentDaemon = readPersistentDaemon(log)
+
+        /*
+         * The attestation can only ever RAISE the module reading, and only to
+         * the one value an authorized provider can justify. A null outcome - no
+         * provider was asked, or asking failed - leaves whatever /proc/modules
+         * said, which never attests anything (AGENTS.md 3.12).
+         */
+        if (attestation != null) {
+            log.append(attestation.log)
+            if (attestation.attestedRmg) {
+                o.loadedModule = RootEnvironment.MODULE_ATTESTED_RMG
+                log.appendLine(
+                    "[DFR][ROOT_ENV] MODULE_ATTESTATION=RMG (provider attested, re-derived here)"
+                )
+            } else {
+                log.appendLine(
+                    "[DFR][ROOT_ENV] MODULE_ATTESTATION=NONE rc=${attestation.rc};" +
+                        " the module reading stands as observed"
+                )
+            }
+            /*
+             * Both readings, and both must be Enforcing. The provider saw it as
+             * root at the instant of its call; we see it from here. Two
+             * readers, one requirement - neither may stand in for the other.
+             */
+            o.selinuxEnforcing = attestation.verdict.selinuxEnforcing && liveSelinux == 1
+            log.appendLine(
+                "[DFR][ROOT_ENV] SELINUX provider=" +
+                    (if (attestation.verdict.selinuxEnforcing) "ENFORCING" else "NOT_ENFORCING") +
+                    " local=" + when (liveSelinux) {
+                        1 -> "ENFORCING"
+                        0 -> "PERMISSIVE"
+                        else -> "UNREADABLE"
+                    }
+            )
+        }
 
         val verdict = RootEnvironment.classify(o)
         log.appendLine("[DFR][ROOT_ENV] STATE=${verdict.state} ${verdict.signals()}")

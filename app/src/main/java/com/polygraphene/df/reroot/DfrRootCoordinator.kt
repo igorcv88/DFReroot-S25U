@@ -306,7 +306,23 @@ object DfrRootCoordinator {
         bootId: String,
         marker: Int,
     ): RootEnvironment.Classification {
-        val reading = routeReading(bootId, marker)
+        /*
+         * Named, and so is every other call site.
+         *
+         * `providerContext` was added as the FIRST parameter of a signature
+         * that already took (bootId, marker), and this call was positional, so
+         * bootId rebound onto providerContext. Kotlin caught it only because
+         * String is not a Context; with two parameters of the same type it
+         * would have compiled and decided the route from a Context used as a
+         * boot id. `tools/profile_binding_audit.py` now fails on a positional
+         * call here, because Gate E can only catch this when the types happen
+         * to clash.
+         *
+         * providerContext is left at its default null deliberately - see
+         * routeReading's own comment on why the run path does not pay for the
+         * provider round trip.
+         */
+        val reading = routeReading(bootId = bootId, marker = marker)
         host.log(reading.log)
         return reading.verdict
     }
@@ -321,6 +337,7 @@ object DfrRootCoordinator {
      * no privilege, so calling it costs the boot nothing.
      */
     fun routeReading(
+        providerContext: Context? = null,
         bootId: String = readBootId(),
         marker: Int = markerState(),
     ): RootEnvironmentProbe.Reading {
@@ -332,9 +349,25 @@ object DfrRootCoordinator {
          */
         val record = readPostRootRecord()
         val unreadable = record == AutoRootPolicy.RECORD_UNREADABLE
+        val liveSelinux = readLiveSelinux()
         val complete = !unreadable && record != null &&
-            PostRootStatus.evaluate(record, bootId, readLiveSelinux()).complete
-        return RootEnvironmentProbe.observe(bootId, marker, complete, unreadable)
+            PostRootStatus.evaluate(record, bootId, liveSelinux).complete
+        /*
+         * The provider is asked only when a caller supplies a Context, and that
+         * is a budget decision, not a permission one.
+         *
+         * The round trip costs a service bind plus a root shell behind it - up
+         * to CompanionProtocol.ATTEST_TIMEOUT_MS. The operator's button can
+         * spend that; the early-boot dispatch cannot, because its whole premise
+         * is a window measured in seconds. Nothing is lost by not asking there:
+         * without an attestation the acquisition route refuses anyway, on
+         * STATE_UNKNOWN. What the question buys is the REUSE route and a
+         * precise reason, both of which belong to the interactive path.
+         */
+        val attestation = providerContext?.let { CompanionClient.attest(it) }
+        return RootEnvironmentProbe.observe(
+            bootId, marker, complete, unreadable, attestation, liveSelinux
+        )
     }
 
     private fun refused(reason: String, bootId: String = "") = Result(

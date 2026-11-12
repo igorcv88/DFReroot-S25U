@@ -321,6 +321,30 @@ in one line: `[DFR][ROOT_ENV] PROC_MODULES=KSU_LIKE_LOADED name=kernelsu`
 `PROC_MODULES=UNREADABLE …` (denied, and the state stays `UNKNOWN`). Either
 answer is fail-closed; only the precision of the refusal differs.
 
+## The reuse route, evidenced — 2026-11-12
+
+`RMG_ACTIVE_VERIFIED` was unreachable by construction when the route classifier
+landed, because no component running at `u:r:system_server:s0` can attest the
+loaded module. The companion closes that: it holds the grant this uid cannot
+hold, and its attestation is recorded in `docs/COMPANION.md` §0.
+
+| Element | Value |
+|---|---|
+| attestation | `RMG_CONTRACT` (re-derived client-side, not taken on trust) |
+| root operation | PASS, bound to the call's nonce (`a9d2897721ef…`) |
+| ksud digest, before / after | `95b2cc36…981d8a5` both reads |
+| contract ioctl round-trip | PASS (`0xc0104b1e`, revision 1, operation 0 — no write) |
+| SELinux | Enforcing, provider **and** local read |
+| grant | `com.polygraphene.df.companion` uid 10516, `profile=present root=true` |
+
+What this promotes: nothing that was gated on DFR's own acquisition. The
+acquisition route still refuses on this device, `/data/adb/ksud` is untouched,
+and `ROOT_RESULT=SUCCESS` remains a claim about DFR and only DFR.
+
+What it does not establish: a cryptographic attestation of the loaded module's
+bytes. The round-trip proves the module *implements* the managerless contract;
+no userspace reading can prove more, and every consumer inherits that boundary.
+
 ## Route classification replaces the unconditional ownership preflight
 
 **Source-level change only. It qualifies no gate and authorises no physical
