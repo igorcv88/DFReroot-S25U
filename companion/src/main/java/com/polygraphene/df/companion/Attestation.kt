@@ -42,10 +42,24 @@ object Attestation {
                     " cut -d' ' -f1)\""
             )
             appendLine("echo \"DFRC_KSUD_SIZE=\$(stat -c %s '$ksud' 2>/dev/null)\"")
-            appendLine(
-                "S=\$('$ksud' profile status ${CompanionContract.PACKAGE}" +
-                    " 2>/dev/null | head -1); RC=\$?"
-            )
+            /*
+             * The daemon's exit status is captured with NO pipeline in between,
+             * and only then is the first line taken.
+             *
+             * It was `S=$(... | head -1); RC=$?`, which records the status of
+             * `head` - effectively always 0 - so a daemon that FAILED reported
+             * RC=0. The parser's shape requirement limited the damage (an error
+             * message does not start with `package=`), but the exit code was
+             * decorative, which is worse than absent: it reads like a check.
+             *
+             * Found in the owner's independent review of a4ff533 - not by this
+             * repository's suite, because a static text check cannot see it.
+             * That is why tools/tests/test_companion_attest_script.py now
+             * EXTRACTS these lines and runs them against a failing fake daemon.
+             */
+            appendLine("OUT=\$('$ksud' profile status ${CompanionContract.PACKAGE}" +
+                " 2>/dev/null); RC=\$?")
+            appendLine("S=\$(printf '%s\\n' \"\$OUT\" | head -1)")
             appendLine("echo \"DFRC_STATUS=\$S\"")
             appendLine("echo \"DFRC_STATUS_RC=\$RC\"")
             appendLine(

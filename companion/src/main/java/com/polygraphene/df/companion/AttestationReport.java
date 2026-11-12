@@ -178,8 +178,16 @@ public final class AttestationReport {
          * only have been produced by a process that traversed it. That is the
          * root-only read, and it is why the digest doubles as proof of
          * privilege rather than only as identity.
+         *
+         * EITHER digest proves the traversal, deliberately. It was `&&`, which
+         * made "a root operation happened" depend on the report being complete
+         * enough to PIN the daemon - two different facts behind one boolean, so
+         * a run where the second hash failed reported ATTESTATION=NONE and
+         * ROOT_OPERATION=FAIL even though root plainly happened. That is 3.7's
+         * collapse, and it would have sent a physical run looking for a missing
+         * grant that was never missing. Pinning still needs both (below).
          */
-        boolean rootOnlyRead = digest(pre) && digest(post);
+        boolean rootOnlyRead = digest(pre) || digest(post);
         boolean rootProven = uidZero && rootOnlyRead;
 
         long size = -1L;
@@ -188,7 +196,7 @@ public final class AttestationReport {
         } catch (NumberFormatException ignored) {
             size = -1L;
         }
-        boolean ksudPinned = rootOnlyRead
+        boolean ksudPinned = digest(pre) && digest(post)
                 && pre.equalsIgnoreCase(post)
                 && pre.equalsIgnoreCase(RmgIdentity.RMG_KSUD_SHA256)
                 && size == RmgIdentity.RMG_KSUD_SIZE;

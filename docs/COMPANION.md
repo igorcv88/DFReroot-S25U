@@ -71,6 +71,22 @@ This is why `MODULE_NAMED` is reported and contributes nothing. It is an
 observation, kept visible, that is not allowed to stand in for evidence
 (AGENTS.md §3.12).
 
+### And it is functional evidence, not a cryptographic attestation of the module
+
+This distinction has to stay explicit, because the gap between the two is where
+an over-claim would live. A successful `APP_GRANTS_CONTRACT` round-trip proves
+the loaded module **implements the managerless contract this build expects** -
+revision 1, 784-byte profile ABI, an ioctl upstream does not have. It does
+**not** hash the loaded module's text, and nothing in userspace can: two
+differently-built RMG-patched modules would both answer, and so would any module
+that implements the same contract.
+
+So the claim `ATTEST_RMG_CONTRACT` licenses is exactly: *the kernel is running a
+module that speaks the RMG managerless contract, and the pinned RMG daemon is
+what asked it.* Not "the module's bytes are the ones we expect". Anything built
+on top of this - PR C's reuse route included - inherits that boundary, and the
+owner's review of 2026-11-12 asked for it to remain stated rather than implied.
+
 ### What it still cannot establish
 
 - **Which process called.** DFReroot is in a shared uid, so Binder's
@@ -115,12 +131,22 @@ say".
 | The root invocation has an enforced deadline and is force-killed on timeout | same |
 | No world-writable path is referenced (§3.6) | same |
 | Caller refusals: wrong uid, unanswered package lookup, missing client, foreign certificate, absent digest, version skew | `tools/tests/CompanionContractTest.java` |
-| Attestation refusals: no nonce, wrong nonce, truncated report, duplicate keys, non-zero uid, no root-only read, foreign daemon, failed or unparsable contract probe, size mismatch, daemon swapped mid-call | same |
+| Attestation refusals: no nonce, wrong nonce, truncated report, duplicate keys, non-zero uid, no root-only read, foreign daemon, failed or unparsable contract probe, size mismatch, daemon swapped mid-call, a FAILING daemon printing a valid-looking line | same |
+| The daemon's exit status is the daemon's, not a pipeline's | `tools/tests/test_companion_attest_script.py` (runs the extracted script against a failing fake daemon) **and** a shape guard in the audit |
 
 The audit's guards were **mutation-tested**: each was broken on purpose and the
 audit was confirmed to fail. One did not, and the reason is recorded in the code
 — the guards greped raw text, and this file's own prose about `profile status`
 satisfied the check meant for the code. They now run on `code_only()`.
+
+**A static guard was not enough, and the record should say so.** The owner's
+independent review of `a4ff533` found that the script captured `$?` after a
+pipeline, so a daemon that *failed* reported `DFRC_STATUS_RC=0`. No text check
+can see that. The script is now extracted from `Attestation.kt` and executed
+against a fake daemon that exits non-zero — including one that prints a
+plausible status line, which is the shape where the parser's prefix check passes
+and the exit code is the only thing left to refuse it. Reverting the fix makes
+that test fail; it was verified in both directions.
 
 ## 5. Granting it, and the physical acceptance criteria
 

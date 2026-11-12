@@ -2607,6 +2607,16 @@ def audit(json_mode=False):
             fail("the companion's attestation script contains %r; version 1 is "
                  "non-destructive by construction and the contract probe it "
                  "uses is operation 0, which performs no write" % token)
+    # The daemon's exit status must be captured with no pipeline in between.
+    # `S=$(... | head -1); RC=$?` records head's status, so a failing daemon
+    # reported RC=0 (owner's review of a4ff533). The behavioural proof is
+    # tools/tests/test_companion_attest_script.py, which runs these lines; this
+    # guard is the cheap shape check beside it.
+    for line in attest_src.split(chr(10)):
+        if "RC=" in line and "$?" in line and "|" in line:
+            fail("the companion's attestation captures an exit status on a line "
+                 "that also contains a pipeline; $? would be the last command's "
+                 "status, not the daemon's")
     if "profile status" not in attest_src:
         fail("the attestation no longer performs the managerless contract "
              "round-trip; without it the loaded module is not attested and a "

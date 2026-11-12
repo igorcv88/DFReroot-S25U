@@ -127,12 +127,31 @@ public final class CompanionContractTest {
         expect(AttestationReport.evaluate(report("DFRC_UID=0", "DFRC_UID=10600"), NONCE)
                         .attestation == AttestationReport.ATTEST_NONE,
                 "a non-zero uid proves no root operation");
+        // Neither digest: no read under /data/adb happened, so no privilege is
+        // proven. EITHER one proves it, which is why both are cleared here.
         AttestationReport.Verdict noRead = AttestationReport.evaluate(
-                report("DFRC_KSUD_SHA256_PRE=" + RmgIdentity.RMG_KSUD_SHA256,
-                        "DFRC_KSUD_SHA256_PRE="), NONCE);
+                report(RmgIdentity.RMG_KSUD_SHA256, ""), NONCE);
         expect(noRead.attestation == AttestationReport.ATTEST_NONE,
-                "without the root-only read nothing is proven");
+                "without any root-only read nothing is proven");
         expect(!noRead.ksudPinned, "and the daemon is not reported as pinned");
+        /*
+         * One digest missing is a different fact from no root.
+         *
+         * `rootOnlyRead` used to require BOTH, so a run whose second hash
+         * failed reported ROOT_OPERATION=FAIL while root had plainly happened -
+         * and a physical run would have gone looking for a grant that was never
+         * missing. The pinning still needs both, because that is what the
+         * second hash is for.
+         */
+        AttestationReport.Verdict halfHashed = AttestationReport.evaluate(
+                report("DFRC_KSUD_SHA256_POST=" + RmgIdentity.RMG_KSUD_SHA256,
+                        "DFRC_KSUD_SHA256_POST="), NONCE);
+        expect(halfHashed.rootProven,
+                "a single root-only read still proves the root operation");
+        expect(!halfHashed.ksudPinned,
+                "but one digest cannot establish the daemon was not swapped");
+        expect(halfHashed.attestation == AttestationReport.ATTEST_ROOT_OPERATIONAL,
+                "so the attestation stops at operational");
 
         // the two halves, each alone
         AttestationReport.Verdict foreignKsud = AttestationReport.evaluate(
@@ -158,6 +177,38 @@ public final class CompanionContractTest {
                                 "DFRC_KSUD_SIZE=x"), NONCE)
                         .attestation == AttestationReport.ATTEST_ROOT_OPERATIONAL,
                 "an unparsable size is not a matching one");
+
+        // A FAILING daemon whose output looks right is the dangerous shape: the
+        // prefix check passes, so the exit code is the only thing that refuses
+        // it. The shell half (that RC is the daemon's status and not head's) is
+        // proven by tools/tests/test_companion_attest_script.py; this is the
+        // parser half.
+        AttestationReport.Verdict plausibleButFailed = AttestationReport.evaluate(
+                report("DFRC_STATUS_RC=0", "DFRC_STATUS_RC=3"), NONCE);
+        expect(plausibleButFailed.attestation == AttestationReport.ATTEST_ROOT_OPERATIONAL,
+                "a failing daemon printing a valid-looking status line is not attested");
+        expect(!plausibleButFailed.contractRoundTrip,
+                "and the round-trip signal is FAIL, whatever the line says");
+        expect(plausibleButFailed.ksudPinned,
+                "while the daemon's identity is still reported independently");
+        expect(AttestationReport.evaluate(
+                        report("DFRC_STATUS_RC=0", "DFRC_STATUS_RC="), NONCE)
+                        .contractRoundTrip == false,
+                "an empty exit code is not a zero one");
+        expect(AttestationReport.evaluate(
+                        report("DFRC_STATUS_RC=0", "DFRC_STATUS_RC=00"), NONCE)
+                        .contractRoundTrip == false,
+                "only the exact string 0 is success; no numeric coercion");
+        // Partial output from a daemon that died mid-print: the keys that did
+        // arrive must not add up to a pass.
+        String truncated = report().substring(0, report().indexOf("DFRC_STATUS="));
+        expect(AttestationReport.evaluate(truncated, NONCE).attestation
+                        == AttestationReport.ATTEST_NONE,
+                "a report cut off before the status line attests nothing");
+        expect(AttestationReport.evaluate(
+                        truncated + "DFRC_END=1\n", NONCE).attestation
+                        == AttestationReport.ATTEST_ROOT_OPERATIONAL,
+                "an end marker on a report with no status line proves root only");
 
         // the post-invocation digest is what catches a replacement
         AttestationReport.Verdict swapped = AttestationReport.evaluate(
