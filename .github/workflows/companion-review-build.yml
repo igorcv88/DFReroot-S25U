@@ -64,10 +64,22 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Install Android SDK packages
+      # Match the working CI Gate E SDK discovery rather than assuming the
+      # runner puts sdkmanager on PATH. On run 43321505575, the command was
+      # available under ANDROID_HOME/cmdline-tools but not as a bare executable;
+      # the previous step failed with exit 127 before a signed build began.
+      - name: Install Android SDK packages on hosted runner
         run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" >/dev/null
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit)"
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found under $ANDROID_HOME/cmdline-tools"
+            exit 1
+          fi
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+          test -f "$ANDROID_HOME/platforms/android-36/android.jar"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/aapt2"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
 
       # Offline gates first. A signed artefact built from a tree whose own
       # invariants do not hold is worse than no artefact: it installs.
