@@ -84,16 +84,23 @@ the closeout before any handover), not something this protocol can work around.
 > anything checks it, so the RMG daemon was replaced by a run that then failed.
 > See `docs/S25U_DZIF_OWO_COMPATIBILITY.md`.
 >
-> The contract is now: **refuse**. `utils::finish_install` has no parameterised
-> destination, so one device has one persistent KernelSU daemon and the two pairs
-> cannot share it. The daemon asks two questions before the handover — whose
-> module is live, and whose daemon is persisted — and refuses without touching a
-> foreign one. Not a backup-and-restore: the foreign daemon is never modified.
+> The contract that answers it is **refuse**: `utils::finish_install` has no
+> parameterised destination, so one device has one persistent KernelSU daemon and
+> the two pairs cannot share it.
 >
-> For this protocol that means the pre-run checks below are no longer only about
-> a manager app. **Record `/data/adb/ksud`'s hash, size and mtime before every
-> run**, and treat a foreign daemon there as a device that cannot close the gate
-> until its owner removes it deliberately and out of band.
+> **That contract is not in the shipped build.** The bundled
+> `app/src/main/assets/ksud-dzif-owo` is still `6b7246e5…def2` — the exact binary
+> that renamed over the RMG daemon on the run above. The two gates that would make
+> it a refusal (whose module is live, whose daemon is persisted) exist only as a
+> change to the daemon's patch generators in `RMGLabs-Payloads`, pending an
+> independent review and a rebuild. Until a daemon carrying them is built and
+> audited, **nothing in this app protects a foreign `/data/adb/ksud`**, and the
+> only thing standing between a run and that daemon is this protocol.
+>
+> So the pre-run checks below are no longer only about a manager app. **Record
+> `/data/adb/ksud`'s hash, size and mtime before every run** and compare them
+> afterwards; treat a foreign daemon there as a device that must not be run
+> against at all until its owner has removed it deliberately and out of band.
 
 ## 2. Verify what you are installing
 

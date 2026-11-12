@@ -172,8 +172,15 @@ parameterised destination — disassembly of this exact daemon shows it does two
 things about the daemon, `lsetxattr security.selinux` on `/data/adb/ksud` and a
 symlink of `/data/adb/ksu/bin/ksud` at it — so DFReroot and the RMG pair cannot
 both own that path. The chain must refuse on a device carrying the other pair,
-rather than take the path from it. `RMGLabs-Payloads` PR adds the two gates that
-make it a refusal before the `rename(2)` instead of after.
+rather than take the path from it. `RMGLabs-Payloads` PR #29 proposes the two
+gates that would make it a refusal before the `rename(2)` instead of after.
+
+**The pinned daemon below does not carry them.** `6b7246e5…def2` is the binary
+that performed this run, and the gates exist only as a change to that
+repository's patch generators — unreviewed, unbuilt, and not yet audited by
+`tools/ksud_capability_audit.py`. Nothing in the shipped app protects a foreign
+`/data/adb/ksud`. When a daemon carrying the gates is built, its digest and size
+replace the pin here and in `KsudStage`, and this paragraph goes with them.
 
 **A re-run is not authorised** until that daemon is rebuilt and independently
 reviewed, and until `/data/adb/ksud` on the device is restored to the RMG pair
