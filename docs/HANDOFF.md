@@ -35,6 +35,27 @@
 > foreign provider's root can satisfy the DFR post-root contract or qualify
 > either of them.
 >
+> **Update, same day — the daemon's identity is settled and one ordering defect
+> is fixed.** A root capture in boot `19671080-6ce0-431e-a034-7b5c2b79e1d2`
+> (the boot whose preflight answered `errno=13`) shows `/data/adb/ksud` holding
+> the RMG build `95b2cc36…981d8a5`, `kernelsu` Live in `/proc/modules`, root
+> working at `u:r:ksu:s0`, SELinux Enforcing. The failed run refused before
+> `stage_daemon_from()` and damaged nothing. It is **not** an attestation of the
+> loaded module's bytes, so it promotes no gate.
+>
+> That capture also exposed a real ordering defect, now corrected: with root
+> established the `/dev/df*` probes answer EACCES, so `markerState()` is
+> `MARKER_UNKNOWN` and both the button and the run refused with "could not be
+> determined" while the decisive reading sat one call away, unasked. The route
+> verdict is now derived first, in `MainActivity.runDfAll()` and in
+> `runOwned()`; the marker and single-owner guards are **kept after it**, not
+> traded for it (§3.2), and the classifier refuses every marker state but a
+> positively-attested clean boot, so nothing is relaxed.
+>
+> Owed, cheap, non-destructive: whether `/proc/modules` is readable from
+> uid 1000. The capture was taken as root; the answer decides whether the app
+> reports `FOREIGN_KSU_ACTIVE` or `UNKNOWN`.
+>
 > Still unexplained and tracked separately: the first 2026-11-12 boot
 > (`200c9cb5-…`) lost the DirtyFrag handoff at `df=1 helper=0 ns=0 bind=0`,
 > `runAll=4`. That is a native reliability question, independent of the daemon

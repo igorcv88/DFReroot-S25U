@@ -135,6 +135,32 @@ check("val route = routeVerdict(host, bootId, marker)" in run_owned
       and "if (!route.dfrAcquisitionAllowed)" in run_owned
       and "DFR acquisition refused in state" in run_owned,
       "the run refuses when this boot does not permit the acquisition route")
+# The marker guard stays, and the route verdict is asked FIRST. Once root is
+# established the /dev/df* probes answer EACCES, so markerState() is UNKNOWN and
+# the guard alone refuses with the least informative true reason available while
+# a decisive reading sits one call away (AGENTS.md 3.7). Both must be present,
+# in this order: the classification refuses every marker state but an attested
+# clean boot, so nothing is relaxed, and two refusals stay in front of the
+# destructive transaction (3.2).
+check(run_owned.index("val route = routeVerdict(host, bootId, marker)")
+      < run_owned.index("marker == AutoRootPolicy.MARKER_PRESENT")
+      < run_owned.index("marker != AutoRootPolicy.MARKER_ABSENT"),
+      "the route verdict precedes the marker guard, and the guard survives it")
+check("Only a hard reboot clears armed hooks" in run_owned
+      and "refusing rather than assuming a clean boot" in run_owned,
+      "both marker refusals are still reachable in the run")
+main_run = main[main.index("private fun runDfAll("):]
+check(main_run.index("DfrRootCoordinator.routeReading(")
+      < main_run.index("private fun runAllGuarded("),
+      "the UI derives the route before the marker/owner guards it still applies")
+check("showRunDialog()" not in main_run[:main_run.index("private fun runAllGuarded(")],
+      "runDfAll() never opens the destructive dialog except through runAllGuarded()")
+guarded = main_run[main_run.index("private fun runAllGuarded("):]
+check("AutoRootPolicy.MARKER_PRESENT" in guarded
+      and "AutoRootPolicy.MARKER_ABSENT" in guarded
+      and guarded.index("AutoRootPolicy.MARKER_ABSENT")
+      < guarded.index("showRunDialog()"),
+      "the guarded path keeps both marker states ahead of the dialog")
 check(run_owned.index("val route = routeVerdict(host, bootId, marker)")
       < run_owned.index("host.phase(Phase.STAGE_KSUD)")
       < run_owned.index("StageHop.hopToNetworkStack(context)")

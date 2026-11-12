@@ -378,28 +378,22 @@ object DfrRootCoordinator {
                 " impossible to establish")
         }
         host.log("[DFR][RUN] owner=$who boot_id=$bootId\n")
-        /*
-         * The second-run guard lives here, not only in the UI: it is the reason a
-         * failed run cannot be "tried again", and a second entry point without it
-         * would be the same defect AGENTS.md 3.2 describes for the native gates.
-         */
         val marker = markerState()
-        if (marker == AutoRootPolicy.MARKER_PRESENT) {
-            return refused("/dev/df or a stage marker is present; refusing a second run." +
-                " Only a hard reboot clears armed hooks", bootId)
-        }
-        if (marker != AutoRootPolicy.MARKER_ABSENT) {
-            return refused("whether /dev/df or a stage marker exists could not be" +
-                " determined (not ENOENT); refusing rather than assuming a clean boot",
-                bootId)
-        }
-
         /*
          * Choose the route BEFORE staging, the privileged cross-process hop or
          * any page-cache write - and refuse here if this boot does not permit
          * the acquisition route at all. An ALLOWED verdict is not authority to
          * skip anything downstream: the staging digest, the remote preflight,
          * the daemon's ownership gate and the post-root contract all still run.
+         *
+         * It also runs BEFORE the marker guard below, and that order was a
+         * correction: once root is established on this firmware the /dev/df*
+         * lookups answer EACCES, so markerState() is MARKER_UNKNOWN and the
+         * guard refused with "could not be determined" while a decisive reading
+         * - another provider owns the kernel side - sat one call away, unasked
+         * (3.7). The marker is an INPUT to the classification, which refuses
+         * every marker state but a positively-attested clean boot, so nothing
+         * is relaxed by asking the better question first.
          *
          * Scoped to the profile that needs it, for the reason the preflight was:
          * ZZIC and DZIF/OXM carry already-qualified boot contracts, and widening
@@ -415,6 +409,26 @@ object DfrRootCoordinator {
                     bootId,
                 )
             }
+        }
+
+        /*
+         * The second-run guard lives here, not only in the UI: it is the reason a
+         * failed run cannot be "tried again", and a second entry point without it
+         * would be the same defect AGENTS.md 3.2 describes for the native gates.
+         *
+         * Kept after the route verdict rather than replaced by it: on the routed
+         * profile the two agree, and two independent refusals in front of the
+         * destructive transaction are the point of 3.2. On every other profile
+         * this is the only one.
+         */
+        if (marker == AutoRootPolicy.MARKER_PRESENT) {
+            return refused("/dev/df or a stage marker is present; refusing a second run." +
+                " Only a hard reboot clears armed hooks", bootId)
+        }
+        if (marker != AutoRootPolicy.MARKER_ABSENT) {
+            return refused("whether /dev/df or a stage marker exists could not be" +
+                " determined (not ENOENT); refusing rather than assuming a clean boot",
+                bootId)
         }
 
         host.phase(Phase.STAGE_KSUD)

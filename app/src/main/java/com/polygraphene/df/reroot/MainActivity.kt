@@ -186,6 +186,79 @@ class MainActivity : Activity() {
 
     private fun runDfAll() {
         val marker = DfrRootCoordinator.markerState()
+        val owner = DfrRootCoordinator.currentOwner()
+        /*
+         * On the routed profile the ROUTE is derived first, and the marker and
+         * owner guards below still run afterwards.
+         *
+         * Not cosmetic, and found by reading a root capture of the owner's own
+         * device (boot 19671080-6ce0-431e-a034-7b5c2b79e1d2): with the RMG pair
+         * active, the /dev/df* probes answer EACCES rather than ENOENT, so
+         * markerState() is MARKER_UNKNOWN - and the marker guard used to return
+         * here with "cannot determine whether a stage marker exists". True, and
+         * the least informative true thing available: the actual state is that
+         * another provider owns the kernel side, which is what the owner needs
+         * to read and what decides what to do next. A refusal whose reason
+         * names the probe that could not speak, while a more decisive reading
+         * was available and unasked, is AGENTS.md 3.7's defect.
+         *
+         * The guards are NOT traded for the classification - they are kept
+         * after it. The classifier refuses every marker state that is not a
+         * positively-attested clean boot, so the two agree; keeping both means
+         * the destructive dialog stays behind two independent refusals rather
+         * than one (3.2).
+         *
+         * Off the main thread because it reads files (and, where the path is
+         * readable, hashes one): the manifest puts every component of this app
+         * in system_server, which must never block its main thread on that.
+         */
+        if (KsudStage.requiresRootEnvironmentGate()) {
+            btnRunAll.isEnabled = false
+            runBg {
+                val reading = DfrRootCoordinator.routeReading(marker = marker)
+                append(reading.log)
+                val verdict = reading.verdict
+                runOnUiThread {
+                    btnRunAll.isEnabled = true
+                    if (!verdict.dfrAcquisitionAllowed) {
+                        append("[x] ROUTE=NONE DFR acquisition is not available in" +
+                            " this boot\n" +
+                            "    STATE=${verdict.state} ${verdict.signals()}\n" +
+                            "    ${verdict.reason}\n")
+                        if (verdict.rootAvailable && !verdict.dfrAcquired) {
+                            /*
+                             * Unreachable in this build, and deliberately still
+                             * written: it needs an authorized provider that can
+                             * attest the loaded module, which is the companion
+                             * transport this app does not have. Claiming the
+                             * reuse route exists while nothing can execute
+                             * through it would be success without proof.
+                             */
+                            append("    root IS available from another provider," +
+                                " and this build has no authorized transport to" +
+                                " use it\n")
+                        }
+                    } else {
+                        append("[*] ROUTE=DFR_ACQUISITION this run will attempt" +
+                            " DirtyFrag; every later gate still applies\n")
+                        runAllGuarded(marker, owner)
+                    }
+                }
+            }
+            return
+        }
+        runAllGuarded(marker, owner)
+    }
+
+    /**
+     * The marker and single-owner guards, and only then the destructive dialog.
+     *
+     * Unchanged in substance: these are the refusals the button has always
+     * carried, and they are the ONLY ones on a profile whose runs are not
+     * routed. [runDfAll] reaches them after the route verdict on the routed
+     * profile, and directly everywhere else.
+     */
+    private fun runAllGuarded(marker: Int, owner: String?) {
         if (marker == AutoRootPolicy.MARKER_PRESENT) {
             append("[x] already hooked (/dev/df or a stage marker present). " +
                 "Refusing second run.\n" +
@@ -198,59 +271,11 @@ class MainActivity : Activity() {
                 "    See logcat for the failing probe.\n")
             return
         }
-        val owner = DfrRootCoordinator.currentOwner()
         if (owner != null) {
             append("already running (owner=$owner)\n")
             return
         }
-        /*
-         * Say what the button is about to do, before it does it.
-         *
-         * On the profile where a foreign KernelSU pair may already own the
-         * kernel side, "Run All" is no longer one unconditional meaning. The
-         * route is derived here from the same call the run itself uses, and a
-         * boot that does not permit the acquisition route never opens the
-         * destructive dialog at all - the owner reads the state and the reason
-         * instead of watching a run refuse inside it.
-         *
-         * Off the main thread because it reads files (and, where the path is
-         * readable, hashes one): the manifest puts every component of this app
-         * in system_server, which must never block its main thread on that.
-         */
-        if (!KsudStage.requiresRootEnvironmentGate()) {
-            showRunDialog()
-            return
-        }
-        btnRunAll.isEnabled = false
-        runBg {
-            val reading = DfrRootCoordinator.routeReading(marker = marker)
-            append(reading.log)
-            val verdict = reading.verdict
-            runOnUiThread {
-                btnRunAll.isEnabled = true
-                if (verdict.dfrAcquisitionAllowed) {
-                    append("[*] ROUTE=DFR_ACQUISITION this run will attempt DirtyFrag;" +
-                        " every later gate still applies\n")
-                    showRunDialog()
-                } else {
-                    append("[x] ROUTE=NONE DFR acquisition is not available in this boot\n" +
-                        "    STATE=${verdict.state} ${verdict.signals()}\n" +
-                        "    ${verdict.reason}\n")
-                }
-                if (verdict.rmgReuseAllowed) {
-                    /*
-                     * Unreachable in this build, and deliberately still
-                     * written: reaching it needs an authorized provider that
-                     * can attest the loaded module, which is the companion
-                     * transport this app does not have yet. Claiming the reuse
-                     * route exists while nothing can execute through it would
-                     * be the success-without-proof this repository refuses.
-                     */
-                    append("    root IS available from another provider, and this" +
-                        " build has no authorized transport to use it\n")
-                }
-            }
-        }
+        showRunDialog()
     }
 
     /**

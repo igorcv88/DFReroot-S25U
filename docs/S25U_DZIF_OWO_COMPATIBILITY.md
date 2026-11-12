@@ -234,6 +234,52 @@ These are source-level changes until built and reviewed.
 No third physical attempt is authorised by these changes. A safe, explicit
 migration or restore procedure for the RMG pair remains separate work.
 
+## The persistent daemon's identity, read as root — 2026-11-12
+
+Closed. The owner captured this through a root shell in boot
+`19671080-6ce0-431e-a034-7b5c2b79e1d2` — the same boot in which the app's
+preflight answered `errno=13`.
+
+| Reading | Value |
+|---|---|
+| root identity | `uid=0(root)`, context `u:r:ksu:s0` |
+| SELinux | Enforcing |
+| `/data/adb/ksud` | `-rwxr-xr-x root root u:object_r:ksu_file:s0`, 5,797,976 bytes |
+| SHA-256 | `95b2cc363f420b075c1b1301cb959d29d2cd5845372eb3e89b849d020981d8a5` |
+| mtime | 2026-11-12 17:55:46 −0300 |
+| `/data/adb/ksu/bin/ksud` | symlink → `/data/adb/ksud` |
+| `/proc/modules` | `kernelsu 180224 2 - Live 0x0 (O)` |
+| `/sys/module/kernelsu` | ENOENT |
+
+What this establishes:
+
+- **The daemon at that path is the RMG managerless build**, by digest — the same
+  `95b2cc36…981d8a5` the dossier recorded before the failed run. The earlier
+  note that the 2026-11-12 run "replaced its on-disk daemon with the older DFR
+  binary" is superseded for the current state: whatever happened, the RMG binary
+  is what is there now, and the mtime says it was written at 17:55. **Which
+  operation wrote it is not established** by this capture.
+- **The failed run did not damage the RMG installation.** It refused at
+  `DFR_DAEMON_OWNERSHIP` before `stage_daemon_from()`, which is the gate working.
+- **Root works through the RMG pair in that boot**, which is what makes the
+  companion route worth building before anything else.
+
+What it does **not** establish, and must not be read as:
+
+- **It is not an attestation of the loaded module's bytes.** `/proc/modules`
+  names `kernelsu` and says `Live`; the name is shared by both pairs and the
+  entry carries no digest. A working `su` plus a pinned daemon on disk is strong
+  circumstantial evidence and is not the same claim (AGENTS.md §3.12). So this
+  capture does not promote `RMG_ACTIVE_VERIFIED`, and the classifier is right to
+  report `FOREIGN_KSU_ACTIVE` from it.
+- **The missing `/sys/module/kernelsu` is not evidence of absence.**
+  `/proc/modules` reports the module Live with a refcount of 2. The sysfs
+  directory's absence is unexplained here and nothing depends on it.
+- The 5,797,976-byte size alone would classify `DAEMON_FOREIGN` against this
+  profile's pinned 5,822,240 — *if* the app could `lstat` it, which from
+  `u:r:system_server:s0` it cannot. The evidence above exists only because it
+  was read through root.
+
 ## Route classification replaces the unconditional ownership preflight
 
 **Source-level change only. It qualifies no gate and authorises no physical
@@ -364,7 +410,10 @@ SHA-256. The provenance records the LF digest — what `git show :<path>` produc
 - **A DFR runtime mode that does not require taking `/data/adb/ksud` over.**
   Until it exists, `DAEMON_FOREIGN` has no route that can act on it, and the
   only alternative is a migration with its own recovery and rollback evidence.
-- The identity of the daemon currently at `/data/adb/ksud`. The 2026-11-12 run
-  replaced the RMG binary with the older DFR one; the owner reports RMGLabs
-  root working, which the record above does not explain. Neither claim may be
-  assumed — read the path through a shell that can read it.
+- ~~The identity of the daemon currently at `/data/adb/ksud`.~~ **Closed
+  2026-11-12** by a root capture: it is the RMG build `95b2cc36…981d8a5`. See
+  the section above for what that does and does not establish.
+- Whether `/proc/modules` is readable from uid 1000 / `u:r:system_server:s0`.
+  The capture above was taken as root, and the answer decides whether the app
+  reports `FOREIGN_KSU_ACTIVE` or `UNKNOWN` on this device. One non-destructive
+  read from an unprivileged shell settles it.
