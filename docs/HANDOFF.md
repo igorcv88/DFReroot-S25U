@@ -56,6 +56,21 @@
 > uid 1000. The capture was taken as root; the answer decides whether the app
 > reports `FOREIGN_KSU_ACTIVE` or `UNKNOWN`.
 >
+> **Companion module added, 2026-11-12 (source-level only).** `companion/` -
+> `com.polygraphene.df.companion`, own uid, same key - is the grant holder
+> DFReroot cannot be: the RMG managerless contract refuses shared-UID peers and
+> requires appId 10000..19999, and `system_server` cannot exec or map what the
+> UAPI needs. DFInstaller was considered and rejected (it is already granted,
+> but the grant is a runtime command, while an IPC surface on the packages.xml
+> writer is permanent). See `docs/COMPANION.md`.
+>
+> It attests the loaded module through the RMG-only contract ioctl, which
+> `ksud profile status` reaches with operation 0 (no write) and which upstream
+> KernelSU does not implement - the first evidence available to this project
+> that is about the module rather than its name. v1 exposes two transactions and
+> no command channel. `CompanionContractTest` 40/40; six audit guards, each
+> mutation-tested. Not a release artifact; DFReroot does not call it yet.
+>
 > Still unexplained and tracked separately: the first 2026-11-12 boot
 > (`200c9cb5-…`) lost the DirtyFrag handoff at `df=1 helper=0 ns=0 bind=0`,
 > `runAll=4`. That is a native reliability question, independent of the daemon

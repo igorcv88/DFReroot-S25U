@@ -2531,6 +2531,108 @@ def audit(json_mode=False):
             fail("%s captures the stop diagnostics outside onStopJob; only that "
                  "callback runs at the instant the scheduler reclaimed the "
                  "execution" % name)
+    # --- the root-operation companion -----------------------------------
+    # A separate app with its own uid, because DFReroot CANNOT hold the grant:
+    # the RMG managerless contract refuses shared-UID peers and requires an
+    # appId in 10000..19999. Its decisions are pure and tested by
+    # tools/tests/CompanionContractTest.java; what is asserted here is the shape
+    # that test cannot see - the manifest, the absence of a command channel, and
+    # the scripts actually handed to a root shell.
+    companion_dir = os.path.join(ROOT, "companion", "src", "main")
+
+    def companion_src(name):
+        with open(os.path.join(companion_dir, name), encoding="utf-8") as f:
+            return f.read().replace(chr(13) + chr(10), chr(10))
+
+    try:
+        companion_manifest = companion_src("AndroidManifest.xml")
+        """
+        code_only() on every one of these, not just where it reads nicer.
+
+        The first version of these guards greped the raw text, and the
+        contract-round-trip guard was VACUOUS because this file's own comment
+        explains that `ksud profile status` is the call that reaches the kernel:
+        the prose satisfied a check about the code. Found by mutating the script
+        and watching the audit pass. Comments must not be able to satisfy - or
+        to trip - a guard about behaviour.
+        """
+        contract_src = code_only(companion_src(
+            "java/com/polygraphene/df/companion/CompanionContract.java"))
+        service_src = code_only(companion_src(
+            "java/com/polygraphene/df/companion/CompanionService.kt"))
+        attest_src = code_only(companion_src(
+            "java/com/polygraphene/df/companion/Attestation.kt"))
+        su_src = code_only(companion_src(
+            "java/com/polygraphene/df/companion/SuChannel.kt"))
+    except OSError as ex:
+        fail("cannot read the companion module: %s" % ex)
+        companion_manifest = contract_src = service_src = attest_src = su_src = ""
+
+    # Strip XML comments first: this file EXPLAINS why there is no sharedUserId,
+    # and a guard that greps prose refuses the thing it is documenting.
+    companion_manifest_code = re.sub(r"<!--.*?-->", "", companion_manifest,
+                                     flags=re.S)
+    if "sharedUserId" in companion_manifest_code:
+        fail("the companion declares a sharedUserId; the RMG grant contract "
+             "refuses shared-UID peers, so such a companion could never hold "
+             "the grant it exists to hold")
+    if 'android:exported="true"' in companion_manifest_code and (
+            'android:permission="com.polygraphene.df.companion.permission'
+            '.ROOT_OPERATIONS"' not in companion_manifest_code):
+        fail("the companion's exported service is not guarded by its "
+             "signature-level permission")
+    if 'android:protectionLevel="signature"' not in companion_manifest_code:
+        fail("the companion's permission is not signature-level; any app could "
+             "then hold it")
+
+    # No command channel. An exported interface that runs a caller's string as
+    # root is a root shell with extra steps, and a shared-uid caller cannot be
+    # identified precisely enough to justify one.
+    for token in ("readString()", "data.readString"):
+        if token in service_src and "TX_ATTEST" in service_src:
+            # A string argument is only acceptable if nothing passes it to a shell.
+            if "runAsRoot(" in service_src and "script(" not in service_src:
+                fail("the companion service reads a caller string and reaches a "
+                     "root shell without the fixed attestation script")
+    if "Attestation.script(nonce)" not in service_src:
+        fail("the companion service no longer runs the fixed attestation "
+             "script; only a constant script may reach a root shell")
+
+    # Every command in the attestation is a read. These tokens name the write
+    # side of the grant contract and the module lifecycle.
+    for token in ("profile grant", "profile revoke", "insmod", "finit_module",
+                  "setenforce", "stage_daemon", "mount ", "rm -", "mv ",
+                  "chmod ", "chcon ", "restorecon", "reboot", "kill "):
+        if token in attest_src:
+            fail("the companion's attestation script contains %r; version 1 is "
+                 "non-destructive by construction and the contract probe it "
+                 "uses is operation 0, which performs no write" % token)
+    # The daemon's exit status must be captured with no pipeline in between.
+    # `S=$(... | head -1); RC=$?` records head's status, so a failing daemon
+    # reported RC=0 (owner's review of a4ff533). The behavioural proof is
+    # tools/tests/test_companion_attest_script.py, which runs these lines; this
+    # guard is the cheap shape check beside it.
+    for line in attest_src.split(chr(10)):
+        if "RC=" in line and "$?" in line and "|" in line:
+            fail("the companion's attestation captures an exit status on a line "
+                 "that also contains a pipeline; $? would be the last command's "
+                 "status, not the daemon's")
+    if "profile status" not in attest_src:
+        fail("the attestation no longer performs the managerless contract "
+             "round-trip; without it the loaded module is not attested and a "
+             "module name would be standing in for evidence")
+    if "/data/local/tmp" in attest_src or "/data/local/tmp" in su_src:
+        fail("the companion references a world-writable path (AGENTS.md 3.6)")
+
+    # The deadline exists because a `su` waiting for a manager prompt that
+    # nobody will answer must end in a refusal, not a stuck binder thread.
+    if "waitFor(timeoutMs" not in su_src or "destroyForcibly()" not in su_src:
+        fail("the companion's root invocation has no enforced deadline")
+
+    # The client is named once, and it is the app, not the uid alone.
+    if 'CLIENT_PACKAGE = "com.polygraphene.df.reroot"' not in contract_src:
+        fail("the companion no longer pins which package may call it")
+
     # --- root-environment routing ---------------------------------------
     # Which provider owns root in this boot decides which route may be
     # attempted, and the decision has to stay in ONE pure place. The Kotlin that

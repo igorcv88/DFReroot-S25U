@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DFR Companion</string>
+    <string name="companion_intro">Root-operation provider for DFReroot.\n\nThis app holds the KernelSU grant; DFReroot does not and cannot, because its shared system uid is refused by the grant contract. It executes only the bounded, non-destructive operations its contract declares.</string>
+    <string name="companion_attest">Run attestation</string>
+</resources>

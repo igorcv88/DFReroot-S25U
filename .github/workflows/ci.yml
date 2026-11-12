@@ -101,7 +101,7 @@ jobs:
           python3 - <<'PY'
           import sys, yaml
           rc = 0
-          for f in ("ci.yml", "release.yml"):
+          for f in ("ci.yml", "release.yml", "companion-review-build.yml"):
               p = ".github/workflows/" + f
               try:
                   d = yaml.safe_load(open(p))
