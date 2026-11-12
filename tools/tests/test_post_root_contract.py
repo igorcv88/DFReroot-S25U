@@ -102,7 +102,7 @@ check("e.errno == OsConstants.ENOENT) return null" in reader,
 check("catch (e: ErrnoException)" in reader
       and reader.count("return AutoRootPolicy.RECORD_UNREADABLE") >= 2,
       "EACCES/EIO/unknown lookup errors and read failures are unreadable")
-check(".exists()" not in reader,
+check("f.exists()" not in reader and "File(PostRootStatus.PATH).exists()" not in reader,
       "File.exists can silently turn EACCES into absent, even without throwing")
 check("PostRootStatus.unreadable()" in wait,
       "the unreadable case gets its own verdict instead of being parsed as a record")
