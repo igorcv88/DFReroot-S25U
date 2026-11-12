@@ -29,6 +29,11 @@ public final class RootEnvironmentTest {
         o.dfrPostRootUnreadable = false;
         o.persistentDaemon = RootEnvironment.DAEMON_ABSENT;
         o.loadedModule = RootEnvironment.MODULE_ATTESTED_NONE;
+        /*
+         * Enforcing on BOTH readings. The clean shape has to carry it, or every
+         * mutation below would be confounded with a missing SELinux element.
+         */
+        o.selinuxEnforcing = true;
         return o;
     }
 
@@ -112,6 +117,33 @@ public final class RootEnvironmentTest {
                 "the signal triple says the acquisition was not attempted");
         expect(reuse.signals().contains("ROOT_AVAILABLE=PASS"),
                 "while still reporting availability");
+
+        /*
+         * SELinux is a separate element of the reuse route, and it is required.
+         *
+         * Not evidence about the module - a permissive kernel answers the
+         * contract ioctl identically - so it is not folded into the
+         * attestation. It is invariant 11: offering a route while the device is
+         * in a state nobody has explained is the thing to refuse. Both readers
+         * must agree, and neither may stand in for the other, so the caller
+         * ANDs them before setting this field.
+         */
+        RootEnvironment.Observation rmgPermissive = clean();
+        rmgPermissive.loadedModule = RootEnvironment.MODULE_ATTESTED_RMG;
+        rmgPermissive.selinuxEnforcing = false;
+        RootEnvironment.Classification refusedForSelinux = classify(rmgPermissive);
+        expect(!refusedForSelinux.rmgReuseAllowed,
+                "an attested RMG pair without Enforcing SELinux grants no reuse route");
+        expect(!refusedForSelinux.rootAvailable,
+                "and claims no available root");
+        expect(!refusedForSelinux.dfrAcquisitionAllowed,
+                "and certainly no acquisition");
+        expect(RootEnvironment.STATE_UNKNOWN.equals(refusedForSelinux.state),
+                "the state is UNKNOWN: the attestation says nothing about SELinux");
+        expect(refusedForSelinux.reason.contains("SELinux"),
+                "and the refusal names the element that failed");
+        expect(RootEnvironment.PROVIDER_RMG.equals(refusedForSelinux.provider),
+                "while still naming who was attested, so the reader is not left guessing");
 
         // --- DFR's own completion ---------------------------------------------
         RootEnvironment.Observation done = clean();

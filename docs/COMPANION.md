@@ -9,6 +9,46 @@ change (the laudo's PR C).
 
 ---
 
+## 0. Physical PASS — 2026-11-12
+
+The companion ran on the owner's device and attested the RMG pair. **This is
+the evidence the reuse route rests on**, and it is recorded here rather than
+inferred from anywhere else.
+
+```text
+exec_failed=false timed_out=false exit=0
+ATTESTATION=RMG_CONTRACT ROOT_OPERATION=PASS KSUD_PINNED=PASS
+CONTRACT_V1_ROUNDTRIP=PASS SELINUX_ENFORCING=PASS MODULE_NAMED=PASS
+
+DFRC_UID=0
+DFRC_SELINUX=Enforcing
+DFRC_NONCE=a9d2897721ef58507a3efe5416e35a66
+DFRC_KSUD_SHA256_PRE=95b2cc363f420b075c1b1301cb959d29d2cd5845372eb3e89b849d020981d8a5
+DFRC_KSUD_SIZE=5797976
+DFRC_STATUS=package=com.polygraphene.df.companion user=0 uid=10516 profile=present root=true persistence=not-checked
+DFRC_STATUS_RC=0
+DFRC_KSUD_SHA256_POST=95b2cc363f420b075c1b1301cb959d29d2cd5845372eb3e89b849d020981d8a5
+DFRC_MODULES=kernelsu
+DFRC_END=1
+```
+
+What it establishes: the companion was granted (uid 10516), a root operation
+bound to **this call's** nonce succeeded, the pinned RMG daemon's bytes were
+unchanged before and after it, and the loaded module answered the managerless
+contract ioctl. The digest matches `95b2cc36…981d8a5` on both reads.
+
+What it does **not** establish, and §2 says why at length: it is functional
+evidence about the loaded module, not a cryptographic attestation of its bytes.
+
+Two incidental facts worth keeping:
+
+- the signed review build produced an installable APK with **no NDK installed**,
+  even though `:app` declares `externalNativeBuild`. A step to provide one is
+  unnecessary; do not re-add it.
+- `DFRC_STATUS_RC=0` here is the *fixed* capture: the exit status is the
+  daemon's, taken with no pipeline in between. The pre-fix script would have
+  printed `0` whatever the daemon did.
+
 ## 1. Why a separate app, and not DFInstaller or DFReroot itself
 
 DFReroot runs entirely inside `system_server` (`sharedUserId=
@@ -207,5 +247,20 @@ to DFReroot, and arrive with PR C.
   deliberately not a release version. Everywhere else in this repo an absent
   version is a refusal; here an explicit development pair says what the build
   is instead of borrowing a number that would make it look publishable.
-- **DFReroot does not call it.** `RootEnvironment.MODULE_ATTESTED_RMG` exists
-  and is still unreachable until PR C binds this provider to it.
+- ~~**DFReroot does not call it.**~~ **It does now** (PR C). `CompanionClient`
+  binds the service from a background thread, checks the provider's signing
+  certificate before binding, runs `TX_DESCRIBE` as a cheap version handshake
+  and then `TX_ATTEST`, and `CompanionProtocol` **re-derives** the attestation
+  level from the component signals instead of believing the summary. The app
+  declares the companion's signature-level permission, without which the
+  framework refuses the bind before any of this runs — a symptom identical to a
+  missing install and to a certificate mismatch, which is why all three are
+  reported separately.
+
+  Two things PR C deliberately did not do. The early-boot dispatch does **not**
+  ask the provider: the round trip costs a bind plus a root shell, its premise
+  is a window measured in seconds, and without an attestation the acquisition
+  route refuses anyway — so nothing is lost but diagnostic precision, and
+  `tools/profile_binding_audit.py` fails if any early-path source reaches
+  `CompanionClient`. And DFReroot still executes **no operation** through the
+  provider: it reads that state and says so.

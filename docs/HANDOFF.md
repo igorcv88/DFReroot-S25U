@@ -1,5 +1,28 @@
 # DFReroot S25U / ZZIC — handoff
 
+> **The reuse route is open, 2026-11-12.** The companion attested the RMG pair
+> on the device (`ATTESTATION=RMG_CONTRACT`, every component PASS, ksud digest
+> `95b2cc36…981d8a5` unchanged either side of the call, grant uid 10516), and
+> PR C binds that provider to `RootEnvironment`. DFReroot now reports
+> `ROOT_PROVIDER=RMG ROOT_AVAILABLE=PASS DFR_ACQUISITION=NOT_ATTEMPTED` without
+> running DirtyFrag or touching `/data/adb/ksud`.
+>
+> Three properties of that integration, because each is one edit from being
+> lost: the client refuses the main thread before binding (this app is
+> `system_server`); it compares the provider's signing certificate with its own
+> before binding, since `setPackage` pins a name and not a signer; and
+> `CompanionProtocol` re-derives the attestation level from the component
+> signals, so a provider whose summary contradicts its own evidence is refused.
+> SELinux Enforcing is a **separate required element** of the reuse route, read
+> by both the provider and this process and ANDed — a permissive kernel answers
+> the contract ioctl identically, so it is not evidence about the module.
+>
+> **What is still not done, and is the remaining half of the laudo:** DFReroot
+> executes no operation through the provider (v1 is attestation only), and its
+> own independent acquisition after a KernelSU-less boot is unchanged — that
+> needs the RMGLabs transient mode that does not take `/data/adb/ksud` over.
+> Scenario A of §9.4 is now evidenced; Scenario B is not started.
+
 > **Route classification, 2026-11-12 (source-level only).** The unconditional
 > `/data/adb/ksud` preflight imported with #95/#96 is replaced by
 > `RootEnvironment` (pure, 49/49 host cases) + `RootEnvironmentProbe`

@@ -761,10 +761,36 @@ The durable rules:
   a hit refuses the acquisition route and still does not grant the reuse route.
   An empty read is `UNKNOWN`, because a module that hides itself from that file
   reads exactly the same. Granting reuse needs a positive attestation from an
-  authorized provider, which nothing in this domain can produce - so
-  `RMG_ACTIVE_VERIFIED` and `NO_ACTIVE_KSU` are **modelled, negative-tested and
-  unreachable** in this build. An unreachable state is the correct cost of
-  missing evidence; inferring the provider from a name is §2's defect.
+  authorized provider - the companion, which holds the grant this uid cannot
+  hold, since the RMG managerless contract refuses shared-UID peers and
+  requires an appId in 10000..19999. `RMG_ACTIVE_VERIFIED` is reachable through
+  that provider and through nothing else; `NO_ACTIVE_KSU` remains **modelled,
+  negative-tested and unreachable**, and that is the correct cost of missing
+  evidence. Inferring the provider from a name is still §2's defect, which is
+  why `tools/profile_binding_audit.py` scopes the probe's own two readings and
+  fails if either produces an attested value.
+- **An attestation is believed only after it is re-derived.** The provider
+  reports a level beside the component signals it derived it from, and
+  `CompanionProtocol` recomputes the level and refuses when the two disagree. A
+  summary whose own evidence contradicts it is the thing not to trust, and the
+  evidence is in the same message. Separately: the provider's identity is
+  checked before the bind - `setPackage` pins a name, not a signer - and the
+  call refuses the main thread, because this app is `system_server` and the
+  round trip waits on a bind and then on a root shell.
+- **Functional evidence about the loaded module is not a cryptographic
+  attestation of its bytes.** A successful `APP_GRANTS_CONTRACT` round-trip
+  proves the loaded module *implements* the managerless contract - revision 1,
+  784-byte profile ABI, an ioctl upstream does not have. It does not hash the
+  module's text, and no userspace reading can: another module implementing the
+  same contract would answer identically. Every consumer inherits that
+  boundary, and it is stated rather than implied.
+- **SELinux Enforcing is a separate element of the reuse route, not part of the
+  attestation.** A permissive kernel answers the contract ioctl identically, so
+  folding it in would be 3.7's collapse; and invariant 11 means a route must
+  not be offered while the device sits in a state nobody has explained. Both
+  the provider's reading (as root, at the instant of its call) and this
+  process's own live read must say Enforcing, and neither may stand in for the
+  other.
 - **`ROOT_RESULT=SUCCESS` stays a claim about DFR's own acquisition.** Another
   provider's root is reported as `ROOT_PROVIDER` + `ROOT_AVAILABLE` with
   `DFR_ACQUISITION=NOT_ATTEMPTED`. Three signals, never one (3.7), and no

@@ -129,3 +129,13 @@ $JAVAC -nowarn -d "$OUT" \
     companion/src/main/java/com/polygraphene/df/companion/RmgIdentity.java \
     tools/tests/CompanionContractTest.java
 java -cp "$OUT" CompanionContractTest
+
+# The client half of the companion contract: the parser that re-derives the
+# attestation instead of believing the provider's summary. The shaped cases are
+# the point - a summary that disagrees with its own signals, and a level this
+# build does not know - and none of them can be produced by the real companion,
+# which is exactly why they must be produced here.
+$JAVAC -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/CompanionProtocol.java \
+    tools/tests/CompanionProtocolTest.java
+java -cp "$OUT" CompanionProtocolTest

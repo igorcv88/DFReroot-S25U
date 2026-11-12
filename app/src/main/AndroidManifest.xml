@@ -33,6 +33,21 @@
     -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+      The companion's own signature-level permission.
+
+      Without it the bind is refused by the framework before any of our code
+      runs, and the symptom on the device is "the companion does not answer" -
+      which is also what a certificate mismatch looks like, and what a missing
+      install looks like. Declaring it is what makes those three distinguishable
+      (CompanionClient reports each separately).
+
+      It grants nothing by itself: the companion re-derives our uid, package
+      membership and certificate inside onTransact, and its v1 contract exposes
+      a non-destructive attestation and no command channel.
+    -->
+    <uses-permission android:name="com.polygraphene.df.companion.permission.ROOT_OPERATIONS" />
+
     <application
         android:label="@string/app_name"
         android:allowBackup="true"

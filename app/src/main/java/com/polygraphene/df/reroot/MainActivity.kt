@@ -128,7 +128,7 @@ class MainActivity : Activity() {
              * is worse than silence.
              */
             if (KsudStage.requiresRootEnvironmentGate()) {
-                append(DfrRootCoordinator.routeReading().log)
+                append(DfrRootCoordinator.routeReading(applicationContext).log)
             }
         }
     }
@@ -215,7 +215,7 @@ class MainActivity : Activity() {
         if (KsudStage.requiresRootEnvironmentGate()) {
             btnRunAll.isEnabled = false
             runBg {
-                val reading = DfrRootCoordinator.routeReading(marker = marker)
+                val reading = DfrRootCoordinator.routeReading(applicationContext, marker = marker)
                 append(reading.log)
                 val verdict = reading.verdict
                 runOnUiThread {
@@ -227,16 +227,20 @@ class MainActivity : Activity() {
                             "    ${verdict.reason}\n")
                         if (verdict.rootAvailable && !verdict.dfrAcquired) {
                             /*
-                             * Unreachable in this build, and deliberately still
-                             * written: it needs an authorized provider that can
-                             * attest the loaded module, which is the companion
-                             * transport this app does not have. Claiming the
-                             * reuse route exists while nothing can execute
-                             * through it would be success without proof.
+                             * Reachable now that the companion holds the grant
+                             * and can attest the pair. What this says and what
+                             * it withholds are both deliberate: root is
+                             * AVAILABLE from another provider, DFR did not
+                             * acquire it, nothing here ran DirtyFrag or touched
+                             * the persistent daemon - and this build still
+                             * executes no operation through that provider, so
+                             * it must not read as if it could (AGENTS.md 3.12).
                              */
-                            append("    root IS available from another provider," +
-                                " and this build has no authorized transport to" +
-                                " use it\n")
+                            append("[+] ROOT AVAILABLE via ${verdict.provider}\n" +
+                                "    DirtyFrag was not run and /data/adb/ksud was" +
+                                " not touched\n" +
+                                "    this build reads that state; it does not yet" +
+                                " execute operations through the provider\n")
                         }
                     } else {
                         append("[*] ROUTE=DFR_ACQUISITION this run will attempt" +

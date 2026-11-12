@@ -321,6 +321,7 @@ object DfrRootCoordinator {
      * no privilege, so calling it costs the boot nothing.
      */
     fun routeReading(
+        providerContext: Context? = null,
         bootId: String = readBootId(),
         marker: Int = markerState(),
     ): RootEnvironmentProbe.Reading {
@@ -332,9 +333,25 @@ object DfrRootCoordinator {
          */
         val record = readPostRootRecord()
         val unreadable = record == AutoRootPolicy.RECORD_UNREADABLE
+        val liveSelinux = readLiveSelinux()
         val complete = !unreadable && record != null &&
-            PostRootStatus.evaluate(record, bootId, readLiveSelinux()).complete
-        return RootEnvironmentProbe.observe(bootId, marker, complete, unreadable)
+            PostRootStatus.evaluate(record, bootId, liveSelinux).complete
+        /*
+         * The provider is asked only when a caller supplies a Context, and that
+         * is a budget decision, not a permission one.
+         *
+         * The round trip costs a service bind plus a root shell behind it - up
+         * to CompanionProtocol.ATTEST_TIMEOUT_MS. The operator's button can
+         * spend that; the early-boot dispatch cannot, because its whole premise
+         * is a window measured in seconds. Nothing is lost by not asking there:
+         * without an attestation the acquisition route refuses anyway, on
+         * STATE_UNKNOWN. What the question buys is the REUSE route and a
+         * precise reason, both of which belong to the interactive path.
+         */
+        val attestation = providerContext?.let { CompanionClient.attest(it) }
+        return RootEnvironmentProbe.observe(
+            bootId, marker, complete, unreadable, attestation, liveSelinux
+        )
     }
 
     private fun refused(reason: String, bootId: String = "") = Result(

@@ -138,6 +138,21 @@ public final class RootEnvironment {
         public int persistentDaemon = DAEMON_UNKNOWN;
         /** One of the {@code MODULE_*} constants. */
         public int loadedModule = MODULE_UNKNOWN;
+        /**
+         * SELinux was observed Enforcing by BOTH the authorized provider (as
+         * root, at the instant of the attestation) and this process's own live
+         * read.
+         *
+         * A separate element on purpose, and required for the reuse route. Two
+         * reasons. It is not evidence about the module - a permissive kernel
+         * would answer the contract ioctl exactly the same - so folding it into
+         * the attestation would be 3.7's collapse. And it is this project's
+         * invariant 11: an operation concludes with SELinux Enforcing, so
+         * offering a route while the device is permissive would be offering to
+         * act on a state nobody has explained. Unreadable on either side is
+         * false, because neither reader may assume the other's answer.
+         */
+        public boolean selinuxEnforcing = false;
     }
 
     /** What the caller may do, and why. Each field is a separate fact. */
@@ -234,9 +249,22 @@ public final class RootEnvironment {
 
         switch (o.loadedModule) {
             case MODULE_ATTESTED_RMG:
+                if (!o.selinuxEnforcing) {
+                    /*
+                     * The provider attested the pair and SELinux is not
+                     * Enforcing on both readings. That is not a reuse route: it
+                     * is a device in a state this build cannot account for, and
+                     * the attestation does not speak to it either way.
+                     */
+                    return of(STATE_UNKNOWN, PROVIDER_RMG, false, false, false, false,
+                            "the RMG pair was attested but SELinux was not observed"
+                                    + " Enforcing by both the provider and this process;"
+                                    + " refusing every route until that is explained");
+                }
                 return of(STATE_RMG_ACTIVE_VERIFIED, PROVIDER_RMG, true, false, false, true,
                         "an authorized provider attested the loaded module is the RMG"
-                                + " pair; reusing it and not running DirtyFrag");
+                                + " pair, with SELinux Enforcing on both readings; reusing"
+                                + " it and not running DirtyFrag");
             case MODULE_ATTESTED_DFR:
                 /*
                  * Our module is loaded and the contract did not complete. The
