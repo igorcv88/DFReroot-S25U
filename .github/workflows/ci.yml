@@ -74,7 +74,7 @@ jobs:
               p["vbmeta_digest"][:16],
               p["ko_sha256"][:16],
               p["ksud_sha256"][:16],
-              "**PHYSICAL NOT PERFORMED**",
+              "**PRIOR GATE 3 FAIL; NEW DAEMON NOT YET QUALIFIED**",
               "**NOT ESTABLISHED**",
           )
           for value in expected:
