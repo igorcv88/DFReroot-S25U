@@ -70,6 +70,21 @@ public final class PostRootStatus {
     }
 
     /**
+     * The record could not be read, or its presence could not be determined.
+     *
+     * A caller that holds {@link AutoRootPolicy#RECORD_UNREADABLE} cannot hand it
+     * to {@link #evaluate} and get a true answer: the sentinel is not a record, so
+     * the parser would report "malformed status line", which names the sentinel
+     * rather than the I/O failure that produced it. This keeps the parser pure -
+     * it still knows nothing about the sentinel - while giving every reader one
+     * refusal whose reason is the real cause. Incomplete, like every other
+     * non-affirmative verdict, and carrying no transport fix.
+     */
+    public static Verdict unreadable() {
+        return fail("the completion record could not be read or its presence determined");
+    }
+
+    /**
      * May the paired KernelSU transport/grant predicate be reached this boot?
      *
      * Only when a complete, same-boot record says the loaded module carries the

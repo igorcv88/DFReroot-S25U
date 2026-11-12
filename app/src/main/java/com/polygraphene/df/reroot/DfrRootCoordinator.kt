@@ -677,17 +677,52 @@ object DfrRootCoordinator {
      * a live SELinux state that is not exactly 1 are all failures - never a
      * green result, and never an "unknown" the reader has to interpret.
      */
+    /**
+     * The completion record, `null` when it is genuinely not there yet, or
+     * [AutoRootPolicy.RECORD_UNREADABLE] when lookup fails or it cannot be read.
+     *
+     * Collapsing the second into the first - which a bare `catch { null }` does -
+     * makes an EACCES, an EIO or an untraversable `/data/system` report as
+     * "completion record absent or empty". The verdict is a refusal either way,
+     * so nothing becomes more permissive; what is lost is the only line that
+     * separates "the daemon never published" from "the daemon published and this
+     * app could not read it", and those two send an investigation to opposite
+     * ends of the chain. Three other readers in this build already keep them
+     * apart ([AutoRootPolicy.RECORD_UNREADABLE], [DfrSoftRebootReceiver], and
+     * [readLiveSelinux]'s `-1`); this one was the exception.
+     */
+    private fun readPostRootRecord(): String? {
+        // File.exists() returns false for both ENOENT and lookup failures.
+        // Only ENOENT means the daemon has not yet published its record.
+        // Every other errno is unreadable, never permission to try again.
+        try {
+            Os.stat(PostRootStatus.PATH)
+        } catch (e: ErrnoException) {
+            if (e.errno == OsConstants.ENOENT) return null
+            return AutoRootPolicy.RECORD_UNREADABLE
+        } catch (_: Throwable) {
+            return AutoRootPolicy.RECORD_UNREADABLE
+        }
+        // If the file disappears between stat and read, the state becomes
+        // unreadable for this poll; it must not be mistaken for absent.
+        return try {
+            File(PostRootStatus.PATH).readText()
+        } catch (_: Throwable) {
+            AutoRootPolicy.RECORD_UNREADABLE
+        }
+    }
+
     private fun awaitPostRootComplete(timeoutMs: Long, bootId: String, host: Host): Boolean {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         var lastReason = ""
         while (SystemClock.uptimeMillis() < deadline) {
-            val record = try {
-                File(PostRootStatus.PATH).readText()
-            } catch (_: Throwable) {
-                null
-            }
+            val record = readPostRootRecord()
             val liveSelinux = readLiveSelinux()
-            val verdict = PostRootStatus.evaluate(record, bootId, liveSelinux)
+            val verdict = if (AutoRootPolicy.RECORD_UNREADABLE == record) {
+                PostRootStatus.unreadable()
+            } else {
+                PostRootStatus.evaluate(record, bootId, liveSelinux)
+            }
             if (verdict.complete) {
                 host.log("[DFR][POST_ROOT] POST_ROOT_COMPLETE=PASS boot_id=$bootId" +
                     " ksu_version=${PostRootStatus.EXPECTED_KSU_VERSION}" +
