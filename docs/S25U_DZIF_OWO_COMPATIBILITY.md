@@ -237,16 +237,16 @@ migration or restore procedure for the RMG pair remains separate work.
 ## The daemon
 
 This APK bundles the DFR-only managerless Secure Late-Load candidate produced
-by RMGLabs-Payloads workflow `43271383389`, from source commit
-`05a5f6477b5c5f2dc26dc8824321736bfa7ce4b8`, with
+by RMGLabs-Payloads workflow `43296818818`, from source commit
+`925046c63123b45874bcfef186d5d22796a725d0`, with
 `staging_profile=dfreroot`, `secure_late_load=true`,
 `managerless_app_grants=true`, and `publish_artifacts=false`.
 
 | Identity | Audited value |
 |---|---|
-| Daemon SHA-256 | `30428cd21fd03eea16dd216ed95a95a925f49864c6ace4fa61d957a609232a33` |
-| Daemon size | 5,820,784 bytes |
-| Daemon ELF build-id | `a696370f4d9ef202afa7063389bd8da164cf355f` |
+| Daemon SHA-256 | `ea71739be0f800d9669491ae77408dd309e86aa569c8447ff869536e7685fa2c` |
+| Daemon size | 5,822,240 bytes |
+| Daemon ELF build-id | `b6a9dfd034da27d17907fa36662d3906ec675fef` |
 | Embedded KernelSU module SHA-256 | `4b8965cdd3c733315c84767d3d26c1f71eaec9071b07d13fa08940bd4fe8731c` |
 | Embedded module size | 3,634,632 bytes |
 | Embedded module build-id | `e61c877018ef31e9e0bf2148e8f556ad3f63473e` |

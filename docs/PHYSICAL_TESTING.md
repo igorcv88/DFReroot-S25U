@@ -89,8 +89,8 @@ the closeout before any handover), not something this protocol can work around.
 > the two pairs cannot share it.
 >
 > **Ownership gates now included in the newly pinned DFR candidate** (`ksud`
-> SHA-256 `30428cd2â€¦232a33`). The gates are fail-closed and were compiled in
-> workflow `43271383389`, but physical acceptance is still pending. The older
+> SHA-256 `ea71739b…7685fa2c`). The gates are fail-closed and were compiled in
+> workflow `43296818818`, but physical acceptance is still pending. The older
 > physical run used `6b7246e5â€¦def2` and replaced the RMG daemon; do not
 > conflate those two binaries.
 >

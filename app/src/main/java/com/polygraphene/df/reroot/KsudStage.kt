@@ -47,7 +47,7 @@ object KsudStage {
      * This daemon is NOT the RMG one. It carries the dfreroot staging contract
      * (/data/system/dfreroot-ksud, the DEST below) and was built with
      * secure-late-load + managerless-app-grants from RMGLabs-Payloads
-     * 05a5f6477b5c5f2dc26dc8824321736bfa7ce4b8. The RMG managerless daemon
+     * 925046c63123b45874bcfef186d5d22796a725d0. The RMG managerless daemon
      * previously observed at /data/adb/ksud (95b2cc36..., 5797976
      * bytes) stages from a different path and must never be substituted here:
      * the size and digest below are what make that substitution a refusal
@@ -60,8 +60,8 @@ object KsudStage {
                 "S938BXXUCDZIF_OWOCDZIF:user/release-keys",
         assetName = "ksud-dzif-owo",
         sha256 =
-            "30428cd21fd03eea16dd216ed95a95a925f49864c6ace4fa61d957a609232a33",
-        size = 5820784L,
+            "ea71739be0f800d9669491ae77408dd309e86aa569c8447ff869536e7685fa2c",
+        size = 5822240L,
     )
 
     private fun currentSpec(): KsudSpec? = when (Build.FINGERPRINT) {
