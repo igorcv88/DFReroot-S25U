@@ -1,5 +1,81 @@
 # DFReroot S25U / ZZIC — handoff
 
+> **Route classification, 2026-11-12 (source-level only).** The unconditional
+> `/data/adb/ksud` preflight imported with #95/#96 is replaced by
+> `RootEnvironment` (pure, 49/49 host cases) + `RootEnvironmentProbe`
+> (observation only), scoped to `S25U_DZIF_OWO` via
+> `KsudStage.requiresRootEnvironmentGate()`. The reading is unchanged; the
+> decision moved to the layer that knows which route needs it, because the
+> process that demanded the evidence could not obtain it (EACCES). See
+> AGENTS.md §3.12 and `docs/S25U_DZIF_OWO_COMPATIBILITY.md`.
+>
+> **This does not restore a working flow, and must not be reported as one.**
+> Both routes still refuse on the owner's device: the reuse route needs a
+> positive attestation of the loaded module, and the acquisition route needs the
+> same attestation plus a daemon that is absent or ours. Nothing at
+> `u:r:system_server:s0` can attest either. What changed is that the refusal now
+> names the state and the missing evidence rather than an errno, never spends the
+> boot's destructive transaction, and never writes over the owner's RMGLabs
+> installation.
+>
+> **What closes it — in this order, and neither is a gate promotion:**
+> 1. An authorized companion provider (own uid, own signature, RMG App Profile
+>    grant) that can answer for the kernel side and execute bounded root
+>    operations. Until it exists, `RMG_ACTIVE_VERIFIED` is unreachable by
+>    construction. Physical acceptance criteria: `ROOT_PROVIDER=RMG`,
+>    `ROOT_AVAILABLE=PASS`, `ROOT_OPERATION=PASS`,
+>    `DFR_ACQUISITION=NOT_ATTEMPTED`, `PERSISTENT_DAEMON_CHANGED=NO`.
+> 2. A DFR runtime mode in RMGLabs-Payloads that activates the module without
+>    `stage_daemon_from()` taking `/data/adb/ksud` over, with the module
+>    lifecycle it can actually complete stated rather than assumed. Only that
+>    makes `DAEMON_FOREIGN` actionable without a migration.
+>
+> Auto Root and Early Root are unaffected and stay as they were: both reach the
+> chain through `DfrRootCoordinator`, so both inherit this refusal, and no
+> foreign provider's root can satisfy the DFR post-root contract or qualify
+> either of them.
+>
+> **Update, same day — the daemon's identity is settled and one ordering defect
+> is fixed.** A root capture in boot `19671080-6ce0-431e-a034-7b5c2b79e1d2`
+> (the boot whose preflight answered `errno=13`) shows `/data/adb/ksud` holding
+> the RMG build `95b2cc36…981d8a5`, `kernelsu` Live in `/proc/modules`, root
+> working at `u:r:ksu:s0`, SELinux Enforcing. The failed run refused before
+> `stage_daemon_from()` and damaged nothing. It is **not** an attestation of the
+> loaded module's bytes, so it promotes no gate.
+>
+> That capture also exposed a real ordering defect, now corrected: with root
+> established the `/dev/df*` probes answer EACCES, so `markerState()` is
+> `MARKER_UNKNOWN` and both the button and the run refused with "could not be
+> determined" while the decisive reading sat one call away, unasked. The route
+> verdict is now derived first, in `MainActivity.runDfAll()` and in
+> `runOwned()`; the marker and single-owner guards are **kept after it**, not
+> traded for it (§3.2), and the classifier refuses every marker state but a
+> positively-attested clean boot, so nothing is relaxed.
+>
+> Owed, cheap, non-destructive: whether `/proc/modules` is readable from
+> uid 1000. The capture was taken as root; the answer decides whether the app
+> reports `FOREIGN_KSU_ACTIVE` or `UNKNOWN`.
+>
+> **Companion module added, 2026-11-12 (source-level only).** `companion/` -
+> `com.polygraphene.df.companion`, own uid, same key - is the grant holder
+> DFReroot cannot be: the RMG managerless contract refuses shared-UID peers and
+> requires appId 10000..19999, and `system_server` cannot exec or map what the
+> UAPI needs. DFInstaller was considered and rejected (it is already granted,
+> but the grant is a runtime command, while an IPC surface on the packages.xml
+> writer is permanent). See `docs/COMPANION.md`.
+>
+> It attests the loaded module through the RMG-only contract ioctl, which
+> `ksud profile status` reaches with operation 0 (no write) and which upstream
+> KernelSU does not implement - the first evidence available to this project
+> that is about the module rather than its name. v1 exposes two transactions and
+> no command channel. `CompanionContractTest` 40/40; six audit guards, each
+> mutation-tested. Not a release artifact; DFReroot does not call it yet.
+>
+> Still unexplained and tracked separately: the first 2026-11-12 boot
+> (`200c9cb5-…`) lost the DirtyFrag handoff at `df=1 helper=0 ns=0 bind=0`,
+> `runAll=4`. That is a native reliability question, independent of the daemon
+> ownership one, and nothing here addresses it.
+
 > **Post-flash review, 2026-10-18:** The owner supplied the OWO/ZTO runtime
 > identity at 17:24. Binary compatibility and the new vbmeta chain are pending. Main remains `3b70be7` with the OXM DZIF
 > fingerprint and DFR daemon `89eb37bd…`; #83/#84 are merged, #85 is open.

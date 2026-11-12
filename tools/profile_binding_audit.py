@@ -2531,6 +2531,178 @@ def audit(json_mode=False):
             fail("%s captures the stop diagnostics outside onStopJob; only that "
                  "callback runs at the instant the scheduler reclaimed the "
                  "execution" % name)
+    # --- the root-operation companion -----------------------------------
+    # A separate app with its own uid, because DFReroot CANNOT hold the grant:
+    # the RMG managerless contract refuses shared-UID peers and requires an
+    # appId in 10000..19999. Its decisions are pure and tested by
+    # tools/tests/CompanionContractTest.java; what is asserted here is the shape
+    # that test cannot see - the manifest, the absence of a command channel, and
+    # the scripts actually handed to a root shell.
+    companion_dir = os.path.join(ROOT, "companion", "src", "main")
+
+    def companion_src(name):
+        with open(os.path.join(companion_dir, name), encoding="utf-8") as f:
+            return f.read().replace(chr(13) + chr(10), chr(10))
+
+    try:
+        companion_manifest = companion_src("AndroidManifest.xml")
+        """
+        code_only() on every one of these, not just where it reads nicer.
+
+        The first version of these guards greped the raw text, and the
+        contract-round-trip guard was VACUOUS because this file's own comment
+        explains that `ksud profile status` is the call that reaches the kernel:
+        the prose satisfied a check about the code. Found by mutating the script
+        and watching the audit pass. Comments must not be able to satisfy - or
+        to trip - a guard about behaviour.
+        """
+        contract_src = code_only(companion_src(
+            "java/com/polygraphene/df/companion/CompanionContract.java"))
+        service_src = code_only(companion_src(
+            "java/com/polygraphene/df/companion/CompanionService.kt"))
+        attest_src = code_only(companion_src(
+            "java/com/polygraphene/df/companion/Attestation.kt"))
+        su_src = code_only(companion_src(
+            "java/com/polygraphene/df/companion/SuChannel.kt"))
+    except OSError as ex:
+        fail("cannot read the companion module: %s" % ex)
+        companion_manifest = contract_src = service_src = attest_src = su_src = ""
+
+    # Strip XML comments first: this file EXPLAINS why there is no sharedUserId,
+    # and a guard that greps prose refuses the thing it is documenting.
+    companion_manifest_code = re.sub(r"<!--.*?-->", "", companion_manifest,
+                                     flags=re.S)
+    if "sharedUserId" in companion_manifest_code:
+        fail("the companion declares a sharedUserId; the RMG grant contract "
+             "refuses shared-UID peers, so such a companion could never hold "
+             "the grant it exists to hold")
+    if 'android:exported="true"' in companion_manifest_code and (
+            'android:permission="com.polygraphene.df.companion.permission'
+            '.ROOT_OPERATIONS"' not in companion_manifest_code):
+        fail("the companion's exported service is not guarded by its "
+             "signature-level permission")
+    if 'android:protectionLevel="signature"' not in companion_manifest_code:
+        fail("the companion's permission is not signature-level; any app could "
+             "then hold it")
+
+    # No command channel. An exported interface that runs a caller's string as
+    # root is a root shell with extra steps, and a shared-uid caller cannot be
+    # identified precisely enough to justify one.
+    for token in ("readString()", "data.readString"):
+        if token in service_src and "TX_ATTEST" in service_src:
+            # A string argument is only acceptable if nothing passes it to a shell.
+            if "runAsRoot(" in service_src and "script(" not in service_src:
+                fail("the companion service reads a caller string and reaches a "
+                     "root shell without the fixed attestation script")
+    if "Attestation.script(nonce)" not in service_src:
+        fail("the companion service no longer runs the fixed attestation "
+             "script; only a constant script may reach a root shell")
+
+    # Every command in the attestation is a read. These tokens name the write
+    # side of the grant contract and the module lifecycle.
+    for token in ("profile grant", "profile revoke", "insmod", "finit_module",
+                  "setenforce", "stage_daemon", "mount ", "rm -", "mv ",
+                  "chmod ", "chcon ", "restorecon", "reboot", "kill "):
+        if token in attest_src:
+            fail("the companion's attestation script contains %r; version 1 is "
+                 "non-destructive by construction and the contract probe it "
+                 "uses is operation 0, which performs no write" % token)
+    # The daemon's exit status must be captured with no pipeline in between.
+    # `S=$(... | head -1); RC=$?` records head's status, so a failing daemon
+    # reported RC=0 (owner's review of a4ff533). The behavioural proof is
+    # tools/tests/test_companion_attest_script.py, which runs these lines; this
+    # guard is the cheap shape check beside it.
+    for line in attest_src.split(chr(10)):
+        if "RC=" in line and "$?" in line and "|" in line:
+            fail("the companion's attestation captures an exit status on a line "
+                 "that also contains a pipeline; $? would be the last command's "
+                 "status, not the daemon's")
+    if "profile status" not in attest_src:
+        fail("the attestation no longer performs the managerless contract "
+             "round-trip; without it the loaded module is not attested and a "
+             "module name would be standing in for evidence")
+    if "/data/local/tmp" in attest_src or "/data/local/tmp" in su_src:
+        fail("the companion references a world-writable path (AGENTS.md 3.6)")
+
+    # The deadline exists because a `su` waiting for a manager prompt that
+    # nobody will answer must end in a refusal, not a stuck binder thread.
+    if "waitFor(timeoutMs" not in su_src or "destroyForcibly()" not in su_src:
+        fail("the companion's root invocation has no enforced deadline")
+
+    # The client is named once, and it is the app, not the uid alone.
+    if 'CLIENT_PACKAGE = "com.polygraphene.df.reroot"' not in contract_src:
+        fail("the companion no longer pins which package may call it")
+
+    # --- root-environment routing ---------------------------------------
+    # Which provider owns root in this boot decides which route may be
+    # attempted, and the decision has to stay in ONE pure place. The Kotlin that
+    # observes and the Kotlin that paints both need an Android runtime, so the
+    # shape is asserted here (AGENTS.md 5) and the branches themselves are
+    # exercised by tools/tests/RootEnvironmentTest.java.
+    env_src = dfr_source("RootEnvironment.java")
+    probe_src = code_only(dfr_source("RootEnvironmentProbe.kt"))
+    coord_env = code_only(dfr_source("DfrRootCoordinator.kt"))
+    ui_env = code_only(dfr_source("MainActivity.kt"))
+
+    # Taking /data/adb/ksud over is a migration with its own evidence, never a
+    # parameter of an ordinary run (laudo 4.5, AGENTS.md 3.6). A constant cannot
+    # be flipped from data; a boolean input can.
+    if "public boolean persistentMigrationAllowed()" not in env_src:
+        fail("RootEnvironment no longer answers whether the persistent-daemon "
+             "migration is permitted; the question has to be asked somewhere "
+             "and answered no")
+    migration = env_src[env_src.find("public boolean persistentMigrationAllowed()"):]
+    migration = migration[:migration.find("}") + 1]
+    if "return false;" not in migration:
+        fail("persistentMigrationAllowed() is no longer a constant refusal; "
+             "taking the persistent KernelSU daemon over needs an explicit "
+             "owner decision, a verified recovery copy and a proven rollback, "
+             "none of which exist in this build")
+
+    # The module reading may REMOVE permission and never grant it: both pairs
+    # load under the same name, and a module can hide itself from /proc/modules,
+    # so neither a hit nor an empty read identifies a provider.
+    for attested in ("MODULE_ATTESTED_RMG", "MODULE_ATTESTED_DFR",
+                     "MODULE_ATTESTED_NONE"):
+        if "RootEnvironment." + attested in probe_src:
+            fail("RootEnvironmentProbe produces %s; no reading available to "
+                 "system_server can attest which module the kernel is running, "
+                 "and inferring one is absence read as permission" % attested)
+
+    # One derivation, two readers. The UI must ask the coordinator the same
+    # question the run will ask, not classify on its own.
+    if "RootEnvironment.classify(" in ui_env:
+        fail("MainActivity classifies the root environment itself; the route "
+             "must come from DfrRootCoordinator.routeReading() so the button "
+             "and the run cannot disagree")
+    route_at = ui_env.find("DfrRootCoordinator.routeReading(")
+    dialog_at = ui_env.find("showRunDialog()", ui_env.find("private fun runDfAll("))
+    if route_at < 0:
+        fail("MainActivity no longer derives the route before Run All; the "
+             "owner would open the destructive dialog without being told which "
+             "route, if any, this boot permits")
+    gate_at = ui_env.find("KsudStage.requiresRootEnvironmentGate()")
+    if gate_at < 0 or not 0 <= gate_at < route_at:
+        fail("MainActivity derives the route without scoping it to the profile "
+             "whose runs are routed by it; on an already-qualified profile that "
+             "verdict would describe a gate that does not run")
+    if dialog_at < 0:
+        fail("MainActivity.runDfAll() no longer reaches showRunDialog()")
+
+    # The run's own gate: route first, then anything that writes.
+    if "val route = routeVerdict(host, bootId, marker)" not in coord_env:
+        fail("DfrRootCoordinator no longer selects a route before the chain; "
+             "the acquisition path would run in states that refuse it")
+    run_owned_env = coord_env[coord_env.find("private fun runOwned("):]
+    route_order = [
+        run_owned_env.find("val route = routeVerdict(host, bootId, marker)"),
+        run_owned_env.find("host.phase(Phase.STAGE_KSUD)"),
+        run_owned_env.find("StageHop.hopToNetworkStack(context)"),
+    ]
+    if min(route_order) < 0 or route_order != sorted(route_order):
+        fail("route selection no longer precedes staging and the remote hop; a "
+             "refusal has to leave nothing staged and nothing written")
+
     # --- the arm-and-reboot flow ----------------------------------------
     # MainActivity and RebootRequest need an Android runtime, so the shape is
     # asserted (AGENTS.md §5). The owner's reasons are the invariants.

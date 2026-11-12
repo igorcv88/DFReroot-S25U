@@ -52,3 +52,10 @@ python3 tools/tests/test_post_root_contract.py
 # exercise only non-destructive syscall families.
 python3 tools/tests/test_dzif_preflight_static.py
 
+
+# The companion's attestation script, EXTRACTED from Attestation.kt and run
+# against a fake daemon. Kotlin cannot be compiled here, so the script was
+# guarded only by static text checks - and those cannot see that
+# `S=$(... | head -1); RC=$?` records head's status rather than the daemon's.
+# That defect shipped and was found in review, not by this suite.
+python3 tools/tests/test_companion_attest_script.py

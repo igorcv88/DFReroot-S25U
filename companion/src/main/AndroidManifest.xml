@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      A signature-level permission, declared and required by this app.
+
+      "signature" means only a package signed with THIS key may hold it, which
+      the framework enforces before our own code runs. It is the first of two
+      checks, not the only one: CallerAuthorization re-derives the caller's uid,
+      package set and certificate digest inside onTransact, because a permission
+      answers "may you call" and not "who are you" - and the answer to the
+      second question is what decides whether a root operation happens.
+    -->
+    <permission
+        android:name="com.polygraphene.df.companion.permission.ROOT_OPERATIONS"
+        android:protectionLevel="signature" />
+
+    <!--
+      No sharedUserId, on purpose and permanently. The RMG managerless grant
+      contract refuses shared-UID peers and requires appId 10000..19999; a
+      companion inside android.uid.system could never hold the grant this module
+      exists to hold.
+    -->
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.DeviceDefault">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          Exported because DFReroot runs in another uid and must be able to bind
+          it; guarded by the signature permission above, and re-checked in code.
+        -->
+        <service
+            android:name=".CompanionService"
+            android:exported="true"
+            android:permission="com.polygraphene.df.companion.permission.ROOT_OPERATIONS">
+            <intent-filter>
+                <action android:name="com.polygraphene.df.companion.ROOT_OPERATIONS" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

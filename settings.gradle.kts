@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 rootProject.name = "DFReroot"
 include(":app")
 include(":installer")
+include(":companion")

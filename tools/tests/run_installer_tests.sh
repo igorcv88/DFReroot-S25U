@@ -105,3 +105,27 @@ $JAVAC -nowarn -d "$OUT" \
     installer/src/main/java/com/polygraphene/df/installer/SuAuthorization.java \
     tools/tests/SuAuthorizationTest.java
 java -cp "$OUT" SuAuthorizationTest
+
+# Route classification: which provider owns root in this boot, and therefore
+# which route may be attempted. Pure, because producing one of these states on
+# a device costs a reboot and sometimes the device's root session - a foreign
+# module loaded, an armed marker from a run that died, a completion record that
+# exists and cannot be read.
+$JAVAC -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
+    app/src/main/java/com/polygraphene/df/reroot/RootEnvironment.java \
+    tools/tests/RootEnvironmentTest.java
+java -cp "$OUT" RootEnvironmentTest
+
+# The companion's two decisions: who may ask for a root operation, and what the
+# attestation's evidence actually supports. Pure, because none of these states
+# can be arranged on a device - a caller signed by another key, a shared uid
+# without DFReroot in it, a package manager that will not answer, a root shell
+# returning a truncated report or another call's nonce.
+$JAVAC -nowarn -d "$OUT" \
+    companion/src/main/java/com/polygraphene/df/companion/CompanionContract.java \
+    companion/src/main/java/com/polygraphene/df/companion/CallerAuthorization.java \
+    companion/src/main/java/com/polygraphene/df/companion/AttestationReport.java \
+    companion/src/main/java/com/polygraphene/df/companion/RmgIdentity.java \
+    tools/tests/CompanionContractTest.java
+java -cp "$OUT" CompanionContractTest
