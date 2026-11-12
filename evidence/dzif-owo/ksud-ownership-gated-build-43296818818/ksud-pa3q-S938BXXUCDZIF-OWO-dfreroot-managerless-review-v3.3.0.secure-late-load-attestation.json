@@ -1,0 +1,40 @@
+{
+  "app_grants_contract": {
+    "administrators": "manager-or-uid0-ksu-domain",
+    "boot_partition_writes": false,
+    "get_profile_permission": "manager_or_ksu_root",
+    "ksud_build_id": "b6a9dfd034da27d17907fa36662d3906ec675fef",
+    "module_build_id": "e61c877018ef31e9e0bf2148e8f556ad3f63473e",
+    "module_name": "android15-6.6_kernelsu-pa3q-S938BXXUCDZIF-OWO-dfreroot-managerless-review-v3.3.0.ko",
+    "module_sha256": "4b8965cdd3c733315c84767d3d26c1f71eaec9071b07d13fa08940bd4fe8731c",
+    "patches_sha256": {
+      "kernelsu/patches/KernelSU-v3.3.0-samsung-kdp-rkp-defex.patch": "30496d2e6bed200d0841282854b45b315a4f379df828d09f48a1868a93d3849f",
+      "kernelsu/patches/apply-v330-cli-list-grants.py": "2e7d7ede575961dcd80c2f79fdb705ac1574343419c6d921c4cda72d5cc48c50",
+      "kernelsu/patches/apply-v330-lsposed-defex-fix.py": "3088e4787693d30b8cee21d072c2ae700f5403adb14feeda1460198c64fec161",
+      "kernelsu/patches/apply-v330-managerless-app-grants.py": "e1c2a888389d17bfd828ce5f00cc519ba6e4d576b37e27cab287db50ac605c96",
+      "kernelsu/patches/apply-v330-secure-late-load.py": "ffed6fa7d78cbee47ad777006f25f9c1d1612bda1d068110430f56f936244380",
+      "kernelsu/patches/apply-v330-staged-daemon-hotfix.py": "793f603fe43a9298f2163cf7d93ec3ee9a1b97c943047d238341884f06d465cc",
+      "kernelsu/patches/apply-v330-throne-tracker-serialise.py": "fd13e1d6b928fe48873273ffca2b2d99555ef11486109a9a8f59f4711e5c8313",
+      "kernelsu/patches/generic-zygisk-defex.c.inc": "a1d2d4803b41904614d73d8387a8a558751998e832e00d5e64b69d81d6a99559",
+      "kernelsu/patches/managerless/contract.h.inc": "fabb722d33f9811ad93e1ae1e1c828453d8d7c88a49a1589d1c09bacd7374570",
+      "kernelsu/patches/managerless/grants.rs.inc": "5ef6b97b731c387f39baf0677541f15bdd93e87dc9d717d5ee0f9b1caa0844cd",
+      "kernelsu/patches/managerless/identity.rs.inc": "803725c9d6fb4a6517d76e9dd4578bed1e66135f873ae858d379cb2cddb500ae",
+      "kernelsu/patches/managerless/ioctl.rs.inc": "f31ab21ddde74b1bddb39490e2eab1271cc3b299e26b52ce58ce6c23660d6a73",
+      "kernelsu/patches/managerless/persistence.c.inc": "2b6574662cdfd940dea81a492addee7bd0bf0e36b0d49509f98a7fe36f3f3ff9"
+    },
+    "persist_permission": "manager_or_ksu_root",
+    "physical_validation": "NOT_PERFORMED",
+    "profile_size": 784,
+    "revision": 1,
+    "set_profile_permission": "manager_or_ksu_root",
+    "target": "pa3q-S938BXXUCDZIF-OWO",
+    "uapi_version": 2
+  },
+  "build_features": [
+    "secure-late-load",
+    "managerless-app-grants"
+  ],
+  "ksu_commit": "932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e",
+  "ksud_sha256": "ea71739be0f800d9669491ae77408dd309e86aa569c8447ff869536e7685fa2c",
+  "secure_late_load": true
+}

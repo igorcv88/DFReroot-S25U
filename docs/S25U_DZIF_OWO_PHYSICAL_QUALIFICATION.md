@@ -40,8 +40,8 @@ Every one of these must hold before anything is written.
 | # | Precondition | How it is satisfied |
 |---|---|---|
 | 1 | PRs #88, #89 and `RMGLabs-Payloads` #28 reviewed and merged | **DONE** — integrated into their respective `main` branches |
-| 2 | A DFR managerless Secure Late-Load pair **built and audited** | **DONE (offline)** — Payloads run `43028391105`; CLI-level refusal still owed |
-| 3 | That pair's digest and size pinned into `S25U_DZIF_OWO`, with the asset bundled and byte-checked | **DONE (offline)** — PR #89 pins SHA-256 `6b7246e5…def2`, 5817624 bytes, to `assets/ksud-dzif-owo`; binding audit and Gate E pass |
+| 2 | A DFR managerless Secure Late-Load pair **built and audited** | **DONE (offline)** — Payloads run `43296818818`, SHA-256 `ea71739be0f800d9669491ae77408dd309e86aa569c8447ff869536e7685fa2c`; not qualified physically |
+| 3 | Exact OWO daemon pinned to the bundled asset and checked byte-for-byte | **DONE (offline)** — `ksud-dzif-owo`, 5,822,240 bytes, SHA-256 `ea71739be0f800d9669491ae77408dd309e86aa569c8447ff869536e7685fa2c`; final acceptance remains pending |
 | 4 | Both APKs signed with the **same** key, and the release certificate the same one already trusted on the device | `release.yml` compares the APKs with each other; continuity with the device-trusted certificate still requires an independent comparison |
 | 5 | `df_reroot.apk` embedded in DFInstaller byte-identical to the published APK | `tools/ci_build_audit.sh` |
 | 6 | A verified `packages.xml` backup, stock firmware for this exact build, and a **tested** restore path | owner |

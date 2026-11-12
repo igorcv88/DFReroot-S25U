@@ -2,3 +2,4 @@
 # core.autocrlf or text-conversion filters on Windows checkouts.
 evidence/dzif/gate-g/DZIF-derived-minimal.symvers -text
 evidence/zzic/gate-g/ZZIC-derived-minimal.symvers -text
+evidence/dzif-owo/ksud-ownership-gated-build-43296818818/ksud-elf-notes.txt -whitespace

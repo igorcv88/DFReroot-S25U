@@ -307,8 +307,8 @@ const struct TargetProfile DFR_PROFILE_DZIF_OWO = {
      * The audited DFR managerless Secure Late-Load daemon, bundled as
      * assets/ksud-dzif-owo. See the DAEMON note above for what this replaced.
      *
-     * Built by RMGLabs-Payloads run 43271383389 from source commit
-     * 05a5f6477b5c5f2dc26dc8824321736bfa7ce4b8 with
+     * Built by RMGLabs-Payloads run 43296818818 from source commit
+     * 925046c63123b45874bcfef186d5d22796a725d0 with
      * cargo_features=secure-late-load,managerless-app-grants over KernelSU
      * 932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e, publication refused
      * (publish_artifacts=false), and qualified off-device before it was
@@ -337,8 +337,8 @@ const struct TargetProfile DFR_PROFILE_DZIF_OWO = {
      * dispatches to it.
      */
     .ksud_sha256 =
-        "30428cd21fd03eea16dd216ed95a95a925f49864c6ace4fa61d957a609232a33",
-    .ksud_size        = 5820784,
+        "ea71739be0f800d9669491ae77408dd309e86aa569c8447ff869536e7685fa2c",
+    .ksud_size        = 5822240,
     .post_root_record = "/data/system/dfreroot-post-root",
     .kernelsu_version = 32601,
     .kernelsu_uapi_version = 2,
