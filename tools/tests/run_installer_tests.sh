@@ -139,3 +139,11 @@ $JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/CompanionProtocol.java \
     tools/tests/CompanionProtocolTest.java
 java -cp "$OUT" CompanionProtocolTest
+
+# The deadline the client puts around a synchronous Binder transaction. The
+# hung case is the reason the class exists and cannot be produced on a device
+# on demand: a wedged remote, and a transaction that cannot be cancelled.
+$JAVAC -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/BoundedCall.java \
+    tools/tests/BoundedCallTest.java
+java -cp "$OUT" BoundedCallTest

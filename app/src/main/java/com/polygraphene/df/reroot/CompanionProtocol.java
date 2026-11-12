@@ -80,8 +80,26 @@ public final class CompanionProtocol {
     public static final String ATTEST_ROOT_OPERATIONAL = "ROOT_OPERATIONAL";
     public static final String ATTEST_RMG_CONTRACT = "RMG_CONTRACT";
 
-    /** Deadline for one attestation, including the bind and the root shell. */
+    /**
+     * Deadline for the ATTEST transaction, enforced by {@link BoundedCall}.
+     *
+     * Outside the companion's own 20 s bound on its {@code su} child, so a
+     * normal slow path completes and only a wedged handler trips this.
+     *
+     * It was declared and never read - the client called
+     * {@code binder.transact(..., 0)}, which has no timeout at all, while this
+     * constant made the call look bounded. The owner's review of PR C found it.
+     * The audit now fails if it stops being referenced where it is enforced.
+     */
     public static final long ATTEST_TIMEOUT_MS = 30_000L;
+    /**
+     * Deadline for DESCRIBE, which takes no root and reads nothing.
+     *
+     * Short on purpose: its job is the version handshake, so a remote that
+     * cannot answer THAT within five seconds is not one to then ask for an
+     * attestation.
+     */
+    public static final long DESCRIBE_TIMEOUT_MS = 5_000L;
     /** Deadline for the bind alone. */
     public static final long BIND_TIMEOUT_MS = 5_000L;
 

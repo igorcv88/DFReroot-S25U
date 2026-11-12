@@ -169,6 +169,9 @@ say".
 | The attestation script contains no write-side token (`profile grant`, `insmod`, `setenforce`, `reboot`, …) | same |
 | The contract round-trip is still performed | same |
 | The root invocation has an enforced deadline and is force-killed on timeout | same |
+| Every client Binder transaction carries a deadline, PASSED to the enforcer rather than mentioned | same, structurally — the call's own argument list is read |
+| The abandoned worker of a timed-out transaction is a daemon thread | same |
+| The hung-remote case itself | `tools/tests/BoundedCallTest.java` |
 | No world-writable path is referenced (§3.6) | same |
 | Caller refusals: wrong uid, unanswered package lookup, missing client, foreign certificate, absent digest, version skew | `tools/tests/CompanionContractTest.java` |
 | Attestation refusals: no nonce, wrong nonce, truncated report, duplicate keys, non-zero uid, no root-only read, foreign daemon, failed or unparsable contract probe, size mismatch, daemon swapped mid-call, a FAILING daemon printing a valid-looking line | same |
@@ -219,6 +222,41 @@ PERSISTENT_DAEMON_CHANGED=NO
 
 The companion reports the middle three directly. The first and the last belong
 to DFReroot, and arrive with PR C.
+
+## 5.1 What "bounded" means on the client side, exactly
+
+The owner's review of PR C found that `ATTEST_TIMEOUT_MS` was declared and
+never read: the client called `binder.transact(code, data, reply, 0)`, which is
+synchronous and has **no** timeout. The companion bounds its own `su` child at
+20 s, and bounding a child is not bounding the call — the same handler also
+resolves packages, hashes certificates and occupies a binder thread, none of
+which that deadline covers. A declared constant that nothing enforces is worse
+than none, because it makes the call *look* bounded.
+
+Each transaction now runs inside `BoundedCall`, and the distinction it rests on
+is worth stating plainly:
+
+- **the caller is bounded** — it returns at the deadline, every time;
+- **the work is not cancelled**, because a synchronous binder transaction
+  cannot be. There is no interruptible wait to interrupt; the thread is parked
+  in the kernel driver until the remote answers or the system reclaims it,
+  which unbinding makes likely.
+
+So a timeout leaks **one daemon thread per timed-out attempt**. That is the
+trade against a caller stalled indefinitely inside `system_server`. It is an
+acceptable trade only because the attempts are operator-driven: an automatic
+caller that retried in a loop would make it the wrong one, and nothing here
+retries.
+
+Deadlines: bind 5 s, `TX_DESCRIBE` 5 s (no root, reads nothing — a remote that
+cannot answer the version handshake that fast is not one to then ask for an
+attestation), `TX_ATTEST` 30 s (outside the companion's own 20 s, so only a
+wedged handler trips it).
+
+**Still owed, and not claimed:** a same-build device test of
+DFReroot → companion over Binder, and an observation of the service-hung path on
+hardware. `BoundedCallTest` proves the deadline property on the host; it says
+nothing about how a wedged remote behaves on the device.
 
 ## 6. What is not wired, deliberately
 

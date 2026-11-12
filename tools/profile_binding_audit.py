@@ -2775,6 +2775,46 @@ def audit(json_mode=False):
              "signing certificate with this build's; setPackage pins a name, "
              "not a signer")
 
+    # Every Binder transaction the client makes carries a deadline.
+    #
+    # `binder.transact(..., 0)` is synchronous and has no timeout; a wedged
+    # remote handler blocks the caller forever. The constant that was supposed
+    # to bound it was declared and never read, which is worse than absent: it
+    # made the call look bounded. Owner's review of PR C.
+    tx_at = client_kt.find("binder.transact(")
+    bounded_at = client_kt.find("BoundedCall.run(")
+    if tx_at < 0:
+        fail("CompanionClient no longer transacts; the provider cannot be asked")
+    elif bounded_at < 0 or bounded_at > tx_at:
+        fail("CompanionClient's binder.transact() is not wrapped in BoundedCall; "
+             "a synchronous transaction has no timeout and a wedged remote "
+             "handler would stall the caller indefinitely")
+    # Each deadline must be PASSED to the thing that enforces it, not merely
+    # mentioned. The first version of this guard checked for the constant's
+    # presence anywhere, and a mutation that moved it from the boundedTransact
+    # argument into the error MESSAGE passed - a string satisfying a check
+    # about behaviour, the same shape as the comment that satisfied the
+    # `profile status` guard in PR B. So the call's own argument list is read.
+    for tx, const in (("TX_ATTEST", "ATTEST_TIMEOUT_MS"),
+                      ("TX_DESCRIBE", "DESCRIBE_TIMEOUT_MS")):
+        at = client_kt.find("CompanionProtocol." + tx + ",")
+        if at < 0:
+            fail("CompanionClient no longer issues %s" % tx)
+            continue
+        call = client_kt.rfind("boundedTransact(", 0, at)
+        close = client_kt.find(")", at)
+        if call < 0 or close < 0 or "CompanionProtocol." + const not in client_kt[call:close]:
+            fail("the %s transaction does not pass CompanionProtocol.%s to "
+                 "boundedTransact; a deadline that is only mentioned in a "
+                 "message makes the call look bounded when it is not"
+                 % (tx, const))
+    if "latch.await(CompanionProtocol.BIND_TIMEOUT_MS" not in client_kt:
+        fail("the bind wait no longer uses CompanionProtocol.BIND_TIMEOUT_MS")
+    bounded_src = code_only(dfr_source("BoundedCall.java"))
+    if "setDaemon(true)" not in bounded_src:
+        fail("BoundedCall's abandoned worker is not a daemon thread; a leaked "
+             "non-daemon thread would hold the process open")
+
     # system_server must never block its main thread on this call.
     main_guard = client_kt.find("Looper.myLooper() == Looper.getMainLooper()")
     bind_at = client_kt.find("context.bindService(")

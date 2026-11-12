@@ -26,6 +26,15 @@ import java.util.concurrent.TimeUnit
  * be installed under a name - and the whole point of this call is to decide
  * whether to believe a claim about who owns the kernel.
  *
+ * ## Every wait here has a deadline, and one of them is not cancellable
+ *
+ * The bind waits [CompanionProtocol.BIND_TIMEOUT_MS]; each transaction waits
+ * its own deadline through [BoundedCall]. The second one is the subtle case: a
+ * synchronous binder transaction cannot be cancelled, so a timeout bounds the
+ * CALLER and leaves one daemon thread parked in the driver. [BoundedCall]'s
+ * header states that trade-off; it is deliberate, and it is why nothing here
+ * retries in a loop.
+ *
  * ## Why the main thread is a refusal and not a warning
  *
  * Every component of this app runs inside `system_server`
@@ -133,9 +142,12 @@ object CompanionClient {
              * refusal instead of a 30-second root attempt that ends the same
              * way (AGENTS.md 3.7 - two different facts, two different answers).
              */
-            val describe = transact(binder, CompanionProtocol.TX_DESCRIBE, log)
-                ?: return outcome(CompanionProtocol.RC_CLIENT_BAD_REPLY, log,
-                    "DESCRIBE produced no readable reply")
+            val describe = boundedTransact(
+                binder, CompanionProtocol.TX_DESCRIBE,
+                CompanionProtocol.DESCRIBE_TIMEOUT_MS, log
+            ) ?: return outcome(CompanionProtocol.RC_TIMEOUT, log,
+                "DESCRIBE produced no readable reply within" +
+                    " ${CompanionProtocol.DESCRIBE_TIMEOUT_MS}ms")
             if (describe.version != CompanionProtocol.CONTRACT_VERSION) {
                 return outcome(CompanionProtocol.RC_VERSION_MISMATCH, log,
                     "the companion speaks contract v${describe.version}," +
@@ -146,9 +158,12 @@ object CompanionClient {
             }
             log.appendLine("[DFR][COMPANION] DESCRIBE=PASS ${describe.signals}")
 
-            val attest = transact(binder, CompanionProtocol.TX_ATTEST, log)
-                ?: return outcome(CompanionProtocol.RC_CLIENT_BAD_REPLY, log,
-                    "ATTEST produced no readable reply")
+            val attest = boundedTransact(
+                binder, CompanionProtocol.TX_ATTEST,
+                CompanionProtocol.ATTEST_TIMEOUT_MS, log
+            ) ?: return outcome(CompanionProtocol.RC_TIMEOUT, log,
+                "ATTEST produced no readable reply within" +
+                    " ${CompanionProtocol.ATTEST_TIMEOUT_MS}ms")
             if (attest.version != CompanionProtocol.CONTRACT_VERSION) {
                 return outcome(CompanionProtocol.RC_VERSION_MISMATCH, log,
                     "the companion changed contract version mid-call")
@@ -175,6 +190,50 @@ object CompanionClient {
         val signals: String,
         val reason: String,
     )
+
+    /**
+     * One transaction, with a deadline the caller is guaranteed to observe.
+     *
+     * `binder.transact(..., 0)` is synchronous and has NO timeout: it returns
+     * when the remote replies, and never if the remote's handler wedges. The
+     * companion bounds its own `su` child at 20 s, and bounding a child is not
+     * bounding the call - the same handler also resolves packages, hashes
+     * certificates and occupies a binder thread, none of which that deadline
+     * covers.
+     *
+     * So the transaction runs inside [BoundedCall]. Read its header for what
+     * that does and does not buy: the caller returns at the deadline every
+     * time, and the abandoned work is NOT cancelled, because a synchronous
+     * binder transaction cannot be. The cost of a timeout is one parked daemon
+     * thread; the cost of not having this was a caller stalled indefinitely
+     * inside system_server. Found in the owner's review of PR C, which named
+     * the proof: a declared ATTEST_TIMEOUT_MS that nothing read.
+     */
+    private fun boundedTransact(
+        binder: IBinder,
+        code: Int,
+        timeoutMs: Long,
+        log: StringBuilder,
+    ): Reply? {
+        val outcome = BoundedCall.run("dfr-companion-tx-$code", timeoutMs) {
+            transact(binder, code, log)
+        }
+        if (outcome.timedOut) {
+            log.appendLine(
+                "[DFR][COMPANION] TRANSACT_TIMEOUT code=$code after ${timeoutMs}ms;" +
+                    " the remote handler did not reply (its thread stays parked)"
+            )
+            return null
+        }
+        if (outcome.failure != null) {
+            log.appendLine(
+                "[DFR][COMPANION] TRANSACT_THREW code=$code" +
+                    " ${outcome.failure.javaClass.simpleName}"
+            )
+            return null
+        }
+        return outcome.value
+    }
 
     private fun transact(binder: IBinder, code: Int, log: StringBuilder): Reply? {
         val data = Parcel.obtain()
