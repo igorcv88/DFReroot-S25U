@@ -679,7 +679,7 @@ object DfrRootCoordinator {
      */
     /**
      * The completion record, `null` when it is genuinely not there yet, or
-     * [AutoRootPolicy.RECORD_UNREADABLE] when it exists and could not be read.
+     * [AutoRootPolicy.RECORD_UNREADABLE] when lookup fails or it cannot be read.
      *
      * Collapsing the second into the first - which a bare `catch { null }` does -
      * makes an EACCES, an EIO or an untraversable `/data/system` report as
