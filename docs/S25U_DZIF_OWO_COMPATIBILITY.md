@@ -135,7 +135,49 @@ Observed live: pid 4310, `Uid 1073`, `context=u:r:network_stack:s0`,
 | G — module | **as DZIF** | same kernel image; live BTF equals the digest the DZIF witness table was derived from. Shares `DFR_DZIF_KO_*`, so a demotion moves both profiles |
 | V — vendor provenance | **PASS** | eleven anchors pinned; digest reproduced offline; live dm table compared |
 | ksud / daemon | **PASS (host)** | pinned to the audited DFR managerless build; digest, size and asset bytes agree — see below |
-| Physical | **NOT PERFORMED** | nothing in this record was obtained by running the chain |
+| Physical | **FAIL** | one run, 2026-11-12, refused at the closeout; see below |
+
+## The physical run — 2026-11-12, FAIL
+
+One run. The bootstrap completed (`runAll=0`) and the closeout did not, so the
+chain reported FAIL and no `POST_ROOT_COMPLETE` record was published. The
+refusal was correct; what this record exists for is what happened before it.
+
+**The device was already rooted by the RMG managerless pair when the run
+started.** That single fact produced everything observed:
+
+| Observation | Cause |
+|---|---|
+| DFR daemon skipped `load_module()` | `ksuinit::has_kernelsu()` was true — the RMG module was live |
+| no `/data/system/dfreroot-ko-loaded` | the record is written inside the load branch, which was skipped. Correct, and by design: no record means no `transport_fix`, which means `PostRootStatus.transportFixAllowed()` refuses the supercall |
+| `finish_install()` → `EPERM` | its first step relabels `/data/adb/ksud`, and upstream states the precondition in one line: *"The remaining install steps require KernelSU policy"*. That policy arrives when `load_module()` changes the process's security context. On the skip path it never arrives, so the process kept its DirtyFrag bootstrap credentials |
+| `/data/adb/ksud` changed from `95b2cc36…` (5 797 976 B) to `6b7246e5…` (5 817 624 B) | `utils::stage_daemon_from()` completes the handoff with `rename(2)` onto that path, unconditionally, **before** the `has_kernelsu()` check. The RMG daemon was replaced by a run that then failed |
+| `/data/system/dfreroot-ksud` gone | same `rename(2)` — it was the source |
+| cleanup `EACCES` with Enforcing preserved | the daemon's `dfr_restore_selinux_enforcing()` failed from the same constrained context. Enforcing held because `stage1.S` performs its own proven restoration (`x28` + `/system/bin/setenforce 1`); the daemon's attempt is redundant |
+
+Two reporting defects were found while reconstructing this and are fixed:
+`apply_modules_offered=true` was logged after `success=false` (the line logged
+the caller's parameter, not the action actually attached — none was), and the
+coordinator's post-root reader collapsed every read error into "record absent".
+
+### What this does and does not prove
+
+It does **not** demote gate A, B, G or V: every host-side anchor still holds,
+and the chain reached its own closeout, which means identity, module and
+transport all behaved. It does not promote anything either.
+
+What it establishes is a **contract boundary that was not stated before**:
+one device, one persistent KernelSU daemon. `utils::finish_install` has no
+parameterised destination — disassembly of this exact daemon shows it does two
+things about the daemon, `lsetxattr security.selinux` on `/data/adb/ksud` and a
+symlink of `/data/adb/ksu/bin/ksud` at it — so DFReroot and the RMG pair cannot
+both own that path. The chain must refuse on a device carrying the other pair,
+rather than take the path from it. `RMGLabs-Payloads` PR adds the two gates that
+make it a refusal before the `rename(2)` instead of after.
+
+**A re-run is not authorised** until that daemon is rebuilt and independently
+reviewed, and until `/data/adb/ksud` on the device is restored to the RMG pair
+by its owner, deliberately and out of band.
 
 ## The daemon
 

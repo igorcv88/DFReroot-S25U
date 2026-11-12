@@ -77,6 +77,24 @@ If the closeout is to be tested on a device that must keep its manager, that is 
 contract question for the DFR ksud (refuse a foreign `/data/adb/ksud`, or finish
 the closeout before any handover), not something this protocol can work around.
 
+> **Answered, 2026-11-12 — and it is wider than a manager app.** The DZIF/OWO
+> physical run hit this with no manager installed at all: the device carried the
+> **RMG managerless pair**, whose daemon also lives at `/data/adb/ksud`. The DFR
+> daemon's `stage_daemon_from()` renames the staged file onto that path before
+> anything checks it, so the RMG daemon was replaced by a run that then failed.
+> See `docs/S25U_DZIF_OWO_COMPATIBILITY.md`.
+>
+> The contract is now: **refuse**. `utils::finish_install` has no parameterised
+> destination, so one device has one persistent KernelSU daemon and the two pairs
+> cannot share it. The daemon asks two questions before the handover — whose
+> module is live, and whose daemon is persisted — and refuses without touching a
+> foreign one. Not a backup-and-restore: the foreign daemon is never modified.
+>
+> For this protocol that means the pre-run checks below are no longer only about
+> a manager app. **Record `/data/adb/ksud`'s hash, size and mtime before every
+> run**, and treat a foreign daemon there as a device that cannot close the gate
+> until its owner removes it deliberately and out of band.
+
 ## 2. Verify what you are installing
 
 The release publishes both APKs, `SHA256SUMS.txt` and `build-provenance.txt`.
