@@ -302,3 +302,35 @@ nothing about how a wedged remote behaves on the device.
   `tools/profile_binding_audit.py` fails if any early-path source reaches
   `CompanionClient`. And DFReroot still executes **no operation** through the
   provider: it reads that state and says so.
+
+## 7. Run All with an already active RMG root
+
+On the exact DZIF/OWO profile, **Run All** now has an executable RMG
+reuse route. This fixes the UI defect where the same classification reported
+`RMG_REUSE_ALLOWED=PASS` and then printed `ROUTE=NONE`, without ever
+finishing. The modal is **RMG root execution**, not **DirtyFrag Log**.
+
+Selecting that route starts a **new** provider round-trip (it is not a success
+inferred from the earlier screen reading). The companion actually invokes
+`su -c` as uid 0, reads the root-only persistent daemon, verifies both
+hashes and its size, and executes `ksud profile status` to round-trip through
+the live managerless kernel contract. The independent local SELinux reader
+must still report Enforcing.
+
+Only when that second complete operation returns the positively attested
+`RMG_ACTIVE_VERIFIED` verdict does the dialog display **Succeeded** and log:
+
+```
+[DFR][RUN] SUCCEEDED route=RMG_REUSE ROOT_OPERATION=PASS ROOT_PROVIDER=RMG DFR_ACQUISITION=NOT_ATTEMPTED
+```
+
+A timeout, changed daemon, absent grant, failed contract ioctl, or changed
+SELinux state displays **Failed**. No failed or inconclusive observation
+becomes a success.
+
+This is a real root operation and a successful *reuse* of the existing RMG
+root. It does **not** run DirtyFrag, install or load the DFR KernelSU module,
+replace `/data/adb/ksud`, execute arbitrary caller commands, or manufacture
+a DFR `POST_ROOT_COMPLETE` record. It therefore must **never** qualify
+DFR Auto Root / Early Root or report `DFR_ACQUISITION=PASS`. Independent
+acquisition remains a separate capability.
