@@ -64,10 +64,62 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      # RESOLVE sdkmanager; do not assume it is on PATH.
+      #
+      # The first dispatch of this workflow failed with
+      # `sdkmanager: command not found`, and this repository had already paid
+      # for that lesson: release.yml carries the same resolution, with the note
+      # that a run once used `cmdline-tools/16.0/bin/sdkmanager`, so a fallback
+      # that only knows `latest` turns a PATH miss into "not found" on a runner
+      # that has the binary. This is that logic, reused rather than re-invented.
       - name: Install Android SDK packages
         run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" >/dev/null
+          set -eu
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          test -n "$SDK" || { echo "::error::neither ANDROID_SDK_ROOT nor ANDROID_HOME is set"; exit 1; }
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            for c in "$SDK/cmdline-tools/latest/bin/sdkmanager" \
+                     $(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -rV) \
+                     "$SDK/tools/bin/sdkmanager"; do
+              [ -x "$c" ] && { SDKMANAGER="$c"; break; }
+            done
+          fi
+          test -n "${SDKMANAGER:-}" && test -x "$SDKMANAGER" || {
+            echo "::error::sdkmanager not found under $SDK or on PATH"
+            ls -la "$SDK/cmdline-tools" 2>/dev/null || true
+            exit 1
+          }
+          echo "using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          yes | "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0"
+          # What "installed" has to mean here: the two binaries this job calls
+          # by name later. A directory is too weak a check - a half-unpacked
+          # archive leaves one behind with nothing usable in it.
+          test -n "$(find "$SDK/build-tools" -name apksigner -print -quit)" \
+            || { echo "::error::apksigner missing after install"; exit 1; }
+          test -n "$(find "$SDK/build-tools" -name aapt2 -print -quit)" \
+            || { echo "::error::aapt2 missing after install"; exit 1; }
+          echo "ANDROID_SDK_RESOLVED=$SDK" >> "$GITHUB_ENV"
+
+      # The companion has NO native code, so the pinned NDK is deliberately not
+      # installed: a 1 GB download and its retry logic buy nothing here. If
+      # configuring :app (which does declare externalNativeBuild) needs an NDK
+      # to be nameable, whatever the runner already ships satisfies that - and
+      # it must never be used to build :app for a release, which is what
+      # release.yml's pinned, verified install exists for. Absent is fine; this
+      # step does not fail on it.
+      - name: Point at an NDK if the runner has one (not pinned, not for :app)
+        run: |
+          set -eu
+          SDK="${ANDROID_SDK_RESOLVED:?}"
+          NDK="$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -rV | head -1 || true)"
+          if [ -n "$NDK" ]; then
+            echo "using the runner's $NDK for configuration only"
+            echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          else
+            echo "no NDK on this runner; the companion does not need one"
+          fi
 
       # Offline gates first. A signed artefact built from a tree whose own
       # invariants do not hold is worse than no artefact: it installs.
@@ -117,9 +169,9 @@ jobs:
         env:
           NOTE: ${{ inputs.note }}
         run: |
-          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner | sort | tail -1)"
+          APKSIGNER="$(find "$ANDROID_SDK_RESOLVED/build-tools" -name apksigner | sort | tail -1)"
           test -x "$APKSIGNER" || { echo "::error::apksigner not found"; exit 1; }
-          AAPT2="$(find "$ANDROID_SDK_ROOT/build-tools" -name aapt2 | sort | tail -1)"
+          AAPT2="$(find "$ANDROID_SDK_RESOLVED/build-tools" -name aapt2 | sort | tail -1)"
           {
             echo "# DFR Companion - review build provenance"
             echo
