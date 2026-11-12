@@ -77,6 +77,43 @@ check("waiting for same-boot POST_ROOT_COMPLETE" in exp,
 
 # The verdict lives in the shared coordinator now that the boot service is a
 # second caller; both callers only paint or journal what it returns.
+# --- refuse unknown daemon ownership before any DirtyFrag transaction --------
+# On DZIF/OWO 2026-11-12 the bootstrap ran as vendor_modprobe with uid=0,
+# but reading /data/adb/ksud returned EPERM. The same failure must be refused
+# at the earliest safe boundary whenever the app cannot establish ownership,
+# even if doing so costs an otherwise workable root attempt.
+preflight = coord[coord.index("private fun daemonOwnershipPreflight"):
+                  coord.index("private fun refused")]
+run_owned = coord[coord.index("private fun runOwned"): ]
+check('private const val PERSISTENT_KSUD = "/data/adb/ksud"' in coord
+      and "Os.lstat(PERSISTENT_KSUD)" in preflight,
+      "preflight looks up the persistent daemon entry without following symlinks")
+check("e.errno == OsConstants.ENOENT" in preflight
+      and "return null" in preflight,
+      "only ENOENT is a provably absent persistent daemon")
+check("OsConstants.S_IFREG" in preflight
+      and "OsConstants.S_IFMT" in preflight
+      and "NON_REGULAR" in preflight,
+      "symlinks and non-regular entries refuse")
+check("KsudStage.pinnedKsudSize()" in preflight
+      and "KsudStage.pinnedKsudSha256()" in preflight
+      and "MessageDigest.getInstance(\"SHA-256\")" in preflight
+      and "digest != expectedDigest" in preflight,
+      "an existing regular file must match the pinned size and SHA-256")
+check("UNREADABLE phase=lstat" in preflight
+      and "UNREADABLE phase=read" in preflight,
+      "EACCES, EPERM and I/O failures remain explicit refusals")
+check("val ownershipRefusal = daemonOwnershipPreflight(host)" in run_owned
+      and "return refused(ownershipRefusal, bootId)" in run_owned,
+      "the run refuses when preflight cannot establish ownership")
+check(run_owned.index("val ownershipRefusal = daemonOwnershipPreflight(host)")
+      < run_owned.index("host.phase(Phase.STAGE_KSUD)")
+      < run_owned.index("StageHop.hopToNetworkStack(context)")
+      < run_owned.index("host.phase(Phase.RUN_NATIVE)"),
+      "ownership preflight precedes staging, remote hop, and destructive transaction")
+check("daemon gate still required" in preflight,
+      "a passing host preflight never replaces the independent daemon gate")
+
 check("val success = runResult == 0 && postRootComplete && liveSelinux == 1" in coord,
       "success requires native bootstrap plus post-root completion")
 check("PostRootStatus.evaluate(record, bootId, liveSelinux)" in coord,
