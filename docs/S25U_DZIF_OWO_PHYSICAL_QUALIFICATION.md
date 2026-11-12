@@ -1,8 +1,10 @@
 # S25U DZIF/OWO physical qualification plan
 
-**Nothing in this document has been performed.** It is the acceptance plan for a
-later, separately authorised phase — not a runbook to start now, and not
-evidence of anything.
+**This qualification is not accepted.** Physical attempts on 2026-11-12
+failed: one before the daemon, another at the daemon's ownership gate with
+`EPERM` under `u:r:vendor_modprobe:s0`. See
+`docs/S25U_DZIF_OWO_COMPATIBILITY.md` for the physical observations.
+This document remains an acceptance plan, not authorisation to retry.
 
 Scope: the owner's SM-S938B, `S938BXXUCDZIF` on the OWO multi-CSC, with
 ephemeral KernelSU root and **no Manager APK**, keeping Google Wallet working
