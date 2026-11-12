@@ -114,8 +114,11 @@ java -cp "$OUT" SuAuthorizationTest
 $JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
     app/src/main/java/com/polygraphene/df/reroot/RootEnvironment.java \
-    tools/tests/RootEnvironmentTest.java
+    app/src/main/java/com/polygraphene/df/reroot/RootReusePolicy.java \
+    tools/tests/RootEnvironmentTest.java \
+    tools/tests/RootReusePolicyTest.java
 java -cp "$OUT" RootEnvironmentTest
+java -cp "$OUT" RootReusePolicyTest
 
 # The companion's two decisions: who may ask for a root operation, and what the
 # attestation's evidence actually supports. Pure, because none of these states
