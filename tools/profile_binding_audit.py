@@ -2008,7 +2008,7 @@ def audit(json_mode=False):
     # dialog refused with "cannot determine whether a stage marker exists".
     main_code = code_only(main_src_holder[0])
     chip_fn = main_code.find("private fun updateChip()")
-    chip_body = main_code[chip_fn:main_code.find("private fun showRunDialog()")] \
+    chip_body = main_code[chip_fn:main_code.find("private fun showRunDialog(")] \
         if chip_fn >= 0 else ""
     if not chip_body:
         fail("MainActivity.updateChip() not found; the marker chip cannot be checked")

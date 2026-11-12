@@ -222,28 +222,22 @@ class MainActivity : Activity() {
                 val verdict = reading.verdict
                 runOnUiThread {
                     btnRunAll.isEnabled = true
-                    if (!verdict.dfrAcquisitionAllowed) {
-                        append("[x] ROUTE=NONE DFR acquisition is not available in" +
+                    if (RootReusePolicy.succeeded(verdict)) {
+                        // The companion already executed su as uid 0. Run a
+                        // fresh operation inside the result dialog and require
+                        // a second complete RMG attestation for SUCCEEDED.
+                        // No DirtyFrag hooks or daemon migration are involved.
+                        if (owner != null) {
+                            append("[x] RUN=REFUSED an acquisition is already owned by $owner\n")
+                        } else {
+                            append("[*] ROUTE=RMG_REUSE executing root via companion\n")
+                            showRunDialog(reuseRmg = true)
+                        }
+                    } else if (!verdict.dfrAcquisitionAllowed) {
+                        append("[x] ROUTE=REFUSED acquisition is not available in" +
                             " this boot\n" +
                             "    STATE=${verdict.state} ${verdict.signals()}\n" +
                             "    ${verdict.reason}\n")
-                        if (verdict.rootAvailable && !verdict.dfrAcquired) {
-                            /*
-                             * Reachable now that the companion holds the grant
-                             * and can attest the pair. What this says and what
-                             * it withholds are both deliberate: root is
-                             * AVAILABLE from another provider, DFR did not
-                             * acquire it, nothing here ran DirtyFrag or touched
-                             * the persistent daemon - and this build still
-                             * executes no operation through that provider, so
-                             * it must not read as if it could (AGENTS.md 3.12).
-                             */
-                            append("[+] ROOT AVAILABLE via ${verdict.provider}\n" +
-                                "    DirtyFrag was not run and /data/adb/ksud was" +
-                                " not touched\n" +
-                                "    this build reads that state; it does not yet" +
-                                " execute operations through the provider\n")
-                        }
                     } else {
                         append("[*] ROUTE=DFR_ACQUISITION this run will attempt" +
                             " DirtyFrag; every later gate still applies\n")
@@ -487,7 +481,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showRunDialog() {
+    private fun showRunDialog(reuseRmg: Boolean = false) {
         btnRunAll.isEnabled = false
         progress.visibility = View.VISIBLE
         val view = layoutInflater.inflate(R.layout.dialog_run, null)
@@ -497,7 +491,8 @@ class MainActivity : Activity() {
         runDialogSpinner = view.findViewById(R.id.dialogSpinner)
         setRunResult(active = true, success = false)
         val dlg = AlertDialog.Builder(this)
-            .setTitle(R.string.run_dialog_title)
+            .setTitle(if (reuseRmg) R.string.run_reuse_dialog_title
+                else R.string.run_dialog_title)
             .setView(view)
             .setPositiveButton(R.string.run_dialog_close, null)
             .create()
@@ -509,6 +504,38 @@ class MainActivity : Activity() {
         }
         dlg.show()
         runBg {
+            if (reuseRmg) {
+                /*
+                 * Real, bounded root execution: CompanionClient.attest binds to
+                 * the separately granted uid, then runs su as uid 0, hashes
+                 * root-only /data/adb/ksud, and invokes the live managerless
+                 * kernel contract. SUCCEEDED is only the outcome of THIS
+                 * completed root execution, never DFR_ACQUISITION=PASS.
+                 *
+                 * A second attestation is intentional: the route observed
+                 * before the dialog is not authority to report a later
+                 * execution as successful.
+                 */
+                val reading = DfrRootCoordinator.routeReading(
+                    providerContext = applicationContext
+                )
+                append(reading.log)
+                val succeeded = RootReusePolicy.succeeded(reading.verdict)
+                if (succeeded) {
+                    append("[DFR][RUN] SUCCEEDED route=RMG_REUSE" +
+                        " ROOT_OPERATION=PASS ROOT_PROVIDER=RMG" +
+                        " DFR_ACQUISITION=NOT_ATTEMPTED\n")
+                } else {
+                    append("[DFR][RUN] FAILED route=RMG_REUSE " +
+                        " STATE=${reading.verdict.state} ${reading.verdict.reason}\n")
+                }
+                runOnUiThread {
+                    setRunResult(active = false, success = succeeded)
+                    btnRunAll.isEnabled = true
+                    progress.visibility = View.GONE
+                }
+                return@runBg
+            }
             /*
              * One shared execution path with the boot service (DfrRootCoordinator):
              * the gates, the deadlines and the final
