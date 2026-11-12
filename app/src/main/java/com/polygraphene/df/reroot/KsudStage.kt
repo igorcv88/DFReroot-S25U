@@ -75,6 +75,9 @@ object KsudStage {
 
     fun pinnedKsudSize(): Long = currentSpec()?.size ?: -1L
 
+    /** Older firmware profiles have separate, already-qualified boot contracts. */
+    fun requiresDaemonOwnershipPreflight(): Boolean = currentSpec() == DZIF_OWO
+
     fun stageFromAssets(context: Context): String {
         val spec = currentSpec()
             ?: return "[x] KSUD_PROFILE=FAIL unsupported fingerprint=${Build.FINGERPRINT}\n"
