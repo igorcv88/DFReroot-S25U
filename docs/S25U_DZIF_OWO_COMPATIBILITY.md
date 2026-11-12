@@ -189,6 +189,51 @@ refuse before touching `/data/adb/ksud`, but that daemon gate runs after the
 native DirtyFrag stage. The owner must separately approve a recovery or
 migration procedure before pursuing a new physical Gate 3.
 
+## New ownership-gated candidate: two physical failures, 2026-11-12
+
+The replacement DFR daemon (`30428cd2…9232a33`) was used in two attempts,
+with different boot IDs and a full reboot between them. Neither qualified
+physical root.
+
+| Boot ID | DirtyFrag bootstrap | Post-root observation | Verdict |
+|---|---|---|---|
+| `200c9cb5-d329-4c4c-a92f-b20b5fcd40f2` | `df=1 helper=0 ns=0 bind=0`, `runAll=4` | Helper did not take over; daemon never reached | FAIL before daemon |
+| `577fab44-5f22-4082-ac9a-616025f500fe` | `df=1 helper=1 ns=1 bind=1`, `runAll=0` | `POST_ROOT_COMPLETE` absent after 120 s | FAIL |
+
+For the **second** boot, the RISH/Shizuku shell (UID 2000) captured decisive
+`logcat` lines without root:
+
+```text
+16:29:54.307 late-load bootstrap pid=17844 uid=0 selinux=u:r:vendor_modprobe:s0
+16:29:54.308 POST_ROOT_COMPLETE=FAIL error=DFR_DAEMON_OWNERSHIP=UNREADABLE
+             refusing to replace a daemon whose current bytes could not be read:
+             Operation not permitted (os error 1)
+16:29:54.323 POST_ROOT_FAILURE_CLEANUP=FAILED
+             SELINUX_RESTORE_FAIL=READ_AFTER: Permission denied (os error 13)
+```
+
+The daemon **ran**, reached ownership gate 2 and refused before staging over
+`/data/adb/ksud`. Since gate 1 did not refuse, that invocation did not
+identify a live KernelSU module. The command read of `/data/adb/ksud`
+returned EPERM in the `vendor_modprobe` bootstrap context; UID 0 did
+not grant access. RISH could also not read its hash, so **the identity of the
+persistent daemon is still unknown**. `UNREADABLE` is not proof of FOREIGN.
+No same-boot `dfreroot-post-root`, `dfreroot-ko-loaded` or readiness
+marker was found. SELinux was Enforcing when observed via RISH, despite
+the daemon's failed read-back.
+
+The ownership fix must therefore remain *fail-closed*. The follow-up
+RMGLabs patch distinguishes `phase=metadata` from `phase=read` and refuses
+non-regular entries, including dangling symlinks; it does not grant access
+to the protected daemon. The follow-up DFReroot app preflight tries to
+establish presence and, where possible, byte identity **before** another
+DirtyFrag transaction. A denied lookup/read is an early refusal; matching
+bytes only passes the early tripwire and never bypasses the daemon gate.
+These are source-level changes until built and reviewed.
+
+No third physical attempt is authorised by these changes. A safe, explicit
+migration or restore procedure for the RMG pair remains separate work.
+
 ## The daemon
 
 This APK bundles the DFR-only managerless Secure Late-Load candidate produced
