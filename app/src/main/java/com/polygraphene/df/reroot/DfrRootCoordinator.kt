@@ -13,6 +13,7 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -271,6 +272,71 @@ object DfrRootCoordinator {
         return if (undeterminable) AutoRootPolicy.MARKER_UNKNOWN else AutoRootPolicy.MARKER_ABSENT
     }
 
+    private const val PERSISTENT_KSUD = "/data/adb/ksud"
+
+    /**
+     * Best-effort, fail-closed EARLY refusal: this runs before daemon staging,
+     * the network_stack hop and DirtyFrag. No root is acquired by inspecting
+     * this path. The OWO physical run (2026-11-12) proved that even uid 0 in
+     * vendor_modprobe can receive EPERM reading it. An ordinary app/domain may
+     * be unable to inspect it at all; that uncertainty must cost a refusal,
+     * not another exploit attempt.
+     *
+     * This is only an early tripwire. The daemon's independent gate remains
+     * authoritative: another process can change the file after our read.
+     */
+    private fun daemonOwnershipPreflight(host: Host): String? {
+        val stat = try {
+            Os.lstat(PERSISTENT_KSUD)
+        } catch (e: ErrnoException) {
+            if (e.errno == OsConstants.ENOENT) {
+                host.log("[DFR][DAEMON_PREFLIGHT] ABSENT path=$PERSISTENT_KSUD\n")
+                return null
+            }
+            host.log("[DFR][DAEMON_PREFLIGHT] UNREADABLE phase=lstat errno=${e.errno}\n")
+            return "persistent KernelSU daemon ownership cannot be checked " +
+                "(lstat errno=${e.errno}); refusing before the DirtyFrag hop"
+        } catch (t: Throwable) {
+            host.log("[DFR][DAEMON_PREFLIGHT] UNREADABLE phase=lstat ${t.javaClass.simpleName}\n")
+            return "persistent KernelSU daemon ownership check failed; refusing before DirtyFrag"
+        }
+        if ((stat.st_mode and OsConstants.S_IFMT) != OsConstants.S_IFREG) {
+            host.log("[DFR][DAEMON_PREFLIGHT] NON_REGULAR path=$PERSISTENT_KSUD\n")
+            return "persistent KernelSU daemon entry is not a regular file; refusing before DirtyFrag"
+        }
+        val expectedSize = KsudStage.pinnedKsudSize()
+        val expectedDigest = KsudStage.pinnedKsudSha256()
+        if (expectedSize <= 0L || expectedDigest.length != 64) {
+            host.log("[DFR][DAEMON_PREFLIGHT] NO_PIN\n")
+            return "current firmware has no pinned daemon identity; refusing before DirtyFrag"
+        }
+        if (stat.st_size != expectedSize) {
+            host.log("[DFR][DAEMON_PREFLIGHT] FOREIGN_SIZE actual=${stat.st_size} expected=$expectedSize\n")
+            return "foreign persistent KernelSU daemon size; refusing before DirtyFrag"
+        }
+        val digest = try {
+            val sha = MessageDigest.getInstance("SHA-256")
+            File(PERSISTENT_KSUD).inputStream().use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (count > 0) sha.update(buffer, 0, count)
+                }
+            }
+            sha.digest().joinToString("") { "%02x".format(it) }
+        } catch (t: Throwable) {
+            host.log("[DFR][DAEMON_PREFLIGHT] UNREADABLE phase=read ${t.javaClass.simpleName}\n")
+            return "persistent KernelSU daemon cannot be hashed; refusing before DirtyFrag"
+        }
+        if (digest != expectedDigest) {
+            host.log("[DFR][DAEMON_PREFLIGHT] FOREIGN_SHA256 actual=$digest expected=$expectedDigest\n")
+            return "foreign persistent KernelSU daemon digest; refusing before DirtyFrag"
+        }
+        host.log("[DFR][DAEMON_PREFLIGHT] OURS sha256=$digest; daemon gate still required\n")
+        return null
+    }
+
     private fun refused(reason: String, bootId: String = "") = Result(
         success = false, nativeResult = -1, postRootComplete = false,
         nativeStarted = false, liveSelinux = -1, bootId = bootId, reason = reason,
@@ -326,6 +392,14 @@ object DfrRootCoordinator {
             return refused("whether /dev/df or a stage marker exists could not be" +
                 " determined (not ENOENT); refusing rather than assuming a clean boot",
                 bootId)
+        }
+
+        // Refuse a known foreign or unreadable persistent daemon BEFORE
+        // staging, the privileged cross-process hop or any page-cache write.
+        // Even an OURS result is not authority to bypass the daemon gate.
+        val ownershipRefusal = daemonOwnershipPreflight(host)
+        if (ownershipRefusal != null) {
+            return refused(ownershipRefusal, bootId)
         }
 
         host.phase(Phase.STAGE_KSUD)
