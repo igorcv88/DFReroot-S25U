@@ -158,6 +158,14 @@ su -c '/data/adb/ksud profile grant com.polygraphene.df.companion'
 su -c '/data/adb/ksud profile status com.polygraphene.df.companion'
 ```
 
+The owner's physical procedure, 2026-11-12, in order:
+
+1. install the companion normally, with its own uid;
+2. grant it with `ksud profile grant com.polygraphene.df.companion`;
+3. run the attestation and collect the **separate** signals;
+4. confirm `/data/adb/ksud` still hashes `95b2cc36…981d8a5`;
+5. confirm SELinux Enforcing and that **no DirtyFrag execution occurred**.
+
 Acceptance for the first physical run, from the laudo §9.2 — **none of it has
 been attempted**:
 
@@ -177,8 +185,27 @@ to DFReroot, and arrive with PR C.
 - **It is not a release artifact.** `./build.sh` builds it (so Gate E compiles
   it in CI) and emits `df_companion.apk`, but `release.yml` neither publishes it
   nor compares its digest. Adding it to the signed release is an explicit owner
-  decision: it means a third APK in the release, a third digest in
-  `SHA256SUMS.txt`, and generated notes that describe a provider whose physical
-  state is unknown.
+  decision — a third APK, a third digest in `SHA256SUMS.txt`, and generated
+  notes describing a provider whose physical state is unknown — and the owner's
+  decision of 2026-11-12 is: **not yet**, only after a positive physical
+  attestation and PR C.
+- **An installable, production-signed APK comes from a separate manual
+  workflow**: `.github/workflows/companion-review-build.yml`. It is
+  `workflow_dispatch` only, it **refuses any ref but the default branch**
+  (because it holds the production signing secrets, so no pull-request head and
+  no fork may reach the key through it), it runs the offline gates before
+  signing anything, and it uploads — never publishes — a bundle of
+  `df_companion-review.apk`, `SHA256SUMS.txt` and `build-provenance.txt`. The
+  provenance records the commit, the APK digest and the **signing certificate
+  fingerprint**, which is the point: the companion's Binder check compares the
+  caller's certificate with its own, so an APK signed with another key refuses
+  every request from DFReroot. The artefact is named
+  `df_companion-review-EXPERIMENTAL-NOT-QUALIFIED` and the provenance leads with
+  `STATUS: EXPERIMENTAL - NOT PHYSICALLY QUALIFIED`.
+
+  Its version pair is `0.0.0-companion-review-<short sha>` / code 1 —
+  deliberately not a release version. Everywhere else in this repo an absent
+  version is a refusal; here an explicit development pair says what the build
+  is instead of borrowing a number that would make it look publishable.
 - **DFReroot does not call it.** `RootEnvironment.MODULE_ATTESTED_RMG` exists
   and is still unreachable until PR C binds this provider to it.
