@@ -36,7 +36,11 @@ for f in app/src/main/jni/dirtyfrag-android*.ko app/src/main/assets/ksud*; do
 done
 echo
 echo "## Built artefacts"
-for apk in df_reroot.apk df_installer.apk; do
+# df_companion.apk is listed because build.sh now produces it, not because it is
+# published: a provenance record describes what the build made. It is not in the
+# release's SHA256SUMS.txt and is not uploaded (docs/COMPANION.md 6). A build
+# that does not produce it prints MISSING, which is the honest reading.
+for apk in df_reroot.apk df_installer.apk df_companion.apk; do
     if [ -f "$apk" ]; then
         printf '%s  %s (%d bytes)\n' "$(sha256sum "$apk" | cut -d' ' -f1)" "$apk" "$(stat -c%s "$apk")"
     else
