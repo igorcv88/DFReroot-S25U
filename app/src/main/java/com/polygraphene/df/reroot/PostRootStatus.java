@@ -70,7 +70,7 @@ public final class PostRootStatus {
     }
 
     /**
-     * The record exists and could not be read.
+     * The record could not be read, or its presence could not be determined.
      *
      * A caller that holds {@link AutoRootPolicy#RECORD_UNREADABLE} cannot hand it
      * to {@link #evaluate} and get a true answer: the sentinel is not a record, so
@@ -81,7 +81,7 @@ public final class PostRootStatus {
      * non-affirmative verdict, and carrying no transport fix.
      */
     public static Verdict unreadable() {
-        return fail("the completion record exists but could not be read");
+        return fail("the completion record could not be read or its presence determined");
     }
 
     /**
