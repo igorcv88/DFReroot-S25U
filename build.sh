@@ -35,3 +35,12 @@ echo "bundled df_reroot.apk into installer assets"
 cp installer/build/outputs/apk/release/installer-release.apk ./df_installer.apk
 ls -l ./df_installer.apk
 echo "OK: ./df_installer.apk (install FIRST as normal app, needs su from temp root)"
+
+# The root-operation companion. Its own applicationId and uid, same key - the
+# caller check at the Binder compares the caller's certificate against this
+# one. Built here so a compile error costs a local run rather than a CI minute;
+# it is deliberately NOT a release artifact yet (see docs/COMPANION.md).
+./gradlew :companion:assembleRelease
+cp companion/build/outputs/apk/release/companion-release.apk ./df_companion.apk
+ls -l ./df_companion.apk
+echo "OK: ./df_companion.apk (install as a normal app; grant it with ksud profile grant)"

@@ -116,3 +116,16 @@ $JAVAC -nowarn -d "$OUT" \
     app/src/main/java/com/polygraphene/df/reroot/RootEnvironment.java \
     tools/tests/RootEnvironmentTest.java
 java -cp "$OUT" RootEnvironmentTest
+
+# The companion's two decisions: who may ask for a root operation, and what the
+# attestation's evidence actually supports. Pure, because none of these states
+# can be arranged on a device - a caller signed by another key, a shared uid
+# without DFReroot in it, a package manager that will not answer, a root shell
+# returning a truncated report or another call's nonce.
+$JAVAC -nowarn -d "$OUT" \
+    companion/src/main/java/com/polygraphene/df/companion/CompanionContract.java \
+    companion/src/main/java/com/polygraphene/df/companion/CallerAuthorization.java \
+    companion/src/main/java/com/polygraphene/df/companion/AttestationReport.java \
+    companion/src/main/java/com/polygraphene/df/companion/RmgIdentity.java \
+    tools/tests/CompanionContractTest.java
+java -cp "$OUT" CompanionContractTest
