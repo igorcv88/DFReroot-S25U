@@ -103,6 +103,10 @@ check("KsudStage.pinnedKsudSize()" in preflight
 check("UNREADABLE phase=lstat" in preflight
       and "UNREADABLE phase=read" in preflight,
       "EACCES, EPERM and I/O failures remain explicit refusals")
+ksud_stage = src(DFR / "KsudStage.kt")
+check("KsudStage.requiresDaemonOwnershipPreflight()" in run_owned
+      and "currentSpec() == DZIF_OWO" in ksud_stage,
+      "the early tripwire is limited to DZIF/OWO, leaving other profiles unchanged")
 check("val ownershipRefusal = daemonOwnershipPreflight(host)" in run_owned
       and "return refused(ownershipRefusal, bootId)" in run_owned,
       "the run refuses when preflight cannot establish ownership")
