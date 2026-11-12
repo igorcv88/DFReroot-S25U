@@ -105,3 +105,14 @@ $JAVAC -nowarn -d "$OUT" \
     installer/src/main/java/com/polygraphene/df/installer/SuAuthorization.java \
     tools/tests/SuAuthorizationTest.java
 java -cp "$OUT" SuAuthorizationTest
+
+# Route classification: which provider owns root in this boot, and therefore
+# which route may be attempted. Pure, because producing one of these states on
+# a device costs a reboot and sometimes the device's root session - a foreign
+# module loaded, an armed marker from a run that died, a completion record that
+# exists and cannot be read.
+$JAVAC -nowarn -d "$OUT" \
+    app/src/main/java/com/polygraphene/df/reroot/AutoRootPolicy.java \
+    app/src/main/java/com/polygraphene/df/reroot/RootEnvironment.java \
+    tools/tests/RootEnvironmentTest.java
+java -cp "$OUT" RootEnvironmentTest

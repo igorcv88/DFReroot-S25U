@@ -272,69 +272,69 @@ object DfrRootCoordinator {
         return if (undeterminable) AutoRootPolicy.MARKER_UNKNOWN else AutoRootPolicy.MARKER_ABSENT
     }
 
-    private const val PERSISTENT_KSUD = "/data/adb/ksud"
+    /**
+     * Which route this boot permits, decided before anything is staged, hopped
+     * or written.
+     *
+     * ## Why this replaced the unconditional ownership preflight
+     *
+     * The previous shape asked one question - "do we own /data/adb/ksud?" -
+     * ahead of every run, from `u:r:system_server:s0`, and refused the whole
+     * chain when the lookup did not answer. On the owner's OWO device it never
+     * answered (EACCES), so the run refused with an errno for a reason, and the
+     * refusal was unfalsifiable: the process asking could not obtain the
+     * evidence it demanded. That is AGENTS.md 3.5.1's defect - a gate whose own
+     * reader cannot read - and 3.3's correction applies: an unreadable artefact
+     * changes which proof is required, never whether one is required.
+     *
+     * So the reading stays (it is [RootEnvironmentProbe.readPersistentDaemon],
+     * byte for byte) and the DECISION moves to [RootEnvironment], which knows
+     * which route needs that answer. Taking over the persistent daemon is the
+     * only operation that does; a boot where a foreign KernelSU is already
+     * loaded is refused for a reason that names the state rather than the
+     * errno, and the owner's existing install is never a thing this build
+     * writes over.
+     *
+     * Nothing is relaxed. Every state but one refuses, the one that does not
+     * ([RootEnvironment.STATE_NO_ACTIVE_KSU] with an absent or pinned daemon)
+     * is unreachable without an attestation this build cannot produce, and the
+     * daemon's own `DFR_DAEMON_OWNERSHIP` gate remains authoritative on the far
+     * side either way.
+     */
+    private fun routeVerdict(
+        host: Host,
+        bootId: String,
+        marker: Int,
+    ): RootEnvironment.Classification {
+        val reading = routeReading(bootId, marker)
+        host.log(reading.log)
+        return reading.verdict
+    }
 
     /**
-     * Best-effort, fail-closed EARLY refusal: this runs before daemon staging,
-     * the network_stack hop and DirtyFrag. No root is acquired by inspecting
-     * this path. The OWO physical run (2026-11-12) proved that even uid 0 in
-     * vendor_modprobe can receive EPERM reading it. An ordinary app/domain may
-     * be unable to inspect it at all; that uncertainty must cost a refusal,
-     * not another exploit attempt.
+     * The observation and the verdict, with nothing painted and nothing run.
      *
-     * This is only an early tripwire. The daemon's independent gate remains
-     * authoritative: another process can change the file after our read.
+     * Public because the UI needs the same answer the run will use, and two
+     * copies of this derivation would be two places the route can be decided
+     * differently - the scale AGENTS.md 3.11 is about. It reads files, so the
+     * caller owns the thread; it writes nothing, executes nothing and acquires
+     * no privilege, so calling it costs the boot nothing.
      */
-    private fun daemonOwnershipPreflight(host: Host): String? {
-        val stat = try {
-            Os.lstat(PERSISTENT_KSUD)
-        } catch (e: ErrnoException) {
-            if (e.errno == OsConstants.ENOENT) {
-                host.log("[DFR][DAEMON_PREFLIGHT] ABSENT path=$PERSISTENT_KSUD\n")
-                return null
-            }
-            host.log("[DFR][DAEMON_PREFLIGHT] UNREADABLE phase=lstat errno=${e.errno}\n")
-            return "persistent KernelSU daemon ownership cannot be checked " +
-                "(lstat errno=${e.errno}); refusing before the DirtyFrag hop"
-        } catch (t: Throwable) {
-            host.log("[DFR][DAEMON_PREFLIGHT] UNREADABLE phase=lstat ${t.javaClass.simpleName}\n")
-            return "persistent KernelSU daemon ownership check failed; refusing before DirtyFrag"
-        }
-        if ((stat.st_mode and OsConstants.S_IFMT) != OsConstants.S_IFREG) {
-            host.log("[DFR][DAEMON_PREFLIGHT] NON_REGULAR path=$PERSISTENT_KSUD\n")
-            return "persistent KernelSU daemon entry is not a regular file; refusing before DirtyFrag"
-        }
-        val expectedSize = KsudStage.pinnedKsudSize()
-        val expectedDigest = KsudStage.pinnedKsudSha256()
-        if (expectedSize <= 0L || expectedDigest.length != 64) {
-            host.log("[DFR][DAEMON_PREFLIGHT] NO_PIN\n")
-            return "current firmware has no pinned daemon identity; refusing before DirtyFrag"
-        }
-        if (stat.st_size != expectedSize) {
-            host.log("[DFR][DAEMON_PREFLIGHT] FOREIGN_SIZE actual=${stat.st_size} expected=$expectedSize\n")
-            return "foreign persistent KernelSU daemon size; refusing before DirtyFrag"
-        }
-        val digest = try {
-            val sha = MessageDigest.getInstance("SHA-256")
-            File(PERSISTENT_KSUD).inputStream().use { input ->
-                val buffer = ByteArray(64 * 1024)
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    if (count > 0) sha.update(buffer, 0, count)
-                }
-            }
-            sha.digest().joinToString("") { "%02x".format(it) }
-        } catch (t: Throwable) {
-            host.log("[DFR][DAEMON_PREFLIGHT] UNREADABLE phase=read ${t.javaClass.simpleName}\n")
-            return "persistent KernelSU daemon cannot be hashed; refusing before DirtyFrag"
-        }
-        if (digest != expectedDigest) {
-            host.log("[DFR][DAEMON_PREFLIGHT] FOREIGN_SHA256 actual=$digest expected=$expectedDigest\n")
-            return "foreign persistent KernelSU daemon digest; refusing before DirtyFrag"
-        }
-        host.log("[DFR][DAEMON_PREFLIGHT] OURS sha256=$digest; daemon gate still required\n")
-        return null
+    fun routeReading(
+        bootId: String = readBootId(),
+        marker: Int = markerState(),
+    ): RootEnvironmentProbe.Reading {
+        /*
+         * A record from THIS boot would mean the chain already completed here.
+         * The three readings are kept apart - complete, absent, unreadable -
+         * because the third one is the one that must not read as "not yet run"
+         * (PR #93).
+         */
+        val record = readPostRootRecord()
+        val unreadable = record == AutoRootPolicy.RECORD_UNREADABLE
+        val complete = !unreadable && record != null &&
+            PostRootStatus.evaluate(record, bootId, readLiveSelinux()).complete
+        return RootEnvironmentProbe.observe(bootId, marker, complete, unreadable)
     }
 
     private fun refused(reason: String, bootId: String = "") = Result(
@@ -394,13 +394,26 @@ object DfrRootCoordinator {
                 bootId)
         }
 
-        // Refuse a known foreign or unreadable persistent daemon BEFORE
-        // staging, the privileged cross-process hop or any page-cache write.
-        // Even an OURS result is not authority to bypass the daemon gate.
-        if (KsudStage.requiresDaemonOwnershipPreflight()) {
-            val ownershipRefusal = daemonOwnershipPreflight(host)
-            if (ownershipRefusal != null) {
-                return refused(ownershipRefusal, bootId)
+        /*
+         * Choose the route BEFORE staging, the privileged cross-process hop or
+         * any page-cache write - and refuse here if this boot does not permit
+         * the acquisition route at all. An ALLOWED verdict is not authority to
+         * skip anything downstream: the staging digest, the remote preflight,
+         * the daemon's ownership gate and the post-root contract all still run.
+         *
+         * Scoped to the profile that needs it, for the reason the preflight was:
+         * ZZIC and DZIF/OXM carry already-qualified boot contracts, and widening
+         * a new gate onto them would invalidate evidence this change did not
+         * re-earn.
+         */
+        if (KsudStage.requiresRootEnvironmentGate()) {
+            val route = routeVerdict(host, bootId, marker)
+            if (!route.dfrAcquisitionAllowed) {
+                return refused(
+                    "DFR acquisition refused in state ${route.state}" +
+                        " (${route.signals()}): ${route.reason}",
+                    bootId,
+                )
             }
         }
 
@@ -767,7 +780,7 @@ object DfrRootCoordinator {
      * apart ([AutoRootPolicy.RECORD_UNREADABLE], [DfrSoftRebootReceiver], and
      * [readLiveSelinux]'s `-1`); this one was the exception.
      */
-    private fun readPostRootRecord(): String? {
+    internal fun readPostRootRecord(): String? {
         // File.exists() returns false for both ENOENT and lookup failures.
         // Only ENOENT means the daemon has not yet published its record.
         // Every other errno is unreadable, never permission to try again.

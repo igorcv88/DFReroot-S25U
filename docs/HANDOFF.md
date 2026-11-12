@@ -1,5 +1,45 @@
 # DFReroot S25U / ZZIC — handoff
 
+> **Route classification, 2026-11-12 (source-level only).** The unconditional
+> `/data/adb/ksud` preflight imported with #95/#96 is replaced by
+> `RootEnvironment` (pure, 49/49 host cases) + `RootEnvironmentProbe`
+> (observation only), scoped to `S25U_DZIF_OWO` via
+> `KsudStage.requiresRootEnvironmentGate()`. The reading is unchanged; the
+> decision moved to the layer that knows which route needs it, because the
+> process that demanded the evidence could not obtain it (EACCES). See
+> AGENTS.md §3.12 and `docs/S25U_DZIF_OWO_COMPATIBILITY.md`.
+>
+> **This does not restore a working flow, and must not be reported as one.**
+> Both routes still refuse on the owner's device: the reuse route needs a
+> positive attestation of the loaded module, and the acquisition route needs the
+> same attestation plus a daemon that is absent or ours. Nothing at
+> `u:r:system_server:s0` can attest either. What changed is that the refusal now
+> names the state and the missing evidence rather than an errno, never spends the
+> boot's destructive transaction, and never writes over the owner's RMGLabs
+> installation.
+>
+> **What closes it — in this order, and neither is a gate promotion:**
+> 1. An authorized companion provider (own uid, own signature, RMG App Profile
+>    grant) that can answer for the kernel side and execute bounded root
+>    operations. Until it exists, `RMG_ACTIVE_VERIFIED` is unreachable by
+>    construction. Physical acceptance criteria: `ROOT_PROVIDER=RMG`,
+>    `ROOT_AVAILABLE=PASS`, `ROOT_OPERATION=PASS`,
+>    `DFR_ACQUISITION=NOT_ATTEMPTED`, `PERSISTENT_DAEMON_CHANGED=NO`.
+> 2. A DFR runtime mode in RMGLabs-Payloads that activates the module without
+>    `stage_daemon_from()` taking `/data/adb/ksud` over, with the module
+>    lifecycle it can actually complete stated rather than assumed. Only that
+>    makes `DAEMON_FOREIGN` actionable without a migration.
+>
+> Auto Root and Early Root are unaffected and stay as they were: both reach the
+> chain through `DfrRootCoordinator`, so both inherit this refusal, and no
+> foreign provider's root can satisfy the DFR post-root contract or qualify
+> either of them.
+>
+> Still unexplained and tracked separately: the first 2026-11-12 boot
+> (`200c9cb5-…`) lost the DirtyFrag handoff at `df=1 helper=0 ns=0 bind=0`,
+> `runAll=4`. That is a native reliability question, independent of the daemon
+> ownership one, and nothing here addresses it.
+
 > **Post-flash review, 2026-10-18:** The owner supplied the OWO/ZTO runtime
 > identity at 17:24. Binary compatibility and the new vbmeta chain are pending. Main remains `3b70be7` with the OXM DZIF
 > fingerprint and DFR daemon `89eb37bd…`; #83/#84 are merged, #85 is open.

@@ -77,46 +77,77 @@ check("waiting for same-boot POST_ROOT_COMPLETE" in exp,
 
 # The verdict lives in the shared coordinator now that the boot service is a
 # second caller; both callers only paint or journal what it returns.
-# --- refuse unknown daemon ownership before any DirtyFrag transaction --------
-# On DZIF/OWO 2026-11-12 the bootstrap ran as vendor_modprobe with uid=0,
-# but reading /data/adb/ksud returned EPERM. The same failure must be refused
-# at the earliest safe boundary whenever the app cannot establish ownership,
-# even if doing so costs an otherwise workable root attempt.
-preflight = coord[coord.index("private fun daemonOwnershipPreflight"):
-                  coord.index("private fun refused")]
+# --- route selection before any DirtyFrag transaction ------------------------
+# On DZIF/OWO 2026-11-12 the bootstrap ran as vendor_modprobe with uid=0 and
+# reading /data/adb/ksud returned EPERM; from the app it answers EACCES. The
+# ownership reading must therefore stop being the whole verdict and become one
+# observation feeding RootEnvironment, which decides which ROUTE a boot
+# permits - while still refusing every state but the attested-clean one, and
+# still refusing before staging, the remote hop and the destructive transaction.
+probe = src(DFR / "RootEnvironmentProbe.kt")
+env = src(DFR / "RootEnvironment.java")
 run_owned = coord[coord.index("private fun runOwned"): ]
-check('private const val PERSISTENT_KSUD = "/data/adb/ksud"' in coord
-      and "Os.lstat(PERSISTENT_KSUD)" in preflight,
-      "preflight looks up the persistent daemon entry without following symlinks")
-check("e.errno == OsConstants.ENOENT" in preflight
-      and "return null" in preflight,
+daemon_read = probe[probe.index("fun readPersistentDaemon"):]
+check('const val PERSISTENT_KSUD = "/data/adb/ksud"' in probe
+      and "Os.lstat(PERSISTENT_KSUD)" in daemon_read,
+      "the probe looks up the persistent daemon entry without following symlinks")
+check("e.errno == OsConstants.ENOENT" in daemon_read
+      and "RootEnvironment.DAEMON_ABSENT" in daemon_read,
       "only ENOENT is a provably absent persistent daemon")
-check("OsConstants.S_IFREG" in preflight
-      and "OsConstants.S_IFMT" in preflight
-      and "NON_REGULAR" in preflight,
-      "symlinks and non-regular entries refuse")
-check("KsudStage.pinnedKsudSize()" in preflight
-      and "KsudStage.pinnedKsudSha256()" in preflight
-      and "MessageDigest.getInstance(\"SHA-256\")" in preflight
-      and "digest != expectedDigest" in preflight,
+check("OsConstants.S_IFREG" in daemon_read
+      and "OsConstants.S_IFMT" in daemon_read
+      and "PERSISTENT_DAEMON=UNIDENTIFIED non_regular=1" in daemon_read,
+      "symlinks and non-regular entries are never identified as ours")
+check("KsudStage.pinnedKsudSize()" in daemon_read
+      and "KsudStage.pinnedKsudSha256()" in daemon_read
+      and 'MessageDigest.getInstance("SHA-256")' in daemon_read
+      and "digest != expectedDigest" in daemon_read,
       "an existing regular file must match the pinned size and SHA-256")
-check("UNREADABLE phase=lstat" in preflight
-      and "UNREADABLE phase=read" in preflight,
-      "EACCES, EPERM and I/O failures remain explicit refusals")
+check("PERSISTENT_DAEMON=UNKNOWN phase=lstat" in daemon_read
+      and "PERSISTENT_DAEMON=UNKNOWN phase=read" in daemon_read,
+      "EACCES, EPERM and I/O failures stay UNKNOWN, never absent")
+check("the daemon's own ownership gate still applies" in daemon_read,
+      "an OURS reading never replaces the independent daemon gate")
+
+# The module reading may only ever REMOVE permission. Both pairs load under the
+# same name, and a module can hide itself from /proc/modules, so neither a hit
+# nor an empty read may attest a provider.
+module_read = probe[probe.index("private fun readLoadedModule"):
+                    probe.index("fun readPersistentDaemon")]
+check("MODULE_PRESENT_UNIDENTIFIED" in module_read
+      and "RootEnvironment.MODULE_ATTESTED_RMG" not in module_read
+      and "RootEnvironment.MODULE_ATTESTED_DFR" not in module_read
+      and "RootEnvironment.MODULE_ATTESTED_NONE" not in module_read,
+      "the /proc/modules reading never attests a provider")
+check("PROC_MODULES=READ_NO_KSU_ENTRY" in module_read
+      and "RootEnvironment.MODULE_UNKNOWN" in module_read,
+      "a read with no KernelSU entry is UNKNOWN, not an attestation of absence")
+
+# The migration that would take /data/adb/ksud over is not a parameter of a run.
+check("public boolean persistentMigrationAllowed() {\n            return false;" in env,
+      "persistent-daemon migration is a constant refusal, not an input")
+
 ksud_stage = src(DFR / "KsudStage.kt")
-check("KsudStage.requiresDaemonOwnershipPreflight()" in run_owned
+check("KsudStage.requiresRootEnvironmentGate()" in run_owned
       and "currentSpec() == DZIF_OWO" in ksud_stage,
-      "the early tripwire is limited to DZIF/OWO, leaving other profiles unchanged")
-check("val ownershipRefusal = daemonOwnershipPreflight(host)" in run_owned
-      and "return refused(ownershipRefusal, bootId)" in run_owned,
-      "the run refuses when preflight cannot establish ownership")
-check(run_owned.index("val ownershipRefusal = daemonOwnershipPreflight(host)")
+      "the route gate is limited to DZIF/OWO, leaving qualified profiles unchanged")
+check("val route = routeVerdict(host, bootId, marker)" in run_owned
+      and "if (!route.dfrAcquisitionAllowed)" in run_owned
+      and "DFR acquisition refused in state" in run_owned,
+      "the run refuses when this boot does not permit the acquisition route")
+check(run_owned.index("val route = routeVerdict(host, bootId, marker)")
       < run_owned.index("host.phase(Phase.STAGE_KSUD)")
       < run_owned.index("StageHop.hopToNetworkStack(context)")
       < run_owned.index("host.phase(Phase.RUN_NATIVE)"),
-      "ownership preflight precedes staging, remote hop, and destructive transaction")
-check("daemon gate still required" in preflight,
-      "a passing host preflight never replaces the independent daemon gate")
+      "route selection precedes staging, remote hop, and destructive transaction")
+
+# ROOT_RESULT=SUCCESS must stay a claim about DFR's OWN acquisition: a foreign
+# provider's root is reported as availability and never as a DFR result.
+check("dfrAcquired" in env
+      and "ROOT_PROVIDER=" in env and "DFR_ACQUISITION=" in env,
+      "provider, availability and DFR acquisition are three separate signals")
+check("ROOT_RESULT" not in env and "ROOT_RESULT" not in probe,
+      "the environment classifier never emits the DFR acquisition result")
 
 check("val success = runResult == 0 && postRootComplete && liveSelinux == 1" in coord,
       "success requires native bootstrap plus post-root completion")
@@ -131,10 +162,10 @@ check("ROOT_RESULT=SUCCESS" in coord and "POST_ROOT_COMPLETE=PASS" in coord,
 # empty". The verdict is a refusal either way; what was lost is the line that
 # separates "the daemon never published" from "it published and we could not
 # read it". Three other readers in this build already keep them apart.
-wait = coord[coord.index("private fun readPostRootRecord"):]
+wait = coord[coord.index("fun readPostRootRecord"):]
 check("AutoRootPolicy.RECORD_UNREADABLE" in wait,
       "the post-root wait distinguishes an unreadable record from an absent one")
-reader = coord[coord.index("private fun readPostRootRecord"):
+reader = coord[coord.index("fun readPostRootRecord"):
                coord.index("private fun awaitPostRootComplete")]
 check("Os.stat(PostRootStatus.PATH)" in reader,
       "post-root presence must be checked by stat, not File.exists")

@@ -234,6 +234,66 @@ These are source-level changes until built and reviewed.
 No third physical attempt is authorised by these changes. A safe, explicit
 migration or restore procedure for the RMG pair remains separate work.
 
+## Route classification replaces the unconditional ownership preflight
+
+**Source-level change only. It qualifies no gate and authorises no physical
+attempt.** What it changes is which question is asked, where, and by a reader
+that can answer it.
+
+The preflight imported with the candidate above asked "do we own
+`/data/adb/ksud`?" ahead of *every* run, from `u:r:system_server:s0`. On this
+device the lookup answers `EACCES`, so the run refused with
+`[DFR][DAEMON_PREFLIGHT] UNREADABLE phase=lstat errno=13` and the refusal was
+unfalsifiable: the process demanding the evidence could not obtain it. That is
+the AGENTS.md §3.5.1 defect (a gate whose own reader cannot read) and §3.3's
+correction applies — an unreadable artefact changes which proof is required,
+never whether one is required.
+
+The reading is unchanged, byte for byte, in
+`RootEnvironmentProbe.readPersistentDaemon()`. What moved is the decision:
+`RootEnvironment` (pure, host-tested) classifies the boot and says which route
+it permits, because taking the persistent daemon over is the only operation
+that needs that answer.
+
+| State | Reached when | Permits |
+|---|---|---|
+| `DFR_ACTIVE_VERIFIED` | a same-boot `PostRootStatus` verdict is complete | reuse of that session; no second run |
+| `RMG_ACTIVE_VERIFIED` | an authorized provider attests the loaded module is the RMG pair | the reuse route |
+| `FOREIGN_KSU_ACTIVE` | a KernelSU-like module is loaded, provenance unestablished | nothing |
+| `INCOMPLETE_DFR_BOOT` | our module loaded, or a marker armed, with no completion | nothing |
+| `NO_ACTIVE_KSU` | attested that no module is loaded | the acquisition route, **only** with the daemon absent or pinned |
+| `UNKNOWN` | everything else | nothing |
+
+Three properties are what make this not a relaxation:
+
+- **`RMG_ACTIVE_VERIFIED` is currently unreachable, by construction.** Granting
+  the reuse route needs a positive attestation of the loaded module. Nothing at
+  `u:r:system_server:s0` can produce one: `/proc/modules` names a module, and
+  both pairs load as `kernelsu`, so a hit is `FOREIGN_KSU_ACTIVE` and an empty
+  read is `UNKNOWN` (a module can hide itself from that file). The KernelSU
+  prctl UAPI is out of reach for the same reason the transport is — this domain
+  has `map`/`read` but not `execute`/`execmod` on `apk_data_file`. So the state
+  is modelled, negative-tested, and stays unreachable until an authorized
+  companion provider exists.
+- **`NO_ACTIVE_KSU` is equally unreachable today**, because it also requires an
+  attestation. The practical consequence on this device is that the acquisition
+  route still refuses — with a verdict that names the state and the missing
+  evidence instead of an errno, and without spending the boot's destructive
+  transaction.
+- **The persistent-daemon migration is a constant refusal**, not an input:
+  `Classification.persistentMigrationAllowed()` returns `false` and is derived
+  from no observation, so no data can flip it. `tools/profile_binding_audit.py`
+  fails if it becomes a parameter.
+
+Scoped to `S25U_DZIF_OWO` (`KsudStage.requiresRootEnvironmentGate()`). ZZIC and
+DZIF/OXM keep the boot contracts they were physically qualified under; this
+change re-earned no evidence for them and therefore changes nothing there.
+
+Evidence for the change itself is host-side only: `RootEnvironmentTest` 49/49
+(one negative per element, including every unrecognised enum value and the
+default-constructed observation), `test_post_root_contract` 59/59, and the
+routing guards in `tools/profile_binding_audit.py`.
+
 ## The daemon
 
 This APK bundles the DFR-only managerless Secure Late-Load candidate produced
@@ -296,3 +356,15 @@ SHA-256. The provenance records the LF digest — what `git show :<path>` produc
   stability, Wallet or Play Integrity.
 - `kernel_image_sha256` is still a carry-over rather than a live read.
 - The loaded module's build-id, which the capture could not read.
+- **An authorized provider that can attest the loaded module.** Without it
+  `RMG_ACTIVE_VERIFIED` and `NO_ACTIVE_KSU` are unreachable, which means both
+  routes refuse on this device. This is the single blocker for a functioning
+  flow, and it is not a gate that can be promoted by evidence — it needs the
+  companion app and grant contract to be built.
+- **A DFR runtime mode that does not require taking `/data/adb/ksud` over.**
+  Until it exists, `DAEMON_FOREIGN` has no route that can act on it, and the
+  only alternative is a migration with its own recovery and rollback evidence.
+- The identity of the daemon currently at `/data/adb/ksud`. The 2026-11-12 run
+  replaced the RMG binary with the older DFR one; the owner reports RMGLabs
+  root working, which the record above does not explain. Neither claim may be
+  assumed — read the path through a shell that can read it.

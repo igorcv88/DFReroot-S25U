@@ -731,6 +731,55 @@ What must stay separate:
   redundant next to `CONTROLLER_RECEIVED` and is not;
   `tools/profile_binding_audit.py` fails if the phase or the step disappears.
 
+### 3.12 Available root, acquired root and owned installation are three facts
+
+The chain had one shape — "the app must acquire root, and the DFR daemon ends
+up owning `/data/adb/ksud`" — and on a device that already carries a working
+foreign KernelSU pair that single shape asks three questions at once:
+
+| Question | Answer on the owner's OWO device, 2026-11-12 |
+|---|---|
+| Is root available? | Yes; the RMGLabs pair had it |
+| Did DFR acquire it? | No, and it must never report otherwise |
+| May DFR take the persistent daemon over? | A separate, destructive question |
+
+Collapsing them produced a refusal that named an errno. The app asked the third
+question from `u:r:system_server:s0` with an `lstat("/data/adb/ksud")`, received
+EACCES and refused the whole chain — correct in direction (3.3) and asked in the
+wrong place, by a reader that could not obtain the evidence it demanded. That is
+3.5.1's "check that the reader can read", one layer up.
+
+The durable rules:
+
+- **Route selection comes before anything that writes, and it lives in one pure
+  place.** `RootEnvironment` takes observations and returns which route may be
+  *attempted*; `RootEnvironmentProbe` only reads. Two derivations - one for the
+  button, one for the run - would be two places the route can be decided
+  differently, which is 3.11's defect at a different scale.
+- **A reading that cannot identify a provider may remove permission, never
+  grant it.** `/proc/modules` names a module; both pairs load as `kernelsu`, so
+  a hit refuses the acquisition route and still does not grant the reuse route.
+  An empty read is `UNKNOWN`, because a module that hides itself from that file
+  reads exactly the same. Granting reuse needs a positive attestation from an
+  authorized provider, which nothing in this domain can produce - so
+  `RMG_ACTIVE_VERIFIED` and `NO_ACTIVE_KSU` are **modelled, negative-tested and
+  unreachable** in this build. An unreachable state is the correct cost of
+  missing evidence; inferring the provider from a name is §2's defect.
+- **`ROOT_RESULT=SUCCESS` stays a claim about DFR's own acquisition.** Another
+  provider's root is reported as `ROOT_PROVIDER` + `ROOT_AVAILABLE` with
+  `DFR_ACQUISITION=NOT_ATTEMPTED`. Three signals, never one (3.7), and no
+  foreign session may satisfy the DFR post-root contract or qualify Auto Root.
+- **Taking the persistent daemon over is a migration, not a parameter.**
+  `Classification.persistentMigrationAllowed()` is a constant `false` derived
+  from no observation, so no data can flip it; a boolean input would be the
+  shape 3.6 forbids. The migration needs an explicit owner request, a verified
+  recovery copy, a restore path independent of the new KernelSU and a proven
+  rollback. `tools/profile_binding_audit.py` fails if it becomes an input.
+- **A new route gate is scoped to the profile that needs it.** ZZIC and
+  DZIF/OXM were qualified physically on a device with no foreign KernelSU
+  installed; applying a refusal to them invalidates evidence the change did not
+  re-earn. `KsudStage.requiresRootEnvironmentGate()` is that scoping.
+
 ---
 
 ## 4. Where authority lives

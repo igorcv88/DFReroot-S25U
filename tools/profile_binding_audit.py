@@ -2531,6 +2531,76 @@ def audit(json_mode=False):
             fail("%s captures the stop diagnostics outside onStopJob; only that "
                  "callback runs at the instant the scheduler reclaimed the "
                  "execution" % name)
+    # --- root-environment routing ---------------------------------------
+    # Which provider owns root in this boot decides which route may be
+    # attempted, and the decision has to stay in ONE pure place. The Kotlin that
+    # observes and the Kotlin that paints both need an Android runtime, so the
+    # shape is asserted here (AGENTS.md 5) and the branches themselves are
+    # exercised by tools/tests/RootEnvironmentTest.java.
+    env_src = dfr_source("RootEnvironment.java")
+    probe_src = code_only(dfr_source("RootEnvironmentProbe.kt"))
+    coord_env = code_only(dfr_source("DfrRootCoordinator.kt"))
+    ui_env = code_only(dfr_source("MainActivity.kt"))
+
+    # Taking /data/adb/ksud over is a migration with its own evidence, never a
+    # parameter of an ordinary run (laudo 4.5, AGENTS.md 3.6). A constant cannot
+    # be flipped from data; a boolean input can.
+    if "public boolean persistentMigrationAllowed()" not in env_src:
+        fail("RootEnvironment no longer answers whether the persistent-daemon "
+             "migration is permitted; the question has to be asked somewhere "
+             "and answered no")
+    migration = env_src[env_src.find("public boolean persistentMigrationAllowed()"):]
+    migration = migration[:migration.find("}") + 1]
+    if "return false;" not in migration:
+        fail("persistentMigrationAllowed() is no longer a constant refusal; "
+             "taking the persistent KernelSU daemon over needs an explicit "
+             "owner decision, a verified recovery copy and a proven rollback, "
+             "none of which exist in this build")
+
+    # The module reading may REMOVE permission and never grant it: both pairs
+    # load under the same name, and a module can hide itself from /proc/modules,
+    # so neither a hit nor an empty read identifies a provider.
+    for attested in ("MODULE_ATTESTED_RMG", "MODULE_ATTESTED_DFR",
+                     "MODULE_ATTESTED_NONE"):
+        if "RootEnvironment." + attested in probe_src:
+            fail("RootEnvironmentProbe produces %s; no reading available to "
+                 "system_server can attest which module the kernel is running, "
+                 "and inferring one is absence read as permission" % attested)
+
+    # One derivation, two readers. The UI must ask the coordinator the same
+    # question the run will ask, not classify on its own.
+    if "RootEnvironment.classify(" in ui_env:
+        fail("MainActivity classifies the root environment itself; the route "
+             "must come from DfrRootCoordinator.routeReading() so the button "
+             "and the run cannot disagree")
+    route_at = ui_env.find("DfrRootCoordinator.routeReading(")
+    dialog_at = ui_env.find("showRunDialog()", ui_env.find("private fun runDfAll("))
+    if route_at < 0:
+        fail("MainActivity no longer derives the route before Run All; the "
+             "owner would open the destructive dialog without being told which "
+             "route, if any, this boot permits")
+    gate_at = ui_env.find("KsudStage.requiresRootEnvironmentGate()")
+    if gate_at < 0 or not 0 <= gate_at < route_at:
+        fail("MainActivity derives the route without scoping it to the profile "
+             "whose runs are routed by it; on an already-qualified profile that "
+             "verdict would describe a gate that does not run")
+    if dialog_at < 0:
+        fail("MainActivity.runDfAll() no longer reaches showRunDialog()")
+
+    # The run's own gate: route first, then anything that writes.
+    if "val route = routeVerdict(host, bootId, marker)" not in coord_env:
+        fail("DfrRootCoordinator no longer selects a route before the chain; "
+             "the acquisition path would run in states that refuse it")
+    run_owned_env = coord_env[coord_env.find("private fun runOwned("):]
+    route_order = [
+        run_owned_env.find("val route = routeVerdict(host, bootId, marker)"),
+        run_owned_env.find("host.phase(Phase.STAGE_KSUD)"),
+        run_owned_env.find("StageHop.hopToNetworkStack(context)"),
+    ]
+    if min(route_order) < 0 or route_order != sorted(route_order):
+        fail("route selection no longer precedes staging and the remote hop; a "
+             "refusal has to leave nothing staged and nothing written")
+
     # --- the arm-and-reboot flow ----------------------------------------
     # MainActivity and RebootRequest need an Android runtime, so the shape is
     # asserted (AGENTS.md §5). The owner's reasons are the invariants.

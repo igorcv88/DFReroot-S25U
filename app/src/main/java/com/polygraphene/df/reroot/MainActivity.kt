@@ -118,6 +118,18 @@ class MainActivity : Activity() {
             val bootId = DfrRootCoordinator.readBootId()
             SoftRebootHealth.resample(bootId)
             append(SoftRebootHealth.report(bootId))
+            /*
+             * The root environment for THIS boot, printed once rather than
+             * painted into the chip: which provider owns root, whether root is
+             * available at all, and whether DFR acquired it are three separate
+             * facts (AGENTS.md 3.7) and a single colour would collapse them.
+             * Only on the profile whose runs are actually routed by it - on the
+             * others the verdict would describe a gate that does not run, which
+             * is worse than silence.
+             */
+            if (KsudStage.requiresRootEnvironmentGate()) {
+                append(DfrRootCoordinator.routeReading().log)
+            }
         }
     }
 
@@ -191,7 +203,54 @@ class MainActivity : Activity() {
             append("already running (owner=$owner)\n")
             return
         }
-        showRunDialog()
+        /*
+         * Say what the button is about to do, before it does it.
+         *
+         * On the profile where a foreign KernelSU pair may already own the
+         * kernel side, "Run All" is no longer one unconditional meaning. The
+         * route is derived here from the same call the run itself uses, and a
+         * boot that does not permit the acquisition route never opens the
+         * destructive dialog at all - the owner reads the state and the reason
+         * instead of watching a run refuse inside it.
+         *
+         * Off the main thread because it reads files (and, where the path is
+         * readable, hashes one): the manifest puts every component of this app
+         * in system_server, which must never block its main thread on that.
+         */
+        if (!KsudStage.requiresRootEnvironmentGate()) {
+            showRunDialog()
+            return
+        }
+        btnRunAll.isEnabled = false
+        runBg {
+            val reading = DfrRootCoordinator.routeReading(marker = marker)
+            append(reading.log)
+            val verdict = reading.verdict
+            runOnUiThread {
+                btnRunAll.isEnabled = true
+                if (verdict.dfrAcquisitionAllowed) {
+                    append("[*] ROUTE=DFR_ACQUISITION this run will attempt DirtyFrag;" +
+                        " every later gate still applies\n")
+                    showRunDialog()
+                } else {
+                    append("[x] ROUTE=NONE DFR acquisition is not available in this boot\n" +
+                        "    STATE=${verdict.state} ${verdict.signals()}\n" +
+                        "    ${verdict.reason}\n")
+                }
+                if (verdict.rmgReuseAllowed) {
+                    /*
+                     * Unreachable in this build, and deliberately still
+                     * written: reaching it needs an authorized provider that
+                     * can attest the loaded module, which is the companion
+                     * transport this app does not have yet. Claiming the reuse
+                     * route exists while nothing can execute through it would
+                     * be the success-without-proof this repository refuses.
+                     */
+                    append("    root IS available from another provider, and this" +
+                        " build has no authorized transport to use it\n")
+                }
+            }
+        }
     }
 
     /**

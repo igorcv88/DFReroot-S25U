@@ -75,8 +75,22 @@ object KsudStage {
 
     fun pinnedKsudSize(): Long = currentSpec()?.size ?: -1L
 
-    /** Older firmware profiles have separate, already-qualified boot contracts. */
-    fun requiresDaemonOwnershipPreflight(): Boolean = currentSpec() == DZIF_OWO
+    /**
+     * Whether this profile's runs go through the [RootEnvironment] route gate.
+     *
+     * OWO only, and the scoping is the point: ZZIC and DZIF/OXM carry boot
+     * contracts that were qualified physically against a device with no foreign
+     * KernelSU installed, and a new refusal applied to them would invalidate
+     * evidence this change has not re-earned. OWO is the profile where a
+     * working RMGLabs pair is actually present, which is what made the single
+     * "acquire root and take the daemon over" route wrong in the first place.
+     *
+     * Was `requiresDaemonOwnershipPreflight()`. The name moved with the
+     * decision: the persistent-daemon reading is now one observation among
+     * several rather than a veto of its own, so a call site left behind under
+     * the old name would be claiming a gate that no longer exists.
+     */
+    fun requiresRootEnvironmentGate(): Boolean = currentSpec() == DZIF_OWO
 
     fun stageFromAssets(context: Context): String {
         val spec = currentSpec()
