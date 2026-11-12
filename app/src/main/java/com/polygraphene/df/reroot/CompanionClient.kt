@@ -170,7 +170,19 @@ object CompanionClient {
             }
             val verdict = CompanionProtocol.parseSignals(attest.signals)
             log.appendLine("[DFR][COMPANION] ATTEST rc=${attest.rc} ${attest.signals}")
-            log.appendLine("[DFR][COMPANION] REASON ${verdict.reason}")
+            /*
+             * BOTH reasons. The provider's explains why IT refused ("su could
+             * not be executed: ...", which is the only thing that can say why
+             * rc=5 happened); the parser's explains what this side made of the
+             * signals. Printing only the second one discarded the answer -
+             * the owner's 2026-11-12 log shows `rc=5` next to "the provider
+             * returned no signals", which is true and says nothing about the
+             * cause (AGENTS.md 3.7, in a log line).
+             */
+            if (attest.reason.isNotBlank()) {
+                log.appendLine("[DFR][COMPANION] PROVIDER_REASON ${attest.reason}")
+            }
+            log.appendLine("[DFR][COMPANION] CLIENT_REASON ${verdict.reason}")
             if (attest.rc != CompanionProtocol.RC_OK) {
                 return Outcome(attest.rc, verdict, attest.reason, log.toString())
             }

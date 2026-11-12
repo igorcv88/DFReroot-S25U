@@ -1,5 +1,40 @@
 # DFReroot S25U / ZZIC — handoff
 
+> **Owner decision, 2026-11-12: the acquisition route refuses on evidence
+> AGAINST it, not on the absence of evidence for it.**
+>
+> The route gate as shipped made `MODULE_ATTESTED_NONE` the only road to the
+> DirtyFrag attempt, and the owner's device cannot produce it: `/proc/modules`
+> answers `FileNotFoundException` from `system_server`, and `/data/adb/ksud`
+> answers errno 13. So the route was **permanently unreachable on the only
+> profile the gate covers** - a gate that can never pass, blocking the one
+> operation this repository exists to perform. That is a defect, not
+> fail-closed.
+>
+> What still refuses: an armed `/dev/df*` marker, a marker probe that did not
+> answer, a completed record for this boot, an unreadable completion record,
+> our own module attested without a completion, a KernelSU-like module actually
+> observed in `/proc/modules`, a persistent daemon read and found foreign, and
+> any unrecognised enum value.
+>
+> What is NOT relaxed, and is why this is defensible: every gate downstream is
+> untouched - the staging digest, the remote non-destructive preflight, the
+> daemon's own `DFR_DAEMON_OWNERSHIP` gate and the same-boot post-root
+> contract. The daemon still refuses to replace a daemon it cannot identify,
+> and it runs as root where it CAN read it. Worst outcome of being wrong here is
+> a spent boot and possibly a held `/dev/df` mutex needing a reboot - observed
+> 2026-11-12, device intact - not a brick.
+>
+> The REUSE route is unchanged and still needs a positive attestation: claiming
+> another provider's root without evidence would be a claim, not a capability.
+>
+> **Two diagnostics the same log exposed as missing**, both now fixed: the
+> marker state is printed (the module branch refused first, so the one datum
+> needed to read the next refusal was absent), and the provider's own reason is
+> printed beside the parser's (`rc=5` appeared next to "the provider returned no
+> signals", which is true and says nothing about the cause - `su` failing inside
+> the companion).
+
 > **The reuse route is open, 2026-11-12.** The companion attested the RMG pair
 > on the device (`ATTESTATION=RMG_CONTRACT`, every component PASS, ksud digest
 > `95b2cc36…981d8a5` unchanged either side of the call, grant uid 10516), and

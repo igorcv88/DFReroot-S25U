@@ -282,18 +282,54 @@ public final class RootEnvironment {
                                 + " refusing to claim its root");
             case MODULE_ATTESTED_NONE:
                 break; // the only path that may reach the acquisition route
-            case MODULE_UNKNOWN:
             default:
                 /*
-                 * The common reading on the owner's device today, and the
-                 * honest one: nothing in system_server can attest what the
-                 * kernel is running. A marker or a module that merely LOOKS
-                 * absent is not evidence of absence.
+                 * An unrecognised value still refuses (§2). It is NOT merged
+                 * with MODULE_UNKNOWN below: "we could not look" and "the
+                 * caller passed a value this build does not know" are
+                 * different facts, and only the first one is the device's
+                 * normal state.
                  */
                 return of(STATE_UNKNOWN, PROVIDER_UNKNOWN, false, false, false, false,
-                        "no attestation of the loaded KernelSU module is obtainable from"
-                                + " this process; refusing both routes until an authorized"
-                                + " provider can answer");
+                        "unrecognised module observation; refusing");
+            case MODULE_UNKNOWN:
+                /*
+                 * OWNER DECISION, 2026-11-12, and a deliberate departure from
+                 * §2 for this one gate - stated here rather than hidden.
+                 *
+                 * Nothing in system_server can attest what the kernel is
+                 * running: on the owner's device /proc/modules is UNREADABLE
+                 * (FileNotFoundException - the SELinux half of that question,
+                 * now answered). This branch used to refuse on that absence,
+                 * which made MODULE_ATTESTED_NONE the only road to the
+                 * acquisition route and therefore made the route PERMANENTLY
+                 * unreachable on the only profile this gate covers. A gate that
+                 * can never pass is not fail-closed, it is broken, and it was
+                 * blocking the one operation this repository exists to perform.
+                 *
+                 * So the acquisition route is now refused on EVIDENCE AGAINST
+                 * it, not on the absence of evidence for it. What still
+                 * refuses, below and above: an armed marker, a completed record
+                 * for this boot, our own module attested without a completion,
+                 * a KernelSU-like module actually observed in /proc/modules, a
+                 * persistent daemon read and found foreign, an unreadable
+                 * completion record.
+                 *
+                 * What this does NOT relax, and is the reason it is defensible:
+                 * every gate downstream is untouched. The staging digest, the
+                 * remote non-destructive preflight, the daemon's own
+                 * DFR_DAEMON_OWNERSHIP gate and the same-boot post-root
+                 * contract all still run, and the daemon still refuses to
+                 * replace a daemon it cannot identify. The worst outcome of
+                 * being wrong here is a spent boot and possibly a held /dev/df
+                 * mutex needing a reboot - observed on 2026-11-12, device
+                 * intact - not a brick.
+                 *
+                 * The REUSE route is not opened by this: it still needs a
+                 * positive attestation, because claiming another provider's
+                 * root without evidence would be a claim, not a capability.
+                 */
+                break;
         }
 
         // --- MODULE_ATTESTED_NONE from here down -----------------------------
@@ -326,6 +362,24 @@ public final class RootEnvironment {
                         "no module is loaded, no marker is armed and the persistent"
                                 + " daemon is absent or ours; the DFR acquisition route"
                                 + " may be attempted and every later gate still applies");
+            case DAEMON_UNKNOWN:
+                /*
+                 * The owner's device, every time: /data/adb is 0700 root:root,
+                 * so this process cannot inspect the entry at all (errno 13).
+                 *
+                 * Refusing here is what the preflight in #95 did, and it is
+                 * the defect this whole route exists to correct: the question
+                 * belongs to the operation that would REPLACE those bytes, and
+                 * the daemon - which runs as root and can read them - still
+                 * refuses to replace a daemon it cannot identify. Asking a
+                 * reader that cannot read, and then refusing because it could
+                 * not, is §3.5.1's failure (owner decision, 2026-11-12).
+                 */
+                return of(STATE_NO_ACTIVE_KSU, PROVIDER_NONE, false, false, true, false,
+                        "the persistent daemon cannot be inspected from this process"
+                                + " (expected: /data/adb is root-only); the acquisition"
+                                + " route may be attempted and the daemon's own ownership"
+                                + " gate remains authoritative");
             case DAEMON_FOREIGN:
                 return of(STATE_NO_ACTIVE_KSU, PROVIDER_NONE, false, false, false, false,
                         "the persistent KernelSU daemon belongs to another provider;"
@@ -335,11 +389,10 @@ public final class RootEnvironment {
                 return of(STATE_NO_ACTIVE_KSU, PROVIDER_NONE, false, false, false, false,
                         "a persistent KernelSU daemon exists and its identity could not"
                                 + " be established; refusing before the DirtyFrag hop");
-            case DAEMON_UNKNOWN:
             default:
-                return of(STATE_NO_ACTIVE_KSU, PROVIDER_NONE, false, false, false, false,
-                        "the persistent KernelSU daemon entry could not be inspected;"
-                                + " an unreadable path is not an absent one");
+                // An unrecognised enum value still refuses (§2).
+                return of(STATE_UNKNOWN, PROVIDER_NONE, false, false, false, false,
+                        "unrecognised persistent-daemon observation; refusing");
         }
     }
 }
