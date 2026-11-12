@@ -397,9 +397,11 @@ object DfrRootCoordinator {
         // Refuse a known foreign or unreadable persistent daemon BEFORE
         // staging, the privileged cross-process hop or any page-cache write.
         // Even an OURS result is not authority to bypass the daemon gate.
-        val ownershipRefusal = daemonOwnershipPreflight(host)
-        if (ownershipRefusal != null) {
-            return refused(ownershipRefusal, bootId)
+        if (KsudStage.requiresDaemonOwnershipPreflight()) {
+            val ownershipRefusal = daemonOwnershipPreflight(host)
+            if (ownershipRefusal != null) {
+                return refused(ownershipRefusal, bootId)
+            }
         }
 
         host.phase(Phase.STAGE_KSUD)
