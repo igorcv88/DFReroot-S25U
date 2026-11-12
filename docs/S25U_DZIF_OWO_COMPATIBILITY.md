@@ -280,6 +280,47 @@ What it does **not** establish, and must not be read as:
   `u:r:system_server:s0` it cannot. The evidence above exists only because it
   was read through root.
 
+## `/proc/modules` from an unprivileged shell — 2026-11-12
+
+Captured through RISH/Shizuku (`u:r:shell:s0`, uid 2000), **without root**:
+
+```text
+$ stat -c %a /proc/modules
+444
+$ cat /proc/modules
+kernelsu 180224 1 - Live 0x0000000000000000 (O)
+... ~400 further vendor/Samsung modules ...
+```
+
+What it settles:
+
+- **DAC is not the obstacle.** Mode `0444`, so the file is world-readable, and a
+  domain that is allowed it can read the whole list.
+- **The RMG pair does not hide itself from this file**, at least in this boot:
+  `kernelsu` is listed `Live`. Read with no privilege at all.
+- **Exact-match is the right comparison.** The capture contains one entry the
+  probe's name set selects (`kernelsu`) out of roughly four hundred. A substring
+  match over a list that size is how a vendor driver becomes a false
+  `FOREIGN_KSU_ACTIVE`, and a false FOREIGN refuses a route the owner is
+  entitled to — which is why `RootEnvironmentProbe` compares the first column
+  for equality.
+
+What it does **not** settle, and it is the half that matters:
+
+- **Whether `u:r:system_server:s0` may read it.** `shell` is a different domain,
+  and on AOSP `/proc/modules` is labelled `proc_modules` with read granted per
+  domain — the file mode says nothing about that. Every component of this app
+  runs in `system_server` (`android:process="system"`), so the `shell` capture
+  does not transfer. Recording it as settled would be the same error as reading
+  a wrapper's success as a fact about a path (AGENTS.md §3.5.1).
+
+**No further manual probe is needed to close it.** This build prints the route
+reading at startup on this profile, so the next install answers it from logcat
+in one line: `[DFR][ROOT_ENV] PROC_MODULES=KSU_LIKE_LOADED name=kernelsu`
+(readable, and the state becomes `FOREIGN_KSU_ACTIVE`) or
+`PROC_MODULES=UNREADABLE …` (denied, and the state stays `UNKNOWN`). Either
+answer is fail-closed; only the precision of the refusal differs.
+
 ## Route classification replaces the unconditional ownership preflight
 
 **Source-level change only. It qualifies no gate and authorises no physical
@@ -413,7 +454,7 @@ SHA-256. The provenance records the LF digest — what `git show :<path>` produc
 - ~~The identity of the daemon currently at `/data/adb/ksud`.~~ **Closed
   2026-11-12** by a root capture: it is the RMG build `95b2cc36…981d8a5`. See
   the section above for what that does and does not establish.
-- Whether `/proc/modules` is readable from uid 1000 / `u:r:system_server:s0`.
-  The capture above was taken as root, and the answer decides whether the app
-  reports `FOREIGN_KSU_ACTIVE` or `UNKNOWN` on this device. One non-destructive
-  read from an unprivileged shell settles it.
+- Whether `/proc/modules` is readable from `u:r:system_server:s0`. DAC is
+  answered (`0444`, read without root from `u:r:shell:s0`); the SELinux half is
+  not, and `shell` does not stand in for `system_server`. This build's own
+  startup line answers it on the next install — no manual probe required.
