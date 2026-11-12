@@ -88,19 +88,17 @@ the closeout before any handover), not something this protocol can work around.
 > parameterised destination, so one device has one persistent KernelSU daemon and
 > the two pairs cannot share it.
 >
-> **That contract is not in the shipped build.** The bundled
-> `app/src/main/assets/ksud-dzif-owo` is still `6b7246e5…def2` — the exact binary
-> that renamed over the RMG daemon on the run above. The two gates that would make
-> it a refusal (whose module is live, whose daemon is persisted) exist only as a
-> change to the daemon's patch generators in `RMGLabs-Payloads`, pending an
-> independent review and a rebuild. Until a daemon carrying them is built and
-> audited, **nothing in this app protects a foreign `/data/adb/ksud`**, and the
-> only thing standing between a run and that daemon is this protocol.
+> **Ownership gates now included in the newly pinned DFR candidate** (`ksud`
+> SHA-256 `30428cd2â€¦232a33`). The gates are fail-closed and were compiled in
+> workflow `43271383389`, but physical acceptance is still pending. The older
+> physical run used `6b7246e5â€¦def2` and replaced the RMG daemon; do not
+> conflate those two binaries.
 >
-> So the pre-run checks below are no longer only about a manager app. **Record
-> `/data/adb/ksud`'s hash, size and mtime before every run** and compare them
-> afterwards; treat a foreign daemon there as a device that must not be run
-> against at all until its owner has removed it deliberately and out of band.
+> The daemon-level refusal happens **after** the DirtyFrag native execution.
+> Therefore, a device retaining the RMG live module or foreign daemon must
+> not be used for a new exploratory Gate 3 simply to observe that refusal.
+> First record the on-disk daemon hash, size and mtime, and plan recovery or
+> explicit migration separately. Never replace `/data/adb/ksud` automatically.
 
 ## 2. Verify what you are installing
 

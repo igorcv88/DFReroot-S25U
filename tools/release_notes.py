@@ -257,9 +257,12 @@ def main():
         "capability indicators do not prove CLI dispatch reachability; "
         "device/emulator refusal test is still owed |")
     add("| DFInstaller authorisation, DirtyFrag completion and Wallet/Integrity | "
-        "**PHYSICAL NOT PERFORMED** | no OWO run, same-boot "
-        "`POST_ROOT_COMPLETE` or post-injection Wallet acceptance has "
-        "been qualified |")
+        "**PRIOR GATE 3 FAIL; NEW DAEMON NOT YET QUALIFIED** | OWO physical "
+        "Gate 3 on 2026-11-12 reached bootstrap but failed post-root while "
+        "RMG KernelSU was already loaded; the newly pinned ownership-gated "
+        "daemon has not been tested physically, and its refusal does not "
+        "authorise another exploit run |")
+
     add("")
     add("The OWO physical procedure is recorded in "
         "`docs/S25U_DZIF_OWO_PHYSICAL_QUALIFICATION.md`. "

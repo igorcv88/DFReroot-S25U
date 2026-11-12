@@ -238,10 +238,10 @@ const struct TargetProfile DFR_PROFILE_DZIF = {
  * NULL/0, which made KsudStage refuse to stage and DfrRootCoordinator refuse
  * "before the hop" - ahead of the first page-cache write - because the DFR
  * managerless Secure Late-Load pair for this staging contract did not exist.
- * RMGLabs-Payloads PR #28 built it, and the pin below is that pair; the
+ * RMGLabs-Payloads PRs #28-#30 produced and audited this newer pair; the
  * .ksud_sha256 comment carries the provenance and what its audit still owes.
  *
- * The RMG OWO managerless daemon running on the device today (95b2cc36...,
+ * The previously observed RMG OWO managerless daemon (95b2cc36...,
  * 5797976 bytes, staged at /data/adb/ksud) is still NOT this asset: it carries
  * the rmg staging contract. Pinning one does not authorise substituting the
  * other, and the size and digest below are what make such a substitution a
@@ -307,8 +307,8 @@ const struct TargetProfile DFR_PROFILE_DZIF_OWO = {
      * The audited DFR managerless Secure Late-Load daemon, bundled as
      * assets/ksud-dzif-owo. See the DAEMON note above for what this replaced.
      *
-     * Built by RMGLabs-Payloads run 43028391105 from source commit
-     * ae3607778e815e6461d499d1da4e3be066c750fe with
+     * Built by RMGLabs-Payloads run 43271383389 from source commit
+     * 05a5f6477b5c5f2dc26dc8824321736bfa7ce4b8 with
      * cargo_features=secure-late-load,managerless-app-grants over KernelSU
      * 932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e, publication refused
      * (publish_artifacts=false), and qualified off-device before it was
@@ -337,8 +337,8 @@ const struct TargetProfile DFR_PROFILE_DZIF_OWO = {
      * dispatches to it.
      */
     .ksud_sha256 =
-        "6b7246e519d3a2c6419a2a833a4239bb81343da6bda6b1c00a0fa2f4d63bdef2",
-    .ksud_size        = 5817624,
+        "30428cd21fd03eea16dd216ed95a95a925f49864c6ace4fa61d957a609232a33",
+    .ksud_size        = 5820784,
     .post_root_record = "/data/system/dfreroot-post-root",
     .kernelsu_version = 32601,
     .kernelsu_uapi_version = 2,

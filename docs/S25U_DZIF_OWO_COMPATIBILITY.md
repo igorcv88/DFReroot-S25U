@@ -175,77 +175,56 @@ both own that path. The chain must refuse on a device carrying the other pair,
 rather than take the path from it. `RMGLabs-Payloads` PR #29 proposes the two
 gates that would make it a refusal before the `rename(2)` instead of after.
 
-**The pinned daemon below does not carry them.** `6b7246e5…def2` is the binary
-that performed this run, and the gates exist only as a change to that
-repository's patch generators — unreviewed, unbuilt, and not yet audited by
-`tools/ksud_capability_audit.py`. Nothing in the shipped app protects a foreign
-`/data/adb/ksud`. When a daemon carrying the gates is built, its digest and size
-replace the pin here and in `KsudStage`, and this paragraph goes with them.
+**The newly pinned daemon carries both DFR ownership gates.** It was built in
+RMGLabs-Payloads workflow `43271383389` and passed the host-side source,
+KernelSU module and Secure Late-Load audits. These checks are in the new
+candidate, unlike the older `6b7246e5â€¦def2` daemon used in the failed physical
+run recorded above. The earlier run and its filesystem changes remain an
+unaltered historical observation; the gates have **not** been physically
+qualified on this device.
 
-**A re-run is not authorised** until that daemon is rebuilt and independently
-reviewed, and until `/data/adb/ksud` on the device is restored to the RMG pair
-by its owner, deliberately and out of band.
+**Another DirtyFrag run is not authorized on a device that still has the RMG
+KernelSU module loaded or its foreign daemon persisted.** The new daemon will
+refuse before touching `/data/adb/ksud`, but that daemon gate runs after the
+native DirtyFrag stage. The owner must separately approve a recovery or
+migration procedure before pursuing a new physical Gate 3.
 
 ## The daemon
 
-`ksud_sha256` is `6b7246e5…def2` and `ksud_size` is `5817624`, naming the
-audited DFR managerless Secure Late-Load daemon bundled as
-`app/src/main/assets/ksud-dzif-owo`.
+This APK bundles the DFR-only managerless Secure Late-Load candidate produced
+by RMGLabs-Payloads workflow `43271383389`, from source commit
+`05a5f6477b5c5f2dc26dc8824321736bfa7ce4b8`, with
+`staging_profile=dfreroot`, `secure_late_load=true`,
+`managerless_app_grants=true`, and `publish_artifacts=false`.
 
-This profile first landed with the daemon at `NULL`/`0`, which made
-`KsudStage.currentSpec()` return null and `DfrRootCoordinator` refuse **before
-the hop** — ahead of the first page-cache write — because no DFR pair existed
-for the `dfreroot` staging contract. `RMGLabs-Payloads` PR #28 built one.
-
-### Provenance
-
-| | |
+| Identity | Audited value |
 |---|---|
-| run | `43028391105`, 22 steps, all `success` |
-| source commit | `ae3607778e815e6461d499d1da4e3be066c750fe` |
-| cargo features | `secure-late-load,managerless-app-grants` |
-| KernelSU | `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e` (versionCode 32601, UAPI 2) |
-| daemon | `6b7246e519d3a2c6419a2a833a4239bb81343da6bda6b1c00a0fa2f4d63bdef2`, 5817624 B, build-id `85e4c750…` |
-| embedded module | `4b8965cdd3c733315c84767d3d26c1f71eaec9071b07d13fa08940bd4fe8731c`, 3634632 B, build-id `e61c8770…` |
-| publication | refused — `publish_artifacts=false`, the publish step skipped |
+| Daemon SHA-256 | `30428cd21fd03eea16dd216ed95a95a925f49864c6ace4fa61d957a609232a33` |
+| Daemon size | 5,820,784 bytes |
+| Daemon ELF build-id | `a696370f4d9ef202afa7063389bd8da164cf355f` |
+| Embedded KernelSU module SHA-256 | `4b8965cdd3c733315c84767d3d26c1f71eaec9071b07d13fa08940bd4fe8731c` |
+| Embedded module size | 3,634,632 bytes |
+| Embedded module build-id | `e61c877018ef31e9e0bf2148e8f556ad3f63473e` |
+| KernelSU base | `932014ab5b2c9b74a3d11e2ec4d17dd10fc9442e` (32601, UAPI 2) |
+| Capability verdict | `SECURE_LATE_LOAD_INDICATORS_CONSISTENT` |
+| Attestation | `BOUND_TO_THIS_BINARY` |
+| Physical Gate 3 for this new daemon | **NOT PERFORMED** |
 
-### What qualification established
+The workflow verified that the module embedded in the daemon matches the
+standalone module, and the capability report records
+`forbidden_present=[]` and `required_missing=[]`. The new source includes
+fail-closed checks for a foreign live KernelSU module and a foreign
+`/data/adb/ksud` before `stage_daemon_from()`.
 
-- All eleven DFR closeout markers survive the Secure Late-Load rewrite, so the
-  `dfreroot` staging contract is intact rather than compiled out.
-- The module embedded in the daemon digests to the module this run built, so
-  the daemon cannot late-load a different one.
-- That module's modversions (156/156) and manual relocations (64/64) resolve
-  against the DZIF kernel release, which OWO shares; no `S938BXXUCZZIC` leak.
-- `tools/ksud_capability_audit.py` returns
-  `SECURE_LATE_LOAD_INDICATORS_CONSISTENT`, `forbidden_present = []`,
-  `attestation_binding = BOUND_TO_THIS_BINARY`.
-- `/data/local/tmp/.ksud-stage` is absent from the binary: it stages only from
-  `/data/system/dfreroot-ksud`.
+The audit does **not** establish runtime reachability or physical acceptance.
+Its `still_owed` items include the forbidden-CLI refusal check and review of
+the compiled call graph. A device previously carried the RMG managerless
+daemon (`95b2cc36â€¦981d8a5`), but the failed 2026-11-12 run replaced its
+on-disk daemon with the older DFR binary. Its current state must be inspected;
+do not infer it is already restored to RMG or change it as part of this import.
 
-### What it did not
-
-The capability audit's own `still_owed` list keeps the CLI-level refusal test
-— every forbidden subcommand must be unrecognised — which needs a device or an
-emulator, and reports `reachability_claim = NOT_ESTABLISHED_BY_THIS_TOOL`. An
-indicator present proves the code is in the binary, not that the CLI dispatches
-to it. Pinning does not discharge the physical gates below.
-
-### Do not substitute the daemon already on the device
-
-`/data/adb/ksud` is `95b2cc36…81a5` (5797976 B), the **RMG** OWO managerless
-review daemon. It carries the `rmg` staging contract
-(`/data/local/tmp/.ksud-stage`), not `/data/system/dfreroot-ksud`, and it is the
-pair currently preserving the owner's Wallet and Play Integrity state. The two
-are distinct in both halves — daemon `6b7246e5…` vs `95b2cc36…`, module
-`4b8965cd…` vs `a7d03cb9…` — and that digest is listed in
-`RMG_DAEMONS` in the binding audit so bundling the wrong file fails on the host.
-
-The loaded module's build-id could not be read in the capture
-(`loaded_kernelsu_build_note_hex=UNREADABLE`), so the running `kernelsu` module
-is identified only by `lsmod` (`kernelsu 180224 2 - Live`). The Wallet/Integrity
-state the owner reports is therefore attributable to the **daemon** digest
-above, not yet to a specific module build-id.
+The original physical FAIL record above remains historically accurate for the
+old daemon. This candidate has only a host-side build/audit PASS.
 
 ## Verification
 
