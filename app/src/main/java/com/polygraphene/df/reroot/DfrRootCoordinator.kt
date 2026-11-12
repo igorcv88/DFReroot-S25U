@@ -692,15 +692,21 @@ object DfrRootCoordinator {
      * [readLiveSelinux]'s `-1`); this one was the exception.
      */
     private fun readPostRootRecord(): String? {
-        val f = File(PostRootStatus.PATH)
-        val exists = try {
-            f.exists()
+        // File.exists() returns false for both ENOENT and lookup failures.
+        // Only ENOENT means the daemon has not yet published its record.
+        // Every other errno is unreadable, never permission to try again.
+        try {
+            Os.stat(PostRootStatus.PATH)
+        } catch (e: ErrnoException) {
+            if (e.errno == OsConstants.ENOENT) return null
+            return AutoRootPolicy.RECORD_UNREADABLE
         } catch (_: Throwable) {
             return AutoRootPolicy.RECORD_UNREADABLE
         }
-        if (!exists) return null
+        // If the file disappears between stat and read, the state becomes
+        // unreadable for this poll; it must not be mistaken for absent.
         return try {
-            f.readText()
+            File(PostRootStatus.PATH).readText()
         } catch (_: Throwable) {
             AutoRootPolicy.RECORD_UNREADABLE
         }
