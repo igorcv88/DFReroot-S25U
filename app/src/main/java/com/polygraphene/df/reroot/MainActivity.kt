@@ -128,7 +128,7 @@ class MainActivity : Activity() {
              * is worse than silence.
              */
             if (KsudStage.requiresRootEnvironmentGate()) {
-                append(DfrRootCoordinator.routeReading(applicationContext).log)
+                append(DfrRootCoordinator.routeReading(providerContext = applicationContext).log)
             }
         }
     }
@@ -215,7 +215,9 @@ class MainActivity : Activity() {
         if (KsudStage.requiresRootEnvironmentGate()) {
             btnRunAll.isEnabled = false
             runBg {
-                val reading = DfrRootCoordinator.routeReading(applicationContext, marker = marker)
+                val reading = DfrRootCoordinator.routeReading(
+                    providerContext = applicationContext, marker = marker
+                )
                 append(reading.log)
                 val verdict = reading.verdict
                 runOnUiThread {

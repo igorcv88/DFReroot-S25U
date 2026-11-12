@@ -2814,6 +2814,26 @@ def audit(json_mode=False):
         fail("RootEnvironment no longer refuses an attested RMG pair without "
              "Enforcing SELinux")
 
+    # Every call to routeReading() names its arguments.
+    #
+    # Not style. `providerContext` was added as the FIRST parameter of a
+    # signature that already took (bootId, marker), and the one positional
+    # caller silently rebound bootId onto it. Kotlin caught that only because
+    # String is not a Context; with two parameters of the same type it would
+    # have compiled and been wrong on the device - the route decided from a
+    # Context used as a boot id. Gate E is the only Kotlin check in this
+    # repository, so the mechanical guard for a defect class it catches only
+    # sometimes belongs offline.
+    for name in ("DfrRootCoordinator.kt", "MainActivity.kt"):
+        src = code_only(dfr_source(name))
+        for call in re.finditer(r"routeReading\(([^)]*)\)", src, re.S):
+            args = [a.strip() for a in call.group(1).split(",") if a.strip()]
+            if any("=" not in a for a in args):
+                fail("%s calls routeReading() positionally (%s); a signature "
+                     "that grows must be called by name, or the next parameter "
+                     "added in front silently rebinds the arguments"
+                     % (name, call.group(1).strip()[:60]))
+
     # The early dispatch must not pay for the provider round trip: its premise
     # is a window measured in seconds, and without an attestation the
     # acquisition route refuses anyway.

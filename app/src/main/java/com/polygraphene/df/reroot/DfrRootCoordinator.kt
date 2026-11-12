@@ -306,6 +306,22 @@ object DfrRootCoordinator {
         bootId: String,
         marker: Int,
     ): RootEnvironment.Classification {
+        /*
+         * Named, and so is every other call site.
+         *
+         * `providerContext` was added as the FIRST parameter of a signature
+         * that already took (bootId, marker), and this call was positional, so
+         * bootId rebound onto providerContext. Kotlin caught it only because
+         * String is not a Context; with two parameters of the same type it
+         * would have compiled and decided the route from a Context used as a
+         * boot id. `tools/profile_binding_audit.py` now fails on a positional
+         * call here, because Gate E can only catch this when the types happen
+         * to clash.
+         *
+         * providerContext is left at its default null deliberately - see
+         * routeReading's own comment on why the run path does not pay for the
+         * provider round trip.
+         */
         val reading = routeReading(bootId = bootId, marker = marker)
         host.log(reading.log)
         return reading.verdict
