@@ -93,6 +93,17 @@ check("ROOT_RESULT=SUCCESS" in coord and "POST_ROOT_COMPLETE=PASS" in coord,
 wait = coord[coord.index("private fun readPostRootRecord"):]
 check("AutoRootPolicy.RECORD_UNREADABLE" in wait,
       "the post-root wait distinguishes an unreadable record from an absent one")
+reader = coord[coord.index("private fun readPostRootRecord"):
+               coord.index("private fun awaitPostRootComplete")]
+check("Os.stat(PostRootStatus.PATH)" in reader,
+      "post-root presence must be checked by stat, not File.exists")
+check("e.errno == OsConstants.ENOENT) return null" in reader,
+      "only ENOENT means a genuinely absent completion record")
+check("catch (e: ErrnoException)" in reader
+      and reader.count("return AutoRootPolicy.RECORD_UNREADABLE") >= 2,
+      "EACCES/EIO/unknown lookup errors and read failures are unreadable")
+check(".exists()" not in reader,
+      "File.exists can silently turn EACCES into absent, even without throwing")
 check("PostRootStatus.unreadable()" in wait,
       "the unreadable case gets its own verdict instead of being parsed as a record")
 check("catch (_: Throwable) {\n                null\n            }" not in coord,
