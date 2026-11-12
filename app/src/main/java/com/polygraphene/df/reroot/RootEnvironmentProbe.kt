@@ -125,6 +125,19 @@ object RootEnvironmentProbe {
             )
         }
 
+        /*
+         * The marker state, printed. It decides the acquisition route whenever
+         * the module and daemon readings no longer refuse, and the owner's
+         * 2026-11-12 log could not show it because the module branch refused
+         * first - so the one datum needed to read the next refusal was missing.
+         */
+        log.appendLine(
+            "[DFR][ROOT_ENV] MARKER=" + when (markerState) {
+                AutoRootPolicy.MARKER_ABSENT -> "ABSENT"
+                AutoRootPolicy.MARKER_PRESENT -> "PRESENT (a run armed hooks in this boot)"
+                else -> "UNKNOWN (probe did not answer; only a hard reboot clears hooks)"
+            }
+        )
         val verdict = RootEnvironment.classify(o)
         log.appendLine("[DFR][ROOT_ENV] STATE=${verdict.state} ${verdict.signals()}")
         log.appendLine(

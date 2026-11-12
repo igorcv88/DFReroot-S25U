@@ -70,22 +70,47 @@ public final class RootEnvironmentTest {
         RootEnvironment.Observation unidentified = clean();
         unidentified.persistentDaemon = RootEnvironment.DAEMON_UNIDENTIFIED;
         refusesAcquisition(unidentified, "an unidentified persistent daemon refuses");
+        /*
+         * Same owner decision: /data/adb is 0700 root:root, so this process
+         * CANNOT inspect the entry. Refusing on that is what #95 did, and the
+         * question belongs to the operation that would replace those bytes -
+         * which the daemon, running as root, still gates.
+         */
         RootEnvironment.Observation unknownDaemon = clean();
         unknownDaemon.persistentDaemon = RootEnvironment.DAEMON_UNKNOWN;
-        refusesAcquisition(unknownDaemon,
-                "an unreadable persistent daemon refuses: EACCES is not ENOENT");
-        expect(classify(unknownDaemon).reason.contains("not an absent one"),
-                "the unreadable refusal says so, rather than naming an errno");
+        expect(classify(unknownDaemon).dfrAcquisitionAllowed,
+                "a daemon this process cannot inspect no longer refuses the attempt");
+        expect(classify(unknownDaemon).reason.contains("root-only"),
+                "and the reason says why the reading was impossible, not just that it was");
+        RootEnvironment.Observation bogusDaemonValue = clean();
+        bogusDaemonValue.persistentDaemon = 4242;
+        refusesAcquisition(bogusDaemonValue, "an unrecognised daemon value still refuses");
 
         // --- module evidence: it may only ever remove permission ---------------
+        /*
+         * OWNER DECISION, 2026-11-12: an unobtainable attestation no longer
+         * refuses the ACQUISITION route.
+         *
+         * /proc/modules is unreadable from this process on the target, so
+         * requiring an attestation made the route permanently unreachable on
+         * the only profile the gate covers - a gate that can never pass. The
+         * route now refuses on evidence AGAINST it, and every downstream gate
+         * (staging digest, remote preflight, the daemon's own ownership gate,
+         * the post-root contract) is unchanged.
+         */
         RootEnvironment.Observation noAttestation = clean();
         noAttestation.loadedModule = RootEnvironment.MODULE_UNKNOWN;
-        refusesAcquisition(noAttestation,
-                "without a module attestation nothing may be attempted");
-        expect(RootEnvironment.STATE_UNKNOWN.equals(classify(noAttestation).state),
-                "no attestation is UNKNOWN, not NO_ACTIVE_KSU");
+        expect(classify(noAttestation).dfrAcquisitionAllowed,
+                "an unobtainable attestation no longer refuses the acquisition route");
         expect(!classify(noAttestation).rmgReuseAllowed,
-                "no attestation grants no reuse either");
+                "but it grants no reuse route: that still needs positive evidence");
+        expect(!classify(noAttestation).rootAvailable,
+                "and claims no available root");
+        /* An unrecognised value is still a refusal, and stays distinct. */
+        RootEnvironment.Observation bogusModuleValue = clean();
+        bogusModuleValue.loadedModule = 4242;
+        refusesAcquisition(bogusModuleValue,
+                "an unrecognised module value refuses, unlike an unobtainable reading");
 
         RootEnvironment.Observation ksuLike = clean();
         ksuLike.loadedModule = RootEnvironment.MODULE_PRESENT_UNIDENTIFIED;
@@ -207,6 +232,21 @@ public final class RootEnvironmentTest {
         RootEnvironment.Observation bogusDaemon = clean();
         bogusDaemon.persistentDaemon = 9999;
         refusesAcquisition(bogusDaemon, "an unrecognised daemon value refuses");
+        /*
+         * The device's real shape, end to end: nothing readable, nothing
+         * attested, no marker, no record. This is the case that must now be
+         * PERMITTED, and it is the one the owner's 2026-11-12 log refused.
+         */
+        RootEnvironment.Observation ownersDevice = new RootEnvironment.Observation();
+        ownersDevice.bootId = BOOT;
+        ownersDevice.markerState = AutoRootPolicy.MARKER_ABSENT;
+        ownersDevice.loadedModule = RootEnvironment.MODULE_UNKNOWN;
+        ownersDevice.persistentDaemon = RootEnvironment.DAEMON_UNKNOWN;
+        RootEnvironment.Classification live = classify(ownersDevice);
+        expect(live.dfrAcquisitionAllowed,
+                "the owner's actual device state permits the DirtyFrag attempt");
+        expect(!live.rmgReuseAllowed && !live.rootAvailable && !live.dfrAcquired,
+                "and still claims nothing it has not proven");
         RootEnvironment.Observation bogusMarker = clean();
         bogusMarker.markerState = 9999;
         refusesAcquisition(bogusMarker, "an unrecognised marker value refuses");
@@ -215,7 +255,8 @@ public final class RootEnvironmentTest {
         RootEnvironment.Classification fresh =
                 RootEnvironment.classify(new RootEnvironment.Observation());
         expect(!fresh.dfrAcquisitionAllowed && !fresh.rmgReuseAllowed,
-                "a fresh observation, filled in by nobody, permits nothing");
+                "a fresh observation, filled in by nobody, permits nothing"
+                        + " (its marker state is UNKNOWN, which still refuses)");
 
         System.out.println("RootEnvironmentTest: " + checks + "/" + checks + " passed");
     }
