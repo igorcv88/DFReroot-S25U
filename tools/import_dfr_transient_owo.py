@@ -121,6 +121,15 @@ def main():
     require(p.get("module_sha256") == digest(kernel)
             and p.get("module_size") == str(len(kernel)),
             "embedded module does not match provenance")
+    # An absent build ID on both sides previously passed None == None. Build
+    # identities must be independently present before comparing them.
+    ksud_build_id = p.get("ksud_build_id")
+    module_build_id = p.get("module_build_id")
+    require(isinstance(ksud_build_id, str)
+            and re.fullmatch(r"[0-9a-f]{40}", ksud_build_id)
+            and isinstance(module_build_id, str)
+            and re.fullmatch(r"[0-9a-f]{40}", module_build_id),
+            "ksud/module provenance lacks valid SHA-1 ELF build IDs")
     require(all(marker in binary for marker in REQUIRED_MARKERS),
             "transient/closeout strings missing from compiled daemon")
 
@@ -146,7 +155,8 @@ def main():
     require(isinstance(contract, dict)
             and contract.get("module_name") == KO
             and contract.get("module_sha256") == digest(kernel)
-            and contract.get("ksud_build_id") == p.get("ksud_build_id")
+            and contract.get("ksud_build_id") == ksud_build_id
+            and contract.get("module_build_id") == module_build_id
             and contract.get("target") == "pa3q-S938BXXUCDZIF-OWO"
             and contract.get("boot_partition_writes") is False,
             "managerless module contract does not match the candidate pair")
