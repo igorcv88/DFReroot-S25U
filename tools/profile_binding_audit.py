@@ -2874,6 +2874,49 @@ def audit(json_mode=False):
                      "added in front silently rebinds the arguments"
                      % (name, call.group(1).strip()[:60]))
 
+    # RMG reuse has its own completion decision. The route reading that
+    # selects the dialog is NOT an executed root operation. Protect the second
+    # provider-backed observation inside the worker and its exact result wiring:
+    # removing it must fail CI even when RootReusePolicy's pure tests pass.
+    dialog_start = ui_env.find("private fun showRunDialog(")
+    dialog_end = ui_env.find("private fun setRunWaitingPostRoot(", dialog_start)
+    if dialog_start < 0 or dialog_end <= dialog_start:
+        fail("MainActivity's RMG execution dialog cannot be isolated for audit")
+    else:
+        dialog_code = ui_env[dialog_start:dialog_end]
+        worker_at = dialog_code.find("runBg {")
+        branch_at = dialog_code.find("if (reuseRmg) {")
+        return_at = dialog_code.find("return@runBg", branch_at)
+        if min(worker_at, branch_at, return_at) < 0 or not worker_at < branch_at < return_at:
+            fail("RMG reuse execution is no longer scoped to the dialog worker")
+        else:
+            reuse_code = dialog_code[branch_at:return_at]
+            required_steps = (
+                "val reading = DfrRootCoordinator.routeReading(",
+                "providerContext = applicationContext",
+                "val succeeded = RootReusePolicy.succeeded(reading.verdict)",
+                "if (succeeded) {",
+                "ROOT_OPERATION=PASS ROOT_PROVIDER=RMG",
+                "DFR_ACQUISITION=NOT_ATTEMPTED",
+                "setRunResult(active = false, success = succeeded)",
+            )
+            offsets = [reuse_code.find(step) for step in required_steps]
+            if min(offsets) < 0 or offsets != sorted(offsets):
+                fail("RMG execution no longer performs a fresh provider-backed "
+                     "reading, feeds it into RootReusePolicy and paints the "
+                     "result in order; the initial route selection cannot "
+                     "stand in for a completed root operation")
+            if "setRunResult(active = false, success = true)" in reuse_code:
+                fail("RMG reuse dialog forces success without a verified result")
+    reuse_policy = code_only(dfr_source("RootReusePolicy.java"))
+    for required in ("STATE_RMG_ACTIVE_VERIFIED", "PROVIDER_RMG",
+                     "verdict.rootAvailable", "verdict.rmgReuseAllowed",
+                     "!verdict.dfrAcquired", "!verdict.dfrAcquisitionAllowed",
+                     "!verdict.persistentMigrationAllowed()"):
+        if required not in reuse_policy:
+            fail("RootReusePolicy no longer requires %s before reporting "
+                 "executed RMG root as SUCCEEDED" % required)
+
     # The early dispatch must not pay for the provider round trip: its premise
     # is a window measured in seconds, and without an attestation the
     # acquisition route refuses anyway.
