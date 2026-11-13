@@ -2,6 +2,7 @@
 """Import the *reviewed* DFR transient ksud from an RMGLabs workflow artifact.
 
 Usage (from DFReroot-S25U repository root):
+  python3 tools/import_dfr_transient_owo.py /path/to/unpacked-review --run-id N --verify-only
   python3 tools/import_dfr_transient_owo.py /path/to/unpacked-review --run-id N
 
 Only the OWO daemon asset and its existing C/Kotlin/JSON pins are updated.
@@ -86,6 +87,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("artifact_dir", type=Path)
     ap.add_argument("--run-id", required=True, type=int)
+    ap.add_argument("--verify-only", action="store_true",
+                    help="validate the CI artifact and capability report without modifying the worktree")
     args = ap.parse_args()
 
     directory = args.artifact_dir.resolve(strict=True)
@@ -155,6 +158,11 @@ def main():
             and report.get("required_missing") == []
             and report.get("authorized_app_grants_contract") == contract,
             "compiled capability audit did not positively approve this exact pair")
+    if args.verify_only:
+        print(f"VERIFIED run={args.run_id} sha256={new_hash} bytes={new_size}")
+        print("  transient capabilities, managerless contract and paired module: PASS")
+        print("  worktree unchanged")
+        return
 
     old_asset = (ROOT / ASSET).read_bytes()
     require(digest(old_asset) == OLD and len(old_asset) == int(OLD_SIZE),
