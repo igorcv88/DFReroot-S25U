@@ -72,7 +72,11 @@ def verify_sidecars(directory):
                 "checksum name must be a top-level filename")
         require(filename not in entries, "duplicate checksum entry")
         entries[filename] = fields[0]
-    for filename in (NAME, KO, NAME + ".module-provenance.txt", "BUILD_RUN.txt"):
+    for filename in (
+        NAME, KO, NAME + ".module-provenance.txt", "BUILD_RUN.txt",
+        NAME + ".secure-late-load-attestation.json",
+        "secure-late-load-capability-report.json", "embedded-module-audit.txt",
+    ):
         require(filename in entries, f"checksum for {filename} absent")
         require(digest((directory / filename).read_bytes()) == entries[filename],
                 f"SHA256SUMS mismatch for {filename}")
@@ -116,6 +120,41 @@ def main():
             "embedded module does not match provenance")
     require(all(marker in binary for marker in REQUIRED_MARKERS),
             "transient/closeout strings missing from compiled daemon")
+
+    # Audit the exact bytes before accepting the sidecar's claimed identity.
+    # String markers alone do not show that the restricted native capability
+    # profile and paired managerless module were successfully audited.
+    attestation = json.loads(
+        (directory / (NAME + ".secure-late-load-attestation.json"))
+        .read_text(encoding="utf-8"))
+    report = json.loads(
+        (directory / "secure-late-load-capability-report.json")
+        .read_text(encoding="utf-8"))
+    require(isinstance(attestation, dict) and isinstance(report, dict),
+            "candidate attestation/audit is not a JSON object")
+    require(attestation.get("dfr_transient") is True
+            and attestation.get("secure_late_load") is True
+            and attestation.get("build_features") ==
+                ["secure-late-load", "managerless-app-grants"]
+            and attestation.get("ksud_sha256") == new_hash
+            and attestation.get("ksu_commit") == p["ksu_commit"],
+            "transient build attestation missing or detached from ksud")
+    contract = attestation.get("app_grants_contract")
+    require(isinstance(contract, dict)
+            and contract.get("module_name") == KO
+            and contract.get("module_sha256") == digest(kernel)
+            and contract.get("ksud_build_id") == p.get("ksud_build_id")
+            and contract.get("target") == "pa3q-S938BXXUCDZIF-OWO"
+            and contract.get("boot_partition_writes") is False,
+            "managerless module contract does not match the candidate pair")
+    require(report.get("verdict") == "SECURE_LATE_LOAD_INDICATORS_CONSISTENT"
+            and report.get("attestation_binding") == "BOUND_TO_THIS_BINARY"
+            and report.get("dfr_transient_compiled") is True
+            and report.get("ksud_sha256") == new_hash
+            and report.get("forbidden_present") == []
+            and report.get("required_missing") == []
+            and report.get("authorized_app_grants_contract") == contract,
+            "compiled capability audit did not positively approve this exact pair")
 
     old_asset = (ROOT / ASSET).read_bytes()
     require(digest(old_asset) == OLD and len(old_asset) == int(OLD_SIZE),
