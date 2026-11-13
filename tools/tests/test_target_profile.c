@@ -210,9 +210,9 @@ static void test_target_detection(void) {
      */
     CHECK(DFR_PROFILE_DZIF_OWO.ksud_sha256 != NULL &&
           !strcmp(DFR_PROFILE_DZIF_OWO.ksud_sha256,
-                  "ea71739be0f800d9669491ae77408dd309e86aa569c8447ff869536e"
-                  "7685fa2c") &&
-          DFR_PROFILE_DZIF_OWO.ksud_size == 5822240,
+                  "be45782669c199c63666e15bb7abaa68cbb5dc0a741d4486805ee96"
+                  "d92514591") &&
+          DFR_PROFILE_DZIF_OWO.ksud_size == 5819432,
           "the DZIF/OWO daemon pins the audited DFR managerless build");
 
     /*
