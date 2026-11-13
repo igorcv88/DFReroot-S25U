@@ -337,8 +337,8 @@ const struct TargetProfile DFR_PROFILE_DZIF_OWO = {
      * dispatches to it.
      */
     .ksud_sha256 =
-        "ea71739be0f800d9669491ae77408dd309e86aa569c8447ff869536e7685fa2c",
-    .ksud_size        = 5822240,
+        "be45782669c199c63666e15bb7abaa68cbb5dc0a741d4486805ee96d92514591",
+    .ksud_size        = 5819432,
     .post_root_record = "/data/system/dfreroot-post-root",
     .kernelsu_version = 32601,
     .kernelsu_uapi_version = 2,
