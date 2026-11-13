@@ -59,3 +59,5 @@ python3 tools/tests/test_dzif_preflight_static.py
 # `S=$(... | head -1); RC=$?` records head's status rather than the daemon's.
 # That defect shipped and was found in review, not by this suite.
 python3 tools/tests/test_companion_attest_script.py
+# Refuse missing build identities before importing the transient DFR candidate.
+python3 tools/tests/test_dfr_transient_import.py
